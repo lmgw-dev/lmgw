@@ -35,8 +35,7 @@ fn row() -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }
@@ -151,7 +150,7 @@ fn the_key_follows_what_is_loaded_and_nothing_else() {
         ("enabled", Box::new(|m, _| m.enabled = false)),
         (
             "hold fallback",
-            Box::new(|m, _| m.hold_fallback = Some("x".into())),
+            Box::new(|m, _| m.fallback = Some("x".into())),
         ),
         (
             "a row image equal to the class's",
@@ -234,8 +233,9 @@ fn the_pending_table() {
     };
     let now = Instant::now();
     let learned = learned_row(3 * GIB);
-    let p =
-        |m: &AudioModel, s: &AudioSettings, g: &GenView| pending(m, s, 3 * GIB, GIB, g, now).bytes;
+    let p = |m: &AudioModel, s: &AudioSettings, g: &GenView| {
+        pending(m, s, 3 * GIB, GIB, g, now, None).bytes
+    };
 
     assert_eq!(p(&learned, &lazy_class, &GenView::default()), 3 * GIB);
     assert_eq!(
@@ -245,7 +245,8 @@ fn the_pending_table() {
             3 * GIB,
             GIB,
             &GenView::default(),
-            now
+            now,
+            None
         )
         .basis,
         Basis::Whole
@@ -262,7 +263,7 @@ fn the_pending_table() {
     );
     let (loaded, at) = answered(Duration::from_secs(1), AtRest::Unread);
     assert_eq!(
-        pending(&learned, &lazy_class, 3 * GIB, 0, &loaded, at).bytes,
+        pending(&learned, &lazy_class, 3 * GIB, 0, &loaded, at, None).bytes,
         0
     );
 
@@ -274,7 +275,16 @@ fn the_pending_table() {
         "nothing read: what comes on top of the weights file"
     );
     assert_eq!(
-        pending(&eager, &lazy_class, 3 * GIB, GIB, &GenView::default(), now).basis,
+        pending(
+            &eager,
+            &lazy_class,
+            3 * GIB,
+            GIB,
+            &GenView::default(),
+            now,
+            None
+        )
+        .basis,
         Basis::AboveWeights { weights: GIB }
     );
     assert_eq!(
@@ -283,14 +293,32 @@ fn the_pending_table() {
         "read at rest: what it holds, weights and context, is subtracted"
     );
     assert_eq!(
-        pending(&row(), &eager_class, GIB, GIB, &GenView::default(), now).bytes,
+        pending(
+            &row(),
+            &eager_class,
+            GIB,
+            GIB,
+            &GenView::default(),
+            now,
+            None
+        )
+        .bytes,
         0,
         "an eager row's weights are on the card once it is ready"
     );
     let mut lazy_row = row();
     lazy_row.lazy = Some(true);
     assert_eq!(
-        pending(&lazy_row, &eager_class, GIB, GIB, &GenView::default(), now).bytes,
+        pending(
+            &lazy_row,
+            &eager_class,
+            GIB,
+            GIB,
+            &GenView::default(),
+            now,
+            None
+        )
+        .bytes,
         GIB
     );
     assert_eq!(
@@ -320,7 +348,7 @@ fn an_idle_unload_makes_a_loaded_container_pending_again() {
     // Unloaded: the expected figure less the bare context read at rest.
     let learned = learned_row(3 * GIB);
     let (g, at) = answered(Duration::from_secs(61), AtRest::Bare(GIB / 4));
-    let p = pending(&learned, &minute, 3 * GIB, 0, &g, at);
+    let p = pending(&learned, &minute, 3 * GIB, 0, &g, at, None);
     assert_eq!(p.bytes, 3 * GIB - GIB / 4);
     assert_eq!(
         p.basis,
@@ -330,9 +358,255 @@ fn an_idle_unload_makes_a_loaded_container_pending_again() {
     );
     let (g, at) = answered(Duration::from_secs(61), AtRest::Unread);
     assert_eq!(
-        pending(&learned, &minute, 3 * GIB, 0, &g, at).bytes,
+        pending(&learned, &minute, 3 * GIB, 0, &g, at, None).bytes,
         3 * GIB
     );
+}
+
+/// What the container's processes hold now (the ledger's reading,
+/// [`super::now`]) is on the card already, whoever loaded it: the pending
+/// figure is the expected residency less it — the basis's own figure only
+/// where nothing was read — never below nothing, and nothing for a
+/// container lmgw knows holds its model. The figures come from a real case: a music model
+/// charged 6.19 GiB pending while its container held 9.2 GiB, and a TTS model
+/// read 0 B at rest but held 466 MiB after an idle unload.
+#[test]
+fn what_it_holds_now_is_subtracted_from_the_pending_load() {
+    const MIB: u64 = 1024 * 1024;
+    let lazy = AudioSettings::default();
+    let now = Instant::now();
+    let learned = learned_row(3 * GIB);
+    let p = |g: &GenView, held: Option<u64>| pending(&learned, &lazy, 3 * GIB, 0, g, now, held);
+
+    // Loaded by a request lmgw did not route: nothing is pending.
+    let ace = p(&at_rest(AtRest::Bare(0)), Some(9200 * MIB));
+    assert_eq!(ace.bytes, 0);
+    assert_eq!(ace.measured, Some(9200 * MIB));
+    assert_eq!(
+        ace.basis,
+        Basis::AtRest {
+            on_card: 0,
+            eager: false
+        }
+    );
+    // Partly there: only the rest.
+    let some = p(&GenView::default(), Some(GIB));
+    assert_eq!((some.bytes, some.basis.clone()), (2 * GIB, Basis::Whole));
+    assert_eq!(some.measured, Some(GIB));
+    // Less than the at-rest figure: the fresh reading wins, and keeps more
+    // free — the older figure is memory that may have left the card.
+    let less = p(&at_rest(AtRest::Bare(GIB / 4)), Some(GIB / 8));
+    assert_eq!(less.bytes, 3 * GIB - GIB / 8);
+    assert_eq!(less.measured, Some(GIB / 8));
+    // Not read: as before.
+    assert_eq!(
+        p(&at_rest(AtRest::Bare(GIB / 4)), None).bytes,
+        3 * GIB - GIB / 4
+    );
+    assert_eq!(p(&GenView::default(), None).bytes, 3 * GIB);
+    // Known to hold its model: nothing pending, whatever was read.
+    let (loaded, at) = answered(Duration::from_secs(1), AtRest::Unread);
+    let held = pending(&learned, &lazy, 3 * GIB, 0, &loaded, at, Some(GIB / 8));
+    assert_eq!((held.bytes, held.measured), (0, None));
+
+    // Unloaded after idling, its context kept: 0 B read at rest before the
+    // first load, 466 MiB now.
+    let minute = AudioSettings {
+        idle_unload_ms: 60_000,
+        ..AudioSettings::default()
+    };
+    let (g, at) = answered(Duration::from_secs(61), AtRest::Bare(0));
+    let unloaded = pending(&learned, &minute, 3 * GIB, 0, &g, at, Some(466 * MIB));
+    assert_eq!(unloaded.bytes, 3 * GIB - 466 * MIB);
+    assert_eq!(unloaded.basis, Basis::Unloaded { bare: Some(0) });
+
+    // An eager row nothing was read of at rest: above what it holds when
+    // that was read, above its weights file only when nothing was.
+    let mut eager = learned.clone();
+    eager.lazy = Some(false);
+    let e = |held| pending(&eager, &lazy, 3 * GIB, GIB, &GenView::default(), now, held);
+    assert_eq!(e(Some(2 * GIB)).bytes, GIB);
+    assert_eq!(
+        e(Some(GIB / 2)).bytes,
+        3 * GIB - GIB / 2,
+        "a reading below the weights file: the weights are not all on the card"
+    );
+    assert_eq!(
+        e(None).bytes,
+        2 * GIB,
+        "nothing read: above the weights file"
+    );
+}
+
+/// The under-reserve the older rule had: an eager row read at rest with its
+/// weights on the card, then a generation lmgw did not route, and audio.cpp
+/// idle-unloads. lmgw's `last_answered` never started, so the basis still
+/// takes the weights to be on the card; the container holds only its
+/// context. Whatever the basis says, the reload pending is the expected
+/// residency less what the container holds now — what the driver's `used`
+/// shows of it — so `used` plus the pending load covers the whole residency
+/// and admission cannot hand the unloaded weights to another start.
+#[test]
+fn a_fresh_reading_below_an_older_floor_keeps_the_reload_free() {
+    const MIB: u64 = 1024 * 1024;
+    let s = AudioSettings {
+        idle_unload_ms: 60_000,
+        ..AudioSettings::default()
+    };
+    let mut eager = learned_row(3 * GIB);
+    eager.lazy = Some(false);
+    let weights = 2 * GIB;
+    let context = 466 * MIB;
+    let g = at_rest(AtRest::Eager(weights + context));
+    let now = Instant::now();
+
+    // At rest, its weights on the card: only the rest is pending.
+    let rest = pending(
+        &eager,
+        &s,
+        3 * GIB,
+        weights,
+        &g,
+        now,
+        Some(weights + context),
+    );
+    assert_eq!(rest.bytes, 3 * GIB - weights - context);
+    // Unloaded outside lmgw's view: the reading sets the figure, not the
+    // floor read at rest.
+    let unloaded = pending(&eager, &s, 3 * GIB, weights, &g, now, Some(context));
+    assert_eq!(unloaded.bytes, 3 * GIB - context);
+    assert_eq!(
+        unloaded.bytes + context,
+        3 * GIB,
+        "used (what it holds) plus pending covers the expected residency"
+    );
+    assert_eq!(unloaded.measured, Some(context));
+    // The same with nothing read at rest, the weights file as the floor.
+    let blind = pending(
+        &eager,
+        &s,
+        3 * GIB,
+        weights,
+        &GenView::default(),
+        now,
+        Some(context),
+    );
+    assert_eq!(blind.bytes, 3 * GIB - context);
+
+    let note = resident_note(
+        &eager,
+        &s,
+        &NoteFacts {
+            on_disk: GIB,
+            pending: &unloaded,
+            cannot_learn: None,
+            sampling: Sampling::default(),
+            gen: &g,
+            runs_previous: false,
+            unmeasured: None,
+        },
+    );
+    assert!(
+        note.contains("Its weights are not all on the card now: its processes hold 466 MiB (measured), less than the 2.5 GiB it held at rest"),
+        "{note}"
+    );
+    assert!(!note.contains("Weights loaded, not run yet"), "{note}");
+}
+
+/// The notes name the reading when it set the figure, and say why it is
+/// missing when it could not be taken.
+#[test]
+fn the_notes_say_what_it_holds_now() {
+    const MIB: u64 = 1024 * 1024;
+    let s = AudioSettings {
+        idle_unload_ms: 60_000,
+        ..AudioSettings::default()
+    };
+    let learned = learned_row(3 * GIB);
+    let note = |g: &GenView, at: Instant, held: Option<u64>, unmeasured: Option<&str>| {
+        let p = pending(&learned, &s, 3 * GIB, GIB, g, at, held);
+        resident_note(
+            &learned,
+            &s,
+            &NoteFacts {
+                on_disk: GIB,
+                pending: &p,
+                cannot_learn: None,
+                sampling: Sampling::default(),
+                gen: g,
+                runs_previous: false,
+                unmeasured,
+            },
+        )
+    };
+    let now = Instant::now();
+    let rest = at_rest(AtRest::Bare(0));
+    let n = note(&rest, now, Some(9 * GIB), None);
+    assert!(
+        n.contains("Loaded without an answer lmgw saw (a request outside lmgw, such as audio.cpp's own web UI): its processes hold 9.0 GiB now (measured), so nothing is kept free"),
+        "{n}"
+    );
+    assert!(
+        !n.contains("at rest"),
+        "the older reading is not the figure: {n}"
+    );
+    let n = note(&rest, now, Some(GIB), None);
+    assert!(
+        n.contains("Not loaded yet: 2.0 GiB kept free until its first request (its processes hold 1.0 GiB now, measured)"),
+        "{n}"
+    );
+    let (gone, at) = answered(Duration::from_secs(61), AtRest::Bare(0));
+    let n = note(&gone, at, Some(466 * MIB), None);
+    assert!(
+        n.contains("Unloaded after idling 60000 ms")
+            && n.contains("its processes hold 466 MiB now, measured"),
+        "{n}"
+    );
+    let n = note(&gone, at, Some(3 * GIB), None);
+    assert!(
+        n.contains("counts it unloaded") && n.contains("nothing is kept free"),
+        "{n}"
+    );
+    let n = note(
+        &rest,
+        now,
+        None,
+        Some("a container's PID has not been read"),
+    );
+    assert!(
+        n.contains("it holds 0 B at rest already")
+            && n.contains(
+                "What it holds now was not read (a container's PID has not been read), so a load \
+                 lmgw did not route is not subtracted"
+            ),
+        "{n}"
+    );
+}
+
+/// Two process lists around one device read: per container the smaller sum
+/// — memory taken around the device read stays pending. None listed holds
+/// nothing; a failed list or a process without a figure is no figure.
+#[test]
+fn what_it_holds_now_is_the_smaller_of_two_readings() {
+    use super::now::smaller_held;
+    use crate::vram::ProcessMemory;
+    let pm = |pid, bytes| ProcessMemory { pid, bytes };
+    let before = Ok(vec![
+        pm(10, Some(GIB)),
+        pm(11, Some(GIB)),
+        pm(99, Some(5 * GIB)),
+    ]);
+    let after = Ok(vec![
+        pm(10, Some(3 * GIB)),
+        pm(11, Some(GIB)),
+        pm(99, Some(GIB)),
+    ]);
+    assert_eq!(smaller_held(&[10, 11], &before, &after), Ok(2 * GIB));
+    assert_eq!(smaller_held(&[10, 11], &after, &before), Ok(2 * GIB));
+    assert_eq!(smaller_held(&[12], &before, &after), Ok(0), "none listed");
+    assert!(smaller_held(&[10], &before, &Err("gone".into())).is_err());
+    let blind = Ok(vec![pm(10, None)]);
+    assert!(smaller_held(&[10], &before, &blind).is_err());
 }
 
 /// The at-rest rule: more than a bare context plus half the files is a
@@ -375,7 +649,7 @@ fn the_notes_say_what_is_charged_and_why() {
     previous.path = "elsewhere".into();
     let n = residency_sentence(&previous, &s, GIB / 8, None, calm);
     assert!(n.contains("learned for a previous configuration"), "{n}");
-    assert!(n.contains("on-disk 128.0 MiB"), "{n}");
+    assert!(n.contains("on-disk 128 MiB"), "{n}");
 
     let n = residency_sentence(&row(), &s, GIB / 8, None, calm);
     assert!(
@@ -398,7 +672,7 @@ fn the_notes_say_what_is_charged_and_why() {
 
     let now = Instant::now();
     let note = |m: &AudioModel, g: &GenView, cannot: Option<&str>| {
-        let p = pending(m, &s, GIB, GIB / 2, g, now);
+        let p = pending(m, &s, GIB, GIB / 2, g, now, None);
         resident_note(
             m,
             &s,
@@ -409,6 +683,7 @@ fn the_notes_say_what_is_charged_and_why() {
                 sampling: calm,
                 gen: g,
                 runs_previous: false,
+                unmeasured: None,
             },
         )
     };
@@ -420,7 +695,7 @@ fn the_notes_say_what_is_charged_and_why() {
     );
     let n = note(&row(), &at_rest(AtRest::Bare(GIB / 4)), None);
     assert!(
-        n.contains("768.0 MiB kept free") && n.contains("it holds 256.0 MiB at rest already"),
+        n.contains("768 MiB kept free") && n.contains("it holds 256 MiB at rest already"),
         "{n}"
     );
     let n = note(
@@ -433,7 +708,7 @@ fn the_notes_say_what_is_charged_and_why() {
     eager.lazy = Some(false);
     let n = note(&eager, &GenView::default(), None);
     assert!(
-        n.contains("512.0 MiB more kept free") && n.contains("above its 512.0 MiB weights file"),
+        n.contains("512 MiB more kept free") && n.contains("above its 512 MiB weights file"),
         "{n}"
     );
     let loaded = GenView {

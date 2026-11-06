@@ -52,6 +52,7 @@ fn request(path: &str) -> (&'static str, Body) {
         (true, "/transcribe") => ("", Body::Raw(Vec::new())),
         (true, "/pin") => ("", Body::Json(json!({ "pinned": true }))),
         (true, "/archive") => ("", Body::Json(json!({ "archived": true }))),
+        (true, "/title") => ("", Body::Json(json!({ "title": "Renamed" }))),
         (true, "/move") => ("", Body::Json(json!({ "folder_id": null }))),
         (true, "/persist") | (true, "/continue") => ("", Body::Json(json!({}))),
         // No verdicts: a 400 on a thread the caller reaches, never a 404.
@@ -59,6 +60,8 @@ fn request(path: &str) -> (&'static str, Body) {
         // Nothing to answer, and no such task: a 409 and the task's own 404
         // on a thread the caller reaches, never the thread's.
         (true, "/answer") | (true, "/tasks/{task}/cancel") => ("", Body::Json(json!({}))),
+        // No such call running: its own 404 on a thread the caller reaches.
+        (true, "/media/{call_id}/cancel") => ("", Body::Json(json!({}))),
         (true, "/attachments") => ("?name=more.txt", Body::Raw(b"more".to_vec())),
         (true, "/messages/{mid}/delete")
         | (true, "/messages/{mid}/regenerate")
@@ -68,6 +71,8 @@ fn request(path: &str) -> (&'static str, Body) {
             ("", Body::Json(json!({})))
         }
         (false, "/mode") => ("", Body::Json(json!({ "mode": "text" }))),
+        // A text attachment: a 422 on one the caller reaches, never a 404.
+        (false, "/media") => ("", Body::Json(json!({ "action": "upscale" }))),
         _ => panic!("the walk has no request for {path} — add one"),
     }
 }
@@ -97,6 +102,7 @@ async fn drive(
         path.replace("{id}", &id.to_string())
             .replace("{mid}", &message.to_string())
             .replace("{task}", "1")
+            .replace("{call_id}", "call_1")
     );
     let req = match method {
         "GET" => client.get(url),
@@ -232,7 +238,7 @@ async fn the_same_routes_reach_a_chat_thread() {
         let (status, body) = drive(&w, &d.client, row, (tid, message, attachment)).await;
         let code = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null)["code"].clone();
         assert!(
-            status != 404 || code == "task_not_found",
+            status != 404 || code == "task_not_found" || code == "not_running",
             "{} {}: {body}",
             row.0,
             row.1

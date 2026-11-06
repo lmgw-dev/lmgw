@@ -3,7 +3,7 @@
 //! (audio model rows) and `lmgw__voice_transcribe` (voice-library clip
 //! transcripts, audio-class gap 5). Their dispatch is `selfadmin/audio.rs`.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, strs_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, fallback_p, int_p, str_p, strs_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -49,8 +49,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                  through the shared download \
                  queue into the audio models directory, at the revision named in its answer \
                  (the spec's pin, else main); a pin the hub no longer has fails the download \
-                 rather than falling back to main. The whole chain: \
-                 list -> download -> lmgw__hf_downloads until each queued id says 'done' -> \
+                 rather than falling back to main. When the audio class's image (Settings → \
+                 Runtimes → Audio → Image) is not on this machine, download also starts its \
+                 download, a multi-gigabyte image_pull job of its own that starts no model, \
+                 also when every file is installed already; 'engine' in the answer names the \
+                 image and the job, or says why it could not begin or why podman could not \
+                 say whether it is needed, and is null when the image is here. The whole chain: \
+                 list -> download -> lmgw__hf_downloads ids=<the queued ids> until each says 'done' -> \
                  lmgw__audio_model_set action=create with the package's suggested_* fields \
                  -> a request to /v1/audio/speech or /v1/audio/transcriptions on \
                  'audio/<model_id>' to prove it loads. A gated repo is refused while no \
@@ -299,20 +304,11 @@ pub(super) fn tools() -> Vec<Builtin> {
                     bool_p("Start this model's container when lmgw launches."),
                 ),
                 (
-                    "hold_fallback_mode",
-                    enum_p(
-                        "Where a request against this model goes while GPU hold is active. \
-                         'inherit' (default) means NO fallback for this class; 'alias' \
-                         routes to hold_fallback instead.",
-                        &["inherit", "none", "alias"],
-                    ),
-                ),
-                (
-                    "hold_fallback",
-                    str_p(
-                        "Model alias to route to while GPU hold is active, when \
-                         hold_fallback_mode is 'alias' — a cloud audio model. Unused on a \
-                         row on the CPU, which the hold does not stop.",
+                    "fallback",
+                    fallback_p(
+                        "a model of the same task: speech-to-text for asr, text-to-speech for \
+                         tts. A row on the CPU is not stopped by the hold, so its fallback \
+                         answers only for the other reasons",
                     ),
                 ),
                 (
@@ -320,7 +316,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "Field names to reset, comma- or space-separated: 'lazy', \
                          'busy_timeout_ms', 'backend', 'threads', 'extra_run_args', \
-                         'hold_fallback' (resets both mode and alias), and on update \
+                         'fallback', and on update \
                          'residency' (forget the learned \
                          residency). A field named here is unset on create too, whatever \
                          value came with it.",

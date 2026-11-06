@@ -22,7 +22,7 @@ use super::*;
 /// Bring the container up as a warm start does, and wait for its reading at
 /// rest — what every path that makes a container ready asks for
 /// (`VramScheduler::cache_pids`).
-async fn start_at_rest(f: &Fixture, model_id: &str) {
+pub(super) async fn start_at_rest(f: &Fixture, model_id: &str) {
     let before = f.state.vram.residency_at_rest_readings();
     start_idle(f, model_id).await;
     f.state.vram.cache_pids(&f.state);
@@ -86,8 +86,15 @@ async fn a_streamed_answer_counts_only_once_its_relay_ends_whole() {
     drop(resp);
     in_flight_drains(&f, "tts").await;
 
+    // Not counted as loaded and nothing learned — but the fake container
+    // did load, and what it holds now is on the card already, so nothing
+    // is kept free for it (`vram::residency::now`).
     let a = audio_resident(&vram_status(&f.gateway).await);
-    assert_eq!(a["pending_bytes"], 2 * GIB, "not counted as loaded: {a}");
+    assert!(a["pending_bytes"].is_null(), "it holds its load now: {a}");
+    assert!(
+        note(&a).contains("Loaded without an answer lmgw saw"),
+        "not counted as loaded: {a}"
+    );
     assert_eq!(f.state.vram.residency_readings(), before, "nothing read");
     assert_eq!(residency(&f, "tts"), None);
 
@@ -256,8 +263,10 @@ async fn a_warm_container_s_context_is_not_counted_twice() {
         10 * GIB - 3 * GIB,
         "the context once, in the driver's figure: {v}"
     );
+    // The ledger's own reading of what it holds now is what the note
+    // names: the same context the reading at rest found.
     assert!(
-        note(&a).contains("it holds 256.0 MiB at rest already"),
+        note(&a).contains("its processes hold 256 MiB now, measured"),
         "{a}"
     );
 }
@@ -299,7 +308,8 @@ async fn an_eager_container_read_at_rest_keeps_free_the_rest_of_its_figure() {
     let a = audio_resident(&vram_status(&f.gateway).await);
     assert_eq!(a["pending_bytes"], 3 * GIB - 2 * GIB - GIB / 4, "{a}");
     assert!(
-        note(&a).contains("Weights loaded, not run yet") && note(&a).contains("at rest"),
+        note(&a).contains("Weights loaded, not run yet")
+            && note(&a).contains("its processes hold 2.3 GiB now, measured"),
         "{a}"
     );
 }

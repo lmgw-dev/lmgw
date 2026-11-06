@@ -2,7 +2,9 @@
 
 use sqlx::{Row, SqlitePool};
 
-use crate::config::{HoldFallbackMode, ImageModel};
+use lmgw_api_types::chat_media::{PreviewMode, PromptStyle};
+
+use crate::config::ImageModel;
 use crate::error::GatewayError;
 
 use super::*;
@@ -23,8 +25,7 @@ pub(super) fn image_model_from_row(row: &sqlx::sqlite::SqliteRow) -> ImageModel 
         extra_run_args: parse_json_opt(row.get::<Option<String>, _>("extra_run_args")),
         warm_start: row.get::<i64, _>("warm_start") != 0,
         idle_seconds: row.get("idle_seconds"),
-        hold_fallback_mode: hold_fallback_mode_from_row(row),
-        hold_fallback: row.get("hold_fallback"),
+        fallback: fallback_from_row(row),
         capabilities_override: capabilities_override_from_row(
             row.get::<Option<String>, _>("capabilities_override"),
         ),
@@ -35,6 +36,14 @@ pub(super) fn image_model_from_row(row: &sqlx::sqlite::SqliteRow) -> ImageModel 
             .get::<Option<i64>, _>("peak_extra_bytes")
             .and_then(|b| u64::try_from(b).ok()),
         peak_learned_at: row.get("peak_learned_at"),
+        // A value the CHECK let in but this build does not name reads as
+        // unset, the column's own default, rather than failing the load.
+        prompt_style: row
+            .get::<Option<String>, _>("prompt_style")
+            .and_then(|s| PromptStyle::parse(&s)),
+        preview_mode: row
+            .get::<Option<String>, _>("preview_mode")
+            .and_then(|s| PreviewMode::parse(&s)),
     }
 }
 
@@ -51,10 +60,13 @@ pub struct NewImageModel {
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
     pub idle_seconds: i64,
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// Meaningful only when `hold_fallback_mode` is `Alias`.
-    pub hold_fallback: Option<String>,
+    /// The row's one fallback (openai egress design §14.2); `None` = none.
+    pub fallback: Option<String>,
     pub capabilities_override: Option<serde_json::Value>,
+    /// `None` derives it from the matching recipe (chat-media-tools §3.4).
+    pub prompt_style: Option<PromptStyle>,
+    /// `None` is the default preview (chat-media-tools §5.2).
+    pub preview_mode: Option<PreviewMode>,
 }
 
 pub async fn list_image_models(pool: &SqlitePool) -> DbResult<Vec<ImageModel>> {
@@ -78,14 +90,23 @@ fn image_model_json(m: &NewImageModel) -> DbResult<(String, String, String)> {
 }
 
 pub async fn insert_image_model(pool: &SqlitePool, m: &NewImageModel) -> DbResult<i64> {
+    insert_image_model_in(&mut *pool.acquire().await?, m).await
+}
+
+/// [`insert_image_model`] inside a caller's transaction: the fallback save checks
+/// write it in a dry run first (`ops::fallback::referrers`).
+pub async fn insert_image_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    m: &NewImageModel,
+) -> DbResult<i64> {
     let (files, args, modes) = image_model_json(m)?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     let capabilities_override = to_json_opt(&m.capabilities_override)?;
     let res = sqlx::query(
         "INSERT INTO image_models (model_id, files, args, modes, edit, enabled, image,
-                                   extra_run_args, warm_start, idle_seconds, hold_fallback_mode,
-                                   hold_fallback, capabilities_override)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                   extra_run_args, warm_start, idle_seconds, fallback,
+                                   capabilities_override, prompt_style, preview_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )
     .bind(&m.model_id)
     .bind(files)
@@ -97,22 +118,33 @@ pub async fn insert_image_model(pool: &SqlitePool, m: &NewImageModel) -> DbResul
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
     .bind(m.idle_seconds)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(capabilities_override)
-    .execute(pool)
+    .bind(m.prompt_style.map(PromptStyle::as_str))
+    .bind(m.preview_mode.map(PreviewMode::as_str))
+    .execute(&mut *conn)
     .await?;
     Ok(res.last_insert_rowid())
 }
 
 pub async fn update_image_model(pool: &SqlitePool, id: i64, m: &NewImageModel) -> DbResult<()> {
+    update_image_model_in(&mut *pool.acquire().await?, id, m).await
+}
+
+/// [`update_image_model`] inside a caller's transaction: a rename rewrites the
+/// fallbacks that name the row in the same one ([`rewrite_fallbacks_in`]).
+pub async fn update_image_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    id: i64,
+    m: &NewImageModel,
+) -> DbResult<()> {
     let (files, args, modes) = image_model_json(m)?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     let capabilities_override = to_json_opt(&m.capabilities_override)?;
     sqlx::query(
         "UPDATE image_models SET model_id=?2, files=?3, args=?4, modes=?5, edit=?6, enabled=?7,
-         image=?8, extra_run_args=?9, warm_start=?10, idle_seconds=?11, hold_fallback_mode=?12,
-         hold_fallback=?13, capabilities_override=?14,
+         image=?8, extra_run_args=?9, warm_start=?10, idle_seconds=?11, fallback=?12,
+         capabilities_override=?13, prompt_style=?14, preview_mode=?15,
          updated_at=datetime('now') WHERE id=?1",
     )
     .bind(id)
@@ -126,10 +158,11 @@ pub async fn update_image_model(pool: &SqlitePool, id: i64, m: &NewImageModel) -
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
     .bind(m.idle_seconds)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(capabilities_override)
-    .execute(pool)
+    .bind(m.prompt_style.map(PromptStyle::as_str))
+    .bind(m.preview_mode.map(PreviewMode::as_str))
+    .execute(conn)
     .await?;
     Ok(())
 }

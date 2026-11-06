@@ -223,7 +223,10 @@ async fn another_upstream_sees_the_bare_id() {
                            "content": [{"type": "text", "text": "ok"}],
                            "stop_reason": "end_turn",
                            "usage": {"input_tokens": 1, "output_tokens": 1}});
-    for (protocol, reply) in [(Protocol::Openai, openai), (Protocol::Anthropic, anthropic)] {
+    for (protocol, reply) in [
+        (Protocol::OpenaiCompatible, openai),
+        (Protocol::Anthropic, anthropic),
+    ] {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(reply))

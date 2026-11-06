@@ -5,7 +5,7 @@
 //! These go through the real router over HTTP, so a route that stopped being
 //! wired up fails here rather than in the browser.
 
-use lmgw_core::config::{AuxKind, HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{AuxKind, Protocol, UpstreamKind};
 use lmgw_core::erased::Erased;
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewAlias, NewAudioModel, NewAuxModel, NewLocalModel, NewUpstream};
@@ -61,8 +61,7 @@ fn local(model_id: &str, gguf: &str) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -112,6 +111,7 @@ async fn the_spa_is_served_at_the_root_and_the_api_backs_its_pages() {
         "/audio-lab",
         "/image-lab",
         "/decision-lab",
+        "/voice-lab",
         "/agents",
         // Both shipped agents, one per run kind: the chat preset and the batch
         // pipeline the retired mail workflow became (agent-catalog §8).
@@ -161,6 +161,9 @@ async fn the_spa_is_served_at_the_root_and_the_api_backs_its_pages() {
         // being wired up is a page with an empty picker.
         "/audio-lab/api/models",
         "/image-lab/api/models",
+        "/voice-lab/api/sentences",
+        "/voice-lab/api/rounds",
+        "/voice-lab/api/samples",
     ] {
         get_json(&base, path).await;
     }
@@ -533,6 +536,7 @@ async fn the_old_ui_mount_redirects_to_the_root() {
         "/chat/api/nope",
         "/audio-lab/api/nope",
         "/image-lab/api/nope",
+        "/voice-lab/api/nope",
     ] {
         let resp = client.get(format!("{base}{path}")).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 404, "GET {path}");
@@ -878,7 +882,7 @@ async fn mcp_server_create_round_trips_through_config_plane() {
     assert!(s.is_isolated() && s.allow_sampling && s.autostart && s.enabled);
 
     // The synthesized argv carries env as -e and the `:Z` bind mount intact.
-    let (prog, argv) = s.stdio_argv();
+    let (prog, argv) = s.stdio_argv(&[]);
     assert_eq!(prog, "podman");
     assert!(argv.contains(&"-e".to_string()));
     assert!(argv.contains(&"GITHUB_TOKEN=secret123".to_string()));
@@ -1013,7 +1017,7 @@ async fn settings_full_speaks_the_class_shape_and_refuses_the_router_mode_keys()
 
     for gone in [
         json!({"router": {"container_name": "x"}}),
-        json!({"router": {"listen_port": 9292}}),
+        json!({"router": {"listen_port": 9393}}),
         json!({"router": {"models_max": 1}}),
         json!({"aux_router": {"auto_start": true}}),
     ] {
@@ -1199,6 +1203,7 @@ async fn the_responses_surface_lists_and_evicts_conversations() {
                 input_tokens: Some(3),
                 output_tokens: Some(4),
                 created_at: String::new(),
+                key_id: None,
             },
         )
         .await
@@ -1232,15 +1237,19 @@ async fn the_responses_surface_lists_and_evicts_conversations() {
     let (status, body) = op(&base, "response_chain_delete", json!({"chain_id": "r1"})).await;
     assert_eq!(status, 200, "{body}");
     for gone in ["r1", "r2"] {
-        assert!(store::get_response(&state.db, gone)
+        assert!(
+            store::get_response(&state.db, gone, store::ResponseReader::Owner)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        store::get_response(&state.db, "solo", store::ResponseReader::Owner)
             .await
             .unwrap()
-            .is_none());
-    }
-    assert!(store::get_response(&state.db, "solo")
-        .await
-        .unwrap()
-        .is_some());
+            .is_some()
+    );
 
     // And "clear all" empties the store.
     let (status, body) = op(&base, "responses_gc", json!({"scope": "all"})).await;
@@ -1340,7 +1349,7 @@ async fn hide_and_unhide_a_passthrough_model_round_trips() {
         &state.db,
         &NewUpstream {
             name: "catalog-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -1533,7 +1542,7 @@ async fn upstream_models_carries_each_entrys_catalog_facts() {
     let state = AppState::init_for_tests().await.unwrap();
     let upstream = |name: &str, url: String| NewUpstream {
         name: name.into(),
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind: UpstreamKind::Generic,
         base_url: url,
         api_key: None,
@@ -1767,7 +1776,7 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -1821,8 +1830,7 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
@@ -1853,8 +1861,7 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
@@ -1995,19 +2002,20 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
 }
 
 // ---------------------------------------------------------------------------
-// GPU hold — per-model and global fallback (gpu-hold design §2/§3.2/§3.3),
+// GPU hold — the per-model fallback (gpu-hold design §2/§3.2/§3.3; openai
+// egress design §14),
 // work package 1: model + plumbing only, no request routing yet.
 // ---------------------------------------------------------------------------
 
 /// A cloud alias that resolves and classifies as non-local — a "usable"
-/// fallback (§2) — without needing a live upstream: `validate_fallback_alias`
+/// fallback (§2) — without needing a live upstream: `ops::fallback::validate`
 /// only resolves and classifies, it never sends a request.
 async fn insert_cloud_alias(state: &SharedState, alias: &str) {
     let up_id = store::insert_upstream(
         &state.db,
         &NewUpstream {
             name: format!("{alias}-up"),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: None,
@@ -2031,6 +2039,7 @@ async fn insert_cloud_alias(state: &SharedState, alias: &str) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -2038,12 +2047,11 @@ async fn insert_cloud_alias(state: &SharedState, alias: &str) {
     state.reload_snapshot().await.unwrap();
 }
 
-/// `hold_fallback_mode = "alias"` + `hold_fallback` round-trips through the
-/// store and the editor's read endpoint; switching to `none` drops a
-/// previously-set alias; `clear: "hold_fallback"` resets both columns to
-/// inherit/NULL.
+/// A row's one `fallback` (openai egress design §14.2) round-trips through
+/// the store and the editor's read endpoint, and `clear: "fallback"` removes
+/// it.
 #[tokio::test]
-async fn local_model_set_hold_fallback_round_trips_and_clears() {
+async fn local_model_set_fallback_round_trips_and_clears() {
     let state = AppState::init_for_tests().await.unwrap();
     let id = store::insert_local_model(&state.db, &local("qwen3", "qwen3.gguf"))
         .await
@@ -2063,64 +2071,42 @@ async fn local_model_set_hold_fallback_round_trips_and_clears() {
     let (status, body) = op(
         &base,
         "local_model_set",
-        json!({
-            "action": "update", "id": id,
-            "hold_fallback_mode": "alias",
-            "hold_fallback": "cloud-fallback",
-        }),
+        json!({"action": "update", "id": id, "fallback": " cloud-fallback "}),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let m = saved().await;
-    assert_eq!(m.hold_fallback_mode, HoldFallbackMode::Alias);
-    assert_eq!(m.hold_fallback.as_deref(), Some("cloud-fallback"));
+    assert_eq!(saved().await.fallback.as_deref(), Some("cloud-fallback"));
 
-    // The editor's read endpoint hands both fields back.
+    // The editor's read endpoint hands it back.
     let v = get_json(&base, &format!("/api/local-model?id={id}")).await;
-    assert_eq!(v["hold_fallback_mode"], json!("alias"));
-    assert_eq!(v["hold_fallback"], json!("cloud-fallback"));
+    assert_eq!(v["fallback"], json!("cloud-fallback"));
 
-    // Switching to `none` drops the now-meaningless alias.
+    // An update that does not name it keeps it.
     let (status, body) = op(
         &base,
         "local_model_set",
-        json!({"action": "update", "id": id, "hold_fallback_mode": "none"}),
+        json!({"action": "update", "id": id, "idle_seconds": 60}),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let m = saved().await;
-    assert_eq!(m.hold_fallback_mode, HoldFallbackMode::None);
-    assert_eq!(m.hold_fallback, None);
+    assert_eq!(saved().await.fallback.as_deref(), Some("cloud-fallback"));
 
-    // Back to `alias`, then `clear: "hold_fallback"` resets both to inherit/NULL
-    // — the same convention `image`/`extra_run_args` already use.
+    // `clear: "fallback"` removes it — the same convention `image` and
+    // `extra_run_args` use.
     let (status, body) = op(
         &base,
         "local_model_set",
-        json!({
-            "action": "update", "id": id,
-            "hold_fallback_mode": "alias",
-            "hold_fallback": "cloud-fallback",
-        }),
+        json!({"action": "update", "id": id, "clear": "fallback"}),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let (status, body) = op(
-        &base,
-        "local_model_set",
-        json!({"action": "update", "id": id, "clear": "hold_fallback"}),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    let m = saved().await;
-    assert_eq!(m.hold_fallback_mode, HoldFallbackMode::Inherit);
-    assert_eq!(m.hold_fallback, None);
+    assert_eq!(saved().await.fallback, None);
 }
 
-/// A fallback alias must resolve to a non-local route (§2/§3.3): one that is
-/// itself a local model is refused, naming why.
+/// A local model may be a fallback now (§14.2); a name that does not
+/// resolve, and an empty one, are refused, naming why.
 #[tokio::test]
-async fn local_model_set_refuses_a_hold_fallback_that_is_itself_local() {
+async fn local_model_set_takes_a_local_fallback_and_refuses_what_does_not_resolve() {
     let state = AppState::init_for_tests().await.unwrap();
     let id = store::insert_local_model(&state.db, &local("qwen3", "qwen3.gguf"))
         .await
@@ -2134,11 +2120,15 @@ async fn local_model_set_refuses_a_hold_fallback_that_is_itself_local() {
     let (status, body) = op(
         &base,
         "local_model_set",
-        json!({
-            "action": "update", "id": id,
-            "hold_fallback_mode": "alias",
-            "hold_fallback": "other-local",
-        }),
+        json!({"action": "update", "id": id, "fallback": "other-local"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = op(
+        &base,
+        "local_model_set",
+        json!({"action": "update", "id": id, "fallback": "no-such-alias"}),
     )
     .await;
     assert_eq!(status, 400, "{body}");
@@ -2146,131 +2136,45 @@ async fn local_model_set_refuses_a_hold_fallback_that_is_itself_local() {
         body["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("local"),
+            .contains("does not resolve"),
         "{body}"
     );
 
-    // An alias that does not resolve at all is refused the same way.
     let (status, body) = op(
         &base,
         "local_model_set",
-        json!({
-            "action": "update", "id": id,
-            "hold_fallback_mode": "alias",
-            "hold_fallback": "no-such-alias",
-        }),
+        json!({"action": "update", "id": id, "fallback": ""}),
     )
     .await;
     assert_eq!(status, 400, "{body}");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("clear: \"fallback\""),
+        "{body}"
+    );
 }
 
-/// The global `hold.fallback_alias` round-trips through `GET
-/// /api/settings-full`, validates the same way the per-model one does, `""`
-/// clears it, and `active` is not reachable through this generic patch (it is
-/// `ops::hold_set`'s job, per §3.1 — package 2).
+/// There is no global fallback any more (decision 26): the settings read has
+/// the hold's switch alone, and a patch naming `hold` is refused as a field
+/// this route does not carry — `active` is `ops::hold_set`'s job (§3.1).
 #[tokio::test]
-async fn settings_hold_fallback_alias_round_trips_validates_and_clears() {
+async fn the_settings_have_no_global_fallback_and_no_hold_patch() {
     let state = AppState::init_for_tests().await.unwrap();
     insert_cloud_alias(&state, "cloud-fallback").await;
     let base = serve(state.clone()).await;
 
-    let (status, body) = op(
-        &base,
-        "settings_set_full",
+    let v = get_json(&base, "/api/settings-full").await;
+    assert_eq!(v["hold"], json!({"active": false}));
+
+    for patch in [
         json!({"hold": {"fallback_alias": "cloud-fallback"}}),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-
-    let v = get_json(&base, "/api/settings-full").await;
-    assert_eq!(v["hold"]["fallback_alias"], json!("cloud-fallback"));
-    assert_eq!(v["hold"]["active"], json!(false));
-    let dto: lmgw_api_types::SettingsFull = serde_json::from_value(v).unwrap();
-    assert_eq!(dto.hold.fallback_alias.as_deref(), Some("cloud-fallback"));
-    assert!(!dto.hold.active);
-
-    // `""` clears it back to "refuse".
-    let (status, body) = op(
-        &base,
-        "settings_set_full",
-        json!({"hold": {"fallback_alias": ""}}),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    let v = get_json(&base, "/api/settings-full").await;
-    assert_eq!(v["hold"]["fallback_alias"], Value::Null);
-
-    // Unknown alias: refused, not silently stored.
-    let (status, body) = op(
-        &base,
-        "settings_set_full",
-        json!({"hold": {"fallback_alias": "no-such-alias"}}),
-    )
-    .await;
-    assert_eq!(status, 400, "{body}");
-
-    // `active` has no field on this patch at all.
-    let (status, body) = op(
-        &base,
-        "settings_set_full",
         json!({"hold": {"active": true}}),
-    )
-    .await;
-    assert_eq!(status, 400, "{body}");
-}
-
-/// The one `settings_hold_fallback_alias_round_trips_validates_and_clears`
-/// does not cover: a global fallback that resolves, but to a *local* model —
-/// refused the same way the per-model patch already is.
-#[tokio::test]
-async fn settings_set_full_refuses_a_global_fallback_that_is_itself_local() {
-    let state = AppState::init_for_tests().await.unwrap();
-    store::insert_local_model(&state.db, &local("qwen3", "qwen3.gguf"))
-        .await
-        .unwrap();
-    state.reload_snapshot().await.unwrap();
-    let base = serve(state.clone()).await;
-
-    let (status, body) = op(
-        &base,
-        "settings_set_full",
-        json!({"hold": {"fallback_alias": "qwen3"}}),
-    )
-    .await;
-    assert_eq!(status, 400, "{body}");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("local"),
-        "{body}"
-    );
-}
-
-/// `hold_fallback_mode = "alias"` without an alias to route to is refused, not
-/// silently stored as a mode with nothing behind it.
-#[tokio::test]
-async fn local_model_set_refuses_alias_mode_with_no_alias() {
-    let state = AppState::init_for_tests().await.unwrap();
-    let id = store::insert_local_model(&state.db, &local("qwen3", "qwen3.gguf"))
-        .await
-        .unwrap();
-    let base = serve(state.clone()).await;
-
-    let (status, body) = op(
-        &base,
-        "local_model_set",
-        json!({"action": "update", "id": id, "hold_fallback_mode": "alias"}),
-    )
-    .await;
-    assert_eq!(status, 400, "{body}");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("requires hold_fallback"),
-        "{body}"
-    );
+    ] {
+        let (status, body) = op(&base, "settings_set_full", patch).await;
+        assert_eq!(status, 400, "{body}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2392,7 +2296,7 @@ async fn capabilities_override_round_trips_through_the_dashboard_local_and_alias
         &base,
         "upstream_set",
         json!({
-            "action": "create", "name": "cloud-caps", "protocol": "openai",
+            "action": "create", "name": "cloud-caps", "protocol": "openai_compatible",
             "base_url": "http://127.0.0.1:1/v1",
         }),
     )
@@ -2606,8 +2510,8 @@ async fn the_settings_plane_carries_the_image_class_and_makes_its_two_directorie
 
 /// The dashboard's HTML carries the narrow CSP that keeps replies from loading
 /// remote images, and the Permissions Policy that keeps the microphone the
-/// dashboard's own (chat-voice §13.1); API responses and non-HTML assets
-/// carry neither.
+/// dashboard's own (chat-voice §13.1); non-HTML assets carry neither, and API
+/// responses carry the router's `sandbox` instead (machine-check design D90).
 #[tokio::test]
 async fn the_dashboard_html_carries_the_narrow_csp_and_the_api_does_not() {
     let state = AppState::init_for_tests().await.unwrap();
@@ -2641,12 +2545,12 @@ async fn the_dashboard_html_carries_the_narrow_csp_and_the_api_does_not() {
         assert_eq!(csp.as_deref(), Some(want), "{path}");
         assert_eq!(permissions.as_deref(), Some(policy), "{path}");
     }
-    for (path, what) in [
-        ("/v1/models", "/v1/models"),
-        ("/vendor/highlight.js", "js asset"),
+    for (path, what, policy) in [
+        ("/v1/models", "/v1/models", Some("sandbox")),
+        ("/vendor/highlight.js", "js asset", None),
     ] {
         let (_, csp, permissions) = headers(path).await;
-        assert_eq!(csp, None, "{what}");
+        assert_eq!(csp.as_deref(), policy, "{what}");
         assert_eq!(permissions, None, "{what}");
     }
 }

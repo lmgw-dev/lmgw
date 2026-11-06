@@ -4,6 +4,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::config::{Protocol, Upstream};
+use crate::egress::call_ids::CallIds;
 use crate::egress::{
     apply_extra_headers, finish_from_gemini, CountPlan, Egress, EgressStreamDecoder,
 };
@@ -16,6 +17,7 @@ use crate::ir::{
 use crate::sse::SseEvent;
 
 mod signatures;
+pub mod structured;
 
 pub struct GeminiEgress;
 
@@ -86,7 +88,8 @@ fn parts_json(
     let mut out = Vec::new();
     for p in parts {
         match p {
-            ContentPart::Text { text } => {
+            // A refusal replays as its text (`ContentPart::Refusal`).
+            ContentPart::Text { text, .. } | ContentPart::Refusal { text } => {
                 if !text.is_empty() {
                     out.push(json!({"text": text}));
                 }
@@ -105,7 +108,7 @@ fn parts_json(
                 out.push(json!({"inlineData": {"mimeType": mime, "data": data}}));
             }
             ContentPart::ToolUse { id, name, args } => {
-                let mut part = json!({"functionCall": {"name": name, "args": args}});
+                let mut part = json!({"functionCall": {"name": name, "args": crate::ir::object_call_args(args)}});
                 // The model's own signature, carried in the id since its
                 // answer (gateway design §7.1), goes back on its part as it
                 // came. A step whose first call has none gets the skip value
@@ -127,11 +130,25 @@ fn parts_json(
                     "functionResponse": {"name": fn_name, "response": function_response(content)}
                 }));
             }
+            // Folded to its summary's text before (`request_body`).
+            ContentPart::Compaction(c) => {
+                if let Some(text) = c.summary.as_ref().filter(|t| !t.is_empty()) {
+                    out.push(json!({"text": text}));
+                }
+            }
             ContentPart::Reasoning { text, .. } => {
                 // Gemini has no slot for replaying a text trace; its own
                 // continuity token is a `thoughtSignature`, which rides in
                 // a call's id (§7.1), not here.
                 tracing::debug!(chars = text.len(), "dropping reasoning for gemini egress");
+            }
+            // Anthropic's own block: only an Anthropic route is sent it, and
+            // the response names it (`x-lmgw-params-ignored`).
+            ContentPart::AnthropicBlock(b) => {
+                tracing::debug!(
+                    kind = b.kind(),
+                    "dropping an anthropic block for gemini egress"
+                );
             }
         }
     }
@@ -140,6 +157,9 @@ fn parts_json(
 }
 
 fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError> {
+    // An Anthropic compaction block, as Anthropic makes of it: the history
+    // before it dropped, its summary a user turn (`ir::compaction::folded`).
+    let ir = &*crate::ir::compaction::folded(ir);
     let mut body = Map::new();
 
     if let Some(system) = ir.system_text() {
@@ -218,6 +238,7 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
     if !thinking.is_empty() {
         gen_cfg.insert("thinkingConfig".into(), Value::Object(thinking));
     }
+    structured::apply(&mut gen_cfg, ir)?;
     if !gen_cfg.is_empty() {
         body.insert("generationConfig".into(), Value::Object(gen_cfg));
     }
@@ -227,11 +248,15 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
             .tools
             .iter()
             .map(|t| {
-                json!({
+                let mut decl = json!({
                     "name": t.name,
-                    "description": t.description,
                     "parameters": sanitize_schema(&t.parameters),
-                })
+                });
+                // Gemini expects a string here, never null: left out when absent.
+                if let Some(d) = &t.description {
+                    decl["description"] = json!(d);
+                }
+                decl
             })
             .collect();
         body.insert("tools".into(), json!([{"functionDeclarations": decls}]));
@@ -249,38 +274,6 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
     }
 
     Ok(Value::Object(body))
-}
-
-/// Tool call ids for one Gemini answer, which has none of its own: a random
-/// tag plus a counter, `call_<12 hex digits><n in hex>`, as the realtime
-/// session mints its own (`realtime::ids`). Unique across answers too, not
-/// only within one: a tool loop's steps each get a fresh minter, and a
-/// per-answer `call_0` would repeat in the history the client sends back —
-/// duplicate `tool_use` ids on an Anthropic fallback, a result paired with
-/// an older call's name (`ChatRequest::tool_name_for_id`), and clients that
-/// refuse a reused id (`@openai/agents`).
-struct CallIds {
-    tag: String,
-    next: u64,
-}
-
-impl Default for CallIds {
-    fn default() -> Self {
-        // 48 random bits: plenty to keep one gateway's answers apart.
-        let tag: u64 = rand::random::<u64>() & 0xffff_ffff_ffff;
-        Self {
-            tag: format!("{tag:012x}"),
-            next: 0,
-        }
-    }
-}
-
-impl CallIds {
-    fn mint(&mut self) -> String {
-        let n = self.next;
-        self.next += 1;
-        format!("call_{}{n:x}", self.tag)
-    }
 }
 
 /// Split a Gemini `parts` array into answer content and reasoning text. Parts
@@ -384,7 +377,11 @@ pub(crate) fn count_chat_request(
     if let Some(key) = up.api_key.as_deref().filter(|k| !k.is_empty()) {
         rb = rb.header("x-goog-api-key", key);
     }
-    Ok(apply_extra_headers(rb, up))
+    Ok(super::watch::built(
+        up,
+        &serde_json::Map::new(),
+        apply_extra_headers(rb, up),
+    ))
 }
 
 impl Egress for GeminiEgress {
@@ -411,7 +408,11 @@ impl Egress for GeminiEgress {
         if let Some(key) = up.api_key.as_deref().filter(|k| !k.is_empty()) {
             rb = rb.header("x-goog-api-key", key);
         }
-        Ok(apply_extra_headers(rb, up))
+        Ok(super::watch::built(
+            up,
+            &serde_json::Map::new(),
+            apply_extra_headers(rb, up),
+        ))
     }
 
     fn parse_completion(&self, body: &[u8]) -> Result<Completion, GatewayError> {
@@ -439,11 +440,15 @@ impl Egress for GeminiEgress {
             finish_reason,
             usage: parse_usage(v.get("usageMetadata")),
             timings: None, // llama.cpp-only block; Gemini never emits it
+            service_tier: None,
+            upstream_items: None,
+            context_management: None,
             model: v
                 .get("modelVersion")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            usage_iterations: None,
         })
     }
 
@@ -464,6 +469,10 @@ impl Egress for GeminiEgress {
             provider_type: err.get("status").and_then(Value::as_str).map(String::from),
             message,
         }
+    }
+
+    fn structured_refusal(&self, status: u16, body: &[u8]) -> Option<GatewayError> {
+        structured::refusal(status, body)
     }
 
     fn build_embeddings(
@@ -493,7 +502,11 @@ impl Egress for GeminiEgress {
         if let Some(key) = up.api_key.as_deref().filter(|k| !k.is_empty()) {
             rb = rb.header("x-goog-api-key", key);
         }
-        Ok(apply_extra_headers(rb, up))
+        Ok(super::watch::built(
+            up,
+            &serde_json::Map::new(),
+            apply_extra_headers(rb, up),
+        ))
     }
 
     fn build_count_tokens(
@@ -511,7 +524,11 @@ impl Egress for GeminiEgress {
         if let Some(key) = up.api_key.as_deref().filter(|k| !k.is_empty()) {
             rb = rb.header("x-goog-api-key", key);
         }
-        Ok(CountPlan::Request(Box::new(apply_extra_headers(rb, up))))
+        Ok(CountPlan::Request(Box::new(super::watch::built(
+            up,
+            &serde_json::Map::new(),
+            apply_extra_headers(rb, up),
+        ))))
     }
 
     fn parse_count(&self, body: &[u8]) -> Result<u64, GatewayError> {
@@ -584,7 +601,7 @@ impl EgressStreamDecoder for GeminiDecoder {
             }
             for p in parts {
                 match p {
-                    ContentPart::Text { text } => out.push(StreamDelta::TextDelta(text)),
+                    ContentPart::Text { text, .. } => out.push(StreamDelta::TextDelta(text)),
                     ContentPart::ToolUse { id, name, args } => {
                         self.saw_tool = true;
                         // Gemini delivers complete functionCall parts: emit

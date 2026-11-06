@@ -7,8 +7,15 @@ description = "Self-hosted LLM API gateway (tray app)"
 
 [dependencies]
 lmgw-core = { path = "../crates/lmgw-core" }
+# The machine summary the tray watches (machine_tray.rs).
+lmgw-api-types = { path = "../crates/lmgw-api-types" }
 # The install step and its host check (updater.rs); the feed is lmgw-core's.
 lmgw-update = { path = "../crates/lmgw-update" }
+# The machine check's fix (machine.rs, machine-check design WP7): the
+# helper's wire (`helper::Event`, `Exit`, the unit's name), its install
+# check and the plan's schema. Its events and answer are lmgw-api-types',
+# which the dashboard reads too.
+lmgw-machine = { path = "../crates/lmgw-machine" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

@@ -1,0 +1,1041 @@
+{
+  "cdiVersion": "0.7.0",
+  "kind": "nvidia.com/gpu",
+  "devices": [
+    {
+      "name": "0",
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "path": "/dev/nvidia0",
+            "major": 195,
+            "fileMode": 438,
+            "permissions": "rwm"
+          },
+          {
+            "path": "/dev/dri/card1",
+            "major": 226,
+            "minor": 1,
+            "fileMode": 432,
+            "permissions": "rwm",
+            "gid": 39
+          },
+          {
+            "path": "/dev/dri/renderD128",
+            "major": 226,
+            "minor": 128,
+            "fileMode": 438,
+            "permissions": "rwm",
+            "gid": 105
+          }
+        ],
+        "hooks": [
+          {
+            "hookName": "createContainer",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "create-symlinks",
+              "--link",
+              "../card1::/dev/dri/by-path/pci-0000:01:00.0-card",
+              "--link",
+              "../renderD128::/dev/dri/by-path/pci-0000:01:00.0-render"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          },
+          {
+            "hookName": "createRuntime",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "apply-cuda-memory-limits",
+              "--driver-root",
+              "",
+              "--gpu-id",
+              "GPU-00000000-0000-4000-8000-000000000001"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          }
+        ],
+        "additionalGids": [
+          39
+        ]
+      }
+    },
+    {
+      "name": "GPU-00000000-0000-4000-8000-000000000001",
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "path": "/dev/nvidia0",
+            "major": 195,
+            "fileMode": 438,
+            "permissions": "rwm"
+          },
+          {
+            "path": "/dev/dri/card1",
+            "major": 226,
+            "minor": 1,
+            "fileMode": 432,
+            "permissions": "rwm",
+            "gid": 39
+          },
+          {
+            "path": "/dev/dri/renderD128",
+            "major": 226,
+            "minor": 128,
+            "fileMode": 438,
+            "permissions": "rwm",
+            "gid": 105
+          }
+        ],
+        "hooks": [
+          {
+            "hookName": "createContainer",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "create-symlinks",
+              "--link",
+              "../card1::/dev/dri/by-path/pci-0000:01:00.0-card",
+              "--link",
+              "../renderD128::/dev/dri/by-path/pci-0000:01:00.0-render"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          },
+          {
+            "hookName": "createRuntime",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "apply-cuda-memory-limits",
+              "--driver-root",
+              "",
+              "--gpu-id",
+              "GPU-00000000-0000-4000-8000-000000000001"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          }
+        ],
+        "additionalGids": [
+          39
+        ]
+      }
+    },
+    {
+      "name": "all",
+      "containerEdits": {
+        "deviceNodes": [
+          {
+            "path": "/dev/nvidia0",
+            "major": 195,
+            "fileMode": 438,
+            "permissions": "rwm"
+          },
+          {
+            "path": "/dev/dri/card1",
+            "major": 226,
+            "minor": 1,
+            "fileMode": 432,
+            "permissions": "rwm",
+            "gid": 39
+          },
+          {
+            "path": "/dev/dri/renderD128",
+            "major": 226,
+            "minor": 128,
+            "fileMode": 438,
+            "permissions": "rwm",
+            "gid": 105
+          }
+        ],
+        "hooks": [
+          {
+            "hookName": "createContainer",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "create-symlinks",
+              "--link",
+              "../card1::/dev/dri/by-path/pci-0000:01:00.0-card",
+              "--link",
+              "../renderD128::/dev/dri/by-path/pci-0000:01:00.0-render"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          },
+          {
+            "hookName": "createRuntime",
+            "path": "/usr/bin/nvidia-cdi-hook",
+            "args": [
+              "nvidia-cdi-hook",
+              "apply-cuda-memory-limits",
+              "--driver-root",
+              "",
+              "--gpu-id",
+              "GPU-00000000-0000-4000-8000-000000000001"
+            ],
+            "env": [
+              "NVIDIA_CTK_DEBUG=false"
+            ]
+          }
+        ],
+        "additionalGids": [
+          39
+        ]
+      }
+    }
+  ],
+  "containerEdits": {
+    "env": [
+      "NVIDIA_CTK_LIBCUDA_DIR=/usr/lib64",
+      "NVIDIA_VISIBLE_DEVICES=void"
+    ],
+    "deviceNodes": [
+      {
+        "path": "/dev/nvidia-modeset",
+        "major": 195,
+        "minor": 254,
+        "fileMode": 438,
+        "permissions": "rwm"
+      },
+      {
+        "path": "/dev/nvidia-uvm",
+        "major": 508,
+        "fileMode": 438,
+        "permissions": "rwm"
+      },
+      {
+        "path": "/dev/nvidia-uvm-tools",
+        "major": 508,
+        "minor": 1,
+        "fileMode": 438,
+        "permissions": "rwm"
+      },
+      {
+        "path": "/dev/nvidiactl",
+        "major": 195,
+        "minor": 255,
+        "fileMode": 438,
+        "permissions": "rwm"
+      }
+    ],
+    "hooks": [
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "create-symlinks",
+          "--link",
+          "../libnvidia-allocator.so.1::/usr/lib64/gbm/nvidia-drm_gbm.so"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      },
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "create-symlinks",
+          "--link",
+          "libEGL_nvidia.so.600.20.03::/usr/lib64/libEGL_nvidia.so.0",
+          "--link",
+          "libGLESv1_CM_nvidia.so.600.20.03::/usr/lib64/libGLESv1_CM_nvidia.so.1",
+          "--link",
+          "libGLESv2_nvidia.so.600.20.03::/usr/lib64/libGLESv2_nvidia.so.2",
+          "--link",
+          "libGLX_nvidia.so.600.20.03::/usr/lib64/libGLX_indirect.so.0",
+          "--link",
+          "libGLX_nvidia.so.600.20.03::/usr/lib64/libGLX_nvidia.so.0",
+          "--link",
+          "libcuda.so.1::/usr/lib64/libcuda.so",
+          "--link",
+          "libcuda.so.600.20.03::/usr/lib64/libcuda.so.1",
+          "--link",
+          "libcudadebugger.so.600.20.03::/usr/lib64/libcudadebugger.so.1",
+          "--link",
+          "libnvcuvid.so.600.20.03::/usr/lib64/libnvcuvid.so.1",
+          "--link",
+          "libnvcuvid.so.1::/usr/lib64/libnvcuvid.so",
+          "--link",
+          "libnvidia-allocator.so.600.20.03::/usr/lib64/libnvidia-allocator.so.1",
+          "--link",
+          "libnvidia-cfg.so.600.20.03::/usr/lib64/libnvidia-cfg.so.1",
+          "--link",
+          "libnvidia-encode.so.600.20.03::/usr/lib64/libnvidia-encode.so.1",
+          "--link",
+          "libnvidia-encode.so.1::/usr/lib64/libnvidia-encode.so",
+          "--link",
+          "libnvidia-fbc.so.600.20.03::/usr/lib64/libnvidia-fbc.so.1",
+          "--link",
+          "libnvidia-fmdrv.so.600.20.03::/usr/lib64/libnvidia-fmdrv.so.1",
+          "--link",
+          "libnvidia-imex.so.600.20.03::/usr/lib64/libnvidia-imex.so.1",
+          "--link",
+          "libnvidia-ml.so.600.20.03::/usr/lib64/libnvidia-ml.so.1",
+          "--link",
+          "libnvidia-ml.so.1::/usr/lib64/libnvidia-ml.so",
+          "--link",
+          "libnvidia-ngx.so.600.20.03::/usr/lib64/libnvidia-ngx.so.1",
+          "--link",
+          "libnvidia-nvvm.so.600.20.03::/usr/lib64/libnvidia-nvvm.so.4",
+          "--link",
+          "libnvidia-nvvm.so.4::/usr/lib64/libnvidia-nvvm.so",
+          "--link",
+          "libnvidia-opencl.so.600.20.03::/usr/lib64/libnvidia-opencl.so.1",
+          "--link",
+          "libnvidia-opticalflow.so.1::/usr/lib64/libnvidia-opticalflow.so",
+          "--link",
+          "libnvidia-opticalflow.so.600.20.03::/usr/lib64/libnvidia-opticalflow.so.1",
+          "--link",
+          "libnvidia-ptxjitcompiler.so.600.20.03::/usr/lib64/libnvidia-ptxjitcompiler.so.1",
+          "--link",
+          "libnvidia-sandboxutils.so.600.20.03::/usr/lib64/libnvidia-sandboxutils.so.1",
+          "--link",
+          "libnvidia-vksc-core.so.600.20.03::/usr/lib64/libnvidia-vksc-core.so.1",
+          "--link",
+          "libnvoptix.so.600.20.03::/usr/lib64/libnvoptix.so.1",
+          "--link",
+          "libvdpau_nvidia.so.600.20.03::/usr/lib64/vdpau/libvdpau_nvidia.so.1"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      },
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "enable-cuda-compat",
+          "--host-driver-version=600.20.03"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      },
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "update-ldcache",
+          "--folder",
+          "/usr/lib64",
+          "--folder",
+          "/usr/lib64/vdpau"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      },
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "disable-device-node-modification"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      },
+      {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": [
+          "nvidia-cdi-hook",
+          "update-application-profile"
+        ],
+        "env": [
+          "NVIDIA_CTK_DEBUG=false"
+        ]
+      }
+    ],
+    "mounts": [
+      {
+        "hostPath": "/usr/bin/nvidia-cuda-mps-control",
+        "containerPath": "/usr/bin/nvidia-cuda-mps-control",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/bin/nvidia-cuda-mps-server",
+        "containerPath": "/usr/bin/nvidia-cuda-mps-server",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/bin/nvidia-debugdump",
+        "containerPath": "/usr/bin/nvidia-debugdump",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/bin/nvidia-persistenced",
+        "containerPath": "/usr/bin/nvidia-persistenced",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/bin/nvidia-smi",
+        "containerPath": "/usr/bin/nvidia-smi",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libEGL_nvidia.so.600.20.03",
+        "containerPath": "/usr/lib64/libEGL_nvidia.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libGLESv1_CM_nvidia.so.600.20.03",
+        "containerPath": "/usr/lib64/libGLESv1_CM_nvidia.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libGLESv2_nvidia.so.600.20.03",
+        "containerPath": "/usr/lib64/libGLESv2_nvidia.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libGLX_nvidia.so.600.20.03",
+        "containerPath": "/usr/lib64/libGLX_nvidia.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libcuda.so.600.20.03",
+        "containerPath": "/usr/lib64/libcuda.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libcudadebugger.so.600.20.03",
+        "containerPath": "/usr/lib64/libcudadebugger.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvcuvid.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvcuvid.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-allocator.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-allocator.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-cfg.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-cfg.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-egl-gbm.so.1.1.4",
+        "containerPath": "/usr/lib64/libnvidia-egl-gbm.so.1.1.4",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-egl-wayland.so.1.1.24",
+        "containerPath": "/usr/lib64/libnvidia-egl-wayland.so.1.1.24",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-egl-wayland2.so.1.0.2",
+        "containerPath": "/usr/lib64/libnvidia-egl-wayland2.so.1.0.2",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-egl-xcb.so.1.0.6",
+        "containerPath": "/usr/lib64/libnvidia-egl-xcb.so.1.0.6",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-egl-xlib.so.1.0.6",
+        "containerPath": "/usr/lib64/libnvidia-egl-xlib.so.1.0.6",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-eglcore.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-eglcore.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-encode.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-encode.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-fbc.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-fbc.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-fmdrv.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-fmdrv.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-glcore.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-glcore.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-glsi.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-glsi.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-glvkspirv.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-glvkspirv.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-gpucomp.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-gpucomp.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-gtk3.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-gtk3.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-imex.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-imex.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-ml.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-ml.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-ngx.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-ngx.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-nvvm.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-nvvm.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-nvvm70.so.4",
+        "containerPath": "/usr/lib64/libnvidia-nvvm70.so.4",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-opencl.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-opencl.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-opticalflow.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-opticalflow.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-pkcs11-openssl3.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-pkcs11-openssl3.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-present.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-present.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-ptxjitcompiler.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-ptxjitcompiler.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-rtcore.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-rtcore.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-sandboxutils.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-sandboxutils.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-tileiras.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-tileiras.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-tls.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-tls.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-vksc-core.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-vksc-core.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvidia-wayland-client.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvidia-wayland-client.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/libnvoptix.so.600.20.03",
+        "containerPath": "/usr/lib64/libnvoptix.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/etc/OpenCL/vendors/nvidia.icd",
+        "containerPath": "/etc/OpenCL/vendors/nvidia.icd",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json",
+        "containerPath": "/etc/vulkan/icd.d/nvidia_icd.x86_64.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/vulkan/implicit_layer.d/nvidia_layers.json",
+        "containerPath": "/etc/vulkan/implicit_layer.d/nvidia_layers.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/vdpau/libvdpau_nvidia.so.600.20.03",
+        "containerPath": "/usr/lib64/vdpau/libvdpau_nvidia.so.600.20.03",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/nvidia/nvoptix.bin",
+        "containerPath": "/usr/share/nvidia/nvoptix.bin",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/lib/firmware/nvidia/600.20.03/gsp_ga10x.bin",
+        "containerPath": "/lib/firmware/nvidia/600.20.03/gsp_ga10x.bin",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/lib/firmware/nvidia/600.20.03/gsp_tu10x.bin",
+        "containerPath": "/lib/firmware/nvidia/600.20.03/gsp_tu10x.bin",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/lib/firmware/nvidia/600.20.03/ucodes_ga10x.bin",
+        "containerPath": "/lib/firmware/nvidia/600.20.03/ucodes_ga10x.bin",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/lib/firmware/nvidia/600.20.03/ucodes_tu10x.bin",
+        "containerPath": "/lib/firmware/nvidia/600.20.03/ucodes_tu10x.bin",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json",
+        "containerPath": "/usr/share/egl/egl_external_platform.d/09_nvidia_wayland2.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+        "containerPath": "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json",
+        "containerPath": "/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json",
+        "containerPath": "/usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/egl/egl_external_platform.d/20_nvidia_xlib.json",
+        "containerPath": "/usr/share/egl/egl_external_platform.d/20_nvidia_xlib.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+        "containerPath": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      },
+      {
+        "hostPath": "/usr/lib64/xorg/modules/drivers/nvidia_drv.so",
+        "containerPath": "/usr/lib64/xorg/modules/drivers/nvidia_drv.so",
+        "options": [
+          "ro",
+          "nosuid",
+          "nodev",
+          "rbind",
+          "rprivate"
+        ]
+      }
+    ]
+  }
+}

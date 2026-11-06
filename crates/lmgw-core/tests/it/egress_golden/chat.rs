@@ -46,11 +46,11 @@ fn with_passthrough(mut r: ChatRequest, extra: Value) -> ChatRequest {
     r
 }
 
-fn hello() -> ChatRequest {
+pub(super) fn hello() -> ChatRequest {
     ir(json!([msg("user", "hello")]))
 }
 
-fn whole(r: ChatRequest) -> impl Fn(&lmgw_core::config::Upstream) -> Value {
+pub(super) fn whole(r: ChatRequest) -> impl Fn(&lmgw_core::config::Upstream) -> Value {
     move |up| chat_request(up, &r, &Params::default(), false)
 }
 
@@ -359,6 +359,12 @@ pub(super) fn cases() -> Vec<Case> {
             name: "samplers_stream",
             run: |up| chat_request(up, &hello(), &all_samplers(), true),
         },
+        // The output cap alone, the one sampler whose spelling the OpenAI
+        // platform differs on (openai egress design §7.1, P1).
+        Case {
+            name: "max_tokens_alone",
+            run: |up| chat_request(up, &hello(), &params(json!({"max_tokens": 64})), false),
+        },
         Case {
             name: "samplers_edges",
             run: |up| {
@@ -376,18 +382,6 @@ pub(super) fn cases() -> Vec<Case> {
                 whole(with_passthrough(
                     hello(),
                     json!({"grammar": "root ::= \"yes\" | \"no\""}),
-                ))(up)
-            },
-        },
-        Case {
-            name: "passthrough_response_format",
-            run: |up| {
-                whole(with_passthrough(
-                    hello(),
-                    json!({"response_format": {"type": "json_schema", "json_schema": {
-                        "name": "answer", "strict": true,
-                        "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
-                    }}}),
                 ))(up)
             },
         },

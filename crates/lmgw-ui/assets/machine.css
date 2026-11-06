@@ -1,0 +1,206 @@
+/* The machine check (src/widgets/machine_check.rs, machine-check design §4.4):
+   the headline, the items, the plan block, the progress view and the settings
+   switch's confirm. The surface puts the component in its own card; nothing
+   here draws one around it.
+
+   One scroller: the folds grow and the page scrolls, never a box inside it
+   (ui-matrix's nested_v). Long lines wrap instead of scrolling sideways.
+   Nothing fades: WebKitGTK blanks an element one frame after an opacity
+   transition ends, so the pulse is an infinite box-shadow keyframe. */
+
+.machine-check { display: flex; flex-direction: column; gap: 12px; min-width: 0; color: var(--text); }
+
+/* the headline */
+.mc-head { display: flex; align-items: flex-start; gap: 12px; }
+.mc-headline { flex: 1 1 auto; min-width: 0; }
+.mc-verdict { font-size: 15px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.mc-when { font-size: var(--fs-sm); color: var(--text-3); margin-top: 2px; }
+
+/* the marks: ✓ ok, ! a problem, i worth knowing, – not checked yet */
+.mc-mark { flex: none; width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font: 700 12px/1 var(--sans); border: 1px solid var(--border-strong);
+  color: var(--text-2); margin-top: 1px; }
+.mc-mark.big { width: 28px; height: 28px; font-size: 15px; margin-top: 0; }
+.mc-tick { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.4;
+  stroke-linecap: round; stroke-linejoin: round; }
+.mc-mark.big .mc-tick { width: 15px; height: 15px; }
+.mc-mark.mc-ok { background: var(--ok); border-color: var(--ok); color: var(--accent-ink); }
+.mc-mark.mc-problem { background: var(--amber); border-color: var(--amber); color: var(--accent-ink); }
+.mc-mark.mc-info { background: var(--accent-bg); border-color: transparent; color: var(--accent);
+  font-style: italic; font-family: Georgia, serif; }
+.mc-mark.mc-not-checked { color: var(--text-3); border-style: dashed; }
+
+/* the items */
+.mc-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.mc-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 4px 12px;
+  padding: 9px 0; border-top: 1px solid var(--border); }
+.mc-item:first-child { border-top: 0; padding-top: 2px; }
+.mc-item[hidden] { display: none; }
+.mc-item > .mc-fit, .mc-item > .mc-fix, .mc-item > .mc-note { grid-column: 2; }
+.mc-item-body { min-width: 0; }
+.mc-sentence { color: var(--text); line-height: 1.45; }
+.mc-item.mc-problem .mc-sentence { font-weight: 500; }
+.mc-item.mc-not-checked .mc-sentence { color: var(--text-3); }
+.mc-item.mc-not-checked .mc-name { color: var(--text-2); }
+/* the plan and the setup's progress, under the item they are for */
+.mc-fix { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.mc-item > .mc-fix:not(:empty) { margin-top: 6px; }
+.mc-item-act { margin-top: 7px; }
+
+/* a fold: "Details", "Show the commands", the output */
+.mc-fold { font-size: var(--fs-sm); color: var(--text-2); margin-top: 4px; min-width: 0; }
+.mc-fold > summary { cursor: pointer; list-style: none; display: inline-block; }
+.mc-fold > summary::-webkit-details-marker { display: none; }
+.mc-fold > summary::before { content: "▸ "; color: var(--text-3); font-size: 10px; }
+.mc-fold[open] > summary::before { content: "▾ "; }
+.mc-fold > summary:hover { color: var(--text); }
+.mc-fold[open] > summary { margin-bottom: 4px; }
+.mc-lines { margin: 0; padding: 0 0 0 14px; list-style: none; font-family: var(--mono);
+  font-size: 12px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.mc-lines li + li { margin-top: 2px; }
+
+/* the plan block and the progress view */
+.mc-plan, .mc-run { border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 8px; background: var(--bg1); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mc-plan h4, .mc-run h4 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.mc-plan > p { margin: 0; line-height: 1.5; color: var(--text); }
+.mc-sub { margin: 0; font-size: var(--fs-sm); color: var(--text-2); line-height: 1.5; }
+.mc-bullets { margin: 0; padding-left: 20px; line-height: 1.5; color: var(--text); max-width: 80ch; }
+.mc-bullets li + li { margin-top: 3px; }
+/* under the text it acts on, not across a wide card from it */
+.mc-acts { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.mc-elsewhere { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--accent-bg);
+  color: var(--text); font-weight: 500; line-height: 1.45; }
+.mc-code { margin: 0; padding: 8px 10px; background: var(--bg0); border: 1px solid var(--border);
+  border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.mc-cmd.note { color: var(--text-2); font-family: var(--sans); font-style: italic; margin: 2px 0; }
+.mc-commands .mc-sub { margin: 8px 0 4px; }
+.mc-commands .mc-sub:first-of-type { margin-top: 0; }
+/* the button beside the words it acts on, never pushed across the card */
+.mc-copy-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 8px 0 4px; }
+.mc-terminal .mc-copy-head { margin-top: 0; }
+.mc-copy-failed { margin: 0 0 4px; color: var(--text); }
+
+/* the progress view; its head sticks to the top of the page's own scroller
+   while the output below grows past it (D161), opaque so lines pass under.
+   A sticky box stops at the scroller's padding edge, so the head reaches up
+   by the scroller's top padding (--mc-stick-gap, inherited from the
+   scroller the surface sits in: Settings' 14px by default, the Overview's
+   state column 0, the Chat's transcript and empty state 18px) and fills
+   that strip with its own padding: no line shows above it. */
+.mc-run-head { display: flex; flex-direction: column; gap: 8px; }
+.mc-run-head.live { position: sticky; z-index: 2;
+  top: calc(-1 * var(--mc-stick-gap, 14px)); margin-top: -12px; padding: 12px 0 6px;
+  background: var(--bg1); box-shadow: 0 1px 0 var(--border); }
+.mc-phase { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 500;
+  line-height: 1.4; }
+.mc-pulse { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--amber);
+  animation: mc-pulse 1.4s ease-in-out infinite; }
+@keyframes mc-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--amber-bg); }
+  50% { box-shadow: 0 0 0 6px var(--amber-bg); } }
+.mc-run-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+  gap: 6px; }
+.mc-run-step { display: flex; align-items: center; gap: 10px; line-height: 1.4; }
+.mc-step-n { flex: none; width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid var(--border-strong); display: inline-flex; align-items: center;
+  justify-content: center; font: 600 11px/1 var(--sans); color: var(--text-2); }
+.mc-step-label { min-width: 0; }
+.mc-step-note { margin-left: 8px; font-size: var(--fs-sm); color: var(--text-3);
+  white-space: nowrap; }
+.mc-run-step.done .mc-step-n { background: var(--ok); border-color: var(--ok); color: var(--accent-ink); }
+.mc-step-n .mc-tick { width: 11px; height: 11px; }
+.mc-run-step.running .mc-step-n { border-color: var(--amber); color: var(--amber);
+  animation: mc-pulse 1.4s ease-in-out infinite; }
+.mc-run-step.failed .mc-step-n { background: var(--err); border-color: var(--err); color: var(--accent-ink); }
+.mc-run-step.waiting .mc-step-label { color: var(--text-2); }
+.mc-run-step.failed .mc-step-note { color: var(--err); }
+.mc-out { padding: 8px 10px; background: var(--bg0); border: 1px solid var(--border);
+  border-radius: 6px; font: 12px/1.45 var(--mono); color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.mc-line.err { color: var(--text-2); }
+.mc-line.helper { color: var(--accent); }
+.mc-line.note { color: var(--text-2); font-style: italic; }
+
+/* an answer: the setup's, the switch's, an error */
+.mc-note { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px;
+  background: var(--surface); line-height: 1.5; display: flex; flex-direction: column; gap: 4px;
+  min-width: 0; overflow-wrap: anywhere; }
+.mc-note > div:first-child { color: var(--text); font-weight: 500; }
+.mc-note.ok { border-color: var(--ok); background: var(--ok-bg); }
+.mc-note.warn { border-color: var(--amber); background: var(--amber-bg); }
+.mc-note.err { border-color: var(--err); background: var(--err-bg); }
+/* nothing wrong, nothing done: a plain note (review M5) */
+.mc-note.plain > div:first-child, .mc-note.plain { font-weight: 400; }
+.mc-note .mc-lines { padding-left: 0; font-family: var(--sans); font-size: var(--fs-sm); }
+
+/* the settings switch's confirm */
+.mc-fit { border: 1px solid var(--border); border-radius: 8px; background: var(--bg1);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
+  min-width: 0; }
+.mc-fit.done { border: 0; background: none; padding: 0; }
+.mc-fit > p { margin: 0; color: var(--text); line-height: 1.5; }
+.mc-fit > p.mc-sub { color: var(--text-2); }
+.mc-fit .mc-fold .mc-changes { margin-top: 4px; }
+.mc-fit .mc-fold > .mc-sub { margin-top: 8px; }
+.mc-changes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.mc-change { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mc-field { font-size: var(--fs-sm); font-weight: 500; color: var(--text-2); }
+.mc-vals { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 8px; min-width: 0; }
+.mc-val { display: inline-flex; flex-direction: column; min-width: 0; max-width: 100%;
+  padding: 2px 7px; border-radius: 4px; background: var(--surface-hi);
+  font: 12px/1.5 var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.mc-val.old { color: var(--text-2); }
+.mc-val.new { background: var(--accent-bg); }
+.mc-val.plain { font-family: var(--sans); font-style: italic; }
+.mc-changes.was .mc-val { text-decoration: line-through; }
+.mc-arrow { color: var(--text-3); line-height: 22px; }
+.mc-why { font-size: var(--fs-sm); color: var(--text-2); line-height: 1.45; }
+.mc-outdated { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+
+/* `#machine`'s landing: a ring around the card once (review L10). A
+   box-shadow that ends as none, never an opacity (the WebKitGTK blink). */
+@keyframes mc-flash { 0%, 45% { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 3px transparent; } }
+.card.mc-flash { animation: mc-flash 1.6s ease-out; }
+
+/* ---------- beyond Settings (WP8b, machine-check design §2.1, §2.2, §2.5) ----------
+   The Overview's card and the one above the Chat's empty state draw a card
+   around the component, "This computer" at its head; the Chat's banner is
+   one line over the conversation, and the same line stands inside a card
+   under a failure it explains. Where the Chat puts them, and its own
+   gpu_setup card, are the Chat's rules (lmgw-chat-ui's chat.css). Each surface's
+   scroller says how far its top padding reaches (--mc-stick-gap), for the
+   run's sticky head. */
+.mc-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.mc-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mc-card-head > h3 { margin: 0; flex: 1 1 auto; min-width: 0; }
+/* a compact surface: the items that are no problem, folded (D186) */
+.mc-more { margin-top: 2px; }
+.mc-more > .mc-items { margin-top: 6px; }
+
+/* the Overview: the first block of its state column, which gives way */
+.ov-state { --mc-stick-gap: 0px; }
+.ov-state > .ov-machine { margin-bottom: 14px; }
+
+/* the banner: one line under the Chat's head, the transcript's width, with
+   the Chat's side gutter (--chat-side, narrower in its narrow layout) */
+.mc-banner { flex: none; display: flex; align-items: center; gap: 8px;
+  align-self: center; width: calc(100% - 2 * var(--chat-side, 22px)); max-width: 110ch;
+  margin: 8px var(--chat-side, 22px) 0;
+  padding: 5px 8px 5px 10px; border: 1px solid var(--amber); border-radius: 8px;
+  background: var(--amber-bg); color: var(--text); font-size: 13px; line-height: 1.4;
+  min-width: 0; }
+.mc-banner > .mc-mark { flex: none; width: 18px; height: 18px; font-size: 11px; margin: 0; }
+/* the sentence and its link wrap as one run of text beside the mark */
+.mc-banner-words { flex: 1 1 auto; min-width: 0; }
+.mc-banner-text { font-weight: 500; }
+.mc-banner-sep { color: var(--text-3); white-space: pre; }
+.mc-banner-link { font-weight: 500; white-space: nowrap; }
+.mc-banner-not-now { flex: none; }
+/* the same line inside a card: a failed model test, a lab run (D179) */
+.mc-banner.in-card { align-self: stretch; align-items: flex-start; width: auto; max-width: none;
+  margin: 6px 0 0; }
+.mc-banner.in-card > .mc-mark { margin-top: 1px; }

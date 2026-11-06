@@ -29,8 +29,8 @@ pub mod bench;
 /// `candidate_alias_set` (candidate-aliases design §4.1, §4.6) — a child
 /// module for the same file-size reason as [`backends`]; the small shared
 /// helpers it reaches through `super::` (`candidate_alias_name_taken`,
-/// `refuse_if_candidate_alias_name`, the extended `validate_fallback_alias`)
-/// live in `common` and `settings_patch` and come through the re-exports below.
+/// `refuse_if_candidate_alias_name`, the fallback save checks of `fallback`)
+/// live in `common` and the `fallback` module and come through the re-exports below.
 mod candidate_alias;
 pub use candidate_alias::{candidate_alias_set, CandidateAliasPatch};
 mod common;
@@ -59,21 +59,33 @@ mod audio_model;
 pub use audio_model::*;
 mod audio_tools;
 pub use audio_tools::*;
+mod voice_lab;
+pub use voice_lab::*;
 mod voice_library;
 pub use voice_library::*;
 mod recipes;
 pub use recipes::*;
 mod huggingface;
 pub use huggingface::*;
+mod model_get;
+pub use model_get::{
+    free_model_id, id_of_repo, measure_key, model_fit_again, model_get, model_get_status,
+    public_name_of, PassThrough,
+};
 mod mcp_server;
 pub use mcp_server::*;
 mod hold;
+mod model_find;
 pub use hold::*;
+pub use model_find::model_find;
 mod container_actions;
 pub use container_actions::*;
 mod settings_patch;
 pub use settings_patch::*;
 mod chat_voice_settings;
+/// One fallback per model and alias (openai egress design §14.2): the patch
+/// field, the save checks, a rename's rewrites.
+pub(crate) mod fallback;
 pub use chat_voice_settings::*;
 mod chat_feed_settings;
 pub use chat_feed_settings::*;

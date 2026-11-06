@@ -92,7 +92,7 @@ async fn fixtures() -> Fixtures {
         &state.db,
         &NewUpstream {
             name: "live-fixture".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -116,6 +116,7 @@ async fn fixtures() -> Fixtures {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -139,8 +140,7 @@ async fn fixtures() -> Fixtures {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -149,6 +149,10 @@ async fn fixtures() -> Fixtures {
     .unwrap();
 
     state.reload_snapshot().await.unwrap();
+    // A machine check with a result, so `/api/events` sends its `machine`
+    // frame on connect (machine-check design D183): the test state's blank
+    // machine reads as no graphics card.
+    lmgw_core::machine::check(&state, true).await;
     let gw = common::serve(state.clone()).await;
 
     // One chat request through the alias, so /api/logs and /api/usage/* have
@@ -473,7 +477,9 @@ fn parse_sse_frames(buf: &str) -> Vec<SseFrame> {
 
 #[tokio::test]
 async fn events_initial_frames_validate() {
-    const INITIAL: &[&str] = &["stats", "jobs", "runtime", "vram", "mcp", "updates", "chat"];
+    const INITIAL: &[&str] = &[
+        "stats", "jobs", "runtime", "vram", "mcp", "updates", "machine", "chat",
+    ];
 
     let fx = fixtures().await;
     let doc = admin_doc();

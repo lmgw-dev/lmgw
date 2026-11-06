@@ -13,7 +13,18 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    /// The OpenAI platform only: api.openai.com and its regional hosts
+    /// (openai egress design, decision 1). Always kind
+    /// [`UpstreamKind::Generic`] (decision 7).
     Openai,
+    /// Every other OpenAI-shaped provider: aggregators, Gemini's
+    /// OpenAI-compatible endpoint, Groq, an external audio.cpp server, a
+    /// generic box in front of llama-server, the synthetic audio and image
+    /// upstreams (decisions 1, 9). Kind [`UpstreamKind::Generic`] or
+    /// [`UpstreamKind::AudioCpp`]. Spelled `openai_compatible`, which
+    /// `rename_all = "lowercase"` would not produce (decision 6).
+    #[serde(rename = "openai_compatible")]
+    OpenaiCompatible,
     Anthropic,
     Gemini,
     /// llama.cpp's `llama-server` and ik_llama.cpp's: OpenAI-shaped HTTP
@@ -28,6 +39,7 @@ impl Protocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Openai => "openai",
+            Self::OpenaiCompatible => "openai_compatible",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
             Self::LlamaCpp => "llama_cpp",
@@ -37,6 +49,7 @@ impl Protocol {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "openai" => Some(Self::Openai),
+            "openai_compatible" => Some(Self::OpenaiCompatible),
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
             "llama_cpp" => Some(Self::LlamaCpp),
@@ -46,11 +59,40 @@ impl Protocol {
 
     /// The upstream answers OpenAI's HTTP surface: its paths
     /// (`/chat/completions`, `/completions`, `/models`, `/audio/*`), its
-    /// bearer auth and its error shape. True for `openai` and `llama_cpp`;
-    /// what is said on that surface is the egress's business.
+    /// bearer auth and its error shape. True for `openai`,
+    /// `openai_compatible` and `llama_cpp`; what is said on that surface is
+    /// the egress's business.
     pub fn speaks_openai_http(&self) -> bool {
-        matches!(self, Self::Openai | Self::LlamaCpp)
+        matches!(self, Self::Openai | Self::OpenaiCompatible | Self::LlamaCpp)
     }
+}
+
+/// Whether `base_url`'s host is the OpenAI platform's: `api.openai.com` or a
+/// regional `<region>.api.openai.com` (openai egress design, decision 13).
+/// An unparsable URL is not.
+pub fn is_openai_platform_host(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    url.host_str().is_some_and(|h| {
+        let h = h.trim_end_matches('.').to_ascii_lowercase();
+        h == "api.openai.com" || h.ends_with(".api.openai.com")
+    })
+}
+
+/// The note an `openai` row whose host is not the OpenAI platform's carries
+/// on its write, its row and its Test (openai egress design, decision 13):
+/// accepted, since proxies and test servers need other hosts, and said.
+/// `None` for any other row.
+pub fn openai_host_note(protocol: Protocol, base_url: &str) -> Option<String> {
+    (protocol == Protocol::Openai && !is_openai_platform_host(base_url)).then(|| {
+        format!(
+            "protocol openai is the OpenAI platform, and '{}' is not api.openai.com or a \
+             regional *.api.openai.com host: lmgw sends this row OpenAI's own dialect. For \
+             any other OpenAI-shaped provider use openai_compatible",
+            base_url.trim()
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,12 +143,14 @@ pub struct Upstream {
     pub kind: UpstreamKind,
     /// Base URL up to but excluding the protocol-specific path,
     /// e.g. `https://api.openai.com/v1`, `https://api.anthropic.com`,
-    /// `https://generativelanguage.googleapis.com`, `http://127.0.0.1:9292/v1`.
+    /// `https://generativelanguage.googleapis.com`, `http://127.0.0.1:9393/v1`.
     pub base_url: String,
     pub api_key: Option<String>,
     pub extra_headers: Vec<(String, String)>,
-    /// Per-request ceiling. **0 means the maximum possible** — no deadline of
-    /// lmgw's own, the request ends when the upstream ends it. Read through
+    /// Per-request ceiling: it bounds the wait for an answer's headers and,
+    /// on a streamed answer, every silence after them (`proxy::silence`).
+    /// **0 means the maximum possible** — no deadline of lmgw's own, the
+    /// request ends when the upstream ends it. Read through
     /// [`Upstream::request_timeout`], never directly, so that rule holds at
     /// every call site.
     pub timeout_ms: u64,
@@ -126,10 +170,13 @@ pub struct Upstream {
     /// which down-translating to chat/completions would throw away — so a
     /// synthesized call to OpenAI would be *worse* than talking to it directly.
     ///
-    /// Off by default and never inferred from the protocol: `openai` protocol
-    /// means "speaks the OpenAI wire shape", which llama-server, vLLM and most
-    /// local servers do without implementing Responses at all. Guessing would
-    /// turn every request into a 404.
+    /// A choice on `openai_compatible` rows only, off by default (openai
+    /// egress design, decision 8): that protocol means "speaks the OpenAI wire
+    /// shape", which vLLM and most local servers do without implementing
+    /// Responses at all, so guessing would turn every request into a 404. On
+    /// `openai` it is implied, and every other protocol has no such route; the
+    /// table's CHECK keeps it 0 there. Read through
+    /// [`Upstream::forwards_responses`].
     pub supports_responses: bool,
     /// What the llama-server this route goes to said about itself, and the
     /// tool-image decision made on it (llama egress design §3.2) — decided
@@ -142,6 +189,20 @@ pub struct Upstream {
 }
 
 impl Upstream {
+    /// Whether this upstream takes `/v1/responses` natively rather than
+    /// having lmgw's loop synthesize it (openai egress design §6): always on
+    /// the OpenAI platform, by the flag on an `openai_compatible` row, never
+    /// on any other protocol. A request only the loop can serve (an MCP block
+    /// lmgw serves, a `previous_response_id` in lmgw's store) stays in the
+    /// loop even here; `responses::path` decides that per request.
+    pub fn forwards_responses(&self) -> bool {
+        match self.protocol {
+            Protocol::Openai => true,
+            Protocol::OpenaiCompatible => self.supports_responses,
+            Protocol::Anthropic | Protocol::Gemini | Protocol::LlamaCpp => false,
+        }
+    }
+
     /// Base URL with exactly no trailing slash.
     pub fn base(&self) -> &str {
         self.base_url.trim_end_matches('/')
@@ -152,8 +213,9 @@ impl Upstream {
         self.expose_prefix.trim_matches('/')
     }
 
-    /// The per-request ceiling as a deadline, or `None` for **no deadline of
-    /// lmgw's own** — the maximum possible, which is what `timeout_ms = 0`
+    /// The per-request ceiling as a deadline — on the wait for the headers
+    /// and on each silence of a stream after them — or `None` for **no
+    /// deadline of lmgw's own** — the maximum possible, which is what `timeout_ms = 0`
     /// means everywhere: on a stored upstream, and on the four synthetic ones
     /// whose value comes from their class's `request_timeout_seconds`.
     ///
@@ -185,6 +247,12 @@ pub struct ModelAlias {
     /// the result. `None` = no override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
+    /// The alias's one fallback (openai egress design §14.2): the model or
+    /// alias that answers whenever this one cannot — its upstream out of
+    /// quota or unreachable, the alias or its upstream disabled. `None` = no
+    /// fallback.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 /// A candidate alias (candidate-aliases design §4.1): an alias whose target
@@ -212,16 +280,11 @@ pub struct CandidateAlias {
     /// order (§4.2 vs §4.3) applies to a request against this alias.
     #[serde(default)]
     pub background: bool,
-    /// Same three modes as a row's GPU-hold fallback, and the same reason for
-    /// two columns rather than one nullable string — see
-    /// [`HoldFallbackMode`]'s own doc comment. A candidate's own row
-    /// fallback is never used through the alias (§4.1): this is the only
-    /// fallback that answers for it.
-    #[serde(default)]
-    pub fallback_mode: HoldFallbackMode,
-    /// Meaningful only when `fallback_mode` is `Alias`. Validated at save
-    /// time and again at use (must resolve, must not be local, must not be
-    /// another candidate alias — [`Snapshot::usable_fallback`]).
+    /// The one fallback that answers for the **whole** alias (openai egress
+    /// design §14.2; candidate-aliases design §4.1): a candidate's own row
+    /// fallback is never used through the alias. `None` = no fallback.
+    /// Validated at save time and again at use (must resolve, must not be
+    /// another candidate alias — [`Snapshot::fallback_of`]).
     #[serde(default)]
     pub fallback: Option<String>,
     /// The owner's explicit "turn this common facet off" list (§4.6): wire
@@ -293,29 +356,44 @@ impl Route {
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub route: Route,
-    /// `Some(alias)` when the GPU hold re-routed a local model to this
-    /// fallback. Carried out to every HTTP handler, which stamps it on the
-    /// response as `x-lmgw-fallback` — without it a client sees a normal 200
-    /// and has no way to know it was answered by a different model than the
-    /// one it asked for (the body's `model` stays the requested alias, §2).
+    /// The name of the hop that answers, when the GPU hold (or a benchmark's
+    /// lease) handed a local model on along its chain (openai egress design
+    /// §14.3): the last hop, as `x-lmgw-fallback` says it.
     pub fallback: Option<String>,
+    /// Each hop the request was handed to, in order (`x-lmgw-fallback-chain`).
+    pub chain: Vec<String>,
 }
 
-/// A local model's fallback — [`Snapshot::fallback_route`]'s answer.
+/// A model's or alias's fallback as the next hop of a chain —
+/// [`Snapshot::next_hop`]'s answer (openai egress design §14.3).
 // Built once per lookup and matched at once; boxing the route would buy
 // nothing.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum FallbackRoute {
-    /// None configured: the row's mode is `none`, an `alias` row names
-    /// nothing, a non-chat row inherits (only chat inherits the global), no
-    /// global is set, or no row describes the model.
+    /// None configured, or no row describes the model.
     None,
-    /// Configured, resolves, and is not itself local: it can answer.
-    Usable { alias: String, route: Route },
-    /// Configured, and it cannot answer: `why` is the clause that says so
-    /// ("does not resolve", "is itself a local model").
-    Unusable { alias: String, why: &'static str },
+    /// Configured and resolves: it can be tried — the hop's identity and
+    /// its route, marked as the fallback it is. Whether it can answer now
+    /// is the gate's to ask, hop by hop.
+    Usable {
+        alias: String,
+        key: crate::config::HopKey,
+        route: Route,
+    },
+    /// Configured, and it cannot be one: `why` is the clause that says so
+    /// ("does not resolve", "is itself a candidate alias", "is disabled").
+    ///
+    /// `disabled` is the hop when it is a disabled row or alias, or an
+    /// alias on a disabled upstream (§14.3, decision 28): it cannot answer,
+    /// and its own fallback answers for it (reason `disabled`,
+    /// [`Snapshot::past_disabled`]); without one the walk ends "(fallback
+    /// 'B' is disabled)".
+    Unusable {
+        alias: String,
+        why: &'static str,
+        disabled: Option<crate::config::HopKey>,
+    },
 }
 
 /// Sentinel id of the synthetic chat upstream (local chat models route here

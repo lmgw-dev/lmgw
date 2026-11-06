@@ -31,7 +31,7 @@
 //! audio.cpp never opening a CUDA context (it logs `ggml_cuda_init: found 1
 //! CUDA devices` even on `backend: cpu`); a passthrough configured some
 //! other way on the host is not seen here. The CUDA image serves on the CPU
-//! without the device: the live check of 2026-10-02 transcribed on a dev
+//! without the device: a live check transcribed on a dev
 //! copy with `HostConfig.Devices = []` and no NVIDIA mounts, every
 //! transcript exact and no GPU process for the container. Everything else
 //! stays — `--security-opt label=disable` above all, without which the

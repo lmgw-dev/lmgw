@@ -4,8 +4,10 @@
 //! [`list_label`] is the one path from a `{type: "mcp", server_label}` entry
 //! to the tools a client sees: `/v1/realtime` writes them into the label's
 //! `mcp_list_tools` item, and `GET /v1/mcp/servers/{label}` answers them, so
-//! the two can never disagree. It is [`resolve`] with that entry alone — the
-//! caller's scope, the owner's per-tool switch, the targeted connect.
+//! the two can never disagree. It is [`resolve`](super::resolve) with that
+//! entry alone — the caller's scope, the owner's per-tool switch, the
+//! targeted connect. [`list_label_unstarted`] is the same for a reader that
+//! runs nothing: it starts no service agent.
 //!
 //! **Wire names** (§1.3) are the exposed names minus their namespace: a
 //! built-in toolset's label, or the registered server's own tool prefix, read
@@ -15,10 +17,10 @@
 //! the server's own.
 //!
 //! [`labels`] says what a caller could name **without connecting anything**
-//! (§1.4): the built-in toolsets [`resolve`] would answer for it, and the
-//! enabled registered servers and service agents it may be told about
-//! (`shown_to`) — the same rule that says which labels are available when
-//! one is not, so the list, the detail's 404 and that message agree.
+//! (§1.4): the built-in toolsets [`resolve`](super::resolve) would answer for
+//! it, and the enabled registered servers and service agents it may be told
+//! about (`shown_to`) — the same rule that says which labels are available
+//! when one is not, so the list, the detail's 404 and that message agree.
 
 use serde::Serialize;
 
@@ -28,10 +30,10 @@ use crate::state::SharedState;
 
 use super::super::scope::ToolScope;
 use super::super::spec::{ApprovalRule, McpToolSpec};
-use super::super::Aggregate;
+use super::super::{media, Aggregate};
 use super::{
-    builtin_label, find_server, resolve, resolve_builtin, server_label, DOCS_LABEL, KB_LABEL,
-    SELF_ADMIN_LABEL,
+    builtin_label, find_server, resolve_as, resolve_builtin, server_label, Agents, Origin,
+    DOCS_LABEL, KB_LABEL, SELF_ADMIN_LABEL,
 };
 
 /// One tool of a label: as the model is offered it, and as the wire names it.
@@ -87,13 +89,42 @@ impl LabelError {
 }
 
 /// The tools `spec` resolves to for `scope`, with their wire names. Connects
-/// the one server it names, if any, within the lazy-list budget.
+/// the one server it names, if any, within the lazy-list budget, and starts
+/// the service agent it names, as a run that attaches it does.
 pub async fn list_label(
     state: &SharedState,
     spec: &McpToolSpec,
     scope: &ToolScope,
 ) -> Result<LabelTools, LabelError> {
-    let resolved = resolve(state, std::slice::from_ref(spec), scope).await;
+    list_label_as(state, spec, scope, Agents::Start).await
+}
+
+/// [`list_label`] for a reader that runs nothing (the Chat's tool picker,
+/// chat-plane design D16): it starts no service agent. One whose app is not
+/// running is [`LabelError::Unlisted`], saying so; its tools are listed while
+/// it runs.
+pub async fn list_label_unstarted(
+    state: &SharedState,
+    spec: &McpToolSpec,
+    scope: &ToolScope,
+) -> Result<LabelTools, LabelError> {
+    list_label_as(state, spec, scope, Agents::AsTheyAre).await
+}
+
+async fn list_label_as(
+    state: &SharedState,
+    spec: &McpToolSpec,
+    scope: &ToolScope,
+    agents: Agents,
+) -> Result<LabelTools, LabelError> {
+    let resolved = resolve_as(
+        state,
+        std::slice::from_ref(spec),
+        scope,
+        (Origin::Supplied, agents),
+        &media::MediaLayers::default(),
+    )
+    .await;
     let snap = state.snapshot();
     let label = spec.server_label.as_str();
     let server = find_server(&snap, label).filter(|_| builtin_label(label).is_none());
@@ -165,9 +196,9 @@ pub enum LabelKind {
 /// One label a caller may name, as `GET /v1/mcp/servers` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelEntry {
-    /// What goes into `{type: "mcp", server_label}`: the label [`resolve`]
-    /// matches first — a toolset's own, a server's tool prefix, else its
-    /// name.
+    /// What goes into `{type: "mcp", server_label}`: the label
+    /// [`resolve`](super::resolve) matches first — a toolset's own, a
+    /// server's tool prefix, else its name.
     pub server_label: String,
     pub kind: LabelKind,
     /// A server's configured name; a toolset's label.
@@ -178,7 +209,7 @@ pub struct LabelEntry {
 }
 
 /// The built-in toolsets in [`labels`]' order, with their purpose.
-const BUILTINS: [(&str, &str); 3] = [
+const BUILTINS: [(&str, &str); 5] = [
     (
         SELF_ADMIN_LABEL,
         "lmgw's own state and configuration: models, upstreams, MCP servers, settings and usage \
@@ -192,7 +223,22 @@ const BUILTINS: [(&str, &str); 3] = [
         KB_LABEL,
         "The owner's knowledge bases: list, search and read them",
     ),
+    (
+        media::IMAGE_LABEL,
+        "Draw and edit pictures with this gateway's image models",
+    ),
+    (
+        media::AUDIO_LABEL,
+        "Speak text and transcribe recordings with this gateway's audio models",
+    ),
 ];
+
+/// The built-in toolsets in [`labels`]' order, each with its purpose: what
+/// the Chat's tool picker lists before the registered servers
+/// (`web::chat_reads::tools`).
+pub fn builtin_toolsets() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUILTINS.iter().copied()
+}
 
 /// Every label `scope` may name, connecting nothing: the built-in toolsets
 /// that would resolve for it — `lmgw` only for a caller that may use the
@@ -201,10 +247,14 @@ const BUILTINS: [(&str, &str); 3] = [
 /// registered servers
 /// and service agents it may be told about as `agg` stands (`shown_to`),
 /// by label.
-pub fn labels(snap: &Snapshot, agg: &Aggregate, scope: &ToolScope) -> Vec<LabelEntry> {
+pub fn labels(
+    (snap, offer): (&Snapshot, &media::Offer),
+    agg: &Aggregate,
+    scope: &ToolScope,
+) -> Vec<LabelEntry> {
     let mut out: Vec<LabelEntry> = BUILTINS
         .iter()
-        .filter(|(label, _)| builtin_resolves(snap, label, scope))
+        .filter(|(label, _)| builtin_resolves((snap, offer), label, scope))
         .map(|(label, purpose)| builtin_entry(label, purpose))
         .collect();
     let mut servers: Vec<LabelEntry> = snap
@@ -243,25 +293,36 @@ pub(crate) fn shown_to(s: &McpServer, agg: &Aggregate, scope: &ToolScope) -> boo
 
 /// `label`'s entry as [`labels`] lists it — also when it addresses a server
 /// by name — or `None` for one `scope` may not name.
-pub fn label_entry(snap: &Snapshot, label: &str, scope: &ToolScope) -> Option<LabelEntry> {
+pub fn label_entry(
+    (snap, offer): (&Snapshot, &media::Offer),
+    label: &str,
+    scope: &ToolScope,
+) -> Option<LabelEntry> {
     if let Some(builtin) = builtin_label(label) {
         let (_, purpose) = BUILTINS.iter().find(|(l, _)| *l == builtin)?;
-        return builtin_resolves(snap, builtin, scope).then(|| builtin_entry(builtin, purpose));
+        return builtin_resolves((snap, offer), builtin, scope)
+            .then(|| builtin_entry(builtin, purpose));
     }
     find_server(snap, label)
         .filter(|s| s.enabled && scope.may_reach(s))
         .map(server_entry)
 }
 
-/// Whether [`resolve`] would answer the built-in `label` with tools for
-/// `scope` — decided in-process, as `resolve` does.
-fn builtin_resolves(snap: &Snapshot, label: &'static str, scope: &ToolScope) -> bool {
+/// Whether [`resolve`](super::resolve) would answer the built-in `label` with
+/// tools for `scope` — decided in-process, as `resolve` does.
+fn builtin_resolves(
+    (snap, offer): (&Snapshot, &media::Offer),
+    label: &'static str,
+    scope: &ToolScope,
+) -> bool {
     let all = McpToolSpec {
         server_label: label.to_string(),
         allowed_tools: None,
         require_approval: ApprovalRule::Never,
+        server_url: None,
+        connector_id: None,
     };
-    resolve_builtin(snap, label, &all, scope).is_ok()
+    resolve_builtin(snap, offer, label, &all, scope).is_ok()
 }
 
 fn builtin_entry(label: &str, purpose: &str) -> LabelEntry {

@@ -2,7 +2,9 @@
 //! `lmgw__local_model_test`, covering chat, aux (embed/rerank/decision) and
 //! image-model rows plus the load smoke test.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, ladder_p, num_p, str_p, strs_p, Builtin};
+use crate::mcp::selfadmin::{
+    bool_p, enum_p, fallback_p, int_p, ladder_p, num_p, str_p, strs_p, Builtin,
+};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -281,23 +283,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "public",
                     bool_p("Routable by model id without a manual alias."),
                 ),
-                (
-                    "hold_fallback_mode",
-                    enum_p(
-                        "Where a request against this model goes while GPU hold is active. \
-                         'inherit' (default) uses the global hold fallback alias; 'none' \
-                         refuses even when a global fallback is set; 'alias' routes to \
-                         hold_fallback instead.",
-                        &["inherit", "none", "alias"],
-                    ),
-                ),
-                (
-                    "hold_fallback",
-                    str_p(
-                        "Model alias to route to while GPU hold is active, when \
-                         hold_fallback_mode is 'alias'. Must resolve to a non-local route.",
-                    ),
-                ),
+                ("fallback", fallback_p("a chat model")),
                 (
                     "capabilities_override",
                     str_p(
@@ -342,8 +328,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "Field names to reset to unset, comma-separated (e.g. \
                          'spec_type,draft_gguf_path'). Needed because omitting a field means \
-                         'leave unchanged'. 'hold_fallback' resets both hold_fallback_mode and \
-                         hold_fallback to inherit/unset. 'ladder' resets the row to not-a-ladder \
+                         'leave unchanged'. 'fallback' removes the row's fallback. 'ladder' \
+                         resets the row to not-a-ladder \
                          — the base's own gguf_path/ctx_size are untouched.",
                     ),
                 ),
@@ -506,30 +492,18 @@ pub(super) fn tools() -> Vec<Builtin> {
                     bool_p("Start this model's container when lmgw launches."),
                 ),
                 (
-                    "hold_fallback_mode",
-                    enum_p(
-                        "Where a request against this model goes while GPU hold is active. \
-                         'inherit' (default) means NO fallback for this class — aux models \
-                         never inherit the global chat fallback, because a different \
-                         embedding model silently corrupts a vector index; 'alias' routes to \
-                         hold_fallback instead.",
-                        &["inherit", "none", "alias"],
-                    ),
-                ),
-                (
-                    "hold_fallback",
-                    str_p(
-                        "Model alias to route to while GPU hold is active, when \
-                         hold_fallback_mode is 'alias'. Must resolve to a non-local route.",
+                    "fallback",
+                    fallback_p(
+                        "an embedder for an embedder, a reranker for a reranker, a decision \
+                         model that answers /v1/systemone for a decision row",
                     ),
                 ),
                 (
                     "clear",
                     str_p(
                         "Field names to reset to unset, comma-separated: 'extra_args', \
-                         'extra_run_args', 'image', 'hold_fallback' (resets both mode and \
-                         alias), 'ctx_size', 'ubatch_size', 'batch_size', 'mmproj_path', \
-                         'backend', 'threads'.",
+                         'extra_run_args', 'image', 'fallback', 'ctx_size', 'ubatch_size', \
+                         'batch_size', 'mmproj_path', 'backend', 'threads'.",
                     ),
                 ),
             ],
@@ -546,7 +520,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                  template and no embeddings, so they are neither a chat nor an aux row. \
                  The whole chain, and the short way round it: lmgw__image_recipes -> \
                  lmgw__image_recipe_add key=<key> (it queues every component and hands back \
-                 a prefilled row) -> lmgw__hf_downloads until each says 'done' -> THIS TOOL \
+                 a prefilled row) -> lmgw__hf_downloads ids=<the queued ids> until each says 'done' -> THIS TOOL \
                  with the returned row -> lmgw__local_model_test model_id=<id> target=image \
                  to prove it loads and draws. For a pipeline no recipe covers, download the \
                  files yourself with lmgw__hf_add target=image (one call per component — \
@@ -664,24 +638,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                          nothing else can use.",
                     ),
                 ),
-                (
-                    "hold_fallback_mode",
-                    enum_p(
-                        "Where a request against this model goes while GPU hold is active. \
-                         'inherit' (default) means NO fallback for this class — the global \
-                         chat fallback alias is not an image model; 'alias' routes to \
-                         hold_fallback instead.",
-                        &["inherit", "none", "alias"],
-                    ),
-                ),
-                (
-                    "hold_fallback",
-                    str_p(
-                        "Model alias to route to while GPU hold is active, when \
-                         hold_fallback_mode is 'alias'. Must resolve to a non-local route \
-                         — a cloud image model.",
-                    ),
-                ),
+                ("fallback", fallback_p("an image model")),
                 (
                     "capabilities_override",
                     str_p(
@@ -691,12 +648,35 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 (
+                    "prompt_style",
+                    enum_p(
+                        "How the chat model writes this row's prompts when it calls \
+                         image__generate: 'natural' (plain sentences: FLUX, Z-Image, \
+                         Qwen-Image), 'keywords' (short comma-separated phrases: SDXL) or \
+                         'tags' (booru-style tags: anime fine-tunes). 'clear' goes back to \
+                         what the matching shipped recipe says.",
+                        &["natural", "keywords", "tags", "clear"],
+                    ),
+                ),
+                (
+                    "preview_mode",
+                    enum_p(
+                        "How the live preview of a running generation is drawn: 'none' (no \
+                         preview, elapsed time only), 'proj' (a quick colour sketch, free), \
+                         'tae' (needs a TAE file in files, which then also decodes the final \
+                         image at lower quality) or 'vae' (the row's VAE every step: slower, \
+                         more memory). 'clear' goes back to the default: 'proj' where the \
+                         build offers it.",
+                        &["none", "proj", "tae", "vae", "clear"],
+                    ),
+                ),
+                (
                     "clear",
                     str_p(
                         "Field names to reset to unset, comma-separated: 'args', 'modes', \
-                         'extra_run_args', 'image', 'hold_fallback' (resets both mode and \
-                         alias), 'capabilities_override'. Not 'files': a row with no files \
-                         names no pipeline.",
+                         'extra_run_args', 'image', 'fallback', 'capabilities_override', \
+                         'prompt_style', 'preview_mode'. \
+                         Not 'files': a row with no files names no pipeline.",
                     ),
                 ),
             ],

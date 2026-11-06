@@ -79,6 +79,7 @@ async fn price_fallback(f: &Fixture, unit: PriceUnit, p: Prices, price: Option<f
         PriceScope::Alias,
         FALLBACK,
         unit,
+        lmgw_core::config::PriceTier::Standard,
         &p,
         price,
         None,

@@ -2,16 +2,14 @@
 //! (`lmgw__models`, `lmgw__upstreams`, `lmgw__logs`, `lmgw__settings`): each
 //! tool's text is read into its type
 //! and written out again, and the two texts are equal byte for byte. The text
-//! is the answer's pretty JSON with sorted keys, so a key a type adds, drops,
+//! is the answer's compact JSON with sorted keys, so a key a type adds, drops,
 //! renames or turns from absent into `null` (or an integer into a float)
 //! shows up here.
 
 use lmgw_api_types as dto;
 use lmgw_api_types::self_admin::{self, ModelEntry};
 use lmgw_core::config::chat_profile::{create_kind, ProfileCreate};
-use lmgw_core::config::{
-    CatalogRevision, HoldFallbackMode, Protocol, SelfAdmin, Settings, UpstreamKind,
-};
+use lmgw_core::config::{CatalogRevision, Protocol, SelfAdmin, Settings, UpstreamKind};
 use lmgw_core::gguf::synth;
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{
@@ -54,6 +52,7 @@ fn alias(name: &str, upstream_id: i64, model: &str, enabled: bool) -> NewAlias {
         param_overrides: Default::default(),
         enabled,
         capabilities_override: None,
+        fallback: None,
     }
 }
 
@@ -69,8 +68,7 @@ fn local(model_id: &str, gguf: &str, public: bool) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -99,8 +97,7 @@ fn aux(
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -127,8 +124,7 @@ fn audio(model_id: &str, family: &str, task: &str) -> NewAudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -144,9 +140,10 @@ fn image(model_id: &str, files: Value, modes: &[&str], edit: bool) -> NewImageMo
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -155,7 +152,6 @@ fn candidate(name: &str, candidates: &[&str], background: bool) -> NewCandidateA
         alias: name.into(),
         candidates: candidates.iter().map(|c| c.to_string()).collect(),
         background,
-        fallback_mode: HoldFallbackMode::Inherit,
         fallback: None,
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],
@@ -238,7 +234,7 @@ async fn world(passthrough: bool) -> World {
     let plain = MockServer::start().await;
     let mut acme = upstream(
         "acme",
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         &format!("{}/v1", catalog.uri()),
     );
@@ -273,7 +269,7 @@ async fn world(passthrough: bool) -> World {
         &state.db,
         &upstream(
             "audio-box",
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
             UpstreamKind::AudioCpp,
             "http://127.0.0.1:1/v1",
         ),
@@ -292,7 +288,7 @@ async fn world(passthrough: bool) -> World {
             .await;
         let mut open = upstream(
             "open",
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
             UpstreamKind::Generic,
             &format!("{}/v1", mock.uri()),
         );
@@ -301,7 +297,7 @@ async fn world(passthrough: bool) -> World {
         store::insert_upstream(&state.db, &open).await.unwrap();
         let mut hidden = upstream(
             "open-but-off",
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
             UpstreamKind::Generic,
             &format!("{}/v1", plain.uri()),
         );
@@ -435,7 +431,6 @@ async fn world(passthrough: bool) -> World {
     .await
     .unwrap();
     let mut fb = candidate("smart-fb", &["chat-cap", "chat-gone"], true);
-    fb.fallback_mode = HoldFallbackMode::Alias;
     fb.fallback = Some("fast".into());
     store::insert_candidate_alias(&state.db, &fb).await.unwrap();
     store::insert_candidate_alias(&state.db, &candidate("empty-list", &[], false))
@@ -558,16 +553,15 @@ async fn the_models_text_reads_back_equal_for_every_kind() {
     assert_eq!(smart.routable_candidates, ["chat-cap"]);
     assert_eq!(smart.deferrals_24h, 2, "both spellings count");
     assert!(raw(&wire, "smart")["deferrals_24h"].is_u64());
-    assert!(raw(&wire, "smart")["fallback"].is_null());
-    assert!(raw(&wire, "smart").get("fallback").is_some());
-    assert_eq!(raw(&wire, "smart")["fallback_mode"], "inherit");
+    // No fallback: the key is left out, as every fact it does not have.
+    assert!(raw(&wire, "smart").get("fallback").is_none());
+    assert!(raw(&wire, "smart").get("fallback_mode").is_none());
     let ModelEntry::CandidateAlias(fb) = find(&list, "smart-fb") else {
         panic!("smart-fb is a candidate alias")
     };
     assert!(fb.background);
-    assert_eq!(fb.fallback_mode, "alias");
-    assert_eq!(fb.fallback.as_deref(), Some("fast"));
-    assert!(fb.fallback_usable);
+    assert_eq!(fb.facts.fallback.as_deref(), Some("fast"));
+    assert_eq!(fb.facts.fallback_usable, Some(true));
     assert!(fb.problems.is_empty(), "{fb:?}");
     assert_eq!(fb.routable_candidates, ["chat-cap", "chat-gone"]);
     let ModelEntry::CandidateAlias(broken) = find(&list, "broken") else {
@@ -722,7 +716,7 @@ async fn the_models_text_of_an_empty_gateway_is_two_empty_lists() {
     let text = admin.text("lmgw__models", json!({})).await;
     assert_eq!(
         text,
-        serde_json::to_string_pretty(&json!({"models": [], "passthrough_upstreams": []})).unwrap()
+        serde_json::to_string(&json!({"models": [], "passthrough_upstreams": []})).unwrap()
     );
     let list: self_admin::ModelList = read_back(&text);
     assert_eq!(list, self_admin::ModelList::default());
@@ -775,7 +769,7 @@ async fn the_upstreams_text_reads_back_equal_in_every_state() {
     );
     assert_eq!(
         (acme.protocol.as_str(), acme.kind.as_str()),
-        ("openai", "generic")
+        ("openai_compatible", "generic")
     );
     assert_eq!(acme.timeout_ms, 45_000);
     assert!(raw("acme")["timeout_ms"].is_u64());
@@ -829,7 +823,7 @@ async fn the_upstreams_text_of_an_empty_gateway_is_an_empty_list() {
     let text = admin.text("lmgw__upstreams", json!({})).await;
     assert_eq!(
         text,
-        serde_json::to_string_pretty(&json!({"upstreams": []})).unwrap()
+        serde_json::to_string(&json!({"upstreams": []})).unwrap()
     );
     read_back::<dto::UpstreamsResponse>(&text);
 }
@@ -848,10 +842,7 @@ async fn the_logs_text_of_an_empty_gateway_is_an_empty_tail() {
     let state = AppState::init_for_tests().await.unwrap();
     let admin = Admin::new(&state).await;
     let text = admin.text("lmgw__logs", json!({})).await;
-    assert_eq!(
-        text,
-        serde_json::to_string_pretty(&json!({"logs": []})).unwrap()
-    );
+    assert_eq!(text, serde_json::to_string(&json!({"logs": []})).unwrap());
     let tail: self_admin::LogTail = read_back(&text);
     assert_eq!(tail, self_admin::LogTail::default());
 }
@@ -923,7 +914,7 @@ async fn the_logs_text_reads_back_equal_with_rows_of_every_shape() {
         "the length is the list's: {text}"
     );
     for row in rows {
-        assert_eq!(row.as_object().unwrap().len(), 17, "{row}");
+        assert_eq!(row.as_object().unwrap().len(), 19, "{row}");
     }
     // The bare row: the six keys it has, the eleven columns it lacks as null.
     let b = &rows[2];
@@ -1005,7 +996,7 @@ async fn the_logs_text_reads_back_equal_with_rows_of_every_shape() {
     assert_eq!(own.mcp_tool.as_deref(), Some("lmgw__logs"));
     assert!(own.total_ms.is_some() && own.prompt_tokens.is_none());
     for row in parse(&text)["logs"].as_array().unwrap() {
-        assert_eq!(row.as_object().unwrap().len(), 17, "{row}");
+        assert_eq!(row.as_object().unwrap().len(), 19, "{row}");
     }
 }
 
@@ -1076,6 +1067,7 @@ fn top_shapes(changed: &[(&str, &'static str)]) -> Vec<(&'static str, &'static s
         ("chat_feed_page_size", "int"),
         ("chat_feed_retention_days", "int"),
         ("chat_kb_budget_tokens", "int"),
+        ("chat_media_defaults", "object"),
         ("chat_pdf_mode", "string"),
         ("chat_profile", "null"),
         ("chat_purge_days", "int"),
@@ -1104,6 +1096,7 @@ fn top_shapes(changed: &[(&str, &'static str)]) -> Vec<(&'static str, &'static s
         ("jobs_max_rows", "int"),
         ("jobs_retention_days", "int"),
         ("max_body_mb", "int"),
+        ("quota_recheck_seconds", "int"),
         ("realtime", "object"),
         ("retention_days", "int"),
         ("retention_max_rows", "int"),
@@ -1174,7 +1167,7 @@ const FTS_WEIGHT_KEYS: [(&str, &str); 4] = [
 ];
 
 /// The nested objects of a settings text: the kind of each key.
-fn assert_nested_shapes(v: &Value, hold_alias: &str) {
+fn assert_nested_shapes(v: &Value) {
     assert_shapes("router", &v["router"], &CLASS_KEYS);
     assert_shapes("aux_router", &v["aux_router"], &AUX_KEYS);
     assert_shapes("image", &v["image"], &CLASS_KEYS);
@@ -1185,11 +1178,7 @@ fn assert_nested_shapes(v: &Value, hold_alias: &str) {
         &v["docs_search"]["fts_weights"],
         &FTS_WEIGHT_KEYS,
     );
-    assert_shapes(
-        "hold",
-        &v["hold"],
-        &[("active", "bool"), ("fallback_alias", hold_alias)],
-    );
+    assert_shapes("hold", &v["hold"], &[("active", "bool")]);
     assert_shapes("vram", &v["vram"], &[("fallback_on_external", "bool")]);
 }
 
@@ -1204,7 +1193,7 @@ async fn the_settings_text_of_a_default_gateway_reads_back_equal() {
     let settings: self_admin::SettingsRead = read_back(&text);
     let raw = parse(&text);
     assert_shapes("the settings", &raw, &top_shapes(&[]));
-    assert_nested_shapes(&raw, "null");
+    assert_nested_shapes(&raw);
     assert_eq!(raw["forge_tokens"], json!({}));
     assert_eq!(raw["self_admin"], json!("full"));
     assert_eq!(raw["chat_system_prompt_is_builtin"], json!(true));
@@ -1216,7 +1205,6 @@ async fn the_settings_text_of_a_default_gateway_reads_back_equal() {
     assert!(raw["docs_search"]["rrf_k"].is_f64());
     assert!(!settings.has_hf_token);
     assert_eq!(settings.chat_profile, None);
-    assert_eq!(settings.hold.fallback_alias, None);
     assert_eq!(settings.self_admin, lmgw_api_types::AdminLevel::Full);
     assert!(settings.vram.fallback_on_external);
     assert!(settings.forge_tokens.is_empty());
@@ -1268,7 +1256,6 @@ async fn the_settings_text_of_a_configured_gateway_reads_back_equal() {
         s.agent_origin_suffix = "example.test".into();
         s.agent_script_image = "img:1".into();
         s.hold.active = true;
-        s.hold.fallback_alias = Some("fb".into());
         s.vram.fallback_on_external = false;
         s.router.image = "r-img".into();
         s.router.models_dir = "/r".into();
@@ -1343,7 +1330,7 @@ async fn the_settings_text_of_a_configured_gateway_reads_back_equal() {
             ("chat_profile", "int"),
         ]),
     );
-    assert_nested_shapes(&raw, "string");
+    assert_nested_shapes(&raw);
     // The dashboard's names: the secrets are flags, never the value.
     assert_eq!(raw["has_hf_token"], json!(true));
     assert_eq!(raw["has_update_token"], json!(true));
@@ -1355,7 +1342,7 @@ async fn the_settings_text_of_a_configured_gateway_reads_back_equal() {
         raw["forge_tokens"],
         json!({"git.example.com": "<set>", "github.com": "<set>"})
     );
-    assert_eq!(raw["hold"], json!({"active": true, "fallback_alias": "fb"}));
+    assert_eq!(raw["hold"], json!({"active": true}));
     assert_eq!(raw["vram"], json!({"fallback_on_external": false}));
     assert_eq!(raw["router"]["extra_run_args"], json!(["--a", "--b=1"]));
     assert_eq!(raw["aux_router"]["extra_run_args"], json!(["--x"]));
@@ -1410,17 +1397,17 @@ async fn the_settings_text_follows_each_optional_to_its_other_state() {
         &raw,
         &top_shapes(&[("builds_dir", "string"), ("chat_profile", "int")]),
     );
-    assert_nested_shapes(&raw, "null");
+    assert_nested_shapes(&raw);
     assert_eq!(raw["has_hf_token"], json!(false));
     assert_eq!(raw["has_update_token"], json!(true));
     assert_eq!(raw["chat_profile"], json!(other));
-    assert_eq!(raw["hold"], json!({"active": true, "fallback_alias": null}));
+    assert_eq!(raw["hold"], json!({"active": true}));
     assert_eq!(raw["chat_system_prompt"], json!(""));
     assert_eq!(raw["chat_system_prompt_is_builtin"], json!(false));
     assert_eq!(raw["audio"]["extra_run_args"], json!([]));
     // A whole number stays a float: `60.0`, not `60`.
     assert_eq!(raw["docs_search"]["rrf_k"], json!(60.0));
     assert!(raw["docs_search"]["rrf_k"].is_f64());
-    assert!(text.contains("\"rrf_k\": 60.0"), "{text}");
+    assert!(text.contains("\"rrf_k\":60.0"), "{text}");
     assert_eq!(raw["self_admin"], json!("full"));
 }

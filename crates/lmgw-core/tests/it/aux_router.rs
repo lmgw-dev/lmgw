@@ -63,8 +63,7 @@ async fn embeddings_against_a_rerank_model_are_refused_not_forwarded() {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
@@ -202,8 +201,7 @@ async fn aux_world(upstream_base: &str) -> (lmgw_core::state::SharedState, Gw) {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
@@ -576,8 +574,7 @@ async fn an_aux_container_never_carries_the_other_kinds_flag() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     };
     let snap = Snapshot {
         aux_models: vec![stale],
@@ -624,8 +621,7 @@ async fn aux_models_round_trip_their_kind() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await

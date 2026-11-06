@@ -39,7 +39,8 @@ pub struct ModelState {
     /// `asr`, `chat` or `tts`.
     pub stage: String,
     pub alias: String,
-    /// `loading`, `ready`, `held`, `fallback`, `skipped` or `failed`.
+    /// `loading`, `downloading`, `ready`, `held`, `fallback`, `skipped` or
+    /// `failed`.
     pub state: String,
     /// How long the load took, for `ready`.
     pub ms: Option<u64>,
@@ -87,6 +88,37 @@ pub struct ModelState {
         schemars(transform = crate::openapi_ext::non_null)
     )]
     pub capacity_bytes: Option<u64>,
+    /// `downloading`: the image the model runs in, being downloaded before
+    /// its first start (machine-check design §5). A client says the
+    /// download in plain words; the reference is a detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub image: Option<String>,
+    /// `downloading`: compressed bytes downloaded so far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub done_bytes: Option<u64>,
+    /// `downloading`: the download's whole size; absent while it is not
+    /// known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub total_bytes: Option<u64>,
+    /// `downloading`: why the size is not known, when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub size_note: Option<String>,
 }
 
 /// How realtime mode detects the end of a turn — the names

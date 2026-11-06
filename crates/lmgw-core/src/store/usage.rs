@@ -443,7 +443,8 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
             ttfb_sum, ttfb_count, total_sum, total_count, total_min, total_max,
             decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted,
             audio_in_ms, chars_in, images_out,
-            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out)
+            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out,
+            budget_floor_micro)
          SELECT strftime('%Y-%m-%dT%H', ts),
                 COALESCE(key_id, 0),
                 requested_alias,
@@ -478,7 +479,8 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
                 COALESCE(SUM(images_out), 0),
                 SUM(CASE WHEN {unknown} THEN COALESCE(audio_in_ms,0) ELSE 0 END),
                 SUM(CASE WHEN {unknown} THEN COALESCE(chars_in,0) ELSE 0 END),
-                SUM(CASE WHEN {unknown} THEN COALESCE(images_out,0) ELSE 0 END)
+                SUM(CASE WHEN {unknown} THEN COALESCE(images_out,0) ELSE 0 END),
+                COALESCE(SUM(budget_floor_micro), 0)
          FROM request_logs
          GROUP BY 1, 2, 3, 4, 5, 6"
     );
@@ -739,14 +741,18 @@ pub async fn used_model_names(pool: &SqlitePool) -> DbResult<Vec<(String, i64)>>
 /// Spend so far in a key's current budget period, in micro-units.
 ///
 /// Reads the rollup rather than the raw rows, so a budget still works after
-/// retention has pruned the month's early requests.
+/// retention has pruned the month's early requests. Counts the lower bound
+/// of the unpriced rows that have one (`budget_floor_micro`, migration
+/// 0094: a hosted-tool fee, a tier above Standard with no price, a cut
+/// stream's local count; openai egress design §6.1, §13) beside the priced
+/// cost.
 pub async fn key_spend_micro(
     pool: &SqlitePool,
     key_id: i64,
     period_start_utc: &str,
 ) -> DbResult<i64> {
     let row = sqlx::query(
-        "SELECT COALESCE(SUM(cost_micro), 0) AS spent FROM usage_hourly
+        "SELECT COALESCE(SUM(cost_micro + budget_floor_micro), 0) AS spent FROM usage_hourly
          WHERE key_id = ?1 AND bucket_utc >= ?2",
     )
     .bind(key_id)
@@ -759,7 +765,8 @@ pub async fn key_spend_micro(
 /// Total spend across every key in a period — the owner's global budget.
 pub async fn total_spend_micro(pool: &SqlitePool, period_start_utc: &str) -> DbResult<i64> {
     let row = sqlx::query(
-        "SELECT COALESCE(SUM(cost_micro), 0) AS spent FROM usage_hourly WHERE bucket_utc >= ?1",
+        "SELECT COALESCE(SUM(cost_micro + budget_floor_micro), 0) AS spent
+           FROM usage_hourly WHERE bucket_utc >= ?1",
     )
     .bind(period_start_utc)
     .fetch_one(pool)

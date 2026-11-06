@@ -252,7 +252,16 @@ pub(crate) async fn write_user(
     let repo = ChatRepo::of(thread.id);
     let sent = super::super::chat_tasks::deliver::sent(state, thread.id, !repo.is_temp());
     let id = match repo
-        .append_user_message(state, thread.id, content, &[], &[], Some(voice), caller)
+        .append_user_message(
+            state,
+            thread.id,
+            crate::store::UserMessage {
+                content,
+                voice: Some(voice),
+                ..Default::default()
+            },
+            caller,
+        )
         .await
     {
         Ok(SendMessageOutcome::Sent(id)) => id,

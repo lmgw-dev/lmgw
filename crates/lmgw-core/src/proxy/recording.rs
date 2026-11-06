@@ -14,7 +14,7 @@ use crate::ingress::ClientProto;
 use crate::ir::{ChatRequest, Timings, Usage};
 use crate::pricing::{self, Quantities, TokenUsage};
 use crate::state::{AppState, SharedState};
-use crate::store::{self, NewRequestLog};
+use crate::store::NewRequestLog;
 use crate::telemetry::{internal_identity, RequestClass};
 
 /// Per-request context filled by the root middleware / handlers.
@@ -37,6 +37,15 @@ pub struct RequestCtx {
     /// perfectly good models request, and turning it into a 400 in the
     /// middleware would invent a failure mode the header does not have there.
     pub reasoning: Option<Result<crate::ir::ReasoningControl, String>>,
+    /// `x-lmgw-background` as parsed by the middleware (per-request
+    /// background design §3): the origin it asks for, or why it did not
+    /// parse. Parsed but not judged, like [`Self::reasoning`] — and parsed
+    /// **only on the header's routes** (§11.12), so it is `None` on every
+    /// other route's context (realtime, the Chat, `/mcp`) whatever was sent.
+    /// The routes that read it refuse a malformed one
+    /// ([`Self::background_refusal`]); [`Self::origin`] is what they hand the
+    /// gate.
+    pub background: Option<Result<crate::runtime::registry::Origin, String>>,
     /// The client's `anthropic-beta` flags
     /// ([`client_betas`](crate::egress::anthropic::client_betas)). Read, like
     /// `reasoning`, by every route but used only by the chat-shaped ones,
@@ -84,6 +93,11 @@ pub struct RequestCtx {
     /// arrived on, and its socket handle, which the feed sets
     /// `TCP_USER_TIMEOUT` through (§7.1). `None` everywhere else.
     pub conn: Option<crate::server::Conn>,
+    /// The authority the request was sent to (its `Host` header, or the
+    /// URI's for HTTP/2), as the client wrote it: what a `/v1/responses`
+    /// `mcp` block's `server_url` naming this gateway is compared with (openai
+    /// egress design §6). `None` for a context built by hand.
+    pub host: Option<String>,
 }
 
 impl RequestCtx {
@@ -119,6 +133,27 @@ impl RequestCtx {
         self.reasoning.as_ref()?.as_ref().err().map(String::as_str)
     }
 
+    /// Whose traffic this request is, as the gate takes it
+    /// (`gate::resolve`'s `origin`): [`Origin::Background`] exactly when
+    /// `x-lmgw-background: on` was sent on one of the header's routes, the
+    /// owner's otherwise — a malformed value included, which those routes
+    /// refuse first ([`Self::background_refusal`]).
+    ///
+    /// [`Origin::Background`]: crate::runtime::registry::Origin::Background
+    pub fn origin(&self) -> crate::runtime::registry::Origin {
+        match &self.background {
+            Some(Ok(origin)) => *origin,
+            _ => crate::runtime::registry::Origin::Owner,
+        }
+    }
+
+    /// The `400` for an `x-lmgw-background` value that did not parse, naming
+    /// the header — `None` when it parsed or was not sent.
+    pub fn background_refusal(&self) -> Option<GatewayError> {
+        let why = self.background.as_ref()?.as_ref().err()?;
+        Some(GatewayError::BadRequest(why.clone()))
+    }
+
     /// The key this request is charged to: the name it authenticated with,
     /// and the principal's `api_keys.id` — which every row is resolved by
     /// when it is written ([`KeyRef`]) — and the run it is stamped with.
@@ -128,6 +163,7 @@ impl RequestCtx {
             id: self.principal.key_id(),
             run: self.run,
             via: self.via,
+            public: false,
         }
     }
 
@@ -166,6 +202,12 @@ pub(crate) struct KeyRef {
     /// The listener the caller's request came in on (device link design
     /// §4.5), which its rows record.
     pub via: crate::server::Via,
+    /// The caller is a `/v1` client's own request run in-process (the
+    /// `/v1/responses` loop), not one of lmgw's own consumers: without a
+    /// key (auth off) its answers' items are recorded under none, as a
+    /// public request's are, so it may send its own seals back (openai
+    /// egress design §7.3.4, `proxy::answer_items`).
+    pub public: bool,
 }
 
 impl KeyRef {
@@ -233,6 +275,10 @@ pub(super) struct LogParams<'a> {
     /// `Default::default()` when nothing was. `requests` left `None` is
     /// filled by [`record`] (`recording/quantities.rs`).
     pub(super) quantities: Quantities,
+    /// The service tier the answer reported (openai egress design §5.2):
+    /// [`ServedTier::of`](pricing::ServedTier::of) on a chat answer,
+    /// `Default::default()` (no tier dimension) everywhere else.
+    pub(super) service_tier: pricing::ServedTier,
 }
 
 pub(super) async fn record(
@@ -241,6 +287,20 @@ pub(super) async fn record(
     ttfb_ms: Option<i64>,
     usage: Usage,
     error: Option<(&str, String)>,
+) {
+    record_counted(p, status, ttfb_ms, usage, error, None).await;
+}
+
+/// [`record`], with lmgw's own count of an answer whose usage never came
+/// (a platform chat stream cut before its usage chunk, openai egress design
+/// §13.6): the budgets' lower bound, never the row's tokens.
+pub(super) async fn record_counted(
+    p: LogParams<'_>,
+    status: u16,
+    ttfb_ms: Option<i64>,
+    usage: Usage,
+    error: Option<(&str, String)>,
+    local_count: Option<pricing::LocalCount>,
 ) {
     let total_ms = p.started.elapsed().as_millis() as i64;
     let q = with_requests_default(
@@ -257,7 +317,19 @@ pub(super) async fn record(
         p.proto.as_str(),
         &usage,
         &q,
+        &p.service_tier,
+        &pricing::HostedCalls::default(),
+        local_count.as_ref(),
     );
+    // A counted answer is one whose usage never came: the note says so
+    // before what the budgets counted of it (§13.6).
+    let price_note = priced.price_note(local_count.map(|_| {
+        no_usage_reason(
+            p.streamed,
+            error.as_ref(),
+            q.requests.is_some_and(|n| n > 0),
+        )
+    }));
     let row = NewRequestLog {
         client_key: priced.client_key,
         ingress_proto: p.proto.as_str().to_string(),
@@ -293,8 +365,11 @@ pub(super) async fn record(
         // A model call: no approval decides one.
         approved_by: None,
         via: p.ctx.via,
+        service_tier: p.service_tier.relayed(),
+        price_note,
+        priced_alias: priced.priced_alias,
     };
-    note_on_run(p.state, p.ctx.run, &row, &usage);
+    note_on_run(p.state, p.ctx.run, &row, &usage, q.requests);
     // Its own task: a handler dropped mid-insert neither loses the row nor
     // leaves the gauge open (`recording/write.rs`).
     write::write_row(p.state, row, status).await;
@@ -314,15 +389,38 @@ pub(super) async fn record(
 /// price — and only an answer without an error is a model call: a run that
 /// mistyped its alias forty times, or hit forty refusals, reads as no model
 /// calls that cost nothing.
-pub(super) fn note_on_run(state: &AppState, run: Option<i64>, row: &NewRequestLog, usage: &Usage) {
+pub(super) fn note_on_run(
+    state: &AppState,
+    run: Option<i64>,
+    row: &NewRequestLog,
+    usage: &Usage,
+    requests: Option<u64>,
+) {
     let Some(run) = run.filter(|_| row.upstream_id.is_some() && row.class != RequestClass::Tool)
     else {
         return;
     };
+    // An answer marked `incomplete` was answered all the same: the mark says
+    // its usage is missing, not that the call failed.
+    // A stop or a hang-up after the upstream answered is one too, by the
+    // predicate billing uses: the row's `requests` quantity.
+    let answered = match row.error_kind.as_deref() {
+        None => true,
+        Some(INCOMPLETE) => true,
+        Some("canceled" | "client_disconnected") => requests.is_some_and(|n| n > 0),
+        Some(_) => false,
+    };
     state
         .agent_meters
-        .note_row(run, usage, row.row_cost(), row.error_kind.is_none());
+        .note_row(run, usage, row.row_cost(), answered);
 }
+
+/// The row's `error_kind` for an answer that ended without the usage it
+/// should have reported: a native `/v1/responses` stream with no terminal
+/// event and no error, or a whole body with no `usage` to read (openai
+/// egress design §5.2, §6). Not a failure: the request was answered, and
+/// counts as such; the mark makes its unpriced row visible as one.
+pub const INCOMPLETE: &str = "incomplete";
 
 /// Identity + price for one logged call (usage-analytics §2.2, §4.4).
 ///
@@ -335,6 +433,44 @@ pub(super) struct Priced {
     pub(super) client_key: Option<String>,
     pub(super) key_id: Option<i64>,
     pub(super) cost: pricing::Cost,
+    /// The note for an answer its service tier left unpriced (openai egress
+    /// design §5.6).
+    tier_note: Option<String>,
+    /// The note for an answer its hosted-tool calls left unpriced (§6.1).
+    hosted_note: Option<String>,
+    /// What the budgets counted for an unpriced answer, as a lower bound
+    /// (§13): the clause the note's head ends with.
+    floor_note: Option<String>,
+    /// The alias the price was looked up under, when it is not the one the
+    /// client asked for (a fallback that answered): the row's
+    /// `priced_alias`, so a later re-check of its tier reads the same rows.
+    pub(super) priced_alias: Option<String>,
+}
+
+impl Priced {
+    /// The row's `price_note`: the tier's words first, since the
+    /// unpriced-tiers list reads a no-tier note by its opening
+    /// (`store::unpriced_tier_traffic`), then the hosted-tool fees', which
+    /// the hosted list finds anywhere in the note
+    /// (`pricing::HostedCalls::from_note`). `reported` is why an answer is
+    /// unpriced in the first place (its usage never came, §5.2): it stands
+    /// in for the tier's note, which is moot then, never for the hosted
+    /// calls', so a cut stream that searched stays on the hosted list. A
+    /// budget floor's clause ends the head (§13): it says what the budgets
+    /// counted for the reason the head gives.
+    pub(super) fn price_note(&self, reported: Option<&str>) -> Option<String> {
+        let head = reported
+            .map(str::to_string)
+            .or_else(|| self.tier_note.clone());
+        let head = match (head, self.floor_note.clone()) {
+            (Some(h), Some(f)) => Some(format!("{h}; {f}")),
+            (h, f) => h.or(f),
+        };
+        match (head, self.hosted_note.clone()) {
+            (Some(h), Some(f)) => Some(format!("{h}; {f}")),
+            (h, f) => h.or(f),
+        }
+    }
 }
 
 /// [`Priced`] for one call. `alias` is the name the client asked for, and
@@ -346,6 +482,27 @@ pub(super) struct Priced {
 /// defaulted ([`with_requests_default`]); every unit the answering alias's
 /// [`Sheet`](pricing::Sheet) prices is priced from it (billable-units design
 /// §3.2).
+///
+/// `served` is the service tier the answer reported: the sheet is that
+/// tier's rows (openai egress design §5.5), and a tier with no row leaves
+/// the call unpriced with [`Priced::price_note`] saying so (§5.6) — on an
+/// answer with something to price; a call that failed before it spent
+/// anything has no tier to speak of.
+///
+/// `hosted` is the billable hosted-tool calls the answer made (§6.1): their
+/// fees have no price unit yet, so a call with any is unpriced, whatever its
+/// tokens cost, and the note says what they would have cost alone. A budget
+/// still counts what its tokens cost, as a lower bound
+/// ([`pricing::Cost::budget_floor_micro`]): the fee nobody can price must not
+/// make the tokens beside it free to a budget.
+///
+/// A call its tier left unpriced keeps a lower bound for the budgets too,
+/// when the tier that served it costs at least what another sheet prices it
+/// at ([`pricing::tier_floor`], openai egress design §13.2): a Fast answer
+/// with no Fast row counts at the standard price. The row stays unpriced,
+/// and its note says what the budgets counted. Every other unpriced call
+/// adds nothing to a budget's spend.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn price_call(
     state: &AppState,
     alias: &str,
@@ -354,25 +511,24 @@ pub(super) fn price_call(
     ingress_proto: &str,
     usage: &Usage,
     q: &Quantities,
+    served: &pricing::ServedTier,
+    hosted: &pricing::HostedCalls,
+    local_count: Option<&pricing::LocalCount>,
 ) -> Priced {
     let snap = state.snapshot();
-    let (client_key, known) = key.resolve(&snap);
-    // The key's identity when the caller had one (`KeyRef`); otherwise by
-    // name — a real key's when the caller authenticated, else the synthetic
-    // identity for whichever internal consumer this is.
-    let key_id = known.or_else(|| {
-        client_key
-            .as_deref()
-            .or_else(|| internal_identity(ingress_proto))
-            .and_then(|n| snap.key_id_for_name(n))
-    });
+    let (client_key, key_id) = charged(&snap, key, ingress_proto);
     // Fold this call into the rolling windows the policy gate enforces on, so
     // a budget check never has to run a SUM on the request path and a
     // tokens/minute limit sees the tokens that were actually spent. A key
     // deleted while its request ran has no window left to enforce, and a
-    // fresh one for it would never be read again (A2 review 3).
+    // fresh one for it would never be read again (A2 review 3). An answer
+    // whose usage never came counts lmgw's own count of it instead (openai
+    // egress design §13.4), so a cut stream does not slip past the limit.
     if let Some(id) = key_id.filter(|id| snap.api_keys.iter().any(|k| k.id == *id)) {
-        let tokens = usage.prompt_tokens.unwrap_or(0) + usage.completion_tokens.unwrap_or(0);
+        let tokens = match local_count.filter(|_| !usage.reported()) {
+            Some(c) => c.prompt + c.output,
+            None => usage.prompt_tokens.unwrap_or(0) + usage.completion_tokens.unwrap_or(0),
+        };
         state.policy.note_tokens(id, tokens as i64);
     }
 
@@ -387,14 +543,72 @@ pub(super) fn price_call(
         route.map_or(alias, |r| r.priced_alias(alias)),
         route.map(|r| r.upstream.id),
         route.map(|r| r.upstream_model.as_str()),
+        served.price_tier(),
     );
     let cost = pricing::price_request(&detail, q, &sheet);
+    let something_to_price = detail.prompt.is_some()
+        || detail.completion.is_some()
+        || q.requests.is_some_and(|n| n > 0)
+        || q.audio_in_ms.is_some()
+        || q.chars_in.is_some()
+        || q.images_out.is_some();
+    let tier_note = sheet
+        .tier_gap
+        .filter(|_| something_to_price)
+        .map(|gap| pricing::gap_note(served, &gap, route.map_or(alias, |r| &r.upstream_model)));
+    // Unpriced because of its tier, or because its usage never came and
+    // lmgw counted it itself: bounded from below by a sheet that costs no
+    // more (§13.2, §13.4), priced on the same quantities and on the usage
+    // reported, or else the local count.
+    let count = local_count.filter(|_| detail.prompt.is_none() && detail.completion.is_none());
+    let floor_usage = count.map_or(detail, pricing::LocalCount::usage);
+    let floor_tiers = if cost.total_micro.is_some() || !(something_to_price || count.is_some()) {
+        Vec::new()
+    } else if count.is_some() {
+        pricing::count_floor_tiers(served)
+    } else if sheet.tier_gap.is_some() || served.price_tier().is_none() {
+        pricing::tier_floor(served)
+    } else {
+        Vec::new()
+    };
+    let floor = floor_tiers.into_iter().find_map(|tier| {
+        let floor_sheet = snap.sheet_for(
+            route.map_or(alias, |r| r.priced_alias(alias)),
+            route.map(|r| r.upstream.id),
+            route.map(|r| r.upstream_model.as_str()),
+            Some(tier),
+        );
+        let micro = pricing::price_request(&floor_usage, q, &floor_sheet).total_micro?;
+        Some((tier, micro))
+    });
+    let floor_note = floor
+        .map(|(tier, micro)| pricing::floor_clause(tier, micro, count, &snap.settings.currency));
+    let cost = match floor {
+        Some((_, micro)) => cost.with_floor(micro),
+        None => cost,
+    };
+    // A fee priced nowhere makes the whole call unknown (§6.1); a local
+    // route's zero is real and has no such fee.
+    let hosted_note = (!hosted.is_empty() && cost.source != pricing::PriceSource::FreeLocal)
+        .then(|| hosted.note(cost.total_micro, &snap.settings.currency));
+    // The row is unpriced, but what it did price stays the budgets' lower
+    // bound (`Cost::budget_floor_micro`).
+    let cost = if hosted_note.is_some() {
+        cost.unpriced()
+    } else {
+        cost
+    };
 
     // Advance the cached spend the budget check reads — every unit's part,
     // since all of it is money in the one currency (billable-units §7).
     // Unpriced calls add nothing — which is the honest answer, and the reason
-    // a budget cannot be enforced against traffic whose price nobody knows.
-    if let Some(micro) = cost.total_micro.filter(|m| *m != 0) {
+    // a budget cannot be enforced against traffic whose price nobody knows —
+    // except a lower bound where one is known: the known part of one
+    // unpriced only for a hosted-tool fee, or the floor of one its tier left
+    // unpriced. A client could otherwise name a hosted tool or ask for Fast
+    // on every request and spend what no budget sees (openai egress design
+    // §6.1, §13).
+    if let Some(micro) = cost.budget_micro().filter(|m| *m != 0) {
         let now = chrono::Utc::now();
         let key_period = key_id.and_then(|id| {
             snap.api_keys
@@ -412,7 +626,112 @@ pub(super) fn price_call(
         client_key,
         key_id,
         cost,
+        tier_note,
+        hosted_note,
+        floor_note,
+        priced_alias: route
+            .and_then(|r| r.fallback.as_deref())
+            .filter(|f| !f.eq_ignore_ascii_case(alias))
+            .map(str::to_string),
     }
+}
+
+/// Why a row counted locally has no usage, by the row's error: its client
+/// left mid-stream (`canceled`) or before the upstream answered (`499`
+/// `client_disconnected`); a whole answer reported none; or a stream ended
+/// (or broke) before the upstream reported any.
+///
+/// `answered`: the upstream's answer was read whole before the row was
+/// written (a detached unary read, `chat/unary.rs`), so a client that left
+/// then did not leave an unanswered request.
+pub(super) fn no_usage_reason(
+    streamed: bool,
+    error: Option<&(&str, String)>,
+    answered: bool,
+) -> &'static str {
+    match error {
+        Some(("canceled", _)) => pricing::CLIENT_LEFT_NO_USAGE,
+        Some((kind, _)) if *kind == super::CLIENT_DISCONNECTED && answered => {
+            pricing::CLIENT_LEFT_ANSWER_NO_USAGE
+        }
+        Some((kind, _)) if *kind == super::CLIENT_DISCONNECTED => pricing::CLIENT_LEFT_UNANSWERED,
+        _ if !streamed => pricing::ANSWER_NO_USAGE,
+        _ => pricing::STREAM_NO_USAGE,
+    }
+}
+
+/// Whom a call is charged to: the row's `client_key` label and the key's
+/// id. The key's identity when the caller had one (`KeyRef`); otherwise by
+/// name — a real key's when the caller authenticated, else the synthetic
+/// identity for whichever internal consumer `ingress_proto` is.
+fn charged(snap: &Snapshot, key: &KeyRef, ingress_proto: &str) -> (Option<String>, Option<i64>) {
+    let (client_key, known) = key.resolve(snap);
+    let key_id = known.or_else(|| {
+        client_key
+            .as_deref()
+            .or_else(|| internal_identity(ingress_proto))
+            .and_then(|n| snap.key_id_for_name(n))
+    });
+    (client_key, key_id)
+}
+
+/// [`crate::policy::check_priced`] for a send of `class` on `route` by the
+/// key a call is charged to ([`charged`], so a row and its refusal name the
+/// same key): a budgeted caller's request on a scope that prices nothing it
+/// is billed in, flex without a flex price among them (openai egress design
+/// §13.3, decision 24). `requested` is the request's own `service_tier`.
+pub(crate) fn priced_refusal(
+    state: &AppState,
+    key: &KeyRef,
+    ingress_proto: &str,
+    alias: &str,
+    route: &Route,
+    class: RequestClass,
+    requested: Option<&str>,
+) -> Result<(), GatewayError> {
+    let snap = state.snapshot();
+    let (_, id) = charged(&snap, key, ingress_proto);
+    let key = id.and_then(|id| snap.api_keys.iter().find(|k| k.id == id));
+    crate::policy::check_priced(&snap, key, alias, route, class, requested)
+}
+
+/// [`priced_refusal`] on the route `alias` is served on, for a request whose
+/// handler has no later point where its route is final and checked (the
+/// media routes, embeddings, legacy completions): the route the gate's
+/// static walk hands back (openai egress design §14.9, [`crate::gate::resolve`],
+/// which starts nothing) — the alias's own, or the fallback a GPU hold, a
+/// benchmark, a CPU row's container still on the GPU under the hold or a
+/// disabled row hands it to — so a held embedder whose fallback is an
+/// unpriced cloud encoder is refused as a request naming that encoder would
+/// be. A fallback reached at admission (VRAM outside lmgw, a deferred guest)
+/// is not checked here yet. An alias the walk refuses is refused later by
+/// its handler, with that handler's words, so it passes here.
+pub(crate) async fn alias_priced_refusal(
+    state: &SharedState,
+    key: &KeyRef,
+    ingress_proto: &str,
+    alias: &str,
+    class: RequestClass,
+) -> Result<(), GatewayError> {
+    let routed = crate::gate::resolve(
+        state,
+        alias,
+        crate::gate::RouteCheck::None,
+        crate::runtime::registry::Origin::Owner,
+    )
+    .await;
+    let Ok(routed) = routed else {
+        return Ok(());
+    };
+    priced_refusal(
+        state,
+        key,
+        ingress_proto,
+        alias,
+        routed.resolved(),
+        class,
+        None,
+    )
 }
 
 /// Scope + budget for one alias, logged and answered in the caller's dialect.
@@ -429,9 +748,27 @@ pub(super) async fn policy_or_refuse(
     started: Instant,
     class: RequestClass,
 ) -> Option<Response> {
-    let e = policy_refusal(state, ctx, alias).await?;
+    let e = policy_refusal_priced(state, ctx, proto, alias, class).await?;
     record_refusal(state, proto, ctx, alias, started, class, &e).await;
     Some(error_response(proto, &e))
+}
+
+/// [`policy_refusal`], and then a budget enforced only on what is priced
+/// (decision 24) on the route `alias` resolves to: for a handler of `class`
+/// whose route is not checked again where it is final.
+pub(super) async fn policy_refusal_priced(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    proto: ClientProto,
+    alias: &str,
+    class: RequestClass,
+) -> Option<GatewayError> {
+    match policy_refusal(state, ctx, alias).await {
+        Some(e) => Some(e),
+        None => alias_priced_refusal(state, &ctx.key_ref(), proto.as_str(), alias, class)
+            .await
+            .err(),
+    }
 }
 
 /// [`policy_or_refuse`]'s check alone, for a handler that writes the
@@ -500,8 +837,15 @@ async fn checked_as(
 ) -> Result<(), GatewayError> {
     let started = Instant::now();
     let snap = state.snapshot();
-    let Err(e) = crate::policy::check_alias(&state.policy, &state.db, &snap, key_name, alias).await
-    else {
+    let mut checked =
+        crate::policy::check_alias(&state.policy, &state.db, &snap, key_name, alias).await;
+    // A budget is enforced only on what is priced (decision 24). A model
+    // turn is checked where its route is final instead (each turn's open,
+    // `serve_opened`).
+    if checked.is_ok() && class != RequestClass::Chat {
+        checked = alias_priced_refusal(state, &ctx.key_ref(), proto.as_str(), alias, class).await;
+    }
+    let Err(e) = checked else {
         return Ok(());
     };
     // `record` closes a `request_started`, and no handler opened one for a
@@ -598,19 +942,24 @@ pub(super) async fn record_refusal(
             rung: None,
             degraded: None,
             quantities: Quantities::default(),
+            service_tier: Default::default(),
         },
         e.http_status().as_u16(),
         None,
         Usage::default(),
-        Some((e.kind(), e.to_string())),
+        Some((e.kind(), e.log_text())),
     )
     .await;
 }
 
+/// `e` as the client's protocol answers it: its status and body, and an
+/// upstream rate refusal's rate-limit headers (openai egress design §8).
 pub(super) fn error_response(proto: ClientProto, e: &GatewayError) -> Response {
-    let status = e.http_status();
+    let status = proto.error_status(e);
     let body = proto.serialize_error(e);
-    (status, axum::Json(body)).into_response()
+    let mut resp = (status, axum::Json(body)).into_response();
+    e.stamp_rate_hints(&mut resp);
+    resp
 }
 
 /// The header a fallback-served response carries (gpu-hold design §2/§4).
@@ -619,6 +968,11 @@ pub const FALLBACK_HEADER: &str = "x-lmgw-fallback";
 /// | `unavailable` (candidate-aliases design §4.7, §12 entry 70). Always next to [`FALLBACK_HEADER`] —
 /// [`crate::gate::GateHeaders::stamp`] writes both.
 pub const FALLBACK_REASON_HEADER: &str = "x-lmgw-fallback-reason";
+/// Every hop a fallback-served request was handed to, in order, each with its
+/// reason (openai egress design §14.5): an RFC 8941 list,
+/// `"B";reason=hold, "C";reason=quota`. Next to [`FALLBACK_HEADER`] on every
+/// answer a fallback served — [`crate::gate::GateHeaders::stamp`] writes it.
+pub const FALLBACK_CHAIN_HEADER: &str = "x-lmgw-fallback-chain";
 /// The candidate alias's model that answered (candidate-aliases design
 /// §4.1): its model id. Never next to [`FALLBACK_HEADER`] —
 /// [`crate::gate::GateHeaders::stamp`] writes one or the other.
@@ -628,6 +982,17 @@ pub const CANDIDATE_HEADER: &str = "x-lmgw-candidate";
 /// `enabled` for an off fitted to the model in another form (§5.6). Comma
 /// separated, e.g. `enabled,budget`.
 pub const REASONING_IGNORED_HEADER: &str = "x-lmgw-reasoning-ignored";
+
+/// Modelled sampling parameters the answering route does not send (openai
+/// egress design §7.1, P2), next to [`REASONING_IGNORED_HEADER`]. Comma
+/// separated, e.g. `top_k,min_p`.
+pub const PARAMS_IGNORED_HEADER: &str = "x-lmgw-params-ignored";
+
+/// Modelled parameters the answering model refused, which lmgw left out of
+/// the send (`proxy::reasoning_fit::params`): on the request that met the
+/// refusal and retried without them, and on every later one to the same
+/// model. Comma separated, e.g. `temperature,top_p`.
+pub const PARAMS_REFUSED_HEADER: &str = "x-lmgw-params-refused";
 
 /// The `max_tokens` lmgw chose for an Anthropic route because nothing else did
 /// (§5.4) — always stamped when the gateway picked the number, whether it came
@@ -685,6 +1050,12 @@ pub fn reasoning_ignored(
     if c.is_empty() {
         return out;
     }
+    // Anthropic's `between_tools` off (notes between tool calls, no
+    // up-front thinking) has no spelling elsewhere: those routes send their
+    // own off, which is the nearest meaning, and say the rest was not kept.
+    if c.between_tools && protocol != Protocol::Anthropic {
+        out.push("between_tools");
+    }
     // "Think" with no how-much has no wire spelling on these two. What rescues
     // it is another field that *implies* thinking is on — and only one that
     // this route actually sends: a budget a generic OpenAI provider drops
@@ -695,8 +1066,19 @@ pub fn reasoning_ignored(
         // A generic OpenAI-protocol provider knows `reasoning_effort` and
         // nothing else — unless the client brought OpenRouter's object, which
         // carries `enabled` natively.
-        Protocol::Openai => {
+        Protocol::OpenaiCompatible => {
             if c.enabled == Some(true) && c.effort.is_none() && !has_reasoning_object {
+                out.push("enabled");
+            }
+            if c.budget_tokens.is_some() {
+                out.push("budget");
+            }
+        }
+        // The OpenAI platform knows `reasoning_effort` alone, and translates
+        // OpenRouter's object into it rather than forwarding it (openai
+        // egress design §7.1, P3): the object rescues nothing here.
+        Protocol::Openai => {
+            if c.enabled == Some(true) && c.effort.is_none() {
                 out.push("enabled");
             }
             if c.budget_tokens.is_some() {
@@ -725,6 +1107,27 @@ pub fn reasoning_ignored(
     out
 }
 
+/// Which of the request's modelled sampling parameters the route does not
+/// send (openai egress design §7.1, P2), in a fixed order — the
+/// [`PARAMS_IGNORED_HEADER`]'s value, as a pure function beside
+/// [`reasoning_ignored`] and for the same reason.
+///
+/// Read off the egresses' one table ([`crate::egress::sampling`]), which the
+/// Chat's split reads too: the OpenAI platform leaves out the llama samplers
+/// (its Chat reference, checked 2026-10-24,
+/// <https://developers.openai.com/api/reference/resources/chat.md>, "Create
+/// chat completion", has none of them, and it refuses unknown parameters);
+/// Anthropic leaves out `min_p`, `repeat_penalty`, the penalties and `seed`;
+/// Gemini `min_p`, `repeat_penalty` and the penalties; the compatible and
+/// llama.cpp egresses send them all. A client's own unknown keys are not
+/// read here: they go verbatim.
+pub fn params_ignored(
+    protocol: crate::config::Protocol,
+    p: &crate::ir::Params,
+) -> Vec<&'static str> {
+    crate::egress::sampling::dropped(p, protocol)
+}
+
 /// Response annotations that are not the GPU-hold fallback: what the route did
 /// not send, and any `max_tokens` the gateway itself picked or raised. They
 /// travel as headers, on streams and unary answers alike, because none of it is
@@ -736,6 +1139,10 @@ pub fn reasoning_ignored(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Annotations {
     pub ignored: Vec<&'static str>,
+    /// [`params_ignored`]: the modelled samplers the route does not send.
+    pub params_ignored: Vec<&'static str>,
+    /// [`PARAMS_REFUSED_HEADER`]: the parameters the model refused, left out.
+    pub params_refused: Vec<&'static str>,
     pub max_tokens_defaulted: Option<u32>,
     pub max_tokens_raised: Option<u32>,
     /// [`crate::gate::clamp::clamp_max_tokens`]'s "lowered" case (ladder
@@ -749,16 +1156,53 @@ pub(crate) struct Annotations {
     /// [`crate::gate::TurnLease::images_omitted`] (on `/v1/responses`, the
     /// images the run opened with). `None` when none were left out.
     pub images_omitted: Option<usize>,
+    /// The verbatim Anthropic blocks the send or the answer lost on the way
+    /// ([`crate::ir::ignored_names`]): `content.<type>` for a request's
+    /// block an upstream other than Anthropic's was not sent,
+    /// `answer.<type>` for an answer's block a client of another wire was
+    /// not given. [`PARAMS_IGNORED_HEADER`] lists them after
+    /// [`Self::params_ignored`].
+    pub blocks_ignored: Vec<String>,
 }
 
 impl Annotations {
     fn is_empty(&self) -> bool {
         self.ignored.is_empty()
+            && self.params_ignored.is_empty()
+            && self.blocks_ignored.is_empty()
+            && self.params_refused.is_empty()
             && self.max_tokens_defaulted.is_none()
             && self.max_tokens_raised.is_none()
             && self.max_tokens_clamped.is_none()
             && self.images_omitted.is_none()
     }
+}
+
+/// Name on `resp` the verbatim Anthropic blocks of a whole answer that a
+/// client of `proto` is not given, `answer.<type>` in
+/// [`PARAMS_IGNORED_HEADER`] ([`crate::ir::ignored_names`]): every wire but
+/// the Messages wire has no place for one. [`with_annotations`] puts what
+/// the send left out ahead of them.
+pub(crate) fn name_answer_blocks(
+    mut resp: Response,
+    proto: crate::ingress::ClientProto,
+    content: &[crate::ir::ContentPart],
+) -> Response {
+    if proto == crate::ingress::ClientProto::AnthropicMessages {
+        return resp;
+    }
+    let names = crate::ir::ignored_names("answer", content);
+    if names.is_empty() {
+        return resp;
+    }
+    match header::HeaderValue::from_str(&names.join(",")) {
+        Ok(v) => {
+            resp.headers_mut()
+                .insert(header::HeaderName::from_static(PARAMS_IGNORED_HEADER), v);
+        }
+        Err(e) => tracing::warn!("cannot report the answer's ignored blocks: {e}"),
+    }
+    resp
 }
 
 /// Stamp [`Annotations`] on a response, next to `x-lmgw-fallback` and for the
@@ -775,6 +1219,35 @@ pub(crate) fn with_annotations(mut resp: Response, a: &Annotations) -> Response 
                     .insert(header::HeaderName::from_static(REASONING_IGNORED_HEADER), v);
             }
             Err(e) => tracing::warn!("cannot report ignored reasoning controls: {e}"),
+        }
+    }
+    if !a.params_ignored.is_empty() || !a.blocks_ignored.is_empty() {
+        // A unary answer's own blocks were named on the response already
+        // ([`name_answer_blocks`]); they follow what the send left out.
+        let mut names: Vec<String> = a.params_ignored.iter().map(|s| s.to_string()).collect();
+        names.extend(a.blocks_ignored.iter().cloned());
+        if let Some(answer) = resp
+            .headers()
+            .get(PARAMS_IGNORED_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            names.extend(answer.split(',').map(str::to_string));
+        }
+        match header::HeaderValue::from_str(&names.join(",")) {
+            Ok(v) => {
+                resp.headers_mut()
+                    .insert(header::HeaderName::from_static(PARAMS_IGNORED_HEADER), v);
+            }
+            Err(e) => tracing::warn!("cannot report ignored parameters: {e}"),
+        }
+    }
+    if !a.params_refused.is_empty() {
+        match header::HeaderValue::from_str(&a.params_refused.join(",")) {
+            Ok(v) => {
+                resp.headers_mut()
+                    .insert(header::HeaderName::from_static(PARAMS_REFUSED_HEADER), v);
+            }
+            Err(e) => tracing::warn!("cannot report refused parameters: {e}"),
         }
     }
     if let Some(n) = a.max_tokens_defaulted {
@@ -988,11 +1461,12 @@ pub(crate) async fn record_middleware_refusal(
             rung: None,
             degraded: None,
             quantities: Quantities::default(),
+            service_tier: Default::default(),
         },
         e.http_status().as_u16(),
         None,
         Usage::default(),
-        Some((e.kind(), e.to_string())),
+        Some((e.kind(), e.log_text())),
     )
     .await;
 }
@@ -1005,7 +1479,7 @@ pub(crate) async fn record_middleware_refusal(
 /// no parent row (§21).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_request_failure(
-    state: &AppState,
+    state: &SharedState,
     ctx: &RequestCtx,
     ingress_proto: &str,
     alias: &str,
@@ -1026,17 +1500,43 @@ pub(crate) async fn record_request_failure(
         None,
         false,
         e.http_status().as_u16(),
-        Some((e.kind().to_string(), e.to_string())),
+        Some((e.kind().to_string(), e.log_text())),
         None,
+        &Reported::default(),
+        Quantities::default(),
     )
     .await;
 }
 
-/// Log a byte-level passthrough whose body we deliberately never parsed, so it
-/// has latency and status but no token counts (§21 native `/v1/responses`).
+/// What a native `/v1/responses` answer reported, for its row (openai
+/// egress design §5.2): its usage (`Usage::default()` when none arrived,
+/// which leaves the token columns NULL), the service tier it said served
+/// it, and a `price_note` when its cost is not plain — an answer that ended
+/// before its usage was reported. `hosted_calls` is the billable hosted-tool
+/// calls its Response object's output made (§6.1), which leave it unpriced.
+/// `local_count` is lmgw's own count of an answer whose usage never came, a
+/// stream cut before its terminal event on the platform (§13.4): the
+/// budgets' lower bound, never the row's tokens.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Reported {
+    pub usage: Usage,
+    pub service_tier: pricing::ServedTier,
+    pub price_note: Option<String>,
+    pub hosted_calls: pricing::HostedCalls,
+    pub local_count: Option<pricing::LocalCount>,
+}
+
+/// Log a native `/v1/responses` passthrough (§21, openai egress design
+/// §5.2), once it has ended: `reported` is what the upstream's Response
+/// object said ([`Reported`]), priced like every other row. `quantities` is
+/// what the relay knows, `Quantities::answered()` once the upstream's 2xx
+/// arrived.
+///
+/// The caller opened the in-flight gauge when it sent the request
+/// ([`crate::telemetry::TelemetryBus::request_started`]); this row closes it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_passthrough(
-    state: &AppState,
+    state: &SharedState,
     ctx: &RequestCtx,
     ingress_proto: &str,
     alias: &str,
@@ -1048,8 +1548,9 @@ pub(crate) async fn record_passthrough(
     status: u16,
     error: Option<(String, String)>,
     degraded: Option<String>,
+    reported: &Reported,
+    quantities: Quantities,
 ) {
-    state.telemetry.request_started();
     record_free_form(
         state,
         ctx,
@@ -1063,14 +1564,17 @@ pub(crate) async fn record_passthrough(
         status,
         error,
         degraded,
+        reported,
+        quantities,
     )
     .await;
 }
 
 /// Row writer for callers that have a free-form `ingress_proto` and may have no
 /// route at all — the gap between [`record`] (keyed on `ClientProto`) and
-/// [`crate::proxy::record_in_process`] (route required). Tokens are always NULL here: every
-/// caller either failed before generating any or never parsed the body.
+/// [`crate::proxy::record_in_process`] (route required). Its tokens are
+/// `usage`: none for a request that failed before generating any, the
+/// upstream's own report for a native passthrough.
 ///
 /// Priced like every row all the same (billable-units design §3.2, §4.5): a
 /// local route is a real 0 (Q1), an answered one counts its request, and a
@@ -1078,7 +1582,7 @@ pub(crate) async fn record_passthrough(
 /// remainder, which is exactly what it is.
 #[allow(clippy::too_many_arguments)]
 async fn record_free_form(
-    state: &AppState,
+    state: &SharedState,
     ctx: &RequestCtx,
     ingress_proto: &str,
     alias: &str,
@@ -1090,9 +1594,12 @@ async fn record_free_form(
     status: u16,
     error: Option<(String, String)>,
     degraded: Option<String>,
+    reported: &Reported,
+    quantities: Quantities,
 ) {
+    let usage = &reported.usage;
     let q = with_requests_default(
-        Quantities::default(),
+        quantities,
         route.is_some(),
         status,
         error.as_ref().map(|(k, _)| k.as_str()),
@@ -1103,9 +1610,13 @@ async fn record_free_form(
         route,
         &ctx.key_ref(),
         ingress_proto,
-        &Usage::default(),
+        usage,
         &q,
+        &reported.service_tier,
+        &reported.hosted_calls,
+        reported.local_count.as_ref(),
     );
+    let price_note = priced.price_note(reported.price_note.as_deref());
     let row = NewRequestLog {
         client_key: priced.client_key,
         ingress_proto: ingress_proto.to_string(),
@@ -1118,8 +1629,11 @@ async fn record_free_form(
         status: status as i64,
         ttfb_ms,
         total_ms: Some(started.elapsed().as_millis() as i64),
-        prompt_tokens: None,
-        completion_tokens: None,
+        prompt_tokens: usage.prompt_tokens.map(|v| v as i64),
+        completion_tokens: usage.completion_tokens.map(|v| v as i64),
+        cached_in_tokens: usage.cached_input_tokens.map(|v| v as i64),
+        cache_write_tokens: usage.cache_write_tokens.map(|v| v as i64),
+        reasoning_tokens: usage.reasoning_tokens.map(|v| v as i64),
         streamed,
         error_kind: error.as_ref().map(|(k, _)| k.clone()),
         error_msg: error.as_ref().map(|(_, m)| m.clone()),
@@ -1131,21 +1645,21 @@ async fn record_free_form(
         chars_in: quantity_column(q.chars_in),
         images_out: quantity_column(q.images_out),
         via: ctx.via,
+        service_tier: reported.service_tier.relayed(),
+        // An answer whose usage never came has that as its reason; its tier
+        // is moot then, its hosted calls are not.
+        price_note,
+        priced_alias: priced.priced_alias,
         ..Default::default()
     };
     // A stamped native passthrough's answer is the run's like any `/v1`
-    // row: unpriced for want of tokens on a token-priced scope, and then a
-    // gap in the run as it is in Usage — never a partial sum without it.
-    note_on_run(state, ctx.run, &row, &Usage::default());
-    let log_id = store::insert_request_log(&state.db, &row)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("failed to write request log: {e}");
-            0
-        });
-    state
-        .telemetry
-        .request_finished(row_summary(log_id, row, status));
+    // row, its tokens included; one that reported none stays unpriced on a
+    // token-priced scope, and then a gap in the run as it is in Usage —
+    // never a partial sum without it.
+    note_on_run(state, ctx.run, &row, usage, q.requests);
+    // Its own task, as `record`'s: a handler dropped mid-insert neither
+    // loses the row nor leaves the gauge open (`recording/write.rs`).
+    write::write_row(state, row, status).await;
 }
 
 mod quantities;

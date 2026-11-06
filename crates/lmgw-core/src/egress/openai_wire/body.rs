@@ -1,6 +1,7 @@
 //! The OpenAI chat body and its request (llama-egress design §2): one builder
-//! every OpenAI-shaped egress composes, with the two places a dialect differs
-//! passed in — its [`ReasoningStep`] and its [`ToolResultRenderer`].
+//! every OpenAI-shaped egress composes, with the three places a dialect
+//! differs passed in — its [`BodyDialect`], its [`ReasoningStep`] and its
+//! [`ToolResultRenderer`].
 
 use serde_json::{json, Map, Value};
 
@@ -8,6 +9,29 @@ use super::messages::{messages_json, ToolResultRenderer};
 use crate::config::Upstream;
 use crate::egress::apply_bearer_auth;
 use crate::ir::{ChatRequest, Params, ReasoningControl, ToolChoice};
+
+/// The modelled fields one egress spells its own way (openai egress design
+/// §2): the name of the output cap, and whether the modelled llama.cpp
+/// sampler extensions are written at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyDialect {
+    /// The key the IR's `max_tokens` goes out under.
+    pub cap: &'static str,
+    /// Whether the modelled llama.cpp samplers (`top_k`, `min_p`,
+    /// `repeat_penalty`) are written; [`crate::egress::sampling`]'s table
+    /// reads it.
+    pub llama_samplers: bool,
+}
+
+impl BodyDialect {
+    /// llama.cpp's servers and every OpenAI-compatible provider: `max_tokens`
+    /// and the samplers, the body every OpenAI-shaped egress sent before the
+    /// platform got its own.
+    pub const COMPATIBLE: BodyDialect = BodyDialect {
+        cap: "max_tokens",
+        llama_samplers: true,
+    };
+}
 
 /// One egress's spelling of the resolved reasoning control (§5.3) in an
 /// OpenAI-shaped chat body. [`build_chat_body`] calls it only when the control
@@ -37,7 +61,8 @@ pub(crate) fn has_reasoning_object(ir: &ChatRequest) -> bool {
 }
 
 /// The OpenAI-shaped chat body, in a fixed order: the modelled fields (the
-/// messages with each tool result rendered by `tool_results`), then
+/// messages with each tool result rendered by `tool_results`, the cap and
+/// the samplers as `dialect` spells them), then
 /// `reasoning`'s [`apply`](ReasoningStep::apply), then the passthrough loop,
 /// then `reasoning`'s [`reconcile`](ReasoningStep::reconcile) and the
 /// OpenRouter object's. An egress wraps this in its own `chat_body`, the body
@@ -47,9 +72,13 @@ pub fn build_chat_body(
     model: &str,
     params: &Params,
     stream: bool,
+    dialect: BodyDialect,
     reasoning: &dyn ReasoningStep,
     tool_results: &dyn ToolResultRenderer,
 ) -> Value {
+    // An Anthropic compaction block, as Anthropic makes of it: the history
+    // before it dropped, its summary a user turn (`ir::compaction::folded`).
+    let ir = &*crate::ir::compaction::folded(ir);
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
     body.insert(
@@ -62,19 +91,21 @@ pub fn build_chat_body(
     if let Some(v) = params.top_p {
         body.insert("top_p".into(), json!(v));
     }
-    if let Some(v) = params.top_k {
-        // Non-standard; llama.cpp & most OAI-compatible local servers accept it.
-        body.insert("top_k".into(), json!(v));
-    }
-    // llama.cpp extensions, modelled; what passthrough used to re-emit.
-    if let Some(v) = params.min_p {
-        body.insert("min_p".into(), json!(v));
-    }
-    if let Some(v) = params.repeat_penalty {
-        body.insert("repeat_penalty".into(), json!(v));
+    if dialect.llama_samplers {
+        if let Some(v) = params.top_k {
+            // Non-standard; llama.cpp & most OAI-compatible local servers accept it.
+            body.insert("top_k".into(), json!(v));
+        }
+        // llama.cpp extensions, modelled; what passthrough used to re-emit.
+        if let Some(v) = params.min_p {
+            body.insert("min_p".into(), json!(v));
+        }
+        if let Some(v) = params.repeat_penalty {
+            body.insert("repeat_penalty".into(), json!(v));
+        }
     }
     if let Some(v) = params.max_tokens {
-        body.insert("max_tokens".into(), json!(v));
+        body.insert(dialect.cap.into(), json!(v));
     }
     if let Some(v) = params.presence_penalty {
         body.insert("presence_penalty".into(), json!(v));
@@ -93,14 +124,24 @@ pub fn build_chat_body(
             .tools
             .iter()
             .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                })
+                let mut function = json!({
+                    "name": t.name,
+                    "parameters": t.parameters,
+                });
+                // A null description is a type error to llama-server and a
+                // refusal elsewhere: the key is left out when there is none.
+                if let Some(d) = &t.description {
+                    function["description"] = json!(d);
+                }
+                // A strict tool says so; not strict is Chat Completions' own
+                // default, so `false` goes as no key, as a chat client's
+                // tool without one does. A Responses client's tool without
+                // `strict` (strict where its schema allows) has no spelling
+                // here and goes as not strict (ToolDef::strict).
+                if t.strict == Some(true) {
+                    function["strict"] = json!(true);
+                }
+                json!({"type": "function", "function": function})
             })
             .collect();
         body.insert("tools".into(), Value::Array(tools));
@@ -116,6 +157,7 @@ pub fn build_chat_body(
             body.insert("tool_choice".into(), v);
         }
     }
+    super::structured::apply(&mut body, ir);
     if stream {
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({"include_usage": true}));
@@ -124,8 +166,8 @@ pub fn build_chat_body(
     if !c.is_empty() {
         reasoning.apply(&mut body, ir, &c);
     }
-    // Re-emit verbatim the top-level fields the IR doesn't model
-    // (`response_format`, `grammar`, extra llama.cpp sampler params, …). The
+    // Re-emit verbatim the top-level fields the IR doesn't model (`grammar`,
+    // extra llama.cpp sampler params, …). The
     // modeled fields above always win, so this only *adds* keys the gateway
     // would otherwise silently strip on the OpenAI→OpenAI "near pass-through".
     for (k, v) in &ir.passthrough {

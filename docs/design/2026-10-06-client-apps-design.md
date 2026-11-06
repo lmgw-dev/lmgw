@@ -1,5 +1,17 @@
 # lmgw for client apps: device keys, the Chat feed, ongoing folders, device-hosted MCP
 
+*Change note, 2026-10-24 (owner rulings, built in WP10 on 2026-10-25):* one fallback setting per model and per
+alias, used for every reason it cannot answer (the hold, a benchmark, VRAM outside lmgw, a
+deferred background request, an unavailable candidate, an exhausted upstream quota, an unreachable
+upstream, a disabled model, alias or upstream); the reason is recorded, never configured. The
+global `settings.hold.fallback_alias` and the `inherit` mode are removed, and a fallback may be a
+local model, with each hop of a chain checked on its own. A fallback is a model of the same type
+(decision 29): a save that would give any row's fallback another type, a candidate alias or a
+loop is refused, naming the row. So the feed's
+`hold` event and `Hello` lose `fallback_alias` (it was the removed global), and a client shows a
+model's fallback from that model, not from the hold. See
+[2026-10-24-openai-egress-design.md](2026-10-24-openai-egress-design.md) §14.11.
+
 **Draft v2, 2026-10-06**: v1 plus an adversarial review checked against main at 2baa764
 (appendix "Review dispositions"). Paths are relative to the lmgw repository at 2baa764. Companion
 records in `docs/design/` are cited by short name: "principals §n" (2026-09-22), "chat-complete
@@ -689,7 +701,7 @@ WebSocket links close with 4003 and a reason.
 - the view talks to its host in JSON-RPC over postMessage: `ui/initialize`, the `ui/notifications/*`
   set, and proxied `tools/call` and `resources/read`.
 
-The brief named "MCP 2026-07-28"; this draft found MCP Apps only as that extension, so the
+The original scope named "MCP 2026-07-28"; this draft found MCP Apps only as that extension, so the
 spec pins the extension document above. G's first step re-reads it (§7.4).
 
 **Voice and the visualisation**

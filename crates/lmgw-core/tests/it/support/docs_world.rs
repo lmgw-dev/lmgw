@@ -120,7 +120,7 @@ pub async fn setup(mock: &MockServer) -> SharedState {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -149,6 +149,7 @@ pub async fn setup(mock: &MockServer) -> SharedState {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await

@@ -34,6 +34,7 @@ use quickdoc_core::embed::{EmbedIdentity, Embedder, Reranker, TokenCounter};
 use quickdoc_core::error::{QuickdocError, Result as QResult};
 
 use crate::erased::Erased;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use super::limit;
@@ -54,6 +55,8 @@ pub struct BoundedEmbedder {
     pub state: SharedState,
     pub alias: String,
     pub notes: Notes,
+    /// Whose traffic a count it makes is: the search's.
+    pub origin: Origin,
 }
 
 impl Embedder for BoundedEmbedder {
@@ -69,9 +72,12 @@ impl Embedder for BoundedEmbedder {
             };
             let mut shortened = Vec::with_capacity(texts.len());
             for t in texts {
-                let (counter, _) = limit::cached_counter(&self.state, &self.alias, t).await;
+                let (counter, _) =
+                    limit::cached_counter(&self.state, &self.alias, t, self.origin).await;
                 let counter = if limit::near_limit(counter.count(t) as u64, max) {
-                    limit::calibrate(&self.state, &self.alias, t).await.0
+                    limit::calibrate(&self.state, &self.alias, t, self.origin)
+                        .await
+                        .0
                 } else {
                     shortened.push(t.clone());
                     continue;
@@ -102,6 +108,8 @@ pub struct BoundedReranker {
     pub state: SharedState,
     pub alias: String,
     pub notes: Notes,
+    /// As [`BoundedEmbedder::origin`].
+    pub origin: Origin,
 }
 
 impl Reranker for BoundedReranker {
@@ -139,7 +147,8 @@ impl Reranker for BoundedReranker {
             let Some(max) = input.tokens else {
                 return self.inner.rerank_scores(query, documents).await;
             };
-            let (counter, _) = limit::cached_counter(&self.state, &self.alias, query).await;
+            let (counter, _) =
+                limit::cached_counter(&self.state, &self.alias, query, self.origin).await;
             // `count` carries two special tokens, so `count(q) + count(d)` is the
             // pair with the four a query + document pair is wrapped in. The
             // documents are counted by tiktoken (local; what each chunk stores)
@@ -147,7 +156,8 @@ impl Reranker for BoundedReranker {
             // The query is counted exactly when it is near the limit.
             let mut q = counter.count(query) as u64;
             if limit::near_limit(q, max) {
-                let (exact, _) = limit::calibrate(&self.state, &self.alias, query).await;
+                let (exact, _) =
+                    limit::calibrate(&self.state, &self.alias, query, self.origin).await;
                 q = exact.count(query) as u64;
             }
             let fits: Vec<bool> = documents

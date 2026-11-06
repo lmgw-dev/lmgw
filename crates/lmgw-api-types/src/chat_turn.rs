@@ -50,9 +50,18 @@ pub struct SendRequest {
     /// own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kb_refs: Vec<i64>,
-    /// A dictated message's origin, stored on the user message.
+    /// How a dictated message was dictated, stored on the user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<DictatedVoice>,
+    /// Where the user writes from, in one sentence the client words (a
+    /// browser sidebar: "Typed in Kai's sidebar in Firefox, beside the tab
+    /// “Example” (https://example.org/)."). Stored on the user message and
+    /// put before its text in the model's input on every turn, marked as
+    /// what the client says rather than the user's words; the thread reads
+    /// it back as the message's `origin`. Absent, or blank: the message
+    /// says nothing of where it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// Read the reply aloud as it streams: the stream then carries the
     /// speech frames too.
     #[serde(default, skip_serializing_if = "is_false")]

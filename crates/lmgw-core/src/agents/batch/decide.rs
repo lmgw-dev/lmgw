@@ -207,9 +207,14 @@ pub async fn for_run(
     // under the hold a row without a usable fallback is refused here, before
     // any tool call, as the model call's path refuses. A held row with a
     // fallback passes, since a configured fallback always applies.
-    crate::gate::resolve(state, &d.model, crate::gate::RouteCheck::Decision)
-        .await
-        .map_err(|f| format!("model '{}': {}", d.model, f.error))?;
+    crate::gate::resolve(
+        state,
+        &d.model,
+        crate::gate::RouteCheck::Decision,
+        crate::runtime::registry::Origin::Owner,
+    )
+    .await
+    .map_err(|f| format!("model '{}': {}", d.model, f.error))?;
     Ok(Some(d))
 }
 

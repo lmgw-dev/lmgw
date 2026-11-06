@@ -11,8 +11,7 @@ use serde_json::json;
 
 use super::*;
 use crate::config::{
-    CandidateAlias, HoldFallbackMode, LlamaParams, LocalModel, ModelAlias, Protocol, Upstream,
-    UpstreamKind,
+    CandidateAlias, LlamaParams, LocalModel, ModelAlias, Protocol, Upstream, UpstreamKind,
 };
 use crate::state::AppState;
 
@@ -33,8 +32,9 @@ fn local(model_id: &str, modalities: Option<&[&str]>) -> LocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::default(),
-        hold_fallback: None,
+        // Every chat row's own fallback (openai egress design §14.2), as
+        // migration 0095 wrote it for a row that followed the old global.
+        fallback: Some("openai/gpt".into()),
         capabilities_override: modalities
             .map(|m| json!({ "capabilities": { "task": "chat", "input_modalities": m } })),
         ladder: vec![],
@@ -49,7 +49,7 @@ fn upstream(id: i64, name: &str, kind: UpstreamKind) -> Upstream {
         protocol: if kind == UpstreamKind::LlamaServer {
             Protocol::LlamaCpp
         } else {
-            Protocol::Openai
+            Protocol::OpenaiCompatible
         },
         kind,
         // A closed port: a catalog probe is refused at once.
@@ -78,6 +78,7 @@ fn alias(name: &str, upstream_id: i64) -> (String, ModelAlias) {
             capabilities_override: Some(json!({
                 "capabilities": { "task": "chat", "input_modalities": ["text", "audio"] }
             })),
+            fallback: None,
         },
     )
 }
@@ -90,11 +91,6 @@ fn candidate(name: &str, candidates: &[&str], fallback: Option<&str>) -> (String
             alias: name.into(),
             candidates: candidates.iter().map(|c| c.to_string()).collect(),
             background: false,
-            fallback_mode: if fallback.is_some() {
-                HoldFallbackMode::Alias
-            } else {
-                HoldFallbackMode::None
-            },
             fallback: fallback.map(String::from),
             capabilities_disabled: vec![],
             capabilities_enabled: vec!["audio".into()],
@@ -116,14 +112,13 @@ fn candidate(name: &str, candidates: &[&str], fallback: Option<&str>) -> (String
 /// `pick-guard-off` (`hears`, `pooled-off`), `pick-lost` (`gone-off`, then
 /// `hears`; fallback `openai/gpt`), `pick-bg` (background, `hears`; fallback
 /// `openai/gpt`), `pick-bg-alone` (background, no fallback) and
-/// `pick-guarded-fb` (`hears`, `pooled`; fallback `openai/gpt`). The hold's
-/// chat fallback is `openai/gpt`; speech-to-text is `openai/whisper` (task
+/// `pick-guarded-fb` (`hears`, `pooled`; fallback `openai/gpt`). Every chat
+/// row's own fallback is `openai/gpt`; speech-to-text is `openai/whisper` (task
 /// `asr`); the setting is `on` unless `f` says otherwise.
 async fn gateway(f: impl FnOnce(&mut crate::config::Snapshot)) -> SharedState {
     let state = AppState::init_for_tests().await.unwrap();
     let mut snap = (*state.snapshot()).clone();
     snap.settings.chat_voice_audio_input = "on".into();
-    snap.settings.hold.fallback_alias = Some("openai/gpt".into());
     snap.settings.chat_stt_alias = "openai/whisper".into();
     let mut unsure = local("unsure", None);
     unsure.params.mmproj_path = Some("missing-mmproj.gguf".into());
@@ -186,6 +181,13 @@ async fn gateway(f: impl FnOnce(&mut crate::config::Snapshot)) -> SharedState {
     f(&mut snap);
     state.set_snapshot_for_tests(snap);
     state
+}
+
+/// Every chat row falls back to `to` (`None`: no fallback).
+fn all_fall_back_to(s: &mut crate::config::Snapshot, to: Option<&str>) {
+    for m in &mut s.local_models {
+        m.fallback = to.map(String::from);
+    }
 }
 
 fn thread(model: &str) -> ChatThread {
@@ -320,7 +322,7 @@ async fn a_route_that_does_not_settle_gives_its_own_error() {
     // The hold with no fallback at all: the hold's own refusal.
     let state = gateway(|s| {
         s.settings.hold.active = true;
-        s.settings.hold.fallback_alias = None;
+        all_fall_back_to(s, None);
     })
     .await;
     let w = why(&state, &thread("hears")).await;
@@ -424,7 +426,7 @@ async fn a_benchmark_run_and_a_fallback_on_the_network_are_judged_alike() {
     // A llama-server elsewhere as the hold's fallback hears like any other.
     let state = gateway(|s| {
         s.settings.hold.active = true;
-        s.settings.hold.fallback_alias = Some("lan-model".into());
+        all_fall_back_to(s, Some("lan-model"));
     })
     .await;
     assert_eq!(
@@ -491,7 +493,7 @@ async fn the_verdict_forecasts_what_a_block_would_bring() {
         Some("this goes to openai/gpt, which does not take audio input")
     );
     // With no hold fallback at all, and one that does not resolve.
-    let state = gateway(|s| s.settings.hold.fallback_alias = None).await;
+    let state = gateway(|s| all_fall_back_to(s, None)).await;
     assert_eq!(
         forecast(verdict(&state, &thread("hears")).await)
             .unwrap()
@@ -499,7 +501,7 @@ async fn the_verdict_forecasts_what_a_block_would_bring() {
             .as_deref(),
         Some("hears has no fallback, so the turn is refused")
     );
-    let state = gateway(|s| s.settings.hold.fallback_alias = Some("gone".into())).await;
+    let state = gateway(|s| all_fall_back_to(s, Some("gone"))).await;
     assert_eq!(
         forecast(verdict(&state, &thread("hears")).await)
             .unwrap()

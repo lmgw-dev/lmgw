@@ -14,6 +14,14 @@
   ]
  },
  {
+  "js": "(()=>{const b=document.querySelector('.nav-branch[data-branch=labs] .nav-head');if(b.getAttribute('aria-expanded')==='false')b.click();return b.getAttribute('aria-expanded')})()",
+  "label": "unfold Labs if folded (idempotent)"
+ },
+ {
+  "expect": "document.querySelector('.nav-branch[data-branch=labs] .nav-head').getAttribute('aria-expanded')==='true'",
+  "label": "Labs is unfolded"
+ },
+ {
   "repeat": 2,
   "steps": [
    {
@@ -67,6 +75,14 @@
     "go": "/"
    }
   ]
+ },
+ {
+  "js": "(()=>{const b=document.querySelector('.nav-branch[data-branch=models] .nav-caret');if(b.getAttribute('aria-expanded')==='false')b.click();return b.getAttribute('aria-expanded')})()",
+  "label": "unfold Models if folded (idempotent)"
+ },
+ {
+  "expect": "document.querySelector('.nav-branch[data-branch=models] .nav-caret').getAttribute('aria-expanded')==='true'",
+  "label": "Models is unfolded"
  },
  {
   "repeat": 2,

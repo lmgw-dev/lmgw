@@ -1,84 +1,124 @@
-//! The OpenAI egress (§7): OpenAI and OpenAI-compatible providers, a near
-//! pass-through composed from [`super::openai_wire`]. llama.cpp's servers
-//! have an egress of their own ([`super::llama_cpp`], llama egress design
-//! §3); this one speaks only OpenAI's vocabulary.
+//! The OpenAI platform's egress (openai egress design §3.2): api.openai.com
+//! and its regional hosts, the protocol `openai`. Every other OpenAI-shaped
+//! provider leaves through [`super::openai_compatible`].
+//!
+//! It composes [`super::openai_wire`] as the compatible egress does; the
+//! egress corpus (`tests/it/egress_golden.rs`, the `openai_platform` cases)
+//! started byte-identical to the compatible egress's (WP1), and each change
+//! the platform takes on top (the design's §3.3) landed as a commit of its
+//! own that re-blessed only its own platform cases: the cap as
+//! `max_completion_tokens` ([`DIALECT`], P1), the llama samplers left out
+//! and named as ignored (P2), OpenRouter's `reasoning` object translated
+//! into `reasoning_effort` (`reasoning`, P3), and OpenAI's error codes with
+//! a structured-output classifier of OpenAI's shape only (`errors`, P4), and
+//! the answer's `service_tier` read whole and streamed (P5, WP4), which the
+//! row is priced at (§5). Since WP7 (P7, decision 16) its chat sends leave
+//! on OpenAI's Responses wire ([`responses`]) unless a send asks for
+//! something only Chat Completions has; that switch re-blessed the platform
+//! cases of both corpora and nothing else.
+//!
+//! It offers no rerank and no System One: OpenAI serves neither, so both stay
+//! the trait's `Unsupported`, and the System One route guard refuses an
+//! `openai` row before admission.
 
-use serde_json::{json, Map, Value};
+mod count;
+mod errors;
+mod reasoning;
+pub mod responses;
 
-use super::openai_wire::{self, FlattenToolResults, ReasoningStep};
-pub(crate) use super::openai_wire::{has_reasoning_object, parse_timings};
-pub use super::openai_wire::{messages_json, OpenaiDecoder};
+pub use count::{chat_prompt_text, completion_text, count_chat, count_locally, local_count};
+
+use serde_json::Value;
+
+use super::openai_compatible::tiktoken_count;
+use super::openai_wire::{self, BodyDialect, FlattenToolResults, ReadTier};
 use crate::config::{Protocol, Upstream};
-use crate::egress::{CountPlan, Egress, EgressStreamDecoder};
+use crate::egress::{apply_bearer_auth, watch, CountPlan, Egress, EgressStreamDecoder};
 use crate::error::GatewayError;
 use crate::ir::{
-    ChatRequest, Completion, EmbeddingsRequest, EmbeddingsResponse, Params, ReasoningControl,
-    RerankRequest, RerankResponse,
+    ChatRequest, Completion, EmbeddingsRequest, EmbeddingsResponse, Params, SealScope,
 };
+use reasoning::{drop_reasoning_object, PlatformReasoning};
+use responses::Wire;
 
 pub struct OpenaiEgress;
 
-/// This egress's [`ReasoningStep`]: [`apply_reasoning`] before the
-/// passthrough loop, and nothing after it.
-struct OpenaiReasoning;
-
-impl ReasoningStep for OpenaiReasoning {
-    fn apply(&self, body: &mut Map<String, Value>, ir: &ChatRequest, c: &ReasoningControl) {
-        apply_reasoning(body, ir, c);
-    }
-
-    /// Nothing to reconcile: the only reasoning key this vocabulary has,
-    /// `reasoning_effort`, is set before the loop and wins over the client's
-    /// copy. Every other key the client sent goes verbatim like any unknown
-    /// key — llama-server's `thinking_budget_tokens` included, which this
-    /// egress rewrote to the resolved budget until llama.cpp got its own
-    /// (llama egress design I2). OpenRouter's `reasoning` object is the
-    /// shared builder's to reconcile.
-    fn reconcile(&self, _body: &mut Map<String, Value>, _c: &ReasoningControl) {}
-}
-
-/// Render the normalised reasoning triple (§5.3) into the OpenAI body.
+/// The platform's spelling of the modelled fields (design §7.1, P1): the cap
+/// is `max_completion_tokens`. The reference (checked 2026-10-24,
+/// <https://developers.openai.com/api/reference/resources/chat.md>, "Create
+/// chat completion") calls `max_tokens` "deprecated in favor of
+/// `max_completion_tokens`, and … not compatible with o-series models", and
+/// `max_completion_tokens` "an upper bound for the number of tokens that can
+/// be generated for a completion, including visible output tokens and
+/// reasoning tokens". Only the spelling changes: the gate's clamp and fit
+/// read the IR's `max_tokens` as before.
 ///
-/// An OpenAI-protocol provider knows `reasoning_effort` alone, with `"none"`
-/// as that vocabulary's own way of saying off. A budget and a bare "on" have
-/// no spelling here; the handler reports them back to the client as ignored
-/// (`x-lmgw-reasoning-ignored`) rather than sending them somewhere they would
-/// be meaningless.
-///
-/// A client that spoke OpenRouter's dialect gets OpenRouter's dialect back:
-/// its `reasoning` object is reconciled to the resolved control by the shared
-/// builder after the passthrough loop, and adding a second, scalar spelling
-/// of the same thing would be lmgw inventing a field the client did not
-/// send — which providers that read both have every right to resolve
-/// differently than lmgw would.
-///
-/// Called **before** the passthrough loop so that the level, which the
-/// gateway resolved from every tier, wins over a stale copy riding along in
-/// `passthrough` (that loop only fills keys the body does not already have).
-fn apply_reasoning(body: &mut Map<String, Value>, ir: &ChatRequest, c: &ReasoningControl) {
-    if has_reasoning_object(ir) {
-        return;
-    }
-    if c.enabled == Some(false) {
-        body.insert("reasoning_effort".into(), json!("none"));
-    } else if let Some(e) = &c.effort {
-        body.insert("reasoning_effort".into(), json!(e));
+/// The modelled llama.cpp samplers are not written (P2): the same reference
+/// has no `top_k`, `min_p` or `repeat_penalty`, and OpenAI rejects a
+/// parameter it does not know. They are never dropped silently: the API
+/// routes name them in `x-lmgw-params-ignored`
+/// ([`crate::proxy::params_ignored`]), the Chat with its turn
+/// (`web/chat_sampling.rs`). A client's own unknown keys still go verbatim
+/// through passthrough: the client sent them.
+pub const DIALECT: BodyDialect = BodyDialect {
+    cap: "max_completion_tokens",
+    llama_samplers: false,
+};
+
+/// The body [`OpenaiEgress::build_chat`] posts to `up`, on the wire the send
+/// takes ([`responses::wire_for`], P7): the Responses body
+/// ([`responses::responses_body`]), or the Chat body ([`chat_wire_body`]).
+pub fn chat_body(
+    ir: &ChatRequest,
+    model: &str,
+    params: &Params,
+    stream: bool,
+    up: &Upstream,
+) -> Value {
+    match responses::wire_for(ir, params) {
+        Wire::Responses => responses::responses_body(ir, model, params, stream, &SealScope::of(up)),
+        Wire::Chat => chat_wire_body(ir, model, params, stream),
     }
 }
 
-/// The chat body [`OpenaiEgress::build_chat`] posts: the shared builder
-/// ([`openai_wire::build_chat_body`]) with this egress's reasoning step and
-/// the text-only tool-result rendering, which is all OpenAI's `role: "tool"`
-/// message takes.
-pub fn chat_body(ir: &ChatRequest, model: &str, params: &Params, stream: bool) -> Value {
-    openai_wire::build_chat_body(
+/// The platform's Chat Completions body: the shared builder with the
+/// platform's [`DIALECT`], its reasoning vocabulary (`reasoning`, P3) and
+/// text-only tool results, which is all OpenAI's `role: "tool"` message
+/// takes.
+pub fn chat_wire_body(ir: &ChatRequest, model: &str, params: &Params, stream: bool) -> Value {
+    let mut body = openai_wire::build_chat_body(
         ir,
         model,
         params,
         stream,
-        &OpenaiReasoning,
+        DIALECT,
+        &PlatformReasoning,
         &FlattenToolResults,
-    )
+    );
+    drop_reasoning_object(&mut body);
+    ask_for_the_tier(&mut body);
+    body
+}
+
+/// The platform answers with the tier that served the request only when the
+/// request carried a `service_tier`; `auto`, which is the project's setting
+/// and so what an unset one means, is sent when the client set none (design
+/// §5.2, decision 14). The request's own tier stays what the note names.
+pub fn ask_for_the_tier(body: &mut Value) {
+    if let Some(o) = body.as_object_mut() {
+        o.entry("service_tier").or_insert_with(|| "auto".into());
+    }
+}
+
+/// A whole answer on either wire, its seals naming the upstream row `scope`
+/// names (the default scope: none).
+fn parse_platform_completion(body: &[u8], scope: &SealScope) -> Result<Completion, GatewayError> {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        if responses::is_response_object(&v) {
+            return responses::parse_response(&v, scope);
+        }
+    }
+    openai_wire::parse_completion_with(body, ReadTier::Yes)
 }
 
 impl Egress for OpenaiEgress {
@@ -95,20 +135,67 @@ impl Egress for OpenaiEgress {
         params: &Params,
         stream: bool,
     ) -> Result<reqwest::RequestBuilder, GatewayError> {
-        let body = chat_body(ir, model, params, stream);
-        Ok(openai_wire::chat_request(http, up, &body))
+        match responses::chat_only(ir, params) {
+            None => {
+                let body = responses::responses_body(ir, model, params, stream, &SealScope::of(up));
+                let url = format!("{}/responses", up.base());
+                let rb = apply_bearer_auth(http.post(url).json(&body), up);
+                Ok(watch::built(up, &ir.passthrough, rb))
+            }
+            Some(why) => {
+                tracing::debug!(
+                    upstream = %up.name,
+                    model,
+                    "this send takes the Chat Completions wire for {}",
+                    why.describe()
+                );
+                let body = chat_wire_body(ir, model, params, stream);
+                let rb = openai_wire::chat_request(http, up, &body);
+                Ok(watch::built(up, &ir.passthrough, rb))
+            }
+        }
     }
 
+    /// A Response object (the Responses wire, P7) or a chat completion (the
+    /// Chat wire), told apart by its shape; the answer's `service_tier` is
+    /// read on both (P5, openai egress design §5.2): the tier the row is
+    /// priced at.
     fn parse_completion(&self, body: &[u8]) -> Result<Completion, GatewayError> {
-        openai_wire::parse_completion(body)
+        parse_platform_completion(body, &SealScope::default())
     }
 
+    /// A Response's reasoning seals name `up` (openai egress design §7.3.1).
+    fn parse_completion_from(
+        &self,
+        up: &Upstream,
+        body: &[u8],
+    ) -> Result<Completion, GatewayError> {
+        parse_platform_completion(body, &SealScope::of(up))
+    }
+
+    /// Either wire's stream, each event read by its shape
+    /// ([`responses::PlatformDecoder`]); a chat chunk's `service_tier` is
+    /// read on every chunk, a Responses stream's from its terminal event
+    /// (P5). A decoder no send site made: its seals name no row.
     fn new_decoder(&self) -> Box<dyn EgressStreamDecoder> {
-        Box::new(OpenaiDecoder::default())
+        Box::new(responses::PlatformDecoder::default())
     }
 
+    /// The stream's reasoning seals name `up` (§7.3.1).
+    fn decoder_for(&self, up: &Upstream) -> Box<dyn EgressStreamDecoder> {
+        Box::new(responses::PlatformDecoder::for_scope(SealScope::of(up)))
+    }
+
+    /// OpenAI's own error codes (`errors`, P4): `context_length_exceeded`
+    /// and the `429`s told apart.
     fn map_error(&self, status: u16, body: &[u8]) -> GatewayError {
-        openai_wire::map_error(status, body)
+        errors::map_error(status, body)
+    }
+
+    /// OpenAI's structured-output refusals in OpenAI's own shape only (P4):
+    /// the aggregator and llama.cpp texts are the compatible egress's.
+    fn structured_refusal(&self, status: u16, body: &[u8]) -> Option<GatewayError> {
+        openai_wire::structured::openai_refusal(status, body)
     }
 
     fn build_embeddings(
@@ -137,10 +224,8 @@ impl Egress for OpenaiEgress {
     }
 
     /// Not reached through this egress's own plan, which never asks the
-    /// upstream (above). It reads a `/tokenize` answer as the llama.cpp
-    /// egress does — a shape vLLM and SGLang share — rather than refusing, so
-    /// what this egress answers did not change when llama.cpp's servers got
-    /// their own (llama egress design, WP2c).
+    /// upstream (above). It reads a `/tokenize` answer as the compatible
+    /// egress does, so the two answer the same.
     fn parse_count(&self, body: &[u8]) -> Result<u64, GatewayError> {
         openai_wire::parse_tokenize_count(body)
     }
@@ -148,59 +233,4 @@ impl Egress for OpenaiEgress {
     fn parse_embeddings(&self, body: &[u8]) -> Result<EmbeddingsResponse, GatewayError> {
         openai_wire::parse_embeddings(body)
     }
-
-    fn build_rerank(
-        &self,
-        http: &reqwest::Client,
-        up: &Upstream,
-        model: &str,
-        req: &RerankRequest,
-    ) -> Result<reqwest::RequestBuilder, GatewayError> {
-        openai_wire::build_rerank(http, up, model, req)
-    }
-
-    fn parse_rerank(&self, body: &[u8]) -> Result<RerankResponse, GatewayError> {
-        openai_wire::parse_rerank(body)
-    }
-
-    fn build_systemone(
-        &self,
-        http: &reqwest::Client,
-        up: &Upstream,
-        model: &str,
-        body: &openai_wire::SystemOneBody,
-    ) -> Result<reqwest::RequestBuilder, GatewayError> {
-        openai_wire::build_systemone(http, up, model, body)
-    }
-}
-
-/// Count `text` with the model's tiktoken encoding (OpenAI's tokenizer is
-/// public). Unknown / future model names fall back to `o200k_base` — the
-/// encoding of the current GPT-4o/o-series family — and say so: the `bool` is
-/// `true` when the encoding was that guess rather than the model's own, which
-/// [`CountPlan::Guessed`] carries to the response (api-docs design §5.1).
-///
-/// Both encoders are tiktoken-rs's process-wide singletons. `o200k_base()`
-/// builds a fresh 200k-entry encoder on every call (450 ms in a debug build),
-/// and the fallback is the common case here: no open-weights model's name is
-/// known to tiktoken, and the knowledge bases ask for a count on each limit
-/// lookup.
-fn tiktoken_count(model: &str, text: &str) -> (u64, bool) {
-    let (n, guessed) = match tiktoken_rs::bpe_for_model(model) {
-        Ok(bpe) => (bpe.encode_ordinary(text).len(), false),
-        Err(_) => {
-            tracing::debug!("tiktoken: unknown model '{model}', counting with o200k_base");
-            let n = match tiktoken_rs::bpe_for_tokenizer(
-                tiktoken_rs::tokenizer::Tokenizer::O200kBase,
-            ) {
-                Ok(bpe) => bpe.encode_ordinary(text).len(),
-                Err(e) => {
-                    tracing::error!("tiktoken: o200k_base unavailable: {e}");
-                    0
-                }
-            };
-            (n, true)
-        }
-    };
-    (n as u64, guessed)
 }

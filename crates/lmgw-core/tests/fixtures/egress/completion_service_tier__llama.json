@@ -1,0 +1,20 @@
+{
+  "completion": {
+    "content": [
+      {
+        "text": "ok",
+        "type": "text"
+      }
+    ],
+    "finish_reason": "stop",
+    "model": "the-model",
+    "reasoning": "",
+    "usage": {
+      "cache_write_tokens": 4,
+      "cached_input_tokens": 8,
+      "completion_tokens": 2,
+      "prompt_tokens": 20,
+      "reasoning_tokens": 0
+    }
+  }
+}

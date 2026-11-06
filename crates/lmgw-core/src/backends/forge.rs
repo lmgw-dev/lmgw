@@ -33,6 +33,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use lmgw_api_types::builds::{ForgePr, ForgePrPage, RateLimit, RefEntry, RemoteRefsView};
+use lmgw_api_types::settings_labels::FORGE_TOKENS_AT;
 use reqwest::header::{HeaderMap, ACCEPT, LINK, LOCATION};
 use reqwest::{StatusCode, Url};
 use serde::Deserialize;
@@ -355,6 +356,7 @@ impl ForgeClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(USER_AGENT)
+            .no_gzip()
             .redirect(same_origin_redirects())
             .build()
             .map_err(|e| format!("building the forge HTTP client: {e}"))?;
@@ -850,7 +852,7 @@ fn api_error(
         } else {
             format!(
                 ". Requests without a token get the lowest limit (GitHub: 60 an hour); a forge \
-                 token for {host} (Settings) raises it"
+                 token for {host} ({FORGE_TOKENS_AT}) raises it"
             )
         };
         return format!("{what}: {name} API rate limit reached{used}{when}{hint}");
@@ -883,12 +885,12 @@ fn api_error(
     };
     match status {
         StatusCode::UNAUTHORIZED if token_sent => format!(
-            "{what}: the forge token for {host} was rejected ({code}{said}) — check it in \
-             Settings"
+            "{what}: the forge token for {host} was rejected ({code}{said}) — check it under \
+             {FORGE_TOKENS_AT}"
         ),
         StatusCode::UNAUTHORIZED => format!(
             "{what}: {name} wants authentication ({code}{said}) — add a forge token for {host} \
-             (Settings)"
+             ({FORGE_TOKENS_AT})"
         ),
         StatusCode::FORBIDDEN | StatusCode::NOT_FOUND if token_sent => format!(
             "{what}: {name} answered {code}{said} — check the repository URL and the number, \
@@ -896,7 +898,7 @@ fn api_error(
         ),
         StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => format!(
             "{what}: {name} answered {code}{said} — check the repository URL and the number; a \
-             private repository needs a forge token for {host} (Settings){ghe}"
+             private repository needs a forge token for {host} ({FORGE_TOKENS_AT}){ghe}"
         ),
         _ => format!("{what}: {name} answered {code}{said}"),
     }
@@ -1448,6 +1450,36 @@ mod tests {
             chrono::Utc::now(),
         );
         assert!(!e.contains("GitHub Enterprise"), "{e}");
+    }
+
+    /// A refusal that asks for a forge token says where the dashboard keeps
+    /// them, not just "Settings".
+    #[test]
+    fn a_token_refusal_names_where_forge_tokens_are_set() {
+        let repo = ForgeRepo::parse("https://github.com/o/r").unwrap();
+        let api = Api {
+            forge: Forge::Github,
+            name: "GitHub",
+            base: "https://api.github.com".into(),
+        };
+        for (status, sent) in [
+            (StatusCode::UNAUTHORIZED, true),
+            (StatusCode::UNAUTHORIZED, false),
+            (StatusCode::NOT_FOUND, false),
+        ] {
+            let e = api_error(
+                &api,
+                &repo,
+                "PR #7 of o/r",
+                status,
+                &HeaderMap::new(),
+                "",
+                &Quota::default(),
+                sent,
+                chrono::Utc::now(),
+            );
+            assert!(e.contains("Settings → Engines → Forge tokens"), "{e}");
+        }
     }
 
     #[test]

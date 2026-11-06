@@ -92,7 +92,6 @@ async fn the_document_names_the_type_each_save_answers_with() {
                 "active",
                 "draining",
                 "failed",
-                "fallback_alias",
                 "kept_on_cpu",
                 "message",
                 "ok",
@@ -124,7 +123,7 @@ async fn an_upstream_save_and_an_alias_save_answer_the_row_they_wrote() {
         &gw,
         "upstream_set",
         json!({"action": "create", "name": "o1", "base_url": "https://api.example.test/v1",
-               "protocol": "openai", "api_key": "sk-test"}),
+               "protocol": "openai_compatible", "api_key": "sk-test"}),
     )
     .await;
     let created = common::round_trips::<dto::RowSaved>(what, &live);
@@ -434,7 +433,6 @@ async fn the_hold_leaves_benchmark_aborted_out_unless_a_run_was_aborted() {
     let without_run = [
         "ok",
         "active",
-        "fallback_alias",
         "stopped",
         "draining",
         "failed",
@@ -446,22 +444,21 @@ async fn the_hold_leaves_benchmark_aborted_out_unless_a_run_was_aborted() {
     let noop = common::round_trips::<dto::HoldSet>(what, &live);
     assert_keys(&live, &without_run);
     assert_eq!(noop.benchmark_aborted, None);
-    assert!(live["fallback_alias"].is_null(), "present, `null`: {live}");
+    assert!(
+        live.get("fallback_alias").is_none(),
+        "no global fallback: {live}"
+    );
     assert_eq!(live["stopped"], json!([]));
     assert_eq!(noop.message, "the GPU hold was already off — nothing to do");
 
     // A fallback is a string; nothing is running, so nothing is stopped.
-    let mut s = state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&state.db, &s).await.unwrap();
-    state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&state, Some("cloud-chat")).await;
 
     let live = op(&gw, "hold_set", json!({"active": true})).await;
     let engaged = common::round_trips::<dto::HoldSet>(what, &live);
     assert_keys(&live, &without_run);
     assert_eq!(engaged.benchmark_aborted, None);
     assert!(engaged.active);
-    assert_eq!(engaged.fallback_alias.as_deref(), Some("cloud-chat"));
     for list in ["stopped", "draining", "failed", "kept_on_cpu"] {
         assert_eq!(live[list], json!([]), "{list}: {live}");
     }

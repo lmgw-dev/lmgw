@@ -21,7 +21,7 @@ fn token_pending(gw: &device_link::DeviceGw) {
     gw.state
         .devices
         .pending
-        .set(9999, Utc::now() + chrono::Duration::minutes(10));
+        .set(9999, "test", Utc::now() + chrono::Duration::minutes(10));
 }
 
 #[tokio::test]
@@ -316,7 +316,6 @@ async fn the_spa_the_dashboard_api_and_the_agent_proxy_are_not_on_the_device_fac
         ("POST", "/api/op/settings_set"),
         ("GET", "/agents/board/app/"),
         ("POST", "/mcp/admin"),
-        ("GET", "/chat/api/threads/rows"),
         // A path known under another method is no 405 here.
         ("DELETE", "/api/status"),
         ("GET", "/no/such/path"),

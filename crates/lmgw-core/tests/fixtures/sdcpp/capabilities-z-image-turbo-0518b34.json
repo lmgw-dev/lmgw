@@ -1,0 +1,391 @@
+{
+  "current_mode": "img_gen",
+  "defaults": {
+    "batch_count": 1,
+    "cache_mode": "",
+    "cache_option": "",
+    "clip_skip": -1,
+    "control_strength": 0.8999999761581421,
+    "height": 1024,
+    "hires": {
+      "custom_sigmas": [],
+      "denoising_strength": 0.699999988079071,
+      "enabled": false,
+      "scale": 2.0,
+      "steps": 0,
+      "target_height": 0,
+      "target_width": 0,
+      "upscale_tile_size": 128,
+      "upscaler": "Latent"
+    },
+    "image_preprocess": "",
+    "increase_ref_index": false,
+    "ip_adapter_strength": 1.0,
+    "negative_prompt": "",
+    "output_compression": 100,
+    "output_format": "png",
+    "prompt": "",
+    "qwen_image_layers": 3,
+    "ref_image_args": "",
+    "sample_params": {
+      "custom_sigmas": [],
+      "eta": null,
+      "flow_shift": null,
+      "guidance": {
+        "distilled_guidance": 3.5,
+        "img_cfg": null,
+        "slg": {
+          "layer_end": 0.20000000298023224,
+          "layer_start": 0.009999999776482582,
+          "layers": [
+            7,
+            8,
+            9
+          ],
+          "scale": 0.0
+        },
+        "txt_cfg": 1.0
+      },
+      "sample_method": "default",
+      "sample_steps": 8,
+      "scheduler": "default",
+      "shifted_timestep": 0
+    },
+    "scm_mask": "",
+    "scm_policy_dynamic": true,
+    "seed": 42,
+    "strength": 0.75,
+    "vae_tiling_params": {
+      "enabled": false,
+      "extra_tiling_args": "",
+      "rel_size_h": 0.0,
+      "rel_size_w": 0.0,
+      "target_overlap": 0.5,
+      "temporal_tiling": false,
+      "tile_size_h": 0,
+      "tile_size_w": 0
+    },
+    "width": 1024
+  },
+  "defaults_by_mode": {
+    "img_gen": {
+      "batch_count": 1,
+      "cache_mode": "",
+      "cache_option": "",
+      "clip_skip": -1,
+      "control_strength": 0.8999999761581421,
+      "height": 1024,
+      "hires": {
+        "custom_sigmas": [],
+        "denoising_strength": 0.699999988079071,
+        "enabled": false,
+        "scale": 2.0,
+        "steps": 0,
+        "target_height": 0,
+        "target_width": 0,
+        "upscale_tile_size": 128,
+        "upscaler": "Latent"
+      },
+      "image_preprocess": "",
+      "increase_ref_index": false,
+      "ip_adapter_strength": 1.0,
+      "negative_prompt": "",
+      "output_compression": 100,
+      "output_format": "png",
+      "prompt": "",
+      "qwen_image_layers": 3,
+      "ref_image_args": "",
+      "sample_params": {
+        "custom_sigmas": [],
+        "eta": null,
+        "flow_shift": null,
+        "guidance": {
+          "distilled_guidance": 3.5,
+          "img_cfg": null,
+          "slg": {
+            "layer_end": 0.20000000298023224,
+            "layer_start": 0.009999999776482582,
+            "layers": [
+              7,
+              8,
+              9
+            ],
+            "scale": 0.0
+          },
+          "txt_cfg": 1.0
+        },
+        "sample_method": "default",
+        "sample_steps": 8,
+        "scheduler": "default",
+        "shifted_timestep": 0
+      },
+      "scm_mask": "",
+      "scm_policy_dynamic": true,
+      "seed": 42,
+      "strength": 0.75,
+      "vae_tiling_params": {
+        "enabled": false,
+        "extra_tiling_args": "",
+        "rel_size_h": 0.0,
+        "rel_size_w": 0.0,
+        "target_overlap": 0.5,
+        "temporal_tiling": false,
+        "tile_size_h": 0,
+        "tile_size_w": 0
+      },
+      "width": 1024
+    }
+  },
+  "features": {
+    "cache": true,
+    "cancel_generating": false,
+    "cancel_queued": true,
+    "control_image": true,
+    "hires": true,
+    "init_image": true,
+    "ip_adapter_image": true,
+    "lora": true,
+    "mask_image": true,
+    "preview": true,
+    "ref_images": true,
+    "vae_tiling": true
+  },
+  "features_by_mode": {
+    "img_gen": {
+      "cache": true,
+      "cancel_generating": false,
+      "cancel_queued": true,
+      "control_image": true,
+      "hires": true,
+      "init_image": true,
+      "ip_adapter_image": true,
+      "lora": true,
+      "mask_image": true,
+      "preview": true,
+      "ref_images": true,
+      "vae_tiling": true
+    }
+  },
+  "generation_features": {
+    "cache": true,
+    "cache_dit": true,
+    "cache_unet": true,
+    "clip_skip": true,
+    "control_frames": true,
+    "control_image": true,
+    "controlnet": true,
+    "distilled_guidance": true,
+    "end_image": true,
+    "flow_shift": true,
+    "high_noise": true,
+    "img2img": true,
+    "img_cfg": true,
+    "init_image": true,
+    "ip_adapter": true,
+    "lora": true,
+    "mask_image": true,
+    "preview": true,
+    "preview_tae": true,
+    "ref_images": true,
+    "shifted_timestep": true,
+    "slg": true,
+    "vace": true,
+    "vae_tiling": true
+  },
+  "limits": {
+    "max_batch_count": 8,
+    "max_height": 4096,
+    "max_queue_size": 64,
+    "max_upscale_height": 8192,
+    "max_upscale_width": 8192,
+    "max_width": 4096,
+    "min_height": 64,
+    "min_width": 64
+  },
+  "loras": [],
+  "model": {
+    "name": "z_image_turbo-Q4_K.gguf",
+    "path": "/models/leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q4_K.gguf",
+    "stem": "z_image_turbo-Q4_K"
+  },
+  "output_formats": [
+    "png",
+    "jpeg",
+    "webp"
+  ],
+  "output_formats_by_mode": {
+    "img_gen": [
+      "png",
+      "jpeg",
+      "webp"
+    ]
+  },
+  "preview_modes": [
+    "none",
+    "proj",
+    "tae",
+    "vae"
+  ],
+  "runtime": {
+    "error": null,
+    "load_elapsed_seconds": 2.143741626,
+    "models": {},
+    "origin": "command_line",
+    "recipe": null,
+    "runtime_recipe": {
+      "defaults": {},
+      "description": "Uses the loaded command-line model and its generation defaults.",
+      "effective_features": {
+        "cache": true,
+        "cache_dit": true,
+        "cache_unet": true,
+        "clip_skip": true,
+        "control_frames": true,
+        "control_image": true,
+        "controlnet": true,
+        "distilled_guidance": true,
+        "end_image": true,
+        "flow_shift": true,
+        "high_noise": true,
+        "img2img": true,
+        "img_cfg": true,
+        "init_image": true,
+        "ip_adapter": true,
+        "lora": true,
+        "mask_image": true,
+        "preview": true,
+        "preview_tae": true,
+        "ref_images": true,
+        "shifted_timestep": true,
+        "slg": true,
+        "vace": true,
+        "vae_tiling": true
+      },
+      "features": [
+        "cache",
+        "cache_dit",
+        "cache_unet",
+        "clip_skip",
+        "control_frames",
+        "control_image",
+        "controlnet",
+        "distilled_guidance",
+        "end_image",
+        "flow_shift",
+        "high_noise",
+        "img2img",
+        "img_cfg",
+        "init_image",
+        "ip_adapter",
+        "lora",
+        "mask_image",
+        "preview",
+        "preview_tae",
+        "ref_images",
+        "shifted_timestep",
+        "slg",
+        "vace",
+        "vae_tiling"
+      ],
+      "id": "@command-line",
+      "name": "Command-line model (all features)",
+      "slots": [],
+      "source": "command_line"
+    },
+    "state": "ready"
+  },
+  "samplers": [
+    "euler",
+    "euler_a",
+    "heun",
+    "dpm2",
+    "dpm++2s_a",
+    "dpm++2m",
+    "dpm++2mv2",
+    "ipndm",
+    "ipndm_v",
+    "lcm",
+    "ddim_trailing",
+    "tcd",
+    "res_multistep",
+    "res_2s",
+    "er_sde",
+    "euler_cfg_pp",
+    "euler_a_cfg_pp",
+    "euler_ge",
+    "dpm++2m_sde",
+    "dpm++2m_sde_bt",
+    "lms"
+  ],
+  "schedulers": [
+    "discrete",
+    "normal",
+    "karras",
+    "exponential",
+    "ays",
+    "gits",
+    "sgm_uniform",
+    "simple",
+    "smoothstep",
+    "kl_optimal",
+    "lcm",
+    "bong_tangent",
+    "ltx2",
+    "logit_normal",
+    "flux2",
+    "flux",
+    "beta",
+    "llada_image"
+  ],
+  "supported_modes": [
+    "img_gen"
+  ],
+  "upscale": false,
+  "upscalers": [
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "None"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Lanczos"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Nearest"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (nearest)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (nearest-exact)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (antialiased)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (bicubic)"
+    },
+    {
+      "image_upscale": false,
+      "model": false,
+      "name": "Latent (bicubic antialiased)"
+    }
+  ]
+}

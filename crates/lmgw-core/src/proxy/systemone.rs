@@ -115,6 +115,12 @@ async fn relay(state: SharedState, ctx: RequestCtx, body: Result<Bytes, GatewayE
     // Opens the in-flight gauge, and writes the `499` row should the client
     // go away before the row is written (`unanswered.rs`).
     let mut row = Unanswered::open(&state, proto, &ctx, "?", started, RequestClass::Aux);
+    // A malformed `x-lmgw-background` is this route's 400 in its own shape
+    // (per-request background design §3), with its row like every outcome.
+    if let Some(e) = ctx.background_refusal() {
+        row.failed(&e).await;
+        return llama_error_of(&e);
+    }
     let body = match body.and_then(|b| SystemOneBody::parse(&b)) {
         Ok(b) => b,
         Err(e) => {
@@ -147,7 +153,7 @@ async fn relay(state: SharedState, ctx: RequestCtx, body: Result<Bytes, GatewayE
         route,
         hold,
         headers,
-    } = match crate::gate::open(&state, &alias, RouteCheck::Decision).await {
+    } = match crate::gate::open(&state, &alias, RouteCheck::Decision, ctx.origin()).await {
         Ok(o) => o,
         Err(f) => {
             if let Some(route) = f.route.as_deref() {
@@ -176,6 +182,7 @@ async fn relay(state: SharedState, ctx: RequestCtx, body: Result<Bytes, GatewayE
         }
     };
     let status = resp.status();
+    state.upstream_quota.answered(&route, status);
     let relayed = super::relay::RelayedHead::of(resp.headers());
     let bytes = resp.bytes().await;
     // Read to the end: the container no longer has to stay up for it.
@@ -216,6 +223,7 @@ async fn relay(state: SharedState, ctx: RequestCtx, body: Result<Bytes, GatewayE
                 rung: None,
                 degraded: None,
                 quantities: Default::default(),
+                service_tier: Default::default(),
             },
             status.as_u16(),
             None,
@@ -227,7 +235,7 @@ async fn relay(state: SharedState, ctx: RequestCtx, body: Result<Bytes, GatewayE
         // The upstream's own refusal, relayed as it is, is a failed request
         // all the same: its row says what the upstream said.
         let e = crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), &route);
-        row.answered(status.as_u16(), Some((e.kind(), e.to_string())))
+        row.answered(status.as_u16(), Some((e.kind(), e.log_text())))
             .await;
     }
     headers.stamp(relayed.response(status, bytes))
@@ -288,7 +296,7 @@ fn answered_by_lmgw(
             }
             message.push_str(
                 " Pick an image that serves decision models for the row or the aux class on \
-                 the Backends page.",
+                 the Engines page.",
             );
             Some(GatewayError::Refused {
                 status: 501,

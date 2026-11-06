@@ -49,7 +49,7 @@ impl ProfileError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Refused(r) => r.code(),
-            Self::Scope(e) => e.code(),
+            Self::Scope(e) => e.kind(),
             Self::Internal(_) => "internal",
         }
     }
@@ -134,8 +134,7 @@ pub async fn profile_create(
     let mut tx = store::begin_write(&state.db).await?;
     let p = table::create_in(&mut tx, &kind).await??;
     feed::record_profile(&mut tx, feed::kind::PROFILE_CREATED, p.id, &p.name, by).await?;
-    tx.commit().await?;
-    written(state).await;
+    commit(state, tx).await?;
     wire(state, &p, admin).await
 }
 
@@ -166,8 +165,7 @@ pub async fn profile_update(
     admin_use_guard(&mut tx, id, device).await?;
     let p = table::update_in(&mut tx, id, &patch).await??;
     feed::record_profile(&mut tx, feed::kind::PROFILE_UPDATED, p.id, &p.name, by).await?;
-    tx.commit().await?;
-    written(state).await;
+    commit(state, tx).await?;
     wire(state, &p, admin).await
 }
 
@@ -187,8 +185,7 @@ pub async fn profile_reset(
     admin_use_guard(&mut tx, id, device).await?;
     let p = table::reset_in(&mut tx, id).await??;
     feed::record_profile(&mut tx, feed::kind::PROFILE_UPDATED, p.id, &p.name, by).await?;
-    tx.commit().await?;
-    written(state).await;
+    commit(state, tx).await?;
     wire(state, &p, admin).await
 }
 
@@ -205,22 +202,34 @@ pub async fn profile_delete(
     by: feed::By<'_>,
     device: Option<i64>,
 ) -> Result<ProfileDeleted, ProfileError> {
-    let _settings = state.settings_write.lock().await;
-    let name = table::get_chat_profile(&state.db, id)
-        .await?
-        .ok_or(ProfileRefusal::NotFound(id))?
-        .name;
-    let mut tx = store::begin_write(&state.db).await?;
-    admin_use_guard(&mut tx, id, device).await?;
-    let deleted = table::delete_in(&mut tx, id, admin, by).await??;
-    feed::record_profile(&mut tx, feed::kind::PROFILE_DELETED, id, &name, by).await?;
-    tx.commit().await?;
-    // Temporary threads live outside the database: cleared here, as the
-    // delete cleared the stored ones (they are not counted in the answer,
-    // which counts what the transaction cleared).
-    state.chat_temp.clear_profile(id);
-    written(state).await;
-    Ok(deleted)
+    // From the lock on a task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): the lock covers the read and the
+    // write, and a dropped request can no longer skip the temporary
+    // threads' clearing, the publish or the feeds' wake after the commit.
+    let st = state.clone();
+    let by = by.map(str::to_string);
+    crate::detached::detached("deleting the profile", async move {
+        let state = &st;
+        let by = by.as_deref();
+        let _settings = state.settings_write.lock().await;
+        let name = table::get_chat_profile(&state.db, id)
+            .await?
+            .ok_or(ProfileRefusal::NotFound(id))?
+            .name;
+        let mut tx = store::begin_write(&state.db).await?;
+        admin_use_guard(&mut tx, id, device).await?;
+        let deleted = table::delete_in(&mut tx, id, admin, by).await??;
+        feed::record_profile(&mut tx, feed::kind::PROFILE_DELETED, id, &name, by).await?;
+        tx.commit().await?;
+        // Temporary threads live outside the database: cleared here, as the
+        // delete cleared the stored ones (they are not counted in the
+        // answer, which counts what the transaction cleared).
+        state.chat_temp.clear_profile(id);
+        written(state).await;
+        Ok(deleted)
+    })
+    .await
+    .map_err(|r| ProfileError::Internal(r.message))?
 }
 
 /// A device's change, reset or delete of profile `id` while Admin Chat or
@@ -255,6 +264,23 @@ async fn admin_use_guard(
         folders: used.folders,
     }
     .into())
+}
+
+/// Commit `tx`, then [`written`], as a task of its own (*changed
+/// 2026-10-24*, see [`crate::detached::detached`]): a dropped request would
+/// leave the snapshot without the change and the feeds unwoken.
+async fn commit(
+    state: &SharedState,
+    tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+) -> Result<(), ProfileError> {
+    let st = state.clone();
+    crate::detached::detached("saving the profile", async move {
+        tx.commit().await?;
+        written(&st).await;
+        Ok::<_, ProfileError>(())
+    })
+    .await
+    .map_err(|r| ProfileError::Internal(r.message))?
 }
 
 /// After a committed write: the snapshot that holds every profile, and the

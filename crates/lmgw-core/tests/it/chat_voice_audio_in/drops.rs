@@ -152,6 +152,7 @@ async fn world(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: Some(hears()),
+            fallback: None,
         },
     )
     .await
@@ -227,7 +228,8 @@ async fn a_llama_server_that_drops_the_audio_is_remembered_for_the_session() {
 #[tokio::test]
 async fn another_apis_drop_answers_the_turn_from_the_transcript_and_keeps_nothing() {
     for (kind, tools) in [("plain", false), ("tools", true)] {
-        let (state, tid, row, asked) = world(Protocol::Openai, UpstreamKind::Generic, tools).await;
+        let (state, tid, row, asked) =
+            world(Protocol::OpenaiCompatible, UpstreamKind::Generic, tools).await;
         let out = heard_response_for_tests(&state, tid, vec![audio()], row).await;
         assert_eq!(out.result, Ok(SAID.to_string()), "{kind}: {out:?}");
         assert_eq!(out.notes.len(), 1, "{kind}: {out:?}");

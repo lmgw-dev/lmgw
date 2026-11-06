@@ -1,12 +1,12 @@
 //! What a kept lab says about its size (labs-store design §1.5, §2.1): the
-//! results head's "kept · 1 234 runs · 2 set runs · 2.1 MB", its tooltip
+//! results head's "kept · 1 234 runs · 2 set runs · 2.1 MiB", its tooltip
 //! split into text and files, and the words Clear asks with. The runs are
 //! every run the lab keeps, its set runs' items' among them (§3.5). Pure,
 //! so the counts read the same in every lab and the tests pin them.
 
 use lmgw_api_types::lab_store::LabUsage;
 
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 
 fn plural(n: u64, one: &str, many: &str) -> String {
     format!("{} {}", grouped(n), if n == 1 { one } else { many })
@@ -22,7 +22,7 @@ fn set_runs(u: &LabUsage) -> String {
 }
 
 /// The results head's note: "newest first · kept · 48 runs · 2 set runs ·
-/// 21.4 kB", and the files when the lab keeps any ("· 3 files · 4.1 MB").
+/// 21.4 KiB", and the files when the lab keeps any ("· 3 files · 4.1 MiB").
 /// `None` before the usage was read: the size is not guessed.
 pub(in crate::pages) fn kept_note(u: Option<&LabUsage>) -> String {
     match u {
@@ -32,13 +32,13 @@ pub(in crate::pages) fn kept_note(u: Option<&LabUsage>) -> String {
             plural(u.runs, "run", "runs"),
             set_runs(u),
             plural(u.artifact_files, "file", "files"),
-            human_bytes(u.text_bytes + u.artifact_bytes)
+            fmt_bytes(u.text_bytes + u.artifact_bytes)
         ),
         Some(u) => format!(
             "newest first · kept · {}{} · {}",
             plural(u.runs, "run", "runs"),
             set_runs(u),
-            human_bytes(u.text_bytes + u.artifact_bytes)
+            fmt_bytes(u.text_bytes + u.artifact_bytes)
         ),
     }
 }
@@ -55,15 +55,15 @@ pub(in crate::pages) fn kept_title(u: Option<&LabUsage>) -> String {
         set_runs(u),
         plural(u.runs, "run", "runs"),
         plural(u.artifacts, "artifact", "artifacts"),
-        human_bytes(u.text_bytes),
-        human_bytes(u.artifact_bytes),
+        fmt_bytes(u.text_bytes),
+        fmt_bytes(u.artifact_bytes),
         plural(u.artifact_files, "file", "files"),
     );
     if u.orphan_files > 0 {
         out.push_str(&format!(
             "\n{} in the artifacts folder that no row names ({})",
             plural(u.orphan_files, "file", "files"),
-            human_bytes(u.orphan_bytes)
+            fmt_bytes(u.orphan_bytes)
         ));
     }
     out
@@ -114,22 +114,22 @@ mod tests {
     fn the_note_counts_runs_and_the_whole_size() {
         assert_eq!(
             kept_note(Some(&usage(1234, 2))),
-            "newest first · kept · 1\u{202F}234 runs · 2 files · 1.4 MB"
+            "newest first · kept · 1\u{202F}234 runs · 2 files · 1.4 MiB"
         );
         assert_eq!(
             kept_note(Some(&usage(1, 0))),
-            "newest first · kept · 1 run · 1.4 MB"
+            "newest first · kept · 1 run · 1.4 MiB"
         );
         assert_eq!(
             kept_note(Some(&usage(1, 1))),
-            "newest first · kept · 1 run · 1 file · 1.4 MB"
+            "newest first · kept · 1 run · 1 file · 1.4 MiB"
         );
         assert_eq!(kept_note(None), "newest first · kept");
         let mut u = usage(80, 0);
         u.batches = 2;
         assert_eq!(
             kept_note(Some(&u)),
-            "newest first · kept · 80 runs · 2 set runs · 1.4 MB"
+            "newest first · kept · 80 runs · 2 set runs · 1.4 MiB"
         );
         assert!(kept_title(Some(&u)).starts_with("3 groups · 2 set runs · 80 runs"));
     }
@@ -141,8 +141,8 @@ mod tests {
         u.orphan_files = 1;
         u.orphan_bytes = 512;
         let t = kept_title(Some(&u));
-        assert!(t.contains("text 20.0 kB"), "{t}");
-        assert!(t.contains("files 1.4 MB in 2 files"), "{t}");
+        assert!(t.contains("text 19.5 KiB"), "{t}");
+        assert!(t.contains("files 1.3 MiB in 2 files"), "{t}");
         assert!(
             t.contains("1 file in the artifacts folder that no row names (512 B)"),
             "{t}"

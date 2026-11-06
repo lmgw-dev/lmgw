@@ -11,6 +11,8 @@
 //! that are not on disk yet, and that refusal is what keeps a broken row out
 //! of the table.
 
+mod upscalers;
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
@@ -160,6 +162,7 @@ pub fn ImageRecipeBrowser(open: RwSignal<bool>) -> impl IntoView {
                 v.recipes
                     .iter()
                     .flat_map(|r| r.components.iter().filter_map(|c| c.download_id))
+                    .chain(upscalers::download_ids(&v.upscalers))
                     .collect()
             })
             .unwrap_or_default();
@@ -221,6 +224,7 @@ pub fn ImageRecipeBrowser(open: RwSignal<bool>) -> impl IntoView {
                         // Nothing to wait for — go straight to the editor with
                         // the row it just handed back.
                         open.set(false);
+                        editors.image_derived.set(None);
                         editors.image.set(Some(seed_from(r.row)));
                     }
                     toasts.ok(r.message);
@@ -238,6 +242,9 @@ pub fn ImageRecipeBrowser(open: RwSignal<bool>) -> impl IntoView {
 
     view! {
         <div class="wiz cat">
+            // What the pipelines run in, when a recipe's download fetches
+            // it too (machine-check design §5, D16).
+            <crate::gpu_download::GpuPulls/>
             {move || match recipes.get() {
                 None => view! { <div class="dim">"Loading…"</div> }.into_any(),
                 Some(Err(e)) => {
@@ -251,6 +258,7 @@ pub fn ImageRecipeBrowser(open: RwSignal<bool>) -> impl IntoView {
                     let models_dir = v.models_dir.clone();
                     let hf_token_set = v.hf_token_set;
                     let next_step = v.next_step.clone();
+                    let ups = v.upscalers;
                     let list = v.recipes;
                     // Nothing installed anywhere: open the first card, so the
                     // browser never reads as a wall of closed rows.
@@ -317,6 +325,13 @@ pub fn ImageRecipeBrowser(open: RwSignal<bool>) -> impl IntoView {
                                     }
                                 })
                                 .collect_view()}
+                            <upscalers::UpscalerSection
+                                list=ups
+                                models_dir_missing=models_dir_missing
+                                watching=watching
+                                was_running=was_running
+                                reload=reload
+                            />
                         </div>
                     }
                         .into_any()

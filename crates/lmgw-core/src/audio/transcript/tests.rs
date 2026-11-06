@@ -68,7 +68,7 @@ fn a_route_opened_for_the_clip_is_refused_naming_it_and_the_fix() {
     let r = row(json!({}), json!({}));
     let s = speech(&r, true);
     let e = refuse_clip(&r, &s, Some("anna")).unwrap_err();
-    assert_eq!(e.code(), "voice_needs_transcript");
+    assert_eq!(e.kind(), "voice_needs_transcript");
     assert_eq!(e.http_status(), axum::http::StatusCode::BAD_REQUEST);
     let m = e.to_string();
     assert!(m.contains("'anna'") && m.contains("'omni'"), "{m}");

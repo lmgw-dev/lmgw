@@ -96,7 +96,14 @@ fn text_block(image: &Value) -> Value {
             field("data").unwrap_or_default(),
             PLACEHOLDER_REASON,
         ),
-        Some(_) => format!("[image — omitted: {PLACEHOLDER_REASON}]"),
+        // A Files API image, which the ingress carries verbatim: the
+        // placeholder the send gives it (`fallback_images::without_images`).
+        Some(_) => {
+            let note = crate::ir::AnthropicBlock::from_client(image.clone())
+                .image_note()
+                .unwrap_or_else(|| "image".into());
+            format!("[{note} — omitted: {PLACEHOLDER_REASON}]")
+        }
     };
     json!({"type": "text", "text": text})
 }

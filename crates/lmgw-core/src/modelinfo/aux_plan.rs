@@ -12,9 +12,10 @@ use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store;
 
+use super::plan_files::{PlanFiles, Source};
 use super::{
-    aux_batch, decision, image_attention, models_dir_of, plan_fit, projector_floor, role_of,
-    suggest_model_id, summarize,
+    aux_batch, decision, image_attention, models_dir_of, plan_fit, projector_floor,
+    suggest_model_id,
 };
 
 /// Why an embed or rerank plan's `ctx_size` is the trained context `c`, and
@@ -79,16 +80,17 @@ impl Planned {
 /// only address the aux models dir, so a file found in the chat dir gets the
 /// parameters *and* a warning that says where the file has to be — the exact
 /// trap that had an agent hard-linking GGUFs between the two trees.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn aux_plan(
     state: &SharedState,
     snap: &Snapshot,
-    found_in: Class,
-    dir: &str,
-    rel: &str,
-    s: &ModelSummary,
+    files: &PlanFiles,
     kind: Option<AuxKind>,
 ) -> Result<Value, String> {
+    let (s, rel) = (&files.summary, files.rel.as_str());
+    // A file on disk is where it was found; a hub plan's is where `hf_add`
+    // with the same target puts it (D51), so the location rule says the
+    // same of both.
+    let (found_in, in_aux_dir) = (files.found_in, files.in_aux_dir);
     let mut warnings: Vec<String> = Vec::new();
     let kind = kind.unwrap_or_else(|| {
         warnings.push(format!(
@@ -202,30 +204,17 @@ pub(super) async fn aux_plan(
     // A sibling projector (multimodal embedders such as Qwen3-VL-Embedding,
     // image-capable decision models such as Clef): the row's `mmproj_path`,
     // relative to the aux models dir like `gguf_path` (decision-models design
-    // §3.3).
-    let parent = rel
-        .rsplit_once('/')
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_default();
-    let siblings = {
-        let dir = dir.to_string();
-        tokio::task::spawn_blocking(move || crate::hf::scan_gguf_files(&dir))
-            .await
-            .map_err(|e| format!("scan panicked: {e}"))?
-    };
-    for cand in siblings {
-        if cand == rel || cand.rsplit_once('/').map(|(d, _)| d).unwrap_or("") != parent {
-            continue;
-        }
-        let Ok(cs) = summarize(std::path::Path::new(dir).join(&cand)).await else {
-            continue;
-        };
-        if role_of(&cs) == "mmproj" {
-            // Never on a non-causal decision type (decision-models design §3.4).
-            if let Some(w) = decision_shape.and_then(|d| d.unproposed_projector(&cand)) {
-                warnings.push(w);
-                break;
-            }
+    // §3.3). Of several, the one rule's pick (find-a-model design D121),
+    // which the plan's input made.
+    if let Some((cand, cs)) = files
+        .projector
+        .as_ref()
+        .map(|c| (c.path.clone(), &c.summary))
+    {
+        // Never on a non-causal decision type (decision-models design §3.4).
+        if let Some(w) = decision_shape.and_then(|d| d.unproposed_projector(&cand)) {
+            warnings.push(w);
+        } else {
             plan.put(
                 "mmproj_path",
                 json!(cand),
@@ -237,14 +226,13 @@ pub(super) async fn aux_plan(
             );
             // The chat plan's rule: a projector whose images llama.cpp
             // decodes non-causally needs a whole image in one ubatch.
-            let image = image_attention(Some(&cs), s.embedding_length);
+            let image = image_attention(Some(cs), s.embedding_length);
             let planned = (plan.int("ubatch_size"), plan.int("batch_size"));
             projector_floor::plan(
                 Some(&image),
                 planned,
                 &mut |k: &str, v: Value, r: String| plan.put(k, v, r),
             );
-            break;
         }
     }
 
@@ -253,17 +241,22 @@ pub(super) async fn aux_plan(
     if found_in != Class::Aux {
         apply_ready = false;
         let aux_dir = models_dir_of(snap, Class::Aux);
-        let in_aux =
-            !aux_dir.trim().is_empty() && std::path::Path::new(&aux_dir).join(rel).is_file();
-        let downloads = store::list_hf_models(&state.db).await.unwrap_or_default();
-        let origin = downloads
-            .iter()
-            .find(|d| d.dest_path == rel && d.target == found_in.as_str());
+        let in_aux = in_aux_dir;
+        // Where the file comes from: the hub plan's own repo and file, or the
+        // download that put it here, which is that same pair.
+        let origin = match &files.source {
+            Source::Hub { repo, file, .. } => Some((repo.clone(), file.clone())),
+            Source::Disk => store::list_hf_models(&state.db)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|d| d.dest_path == rel && d.target == found_in.as_str())
+                .map(|d| (d.repo, d.file)),
+        };
         let fetch = match origin {
-            Some(d) => format!(
-                "lmgw__hf_add repo={} file={} target=aux (tracked there and updatable by \
-                 lmgw__hf_set check_updates)",
-                d.repo, d.file
+            Some((repo, file)) => format!(
+                "lmgw__hf_add repo={repo} file={file} target=aux (tracked there and updatable \
+                 by lmgw__hf_set check_updates)"
             ),
             None => "lmgw__hf_add … target=aux (tracked and updatable), or move the file into \
                      the aux models dir"
@@ -292,9 +285,16 @@ pub(super) async fn aux_plan(
         ));
     }
 
+    // A split GGUF with a part missing cannot load, wherever it runs.
+    let mut named = vec![rel];
+    named.extend(plan.params.get("mmproj_path").and_then(Value::as_str));
+    warnings.extend(files.missing_parts(&named));
+    // What the hub's read couldn't give (a companion's header).
+    warnings.extend(files.notes.iter().cloned());
     // Owner finding 3: a GPU plan that cannot fit the card says so, with the
     // largest context that does; the trained context stays the plan.
-    if let Some(w) = fit_warning(state, snap, dir, rel, s, &plan).await {
+    let sizer = plan_fit::Sizer::aux(files, &plan.params);
+    if let Some(w) = plan_fit::warning(state, snap, &sizer).await {
         warnings.push(w);
     }
     let Planned { params, why } = plan;
@@ -354,72 +354,6 @@ pub(super) async fn aux_plan(
                             here, so a deliberate CPU or GPU variant is not a difference.",
         "next_step": next_step,
     }))
-}
-
-/// Owner finding 3 for an aux plan: the planned row's footprint on the GPU,
-/// as admission will charge it ([`crate::vram::plan::aux`]), against the card
-/// ([`plan_fit`]). `None` for a row planned on the CPU, while admission has
-/// nothing to measure against, and when it fits.
-async fn fit_warning(
-    state: &SharedState,
-    snap: &Snapshot,
-    dir: &str,
-    rel: &str,
-    s: &ModelSummary,
-    plan: &Planned,
-) -> Option<String> {
-    use crate::vram::plan::aux::{footprint, Batches, Placement};
-    use crate::vram::plan::GgufFiles;
-
-    if plan.params.get("backend").and_then(Value::as_str) == Some("cpu") {
-        return None;
-    }
-    let card = plan_fit::Card::of(state, snap).await?;
-    let ctx = plan
-        .int("ctx_size")
-        .and_then(|c| u64::try_from(c).ok())
-        .or(s.context_length)?;
-    let companion_bytes = match plan.params.get("mmproj_path").and_then(Value::as_str) {
-        Some(p) => tokio::fs::metadata(std::path::Path::new(dir).join(p))
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0),
-        None => 0,
-    };
-    let files = GgufFiles {
-        main_bytes: s.file_size,
-        companion_bytes,
-        summary: Ok(s.clone()),
-    };
-    let (ubatch, batch) = (plan.int("ubatch_size"), plan.int("batch_size"));
-    // A plan that ties the ubatch to the context (a whole input in one
-    // ubatch) keeps the tie at a smaller context.
-    let tied = ubatch.is_some() && ubatch == plan.int("ctx_size");
-    let count = |n: Option<i64>, default: i64| n.unwrap_or(default).unsigned_abs();
-    let at = |c: u64| {
-        let batches = Batches {
-            ubatch: if tied {
-                c
-            } else {
-                count(ubatch, crate::runtime::aux::LLAMA_DEFAULT_UBATCH)
-            },
-            batch: if tied {
-                c
-            } else {
-                count(batch, crate::runtime::aux::LLAMA_DEFAULT_BATCH)
-            },
-            flash_attn_off: false,
-        };
-        // The plan renders no cache type, so the KV cache is f16.
-        let ctx = i64::try_from(c).unwrap_or(i64::MAX);
-        footprint(&files, rel, Some(ctx), (16, 16), Placement::Gpu, batches)
-    };
-    plan_fit::over_card(
-        &card,
-        ctx,
-        "run it on the CPU (backend=cpu), where it takes no VRAM",
-        at,
-    )
 }
 
 /// The delta between an aux plan and a configured aux row on the same GGUF,

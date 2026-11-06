@@ -133,6 +133,15 @@ impl Serving {
         let d = st.snapshot().settings.devices.clone();
         // An answer is never held back for the next one (§4.3).
         let _ = tcp.set_nodelay(true);
+        // A peer that vanishes without a FIN or a reset is noticed by the
+        // keep-alive probes, not when TCP gives up (`keepalive`); a streamed
+        // chat answer adds `TCP_USER_TIMEOUT` while it runs.
+        let timers = super::keepalive::Timers::of(&st.snapshot().settings);
+        if let Err(e) = timers.apply(socket2::SockRef::from(&tcp)) {
+            tracing::warn!(
+                "device listener: TCP keep-alive not set on the connection from {peer}: {e}"
+            );
+        }
         let local = match tcp.local_addr() {
             Ok(a) => canonical(a),
             Err(e) => {

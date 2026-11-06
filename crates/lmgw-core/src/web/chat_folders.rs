@@ -95,9 +95,11 @@ fn parse_defaults(v: serde_json::Value) -> Result<ThreadDefaults, Response> {
 }
 
 /// `fields` (a folder patch's `defaults_patch`) laid over `stored`: each
-/// field given replaces the stored one, `null` unsetting it; `voice` field
-/// by field, `voice: null` unsetting it whole. The whole defaults, for
-/// [`parse_defaults`] — which refuses a field it does not know.
+/// field given replaces the stored one, `null` unsetting it; `voice` and
+/// `media_defaults` field by field (a field's `null` unsetting it, so it
+/// inherits again), `voice: null` / `media_defaults: null` unsetting it
+/// whole. The whole defaults, for [`parse_defaults`] — which refuses a
+/// field it does not know.
 fn laid_over(
     stored: &ThreadDefaults,
     fields: serde_json::Value,
@@ -112,8 +114,8 @@ fn laid_over(
     };
     let mut base = serde_json::to_value(stored).map_err(internal)?;
     for (field, value) in fields {
-        if let (Value::Object(voice), "voice") = (&value, field.as_str()) {
-            let mut now = base["voice"].as_object().cloned().unwrap_or_default();
+        if let (Value::Object(voice), "voice" | "media_defaults") = (&value, field.as_str()) {
+            let mut now = base[&field].as_object().cloned().unwrap_or_default();
             for (k, v) in voice {
                 if v.is_null() {
                     now.remove(k);
@@ -121,8 +123,8 @@ fn laid_over(
                     now.insert(k.clone(), v.clone());
                 }
             }
-            // A voice that sets nothing is no default.
-            base["voice"] = if now.is_empty() {
+            // A voice or a media level that sets nothing is no default.
+            base[&field] = if now.is_empty() {
                 Value::Null
             } else {
                 Value::Object(now)
@@ -132,6 +134,34 @@ fn laid_over(
         base[field] = value;
     }
     Ok(base)
+}
+
+/// A folder's media default models (chat-media-tools design §3.8), checked
+/// as a thread's are: each name it changes must be one of its tool's
+/// choices for the caller; `old`'s names pass. A level that sets nothing
+/// is none.
+async fn check_media(
+    state: &SharedState,
+    caller: &Caller,
+    d: &mut ThreadDefaults,
+    old: Option<&lmgw_api_types::chat_media::MediaDefaults>,
+) -> Result<(), Response> {
+    let Some(m) = d.media_defaults.take() else {
+        return Ok(());
+    };
+    let key = caller.ctx().client_key;
+    let above = crate::mcp::media::defaults::above_folder(state);
+    let m = crate::mcp::media::defaults::check(
+        state,
+        key.as_deref(),
+        (m, old.unwrap_or(&Default::default())),
+        &above,
+        false,
+    )
+    .await
+    .map_err(bad_request)?;
+    d.media_defaults = (!m.is_empty()).then_some(m);
+    Ok(())
 }
 
 fn valid_name(name: &str) -> Result<String, Response> {
@@ -246,7 +276,7 @@ pub(super) fn internal(e: impl std::fmt::Display) -> Response {
 /// for a profile deleted since the route's check); anything else is the
 /// store's 500.
 fn store_refusal(e: &crate::error::GatewayError) -> Response {
-    err_json(e.http_status(), e.code(), e.to_string())
+    err_json(e.http_status(), e.kind(), e.to_string())
 }
 
 /// Folder `id` as `caller` may reach it (client-apps design L3, review
@@ -307,10 +337,13 @@ pub async fn create_folder(
         Ok(n) => n,
         Err(r) => return r,
     };
-    let defaults = match req.defaults.map(parse_defaults).transpose() {
+    let mut defaults = match req.defaults.map(parse_defaults).transpose() {
         Ok(d) => d.unwrap_or_default(),
         Err(r) => return r,
     };
+    if let Err(r) = check_media(&state, &caller, &mut defaults, None).await {
+        return r;
+    }
     let opts = FolderOptions {
         ongoing_idle_minutes: req.ongoing.map(|o| o.idle_minutes),
         archive_days: req.archive_days,
@@ -488,6 +521,11 @@ pub async fn update_folder(
     match defaults.map(parse_defaults).transpose() {
         Ok(d) => patch.defaults = d,
         Err(r) => return r,
+    }
+    if let Some(d) = patch.defaults.as_mut() {
+        if let Err(r) = check_media(&state, &caller, d, stored.media_defaults.as_ref()).await {
+            return r;
+        }
     }
     // A folder whose defaults carry lmgw's admin tools: they start the
     // owner's threads there, so a device below `full` does not change them
@@ -718,6 +756,10 @@ pub async fn delete_folder(
         }
         if !taken.is_empty() {
             super::chat_tasks::threads_gone(&state);
+        }
+        // Their running image and audio calls stop (`MediaCalls::thread_gone`).
+        for t in &taken {
+            state.media_calls.thread_gone(*t);
         }
         let unlocked: Vec<i64> = taken
             .into_iter()

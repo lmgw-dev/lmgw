@@ -43,8 +43,8 @@ pub async fn audio_catalog(
                 AudioCatalogToolAnswer::Downloaded(Box::new(WithNextStep::new(
                     d,
                     format!(
-                        "follow the queued files with lmgw__hf_downloads until each says \
-                         'done', then lmgw__audio_model_set action=create with this package's \
+                        "follow the queued files with lmgw__hf_downloads ids = the ids in \
+                         'downloads' until each says 'done', then lmgw__audio_model_set action=create with this package's \
                          suggested_model_id, suggested_path, suggested_task and suggested_mode \
                          — lmgw__audio_catalog action=list family={} shows them, and the \
                          options the family takes",
@@ -199,7 +199,10 @@ pub(super) async fn audio_model_get(
         !models_dir.trim().is_empty() && std::path::Path::new(&models_dir).join(&m.path).exists();
     let mut problems: Vec<String> = Vec::new();
     if models_dir.trim().is_empty() {
-        problems.push("the audio class has no models_dir configured".into());
+        problems.push(format!(
+            "the audio models directory is not set ({})",
+            crate::hf::models_dir_location("audio")
+        ));
     } else if !path_present {
         problems.push(format!("path '{}' is missing from the models dir", m.path));
     }
@@ -259,8 +262,7 @@ pub(super) async fn audio_model_get(
         image,
         extra_run_args,
         warm_start,
-        hold_fallback_mode,
-        hold_fallback,
+        fallback,
         residency,
     } = m.clone();
     Ok(Some(dto::AudioModelDetail {
@@ -297,8 +299,7 @@ pub(super) async fn audio_model_get(
         image: image.clone(),
         extra_run_args: extra_run_args.clone(),
         warm_start,
-        hold_fallback_mode: hold_fallback_mode.as_str().to_string(),
-        hold_fallback,
+        fallback,
         residency: residency.map(|r| dto::LearnedResidency {
             bytes: r.bytes,
             learned_at: r.learned_at,

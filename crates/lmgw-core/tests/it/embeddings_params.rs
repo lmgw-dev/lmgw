@@ -44,6 +44,7 @@ async fn world(base: &str, protocol: Protocol, kind: UpstreamKind) -> Gw {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -94,7 +95,12 @@ async fn dimensions_reach_an_openai_upstream() {
         .expect(1)
         .mount(&mock)
         .await;
-    let gw = world(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let gw = world(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
 
     let (status, body) = post(&gw, json!({"model": "emb", "input": "hi", "dimensions": 2})).await;
     assert_eq!(status, 200, "{body}");
@@ -172,7 +178,12 @@ async fn base64_is_encoded_by_the_gateway() {
         )
         .mount(&mock)
         .await;
-    let gw = world(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let gw = world(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
 
     let (status, body) = post(
         &gw,
@@ -219,7 +230,12 @@ async fn unusable_fields_are_a_400_before_any_upstream_call() {
         .expect(0)
         .mount(&mock)
         .await;
-    let gw = world(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let gw = world(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
 
     for (extra, needle) in [
         (json!({"encoding_format": "binary"}), "'encoding_format'"),

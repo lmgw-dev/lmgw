@@ -61,7 +61,7 @@ Picking a run's **immutable tag** means "pin this exact image".
 Consequences:
 - audio.cpp's SSH submodule fails to clone without a GitHub SSH key. Every
   git call gets `-c url.https://github.com/.insteadOf=git@github.com:`.
-- ik's default arch list leaves out the 4090 (sm_89), so the arch arg must
+- ik's default arch list leaves out sm_89 (Ada) cards, so the arch arg must
   always be passed. The other engines default to "all archs" (slow) or a
   guess.
 - Official llama.cpp and audio.cpp accept `APP_VERSION`/`APP_REVISION`/`BUILD_DATE`.
@@ -335,7 +335,9 @@ moving tag back to that run's image, with the same recreate offer.
   plus **Check now** per build and globally.
 - For each build it resolves the ref and each unpinned extra, then compares
   them with the last verified run. A commit ref never updates.
-- The build row gets a badge with the reason:
+- The build row gets an "update" badge in its Last run cell, which no
+  window width hides or clips (a separate "check failed" badge when a remote
+  could not be asked); its tooltip and the unfolded row give the reasons:
   - "master +37 commits"
   - "PR #1234 pushed"
   - "PR #1234 merged upstream, drop it?"

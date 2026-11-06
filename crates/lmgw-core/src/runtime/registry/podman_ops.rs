@@ -130,10 +130,16 @@ impl Registry {
 
     pub(super) async fn podman(&self, args: &[&str]) -> std::io::Result<CmdOutput> {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        self.runner.run("podman", &argv).await
+        self.podman_argv(&argv).await
     }
 
+    /// `podman <argv>` through the runner — refused when it gives a
+    /// container the graphics card without lmgw's CDI spec dir
+    /// ([`crate::runtime::cdi::OwnSpec::refuse_unpointed`]).
     pub(super) async fn podman_argv(&self, argv: &[String]) -> std::io::Result<CmdOutput> {
+        self.cdi()
+            .refuse_unpointed(argv)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
         self.runner.run("podman", argv).await
     }
 
@@ -200,7 +206,7 @@ impl Registry {
         let mut broken: Option<String> = None;
         for bin in &candidates {
             let out = self
-                .run_throwaway(&name, target, bin, extra_run_args, &args)
+                .run_throwaway(container_prefix, &name, target, bin, extra_run_args, &args)
                 .await
                 // podman itself could not be executed: no other path can do
                 // better, so say that instead of trying them all.
@@ -357,15 +363,27 @@ impl Registry {
     /// for. It fails fast instead, the caller degrades to "no vocabulary to
     /// check against", and the pull happens where it belongs — the first real
     /// start of a model on that image.
+    ///
+    /// Run args that name a GPU device get lmgw's own CDI spec, made fresh
+    /// first, as a start does (machine-check design §3.6.4): `--help` needs
+    /// the GPU libraries that spec mounts. `container_prefix` is the instance
+    /// whose spec that is; the write takes at most the gateway's load timeout
+    /// ([`crate::runtime::cdi::OwnSpec::load_timeout`]).
     pub async fn run_throwaway(
         &self,
+        container_prefix: &str,
         name: &str,
         image: &str,
         entrypoint: &str,
         mounts: &[String],
         args: &[String],
     ) -> Result<CmdOutput, String> {
-        let mut argv: Vec<String> = vec![
+        let cdi = self.cdi();
+        let mut argv: Vec<String> = cdi
+            .ready_globals(container_prefix, mounts, cdi.load_timeout())
+            .await
+            .map_err(|e| e.to_string())?;
+        argv.extend([
             "run".into(),
             "--rm".into(),
             "--replace".into(),
@@ -373,7 +391,7 @@ impl Registry {
             "never".into(),
             "--name".into(),
             name.into(),
-        ];
+        ]);
         argv.extend(throwaway_args(mounts));
         argv.push("--entrypoint".into());
         argv.push(entrypoint.into());

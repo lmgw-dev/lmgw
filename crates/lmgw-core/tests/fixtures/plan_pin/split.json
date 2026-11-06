@@ -1,0 +1,29 @@
+{
+  "class": "chat",
+  "configured_as": [],
+  "configured_note": "Models already serving this GGUF, and how they differ from the plan. Values the plan read out of the file are facts; the rest are defaults a deliberate variant (a CPU-only twin, a short-context twin) may be overriding on purpose — so this is a proposal to review, not a correction to apply blindly. The one exception is 'unset', which lists configuration the file provably cannot support.",
+  "model_id": "demo-chat",
+  "next_step": "pass these to lmgw__local_model_set action=create (adding model_id), then lmgw__container target=chat action=apply, then lmgw__local_model_test",
+  "params": {
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q8_0",
+    "ctx_size": 65536,
+    "flash_attn": "on",
+    "gguf_path": "split/demo-chat-BF16-00001-of-00002.gguf",
+    "jinja": true,
+    "n_gpu_layers": 999
+  },
+  "rationale": {
+    "cache_type_k": "halves KV cache versus the f16 default, at negligible quality cost",
+    "cache_type_v": "halves KV cache versus the f16 default, at negligible quality cost",
+    "ctx_size": "the model's trained context (65536) — its real ceiling, not a reduced default",
+    "flash_attn": "reduces attention memory",
+    "gguf_path": "the file this plan was made for",
+    "jinja": "the GGUF embeds a chat template; without --jinja it is ignored and tool calling will not work",
+    "n_gpu_layers": "offload every layer"
+  },
+  "target": "chat",
+  "warnings": [
+    "on the GPU at ctx_size 65536, this row's estimated footprint is 584 MiB (weights 40.0 MiB, KV cache 544 MiB) plus the 32.0 MiB headroom, more than the declared GPU memory budget, 64.0 MiB (Settings → GPU → Admission → Budget): admission will refuse to load it (\"no eviction can make it fit\"). No ctx_size fits: at 1 token it is still 42.1 MiB (weights 40.0 MiB, KV cache 2.1 MiB). The plan keeps the trained context; run it on the CPU (n_gpu_layers 0)"
+  ]
+}

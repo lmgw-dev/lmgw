@@ -74,8 +74,9 @@ use crate::store::ThreadMcp;
 /// The code every refusal here carries (§1.8).
 pub(super) const CODE: &str = "tool_label_out_of_scope";
 
-/// The tool a knowledge base is read through (module doc).
-pub(super) const KB_READ: &str = "kb__search";
+/// The tool a knowledge base is searched with: what a device needs within
+/// its scope to name a base (module doc).
+pub(super) const KB_SEARCH: &str = "kb__search";
 
 fn refuse(message: String) -> Response {
     err_json(StatusCode::FORBIDDEN, CODE, message)
@@ -201,6 +202,8 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
             server_label: label.to_string(),
             allowed_tools: entry.allowed_tools.clone(),
             require_approval: ApprovalRule::Never,
+            server_url: None,
+            connector_id: None,
         };
         let any = crate::mcp::selfadmin::list(crate::config::SelfAdmin::Full)
             .iter()
@@ -224,7 +227,10 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
             )
         });
     }
-    let builtin = label == DOCS_LABEL || label == KB_LABEL;
+    let builtin = label == DOCS_LABEL
+        || label == KB_LABEL
+        || label == crate::mcp::media::IMAGE_LABEL
+        || label == crate::mcp::media::AUDIO_LABEL;
     let snap = state.snapshot();
     let named = snap
         .mcp_servers
@@ -270,6 +276,8 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
         server_label: label.to_string(),
         allowed_tools: entry.allowed_tools.clone(),
         require_approval: ApprovalRule::Never,
+        server_url: None,
+        connector_id: None,
     };
     // Every tool the entry exposes now, whoever asks: the gateway's own reach
     // lists them, and the device's scope then judges each one.
@@ -323,7 +331,7 @@ pub(super) fn check_aliases(
             continue;
         }
         if let Err(e) = caller.alias_in_scope(&snap, alias) {
-            return Err(err_json(e.http_status(), e.code(), e.to_string()));
+            return Err(err_json(e.http_status(), e.kind(), e.to_string()));
         }
     }
     Ok(())
@@ -363,7 +371,7 @@ pub(super) async fn check_kbs(
         return Ok(());
     }
     let scope = caller.scope(state).await;
-    if scope.admits(KB_READ) {
+    if scope.admits(KB_SEARCH) {
         return Ok(());
     }
     // Neither the base's name nor whether it exists (review W3-5): a device
@@ -372,7 +380,7 @@ pub(super) async fn check_kbs(
     // one answer alike.
     Err(refuse(format!(
         "a knowledge base is read as {}",
-        scope.refusal(KB_READ)
+        scope.refusal(KB_SEARCH)
     )))
 }
 
@@ -383,12 +391,12 @@ pub(super) async fn kb_reach(state: &SharedState, caller: &Caller) -> Result<(),
         return Ok(());
     }
     let scope = caller.scope(state).await;
-    if scope.admits(KB_READ) {
+    if scope.admits(KB_SEARCH) {
         Ok(())
     } else {
         Err(format!(
             "the knowledge bases were not searched: a knowledge base is read as {}",
-            scope.refusal(KB_READ)
+            scope.refusal(KB_SEARCH)
         ))
     }
 }

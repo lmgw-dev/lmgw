@@ -88,8 +88,27 @@ async fn a_llama_server_route_receives_every_sampling_param() {
     assert_eq!(done["reasoning_ignored"], json!([]), "{done}");
 }
 
+/// A compatible row's egress writes the llama samplers, so the Chat sends
+/// them all, as it does to llama-server (openai egress design §7.1).
 #[tokio::test]
-async fn a_generic_openai_route_is_not_sent_what_it_cannot_take_and_the_turn_says_so() {
+async fn a_compatible_route_receives_every_sampling_param() {
+    let mock = MockServer::start().await;
+    mount_openai_reply(&mock, "ok", 3, 1).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
+    let tid = thread(&gw, json!({})).await;
+    settings(&gw, tid, all()).await;
+
+    let done = send(&gw, tid).await;
+    let sent = upstream_body(&mock, "/chat/completions").await;
+    assert_eq!(sent["top_k"], 40, "{sent}");
+    assert_eq!(sent["min_p"], 0.05);
+    assert_eq!(sent["repeat_penalty"], 1.1);
+    assert_eq!(sent["seed"], 7);
+    assert_eq!(done["reasoning_ignored"], json!([]), "{done}");
+}
+
+#[tokio::test]
+async fn the_openai_platform_is_not_sent_what_it_cannot_take_and_the_turn_says_so() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "ok", 3, 1).await;
     let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;

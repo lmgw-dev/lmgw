@@ -94,7 +94,7 @@ async fn a_request_decided_before_the_lease_is_refused_at_its_start() {
     g.state.set_gpu_lease(Some(lease(7, "qwen")));
     probe.release();
     let err = admit.await.unwrap().map(|_| ()).unwrap_err();
-    assert_eq!(err.code(), "gpu_benchmark", "{err}");
+    assert_eq!(err.kind(), "gpu_benchmark", "{err}");
     assert!(err.to_string().contains("run 7"), "{err}");
     assert!(g.runs().is_empty(), "nothing was started");
 }
@@ -118,6 +118,8 @@ async fn an_operator_start_decided_before_the_lease_is_held_back_under_the_gate(
             Fit::Held(why) => Ok(why),
             Fit::Go(_) => Err("go"),
             Fit::Full(_) => Err("full"),
+            Fit::Failed(_) => Err("failed"),
+            Fit::Downloaded => Err("downloaded"),
             Fit::Unchecked => Err("unchecked"),
         }
     });
@@ -144,7 +146,7 @@ async fn a_guest_start_decided_before_the_lease_is_refused() {
     g.state.set_gpu_lease(Some(lease(7, "qwen")));
     probe.release();
     let err = start.await.unwrap().unwrap_err();
-    assert_eq!(err.code(), "gpu_benchmark", "{err}");
+    assert_eq!(err.kind(), "gpu_benchmark", "{err}");
     assert!(g.runs().is_empty(), "nothing was started");
     assert!(g.state.vram.pending_starts().is_empty(), "nothing reserved");
 }

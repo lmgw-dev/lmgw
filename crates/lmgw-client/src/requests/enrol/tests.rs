@@ -40,7 +40,11 @@ fn the_enrolment_posts_the_token_and_the_key() {
     let r = enrol(
         &token,
         &[0x30, 0x59, 0x30],
-        Some("Kai mobile 0.1.0 (Android 16)"),
+        DeviceSelf {
+            name: Some("Anna's phone"),
+            client: Some("Kai mobile 0.1.0 (Android 16)"),
+            app_id: Some("dev.example.storyplayer"),
+        },
     );
     assert_eq!(
         (r.method, r.path.as_str()),
@@ -50,11 +54,17 @@ fn the_enrolment_posts_the_token_and_the_key() {
     assert_eq!(
         body,
         serde_json::json!({"token": TOKEN, "public_key": "MFkw",
-                           "client": "Kai mobile 0.1.0 (Android 16)"})
+                           "device_name": "Anna's phone",
+                           "client": "Kai mobile 0.1.0 (Android 16)",
+                           "app_id": "dev.example.storyplayer"})
     );
     assert!(r.headers.iter().all(|h| h.name != "Authorization"));
-    let r = enrol(&token, &[1], None);
-    assert!(!r.body.unwrap().contains("client"));
+    let r = enrol(&token, &[1], DeviceSelf::default());
+    let body = r.body.unwrap();
+    assert!(
+        !body.contains("device_name") && !body.contains("client") && !body.contains("app_id"),
+        "{body}"
+    );
 }
 
 #[test]

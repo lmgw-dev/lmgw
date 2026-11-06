@@ -70,7 +70,7 @@ fn shape(ms: &[Message]) -> Vec<(Role, Vec<String>)> {
                 .content
                 .iter()
                 .map(|p| match p {
-                    ContentPart::Text { text } => text.clone(),
+                    ContentPart::Text { text, .. } => text.clone(),
                     ContentPart::ToolUse { id, name, .. } => format!("call:{id}:{name}"),
                     ContentPart::ToolResult {
                         id, name, content, ..

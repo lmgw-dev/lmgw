@@ -17,6 +17,7 @@ fn files(s: ModelSummary, draft: Option<ModelSummary>) -> ChatFiles {
             main_bytes: 10 * MIB,
             companion_bytes: MIB,
             summary: Ok(s),
+            missing: Vec::new(),
         },
         draft: draft.map(Ok),
     }

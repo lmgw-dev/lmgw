@@ -129,6 +129,7 @@ async fn add_claude(state: &SharedState, mock: &MockServer) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

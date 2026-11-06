@@ -4,7 +4,8 @@
 # Runs the 17 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
 # mock upstream, leak listener), prints a PASS/FAIL table, exits non-zero on any FAIL. Everything
 # it starts is stopped by pid/process group on exit and its scratch dir (data, Chrome profiles) removed.
-# --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes, after the drives.
+# --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes and the narrow
+# window's drive (scripts/drive/chat-narrow.json: WebKit at 125 %, the Chat's drawers, D37), after the drives.
 # --voice adds the voice panel's drives that need no model (an in-page bound session, scripts/realtime-mock.js,
 # and a fake microphone; muted): chat-voice-panel, chat-voice-reasoning, chat-voice-viz. The panel and reasoning
 # drives need target/chat-voice/fixtures/voice-de.js (scripts/drive/make-voice-fixtures.py, once, on a gateway
@@ -136,23 +137,28 @@ for d in "${DRIVES[@]}"; do
     if [ -n "$SHOTS" ]; then cp "$WORK/drive-$d.log" "$SHOTS/$d/drive.log"; fi
     if [ "${RESULT[$d]}" = FAIL ]; then
         mkdir -p target/drive-logs; cp "$WORK/drive-$d.log" "target/drive-logs/$d.log"
-        grep -E 'FAIL|panicked' "$WORK/drive-$d.log" | head -8 | sed 's/^/    /'
+        grep -m 8 -E 'FAIL|panicked' "$WORK/drive-$d.log" | sed 's/^/    /'
     fi
 done
 
-for x in matrix webkit; do
+for x in matrix webkit narrow; do
     [ "$x" = matrix ] && [ "$MATRIX" = 0 ] && continue
-    [ "$x" = webkit ] && [ "$WEBKIT" = 0 ] && continue
-    if [ "$x" = matrix ]; then cmd=(python3 scripts/ui-matrix.py --routes all --token "$TOKEN" --base "$BASE")
-    else cmd=(python3 scripts/webkit-check.py --backend broadway --shots "${SHOTS:-$WORK}/webkit" --token "$TOKEN"
-        --base "$BASE" --routes /chat,/knowledge,/usage/keys,/settings/chat); fi
+    [ "$x" != matrix ] && [ "$WEBKIT" = 0 ] && continue
+    case "$x" in
+    matrix) cmd=(python3 scripts/ui-matrix.py --routes all --token "$TOKEN" --base "$BASE") ;;
+    webkit) cmd=(python3 scripts/webkit-check.py --backend broadway --shots "${SHOTS:-$WORK}/webkit" --token "$TOKEN"
+        --base "$BASE" --routes /chat,/knowledge,/usage/keys,/settings/chat) ;;
+    # exit 2 when an expect failed
+    narrow) cmd=(python3 scripts/webkit-check.py --backend broadway --zoom 1.25 --drive scripts/drive/chat-narrow.json
+        --shots "${SHOTS:-$WORK}/narrow" --token "$TOKEN" --base "$BASE") ;;
+    esac
     if "${cmd[@]}" >"target/drive-logs-$x.log" 2>&1; then RESULT[$x]=PASS; else RESULT[$x]=FAIL; FAILS=$((FAILS + 1)); fi
     tail -5 "target/drive-logs-$x.log"
 done
 
 echo
 printf '%-26s %s\n' DRIVE RESULT
-for d in "${DRIVES[@]}" matrix webkit; do
+for d in "${DRIVES[@]}" matrix webkit narrow; do
     [ -n "${RESULT[$d]:-}" ] && printf '%-26s %s\n' "$d" "${RESULT[$d]}"
 done
 echo "$FAILS FAIL"

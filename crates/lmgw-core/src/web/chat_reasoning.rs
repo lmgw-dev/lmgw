@@ -20,6 +20,7 @@ pub(super) fn control(t: &ChatThread) -> Option<ReasoningControl> {
         enabled: t.reasoning_enabled,
         effort: t.reasoning_effort.clone(),
         budget_tokens: t.reasoning_budget,
+        ..Default::default()
     };
     (!c.is_empty()).then_some(c)
 }
@@ -104,7 +105,7 @@ pub(super) fn ignored(ir: &ChatRequest, route: &Route) -> Vec<&'static str> {
     crate::proxy::reasoning_ignored(
         route.upstream.protocol,
         &sent,
-        crate::egress::openai::has_reasoning_object(ir),
+        crate::egress::openai_wire::has_reasoning_object(ir),
     )
     .into_iter()
     .filter(|field| match *field {

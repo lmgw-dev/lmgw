@@ -23,7 +23,10 @@
 //! `X-Lmgw-Face`. lmgw sets its own four of those (§4.6): the
 //! `X-Forwarded-Host`/`-Proto` pair, `X-Forwarded-For` from the TCP peer, and
 //! `X-Lmgw-Face` naming which face the request came in on — the two facts an
-//! app needs to decide whom it serves, and that only lmgw knows.
+//! app needs to decide whom it serves, and that only lmgw knows. On the way
+//! *out* the MCP face, a path on the dashboard's own origin, drops
+//! `Set-Cookie` and gets the router's `nosniff` + `sandbox` default
+//! ([`forwarded_response_headers`], machine-check design D90, D91).
 //!
 //! **The isolation is the browser's** (origins §2). The agent's page is a
 //! different site from the dashboard: its JS cannot read `/api/op/*`, the
@@ -548,6 +551,11 @@ async fn proxy_agent(
     // suffix change renames every origin at once.
     let snap = st.snapshot();
     let origin = service::agent_origin_base(&snap.settings, &id);
+    let to = Answering {
+        face,
+        origin: &origin,
+        container_base: &upstream_base,
+    };
     let authority = service::origin_authority(&snap.settings, &id);
     let method = req.method().clone();
     let upgrading = wants_upgrade(req.headers());
@@ -583,15 +591,7 @@ async fn proxy_agent(
     if upgrading {
         let inbound = req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>();
         return upgrade(
-            st,
-            &id,
-            &url,
-            method,
-            headers,
-            inbound,
-            guard,
-            (&origin, &upstream_base),
-            served_at,
+            st, &id, &url, method, headers, inbound, guard, to, served_at,
         )
         .await;
     }
@@ -641,7 +641,7 @@ async fn proxy_agent(
     let status = upstream.status();
     let mut out = Response::builder().status(status);
     if let Some(h) = out.headers_mut() {
-        *h = forwarded_response_headers(upstream.headers(), false, &origin, &upstream_base);
+        *h = forwarded_response_headers(upstream.headers(), false, to);
     }
     // Chunk by chunk, flushed as it arrives: an SSE stream must reach the
     // browser event by event, and the guard rides along so the container is not
@@ -742,6 +742,17 @@ fn forwarded_request_headers(h: &HeaderMap, upgrading: bool) -> HeaderMap {
     out
 }
 
+/// Who a proxied answer goes to: the face it came in on, and the two origins
+/// a `Location` is rewritten between ([`forwarded_response_headers`]).
+#[derive(Debug, Clone, Copy)]
+struct Answering<'a> {
+    face: Face,
+    /// The agent origin, `http://<id>.<suffix>:<port>`.
+    origin: &'a str,
+    /// The container's published loopback origin, or the `dev_url`.
+    container_base: &'a str,
+}
+
 /// Everything the browser should see of the container's response.
 ///
 /// Two headers get more than a copy:
@@ -753,20 +764,28 @@ fn forwarded_request_headers(h: &HeaderMap, upgrading: bool) -> HeaderMap {
 ///   relative, origin-relative (`/login` is right as it is, now that the app is
 ///   mounted at `/`), and absolute somewhere else entirely, which is the app
 ///   entitled to send its user away.
-/// - **`set-cookie`** goes through as-is, and lands on the **agent's** origin
-///   rather than the dashboard's — which is the whole point of giving the app a
-///   host name of its own (origins §2). A proxy that stripped them would break
-///   every session the app keeps, and one that scoped them would be guessing.
-fn forwarded_response_headers(
-    h: &HeaderMap,
-    upgrading: bool,
-    origin: &str,
-    container_base: &str,
-) -> HeaderMap {
+/// - **`set-cookie`** goes through as-is on the agent origin, and lands on the
+///   **agent's** origin rather than the dashboard's — which is the whole point
+///   of giving the app a host name of its own (origins §2). A proxy that
+///   stripped them would break every session the app keeps, and one that
+///   scoped them would be guessing. On the **MCP face** it is dropped
+///   (machine-check design D91): that face is a path on the dashboard's own
+///   origin, so a cookie set there would be the dashboard's, and its one
+///   legitimate caller, lmgw's own MCP client, keeps no cookies.
+///
+/// The container's `Content-Type` and `Content-Security-Policy` pass as they
+/// are on both faces. On the MCP face the router-wide default adds `nosniff`
+/// and a second policy, `sandbox` (`web::stored`, D90), so an answer opened
+/// in a window with the owner's cookie runs nothing at the gateway's origin;
+/// the agent origin is answered above that layer and stays the container's.
+fn forwarded_response_headers(h: &HeaderMap, upgrading: bool, to: Answering<'_>) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (k, v) in h {
         let name = k.as_str().to_ascii_lowercase();
         if HOP_BY_HOP.contains(&name.as_str()) {
+            continue;
+        }
+        if name == "set-cookie" && to.face == Face::Mcp {
             continue;
         }
         // `content-length` describes a body this hop is re-framing as a
@@ -776,7 +795,7 @@ fn forwarded_response_headers(
             continue;
         }
         if name == "location" {
-            if let Some(rewritten) = rewrite_location(v, origin, container_base) {
+            if let Some(rewritten) = rewrite_location(v, to.origin, to.container_base) {
                 out.append(k.clone(), rewritten);
                 continue;
             }
@@ -829,7 +848,7 @@ async fn upgrade(
     // `None` when the upstream is a `dev_url`: there is no container to keep
     // awake and no counter to hold (§4.7).
     guard: Option<service::InFlight>,
-    (origin, container_base): (&str, &str),
+    to: Answering<'_>,
     served_at: Option<crate::server::ServedAt>,
 ) -> Response {
     let Some(inbound) = inbound else {
@@ -865,7 +884,7 @@ async fn upgrade(
         let status = upstream.status();
         let mut out = Response::builder().status(status);
         if let Some(h) = out.headers_mut() {
-            *h = forwarded_response_headers(upstream.headers(), false, origin, container_base);
+            *h = forwarded_response_headers(upstream.headers(), false, to);
         }
         let stream = upstream.bytes_stream().map(move |chunk| {
             if let Some(g) = &guard {
@@ -885,7 +904,7 @@ async fn upgrade(
 
     let mut out = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
     if let Some(h) = out.headers_mut() {
-        *h = forwarded_response_headers(upstream.headers(), true, origin, container_base);
+        *h = forwarded_response_headers(upstream.headers(), true, to);
     }
     let agent_id = id.to_string();
     // The tunnel ends at its server's stop too: both sockets are dropped, as

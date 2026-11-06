@@ -165,9 +165,15 @@ pub(crate) fn one_slot_kv(s: &ModelSummary, ctx: u64, cache: &str) -> Option<u64
 }
 
 /// The footprint of a chat row of `shape` whose files were read (`files`):
-/// weights + KV cache + compute buffers (module doc). Pure, so the plan can
-/// ask it at other contexts without reading the files again.
+/// weights + KV cache + compute buffers (module doc), led by the parts a
+/// split GGUF among them is missing ([`GgufFiles::flag`]). Pure, so the
+/// plan can ask it at other contexts without reading the files again.
 pub(crate) fn footprint(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
+    files.files.flag(sized(files, gguf_path, shape))
+}
+
+/// [`footprint`] without the missing-part lead.
+fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
     let weights = files
         .files
         .main_bytes
@@ -395,7 +401,9 @@ impl PlanCache {
             let files = ChatFiles::read(&dir, &path, &companions, draft.as_deref());
             let fp = footprint(&files, &path, &shape);
             if cpu {
-                cpu_only(fp)
+                // The CPU note replaces the footprint's; a missing part
+                // still stops the load, so it still leads.
+                files.files.flag(cpu_only(fp))
             } else {
                 fp
             }

@@ -48,7 +48,7 @@ async fn a_route_the_caller_refuses_gets_no_catalog_read() {
         upstream: Upstream {
             id: 5,
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -79,8 +79,12 @@ async fn a_route_the_caller_refuses_gets_no_catalog_read() {
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let refused = stream_once_on(
         &state,
@@ -96,7 +100,7 @@ async fn a_route_the_caller_refuses_gets_no_catalog_read() {
     )
     .await
     .unwrap_err();
-    assert_eq!(refused.code(), "audio_input_unsupported");
+    assert_eq!(refused.kind(), "audio_input_unsupported");
     let reached: Vec<String> = mock
         .received_requests()
         .await
@@ -143,7 +147,7 @@ async fn a_stop_ends_a_call_whose_per_route_check_waits() {
         upstream: Upstream {
             id: 5,
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -167,8 +171,12 @@ async fn a_stop_ends_a_call_whose_per_route_check_waits() {
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let (handle, signal) = crate::proxy::stop_pair();
     handle.stop();
@@ -257,6 +265,7 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
         crate::config::PriceScope::Alias,
         "m",
         crate::config::PriceUnit::PerRequest,
+        crate::config::PriceTier::Standard,
         &crate::pricing::Prices {
             source: crate::pricing::PriceSource::Manual,
             ..Default::default()
@@ -271,7 +280,7 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
         upstream: Upstream {
             id: 5,
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -295,8 +304,12 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let newest = || async {
         crate::store::query_logs(
@@ -371,3 +384,5 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
         "unknown, and said so: a stop is an `ok` row, a gap in any total"
     );
 }
+
+mod failed;

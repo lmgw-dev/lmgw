@@ -9,7 +9,7 @@ use crate::config::{PriceScope, PriceUnit, Protocol, Upstream, UpstreamKind, AUD
 use crate::ingress::ClientProto;
 use crate::pricing::{PriceSource, Prices};
 use crate::state::AppState;
-use crate::store::RequestLogRow;
+use crate::store::{self, RequestLogRow};
 
 const CLOUD: i64 = 5;
 
@@ -18,7 +18,7 @@ fn route(id: i64) -> Route {
         upstream: Upstream {
             id,
             name: "up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: None,
@@ -42,6 +42,7 @@ async fn price_unit(state: &SharedState, alias: &str, unit: PriceUnit, price: f6
         PriceScope::Alias,
         alias,
         unit,
+        crate::config::PriceTier::Standard,
         &Prices {
             source: PriceSource::Manual,
             ..Default::default()
@@ -60,6 +61,7 @@ async fn price_tokens(state: &SharedState, alias: &str) {
         PriceScope::Alias,
         alias,
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &Prices {
             price_in: Some(3.0),
             price_out: Some(15.0),
@@ -127,6 +129,7 @@ async fn write(
             rung: None,
             degraded: None,
             quantities,
+            service_tier: Default::default(),
         },
         status,
         None,
@@ -380,6 +383,7 @@ async fn the_in_process_writer_counts_an_answered_request() {
                 rung: None,
                 degraded: None,
                 quantities: Default::default(),
+                service_tier: Default::default(),
             },
             status,
             None,
@@ -417,6 +421,8 @@ async fn the_free_form_writer_prices_its_rows() {
         200,
         None,
         None,
+        &Reported::default(),
+        Quantities::default(),
     )
     .await;
     let row = newest(&state, "native").await;

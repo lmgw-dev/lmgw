@@ -77,6 +77,27 @@ pub fn store_bool(key: &str, value: bool) {
     write(key, if value { "true" } else { "false" });
 }
 
+/// A stored number, for a preference that is either chosen or not there at
+/// all (a side panel's dragged width): `None` when nothing, or nothing
+/// readable, is stored.
+pub fn stored_number(key: &str) -> Option<f64> {
+    read(key)
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+}
+
+/// Store a number now (written as a whole number when it is one).
+pub fn store_number(key: &str, value: f64) {
+    write(key, &value.to_string());
+}
+
+/// Remove a preference, so the default applies again.
+pub fn forget(key: &str) {
+    if let Some(s) = storage() {
+        let _ = s.remove_item(&format!("{PREFIX}{key}"));
+    }
+}
+
 /// The picks remembered under `recent.<key>`, newest first.
 #[allow(dead_code)] // the ModelPicker (Phase 1b task 9) reads it
 pub fn recent(key: &str) -> Vec<String> {

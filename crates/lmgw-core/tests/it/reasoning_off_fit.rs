@@ -49,6 +49,7 @@ async fn setup(base: &str, protocol: Protocol, caps: Option<Value>) -> (SharedSt
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: caps,
+            fallback: None,
         },
     )
     .await
@@ -152,7 +153,7 @@ fn ignored(resp: &reqwest::Response) -> Option<String> {
 async fn a_refused_off_is_retried_without_the_control_and_remembered() {
     let mock = MockServer::start().await;
     without_reasoning(&mock).await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 200);
@@ -209,7 +210,7 @@ async fn a_refusal_listing_its_values_is_retried_with_the_least() {
         )
         .mount(&mock)
         .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], true).await;
     assert_eq!(resp.status(), 200);
@@ -278,7 +279,7 @@ async fn gemini_climbs_from_minimal_to_the_models_least_level() {
 async fn an_explicit_level_on_a_model_without_reasoning_is_the_providers_error() {
     let mock = MockServer::start().await;
     without_reasoning(&mock).await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning-effort", "high")], false).await;
     assert_eq!(resp.status(), 400);
@@ -305,7 +306,7 @@ async fn a_refusal_about_something_else_is_retried_without_the_off_and_stands() 
         .respond_with(openai_refusal("Request contains an invalid argument."))
         .mount(&mock)
         .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 400);
@@ -353,7 +354,7 @@ async fn a_context_refusal_is_not_retried() {
         ))
         .mount(&mock)
         .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 400);
     assert_eq!(posted(&mock).await.len(), 1);
@@ -382,7 +383,7 @@ async fn every_off_refused_answers_with_no_control_and_is_remembered() {
         .respond_with(openai_ok())
         .mount(&mock)
         .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 200);
@@ -498,7 +499,7 @@ async fn a_catalog_listing_levels_without_off_sends_the_least() {
                "opencode": {"variants": {"low": {}, "medium": {}, "high": {}}}}),
     )
     .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 200);
@@ -523,7 +524,7 @@ async fn a_form_the_catalog_chose_is_retried_when_refused() {
         }]})))
         .mount(&mock)
         .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 200);
@@ -549,7 +550,7 @@ async fn a_catalog_that_can_switch_off_gets_the_off() {
                "opencode": {"variants": {"none": {}, "low": {}, "high": {}}}}),
     )
     .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = chat(&base, &[("x-lmgw-reasoning", "off")], false).await;
     assert_eq!(resp.status(), 200);
@@ -599,7 +600,7 @@ async fn an_owner_override_settles_it() {
     without_reasoning(&mock).await;
     let (state, base) = setup(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         Some(json!({"capabilities": {"task": "chat", "reasoning": {"kind": "fixed"}}})),
     )
     .await;
@@ -640,7 +641,7 @@ async fn a_chat_turn_with_reasoning_off_answers_on_a_model_without_it() {
         )
         .mount(&mock)
         .await;
-    let (state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
     let client = base.client();
     let t: Value = client
         .post(format!("{base}/chat/api/threads"))
@@ -721,7 +722,7 @@ async fn a_chat_turn_on_a_model_refusing_every_off_answers_and_says_so() {
         )
         .mount(&mock)
         .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
     let client = base.client();
     let t: Value = client
         .post(format!("{base}/chat/api/threads"))
@@ -789,7 +790,7 @@ async fn a_chat_turn_on_a_model_refusing_every_off_answers_and_says_so() {
 async fn a_responses_turn_with_reasoning_off_answers_on_a_model_without_it() {
     let mock = MockServer::start().await;
     without_reasoning(&mock).await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai, None).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible, None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/responses"))

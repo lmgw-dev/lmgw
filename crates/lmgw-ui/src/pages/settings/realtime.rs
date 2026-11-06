@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use leptos::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::{anchor, f, Ctl, Def, Page};
+use super::{anchor, f, labels, Ctl, Def, Page};
 use crate::widgets::{Field, FormState, Kind};
 
 /// The default voice and the TTS model's voice list.
@@ -62,7 +62,7 @@ pub(super) const REALTIME: &[Def] = &[
         "realtime",
         "rt-cascade",
         "realtime.default_model",
-        "Chat model",
+        labels::CHAT_MODEL,
         Ctl::Model(&["chat"], None, "none — a session must name its model"),
     )
     .hint("answers a session that names no model, or an OpenAI realtime one (gpt-realtime…)")
@@ -71,7 +71,7 @@ pub(super) const REALTIME: &[Def] = &[
         "realtime",
         "rt-cascade",
         "realtime.asr_alias",
-        "Speech to text",
+        labels::SPEECH_TO_TEXT,
         Ctl::Model(&["asr"], None, "the Chat's transcription model"),
     )
     .hint("transcribes each turn; the Chat uses it too while Settings → Chat names none")
@@ -80,7 +80,7 @@ pub(super) const REALTIME: &[Def] = &[
         "realtime",
         "rt-cascade",
         "realtime.tts_alias",
-        "Text to speech",
+        labels::TEXT_TO_SPEECH,
         Ctl::Model(
             lmgw_api_types::realtime::SPEECH_TASKS,
             None,

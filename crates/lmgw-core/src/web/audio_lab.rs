@@ -25,7 +25,7 @@
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::audio_lab::{
@@ -55,9 +55,9 @@ use extract::{LabJson, LabOptJson};
 /// Subdirectory of the audio models dir holding uploaded reference clips.
 /// Inside the container this is `/models/voices` (the models dir is mounted at
 /// `/models`), which is what goes into a request's `voice_ref`.
-const VOICES_SUBDIR: &str = "voices";
+pub(crate) const VOICES_SUBDIR: &str = "voices";
 /// The same directory as the container sees it.
-const CONTAINER_VOICES_DIR: &str = "/models/voices";
+pub(crate) const CONTAINER_VOICES_DIR: &str = "/models/voices";
 /// audio.cpp's transcript index for a voice library: one
 /// `<basename-without-extension>|<transcript>` line per clip, read when a
 /// request's `voice` resolves to `<voice_dir>/<name>.wav` so the clone gets
@@ -66,7 +66,7 @@ const CONTAINER_VOICES_DIR: &str = "/models/voices";
 /// Stored in the engine's own format rather than in a sidecar of lmgw's
 /// invention: this directory *is* the `voice_dir` the class settings point
 /// at, so the file has to be the one audiocpp_server reads.
-const PROMPT_TEXT_FILE: &str = "prompt_text";
+pub(crate) const PROMPT_TEXT_FILE: &str = "prompt_text";
 
 // ---------------------------------------------------------------------------
 // Model list
@@ -146,7 +146,17 @@ pub async fn list_voices(
 // Voice library — reference clips under <models_dir>/voices
 // ---------------------------------------------------------------------------
 
-fn voices_dir(state: &SharedState) -> Option<std::path::PathBuf> {
+/// Why there is no voice library: the audio class has no models dir. Where
+/// to set one, by its label (`hf::models_dir_location`).
+pub(crate) fn no_audio_models_dir() -> String {
+    format!(
+        "the audio models directory is not set, so there is no voice library — choose where \
+         audio models are stored first: {}",
+        crate::hf::models_dir_location("audio")
+    )
+}
+
+pub(crate) fn voices_dir(state: &SharedState) -> Option<std::path::PathBuf> {
     let dir = state
         .snapshot()
         .settings
@@ -231,7 +241,7 @@ pub(crate) fn library_clips(state: &SharedState) -> Option<Vec<crate::audio::voi
 /// that ends up inside a container request, so anything that could climb out of
 /// the voices dir (`..`, separators, NUL) is rejected outright rather than
 /// sanitized into something the user didn't name.
-fn safe_clip_name(name: &str) -> Result<String, String> {
+pub(crate) fn safe_clip_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("empty file name".into());
@@ -253,7 +263,9 @@ fn safe_clip_name(name: &str) -> Result<String, String> {
 /// The transcript index as a map, or empty when there is none. Malformed
 /// lines are skipped rather than failing the listing — the file is editable by
 /// hand and a bad line should cost that line, not the library.
-fn read_prompt_text(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+pub(crate) fn read_prompt_text(
+    dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
     let Ok(raw) = std::fs::read_to_string(dir.join(PROMPT_TEXT_FILE)) else {
         return Default::default();
     };
@@ -266,11 +278,13 @@ fn read_prompt_text(dir: &std::path::Path) -> std::collections::BTreeMap<String,
         .collect()
 }
 
-/// Write the index back, atomically (tmp + rename inside the directory the
-/// container has mounted, so it never reads a half-written file). An empty map
-/// removes the file: no index at all is what "no transcripts" means to
-/// audiocpp_server.
-fn write_prompt_text(
+/// Write the index back, atomically (a temporary file of its own + rename
+/// inside the directory the container has mounted, so it never reads a
+/// half-written file). An empty map removes the file: no index at all is
+/// what "no transcripts" means to audiocpp_server. Every caller reads the
+/// index, changes it and writes it back holding
+/// [`crate::voice_lab::library_write`], so two writers never lose one's line.
+pub(crate) fn write_prompt_text(
     dir: &std::path::Path,
     map: &std::collections::BTreeMap<String, String>,
 ) -> std::io::Result<()> {
@@ -285,21 +299,23 @@ fn write_prompt_text(
         .iter()
         .map(|(name, text)| format!("{name}|{text}\n"))
         .collect();
-    let tmp = dir.join(format!(".{PROMPT_TEXT_FILE}.tmp"));
+    let tmp = dir.join(crate::voice_lab::temp_name(PROMPT_TEXT_FILE));
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// The voice name a clip answers to: its file name without the extension,
 /// which is the key both `prompt_text` and a request's `voice` use.
-fn voice_name(file_name: &str) -> &str {
+pub(crate) fn voice_name(file_name: &str) -> &str {
     file_name
         .rsplit_once('.')
         .map(|(n, _)| n)
         .unwrap_or(file_name)
 }
 
-fn clip_entries(dir: &std::path::Path) -> Vec<Clip> {
+pub(crate) fn clip_entries(dir: &std::path::Path) -> Vec<Clip> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -339,7 +355,7 @@ pub async fn list_refs(State(state): State<SharedState>) -> Response {
     let Some(dir) = voices_dir(&state) else {
         return Json(ClipList {
             clips: Vec::new(),
-            error: Some("audio models dir is not configured (Settings → Runtimes → Audio)".into()),
+            error: Some(no_audio_models_dir()),
         })
         .into_response();
     };
@@ -356,10 +372,7 @@ pub async fn list_refs(State(state): State<SharedState>) -> Response {
 /// and a guessed cap would reject legitimate audio silently.
 pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> Response {
     let Some(dir) = voices_dir(&state) else {
-        return fail(
-            StatusCode::BAD_REQUEST,
-            "audio models dir is not configured (Settings → Runtimes → Audio)",
-        );
+        return fail(StatusCode::BAD_REQUEST, no_audio_models_dir());
     };
     if let Some(refusal) = refuse_library_write(&state, &dir) {
         return refusal;
@@ -399,14 +412,18 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
             Ok(b) => b,
             Err(e) => return fail(StatusCode::BAD_REQUEST, format!("reading upload: {e}")),
         };
-        // tmp + rename, so the container never sees a half-written clip.
-        let tmp = dir.join(format!(".{name}.part"));
+        // A temporary file of its own + rename, so the container never sees
+        // a half-written clip; under the library's lock, so a Voices lab save
+        // checking that name does not race it.
+        let tmp = dir.join(crate::voice_lab::temp_name(&name));
         if let Err(e) = std::fs::write(&tmp, &bytes) {
+            let _ = std::fs::remove_file(&tmp);
             return fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("writing {}: {e}", tmp.display()),
             );
         }
+        let lock = crate::voice_lab::library_write().await;
         if let Err(e) = std::fs::rename(&tmp, dir.join(&name)) {
             let _ = std::fs::remove_file(&tmp);
             return fail(
@@ -414,6 +431,7 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
                 format!("saving {name}: {e}"),
             );
         }
+        drop(lock);
         saved.push(name);
     }
     if saved.is_empty() {
@@ -425,6 +443,7 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
     let typed = transcript.filter(|t| !t.is_empty());
     let applied = typed.is_some() && saved.len() == 1;
     if let (Some(text), [only]) = (typed, saved.as_slice()) {
+        let _lock = crate::voice_lab::library_write().await;
         let mut texts = read_prompt_text(&dir);
         texts.insert(voice_name(only).to_string(), text);
         if let Err(e) = write_prompt_text(&dir, &texts) {
@@ -477,6 +496,7 @@ pub async fn delete_ref(State(state): State<SharedState>, Path(name): Path<Strin
     if let Some(refusal) = refuse_library_write(&state, &dir) {
         return refusal;
     }
+    let _lock = crate::voice_lab::library_write().await;
     match std::fs::remove_file(dir.join(&name)) {
         Ok(()) => {
             // A transcript for a clip that is gone would silently re-attach
@@ -523,6 +543,7 @@ pub async fn set_ref_text(
         // The index is one line per clip, so a pasted newline would split it
         // into a line that names no clip and a clip that lost its text.
         .replace(['\n', '\r'], " ");
+    let _lock = crate::voice_lab::library_write().await;
     let mut texts = read_prompt_text(&dir);
     let voice = voice_name(&name).to_string();
     match text.is_empty() {
@@ -580,24 +601,25 @@ pub async fn transcribe_ref(
 }
 
 /// `GET /audio-lab/api/refs/{name}` — serve a stored clip back so the panel can
-/// preview it in an `<audio>` element.
-pub async fn get_ref(State(state): State<SharedState>, Path(name): Path<String>) -> Response {
+/// preview it in an `<audio>` element: streamed, whole or the one `Range` the
+/// player asks ([`super::ranged`]).
+pub async fn get_ref(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    ask: super::ranged::RangeAsk,
+) -> Response {
     let (Some(dir), Ok(name)) = (voices_dir(&state), safe_clip_name(&name)) else {
         return fail(StatusCode::BAD_REQUEST, "invalid clip");
     };
     let path = dir.join(&name);
-    match std::fs::read(&path) {
-        Ok(bytes) => (
-            [(
-                header::CONTENT_TYPE,
-                mime_guess::from_path(&path)
-                    .first_or_octet_stream()
-                    .as_ref()
-                    .to_string(),
-            )],
-            bytes,
-        )
-            .into_response(),
+    let head = super::ranged::Head::typed(
+        mime_guess::from_path(&path)
+            .first_or_octet_stream()
+            .as_ref(),
+    );
+    match super::ranged::file(&ask, &path, head).await {
+        // `ranged` sends nosniff + sandbox on the 200, the 206 and the 416.
+        Ok(resp) => resp,
         Err(e) => fail(StatusCode::NOT_FOUND, e.to_string()),
     }
 }

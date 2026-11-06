@@ -372,6 +372,8 @@ impl<'a> Splitter<'a> {
 
 impl DeltaSink for Splitter<'_> {
     fn on_delta(&mut self, d: &StreamDelta) {
+        // A spoken answer has no refusal of its own: the model's words.
+        let d = &*d.refusal_as_text();
         let first = matches!(
             d,
             StreamDelta::TextDelta(_) | StreamDelta::ToolCallStart { .. }
@@ -540,11 +542,11 @@ pub(crate) async fn speak(mut s: Speaker<'_>) -> Result<(), GatewayError> {
         };
         let began = std::time::Instant::now();
         let wav = match synth.speak(&clause, Some(s.stop)).await {
-            Ok((w, shaped)) => {
+            Ok(spoken) => {
                 if !std::mem::replace(&mut reported, true) {
-                    report(s.speech, synth, &shaped);
+                    report(s.speech, synth, &spoken.shaped);
                 }
-                w
+                spoken.audio
             }
             // A clause of nothing but inline tags (`[laughs]` on its own),
             // or of nothing but characters the row's engine cannot say (a

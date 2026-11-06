@@ -176,8 +176,7 @@ async fn local_row(state: &lmgw_core::state::SharedState) {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -377,6 +376,7 @@ async fn the_tts_alias_is_the_key_s_to_use_before_the_101_and_before_each_voice(
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "tts", "endpoints": ["/v1/audio/speech"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
@@ -522,8 +522,7 @@ async fn a_shipped_voice_of_a_local_row_is_known_by_name_in_any_case() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await

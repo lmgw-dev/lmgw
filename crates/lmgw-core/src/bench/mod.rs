@@ -58,6 +58,6 @@ pub mod stream;
 pub use client::{BenchError, HttpAnswer, LlamaClient};
 pub use launcher::{BenchLauncher, PodmanLauncher, BENCH_LABEL};
 pub use run::{run_suite, Bench, BenchSink, BenchTarget, Progress, Record, SuiteEnd};
-pub use runner::{abort_for_hold, boot_sweep, BenchmarkExecutor};
+pub use runner::{abort_for_hold, boot_sweep, Aborted, BenchmarkExecutor};
 pub use sampler::{Baseline, EnergyReading, EnergyWindow, Sample, Sampler};
 pub use state::{BenchState, OnCard, Tuning};

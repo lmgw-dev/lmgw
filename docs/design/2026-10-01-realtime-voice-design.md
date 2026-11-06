@@ -1049,10 +1049,12 @@ holds for one request, and a session's answer is many.
 **`capabilities.speech`** (AC2, `capabilities/speech.rs`) publishes it per
 speaking row (`tts`, `vdes`): `instructions` (`none` | `style` |
 `voice_design` | `passthrough`), `instructions_required`, `inline_tags`
-(`none` | `fixed` | `free`) and `tags`, `languages` (ISO 639-1),
-`streaming`, `sample_rate`, with a notes line. A cloud alias has one only
-through the owner's `capabilities_override` — which is also what shaping
-of that alias goes by.
+(`none` | `fixed` | `free`) and `tags`, `streaming`, `sample_rate`, with a
+notes line. A cloud alias has one only through the owner's
+`capabilities_override` — which is also what shaping of that alias goes by.
+The languages are not part of it any more: every local audio row publishes
+them at the top of `capabilities` as `languages` (ISO 639-1), with
+`multilingual` for a family that only says it covers many.
 
 **Realtime.** `VoiceFacts.native` holds the row's present natives, matched
 without case, so `Ryan` resolves verified against Qwen3's `ryan`. A

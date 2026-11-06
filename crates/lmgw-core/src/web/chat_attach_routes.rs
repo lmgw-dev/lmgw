@@ -3,7 +3,7 @@
 //! viewer.
 
 use axum::extract::State;
-use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::chat_attachments::{ModeRequest, ModeSet};
@@ -92,18 +92,9 @@ pub async fn get_text(
         },
     };
     let mut resp = (StatusCode::OK, text).into_response();
-    let h = resp.headers_mut();
-    h.insert(
+    resp.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    h.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("sandbox"),
-    );
-    resp
+    super::stored::sandboxed(resp)
 }

@@ -29,7 +29,9 @@ use quickdoc_core::store::Corpus;
 use crate::config::{AuxKind, Snapshot};
 use crate::erased::Erased;
 use crate::error::GatewayError;
+use crate::gate::{FallbackReason, GateHeaders};
 use crate::proxy::{self, RequestCtx};
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry;
 
@@ -41,6 +43,9 @@ pub struct InProcessEmbedder {
     /// Whose request the vectors are for ([`Self::charged_to`]); `None`: the
     /// gateway's own work, charged to its internal identity.
     caller: Option<RequestCtx>,
+    /// Whose traffic the calls are ([`Self::as_traffic_of`]): the owner's
+    /// unless set.
+    origin: Origin,
 }
 
 impl std::fmt::Debug for InProcessEmbedder {
@@ -64,12 +69,12 @@ impl InProcessEmbedder {
             alias,
             vec!["quickdoc probe".into()],
             telemetry::EMBED_PROTO,
-            proxy::KeyRef::default(),
+            (proxy::KeyRef::default(), Origin::Owner),
         )
         .await
         .map_err(|(_, _, e)| e)?;
-        if let Some(fb) = headers.fallback() {
-            return Err(refuse_fallback(&state, alias, fb));
+        if headers.fallback().is_some() {
+            return Err(refuse_fallback(&state, alias, &headers));
         }
         let dims = resp
             .embeddings
@@ -84,6 +89,7 @@ impl InProcessEmbedder {
             alias: alias.to_string(),
             identity: EmbedIdentity::new(route.upstream.name, route.upstream_model, dims),
             caller: None,
+            origin: Origin::Owner,
         })
     }
 
@@ -137,6 +143,7 @@ impl InProcessEmbedder {
             alias,
             identity: pinned.clone(),
             caller: None,
+            origin: Origin::Owner,
         })
     }
 
@@ -146,6 +153,17 @@ impl InProcessEmbedder {
     /// row is the key's. `None` keeps the gateway's own charging.
     pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
         self.caller = caller;
+        self
+    }
+
+    /// Embed as `origin`'s traffic (per-request background design §7): a
+    /// search a `/v1/responses` run's tool makes carries the run's origin,
+    /// so a guest's run gets a guest's admission here too — the deferral
+    /// when the embedder cannot start without disturbing the owner, never a
+    /// fallback (a corpus is pinned to its model). Charging is
+    /// [`Self::charged_to`]'s, separately: only a device's key is charged.
+    pub fn as_traffic_of(mut self, origin: Origin) -> Self {
+        self.origin = origin;
         self
     }
 
@@ -185,16 +203,25 @@ impl Embedder for InProcessEmbedder {
                 &self.alias,
                 texts.to_vec(),
                 telemetry::EMBED_PROTO,
-                key,
+                (key, self.origin),
             )
             .await
-            .map_err(|(_, _, e)| QuickdocError::Embedder(format!("{}: {e}", self.alias)))?;
-            if let Some(fb) = headers.fallback() {
+            .map_err(|(_, _, e)| {
+                let message = format!("{}: {e}", self.alias);
+                if crate::knowledge::ingest_split::is_oversize_error(&e) {
+                    QuickdocError::EmbedderOversize(message)
+                } else {
+                    QuickdocError::Embedder(message)
+                }
+            })?;
+            if let Some((fb, reason)) = answered_instead(&headers) {
                 return Err(QuickdocError::Embedder(format!(
-                    "'{}' was answered by the GPU-hold fallback '{fb}' — this corpus is pinned to \
-                 {}, so vectors from another model are refused rather than mixed in. Release \
-                 the hold and run this again.",
-                    self.alias, self.identity
+                    "'{}' was answered by its fallback '{fb}' because {} — this corpus is pinned \
+                     to {}, so vectors from another model are refused rather than mixed in. {}",
+                    self.alias,
+                    reason.because(),
+                    self.identity,
+                    remedy(&self.alias, reason)
                 )));
             }
             if resp.embeddings.len() != texts.len() {
@@ -320,27 +347,62 @@ pub(crate) fn refuse_if_held(
     }
 }
 
-/// Why quickdoc will not take a GPU-hold fallback's vectors (gpu-hold design
-/// §2): a corpus is pinned to one `(upstream, model, dims)`, and an index half
-/// filled by another model is unsearchable in a way no later check can detect.
-/// Named as a hold rather than as a routing error because that is what it is,
-/// and because the fix is to release the hold and re-run — not to reconfigure
-/// anything.
+/// Who answered for the pinned `alias` instead, and why: the walk's first
+/// hop, whose reason is why the model named did not answer (on a one-hop
+/// walk, `x-lmgw-fallback-reason` itself). `None` when the model answered.
+pub(super) fn answered_instead(headers: &GateHeaders) -> Option<(String, FallbackReason)> {
+    headers.chain().hops().first().cloned()
+}
+
+/// What to do so `alias` answers itself again after a fallback answered for
+/// it because of `reason`: worded from that reason, so a refusal never sends
+/// anyone to release a hold that is not on (machine-check design D97).
+pub(super) fn remedy(alias: &str, reason: FallbackReason) -> String {
+    match reason {
+        FallbackReason::Hold => "Release the hold and run this again.".into(),
+        FallbackReason::Benchmark => "Run this again once the benchmark run has ended.".into(),
+        FallbackReason::Disabled => format!("Enable '{alias}' again and run this again."),
+        FallbackReason::GpuSetup => "Open lmgw on the computer it runs on to see what to do, \
+                                     then run this again."
+            .into(),
+        _ => format!("Run this again once '{alias}' can answer itself."),
+    }
+}
+
+/// Why quickdoc will not take a fallback's vectors (gpu-hold design §2): a
+/// corpus is pinned to one `(upstream, model, dims)`, and an index half
+/// filled by another model is unsearchable in a way no later check can
+/// detect.
 ///
-/// A benchmark's lease answers the same, as `gpu_benchmark` (benchmark design
-/// §3.2): the fallback answered because of it.
-fn refuse_fallback(state: &SharedState, alias: &str, fallback: &str) -> GatewayError {
-    state
-        .snapshot()
-        .gpu_block()
-        .unwrap_or(crate::bench::lease::GpuBlock::Hold)
-        .refusal(
-            alias,
-            format!(
-                " (a corpus is pinned to the one model it was embedded with, so quickdoc will \
-                 not embed through the fallback '{fallback}')"
+/// Worded from why the fallback answered ([`answered_instead`]): the GPU
+/// hold, or a benchmark's lease (`gpu_benchmark`, benchmark design §3.2),
+/// as its own refusal while it is on — the fix is to release it and re-run,
+/// not to reconfigure anything; any other reason (a disabled model, a quota)
+/// as what it is, `fallback_refused`, never as a hold that is not on.
+fn refuse_fallback(state: &SharedState, alias: &str, headers: &GateHeaders) -> GatewayError {
+    let Some((fallback, reason)) = answered_instead(headers) else {
+        return GatewayError::Internal(format!(
+            "'{alias}' was refused for a fallback that did not answer"
+        ));
+    };
+    let pinned = format!(
+        " (a corpus is pinned to the one model it was embedded with, so quickdoc will not embed \
+         through the fallback '{fallback}')"
+    );
+    match (reason, state.snapshot().gpu_block()) {
+        (FallbackReason::Hold | FallbackReason::Benchmark, Some(block)) => {
+            block.refusal(alias, pinned)
+        }
+        _ => GatewayError::Refused {
+            status: 503,
+            code: "fallback_refused",
+            message: format!(
+                "'{alias}' was answered by its fallback '{fallback}' because {}{pinned}. {}",
+                reason.because(),
+                remedy(alias, reason)
             ),
-        )
+        },
+    }
 }
 
 /// A client-routable name that resolves to exactly `(upstream, model)`.

@@ -177,7 +177,9 @@ Field rules:
     ⇒ `enable_thinking_var` (llama-server maps effort `none` and
     `x-lmgw-reasoning: off` to `enable_thinking = false`, which only a
     template reading that variable honours); OpenAI-protocol catalog ⇒
-    `opencode.variants ∋ none`; Gemini, Anthropic ⇒ absent.
+    `opencode.variants ∋ none`; Gemini ⇒ absent; Anthropic ⇒
+    `thinking.types.disabled.supported` where the catalog publishes it,
+    absent otherwise *(rev 2026-11-05)*.
   - `budget_tokens`: the configured default budget (`--reasoning-budget`)
     when set and non-zero *(rev)*; a zero budget is reported as
     `enabled: false` (§3.2), not as a budget.
@@ -198,6 +200,16 @@ Field rules:
     lmgw does not set that variable — and, having nothing a request can
     change, it is `kind: fixed`, not a `toggle` whose switch is wired to
     nothing.
+  - `thinking_types` *(rev 2026-11-05)*: the Messages `thinking` types the
+    model takes, as an Anthropic catalog publishes them
+    (`capabilities.thinking.types.<type>.supported: true`), every type it
+    names, sorted — Anthropic's own order for the four it defines
+    (`adaptive`, `between_tools`, `disabled`, `enabled`); a newer type is
+    kept too. Only on an Anthropic route, the one that sends Messages' own
+    `thinking` field; omitted when the catalog names none. `adaptive` is
+    what "on" and an effort level go out as there, `enabled` what a budget
+    goes out as, `between_tools` what an off goes out as on a model that
+    takes it and not `disabled` (§5.6).
   - Absent as a whole ⇒ unknown (a cloud model with no catalog signal).
 - `capabilities.tool_calls` — `kind`: `native` (lmgw returns structured
   `tool_calls`; every local row whose template renders `tools` in a syntax the
@@ -221,6 +233,31 @@ Field rules:
   OpenAI-protocol: from `supported_parameters` when the catalog lists them,
   else absent. Anthropic / Gemini upstreams: absent — lmgw drops
   `response_format` on those egress paths today, unchanged here.
+  *(Changed 2026-10-22, structured-output design
+  [2026-10-22-structured-output-design.md](2026-10-22-structured-output-design.md)
+  §10: every egress translates the format now. Anthropic rows publish
+  `json_schema` from `capabilities.structured_outputs.supported` and
+  `json_object: false`; Gemini rows stay absent, their catalog says nothing
+  per model. An explicit `false` is refused before any upstream call.)*
+- `capabilities.context_editing` *(rev 2026-11-05)* — Anthropic's context
+  management (`context_management` on `/v1/messages`) on this route, named
+  apart because the Anthropic shape puts Anthropic's own
+  `context_management` block beside lmgw's object (§2.2). Present only on an
+  Anthropic-protocol chat route, the one that sends a Messages request's
+  `context_management` on as written (gateway design §6.1); absent
+  everywhere else, where the field is left out and named in
+  `x-lmgw-params-ignored`. `supported`: the catalog's
+  `capabilities.context_management.supported`, absent when it publishes
+  none. `edits`: every key under that object whose `supported` is `true`
+  and that lmgw sends on (`clear_thinking_20251015`,
+  `clear_tool_uses_20250919`, `compact_20260112`, or a newer one), sorted;
+  omitted when none. *(changed 2026-11-05: a compaction edit was left out
+  while the egress refused it; the egress now sends it and carries its
+  `compaction` block back, gateway design §6.1.)* `compaction`
+  *(rev 2026-11-05)*: the on-demand compaction types (`summarize`, or a
+  newer one) of the catalog's `capabilities.compaction` whose `supported`
+  is `true`, sorted; omitted when none (and when that block says
+  `supported: false`).
 - `capabilities.source` — `gguf+config`, `catalog`, `config` (aux, audio and
   image rows, where there is no GGUF signal to read — an image row's
   `files`/`args`/`modes`/`edit` are the whole story *(rev 2026-09-21)*),
@@ -238,13 +275,50 @@ Field rules:
 Same objects with the Anthropic top level (`type: "model"`, `display_name`,
 `created_at`) plus the Anthropic SDK's typed names as **aliases**
 *(rev)*: `max_input_tokens` (= `context_length`) and `max_tokens`
-(= `max_output_tokens`); `max_output_tokens`, `context_window`,
-`capabilities`, `notes`, `pricing` and the list-level `lmgw` object are
-identical to the OpenAI shape — one capability schema, not the Anthropic
-`{feature: {supported}}` tree, because the point is that an agent reads one
-contract whichever SDK it holds. Extra keys are safe: both SDKs' model types
-accept unknown fields (the existing `pricing`/`context_length` already rely
-on that).
+(= `max_output_tokens`); `max_output_tokens`, `context_window`, `notes`,
+`pricing` and the list-level `lmgw` object are identical to the OpenAI shape.
+`capabilities` is the OpenAI shape's object, unchanged, **plus** Anthropic's
+ten `{feature: {supported}}` blocks merged into it (§2.2.1), so an agent
+still reads one contract whichever SDK it holds, and Anthropic's schema, which
+requires the ten blocks, is met; an eleventh, beta `compaction`, is beside
+them *(rev 2026-11-05)*. The key sets do not overlap (lmgw's
+`structured_output`/`reasoning`, Anthropic's `structured_outputs`/`thinking`),
+and extra keys are safe: Anthropic's `ModelCapabilities` takes unknown keys,
+and both SDKs' model types accept unknown fields (the existing
+`pricing`/`context_length` already rely on that). A model whose facts could
+not be read has no `capabilities` in either shape (Anthropic's field is
+optional and nullable).
+
+#### 2.2.1 Anthropic's blocks, mapped from lmgw's facts
+
+Built by `capabilities::anthropic_blocks` from the same `ModelCapabilities`
+the OpenAI shape publishes, nothing else. The rule for every block:
+`supported: true` only when a `/v1/messages` request that uses the feature,
+sent to lmgw for this model, really works: lmgw translates it, or passes it
+through to an upstream that does it. Anthropic's schema has no "unknown", so
+whatever lmgw does not serve yet, or does not know, is `false`; lmgw's own
+fields beside the blocks keep "absent means unknown". A model whose
+`endpoints` lack `/v1/messages` (embedders, audio, image rows) is `false` in
+every block. The mapping is the inverse of how the catalog reads an
+Anthropic upstream's blocks (§4).
+
+| Block | `supported: true` when | Why |
+|---|---|---|
+| `batch` | never yet | lmgw serves no `/v1/messages/batches` yet. |
+| `citations` | never yet | *(rev 2026-11-06)* A `document` or `search_result` block reaches an Anthropic route as written and an answer's citations come back to a Messages client (gateway design §6.1, "Citations"), but lmgw does not read the catalog's `citations` block yet, so it cannot say per model. |
+| `code_execution` | never yet | A server tool; the ingress refuses every tool without `input_schema` yet. |
+| `compaction` *(rev 2026-11-05)* | `capabilities.context_editing` is present (an Anthropic route) and its `compaction` names a type | On-demand compaction (the top-level `compaction`, beta `compact-2026-09-04`) goes to an Anthropic route as written and its `compaction` block comes back as Anthropic wrote it (gateway design §6.1). Not gated on `context_editing.supported`: it is a field of its own. `summarize`: `context_editing.compaction` names it. The catalog reads Anthropic's `capabilities.compaction`, which Anthropic lists under the beta flag, so the catalog fetch sends it. |
+| `context_management` | `capabilities.context_editing` is present (an Anthropic route) and its `supported` is `true` *(rev 2026-11-05: was "not `false`", which said yes where the catalog said nothing)* | Only an Anthropic route sends a request's `context_management` on, as written (gateway design §6.1); every other route leaves it out and names it in `x-lmgw-params-ignored`. Unpublished is `false`, as for the thinking types. `clear_thinking_20251015` / `clear_tool_uses_20250919`: `context_editing.edits` names it, as the provider's catalog published it per model; unknown is `false`. `compact_20260112` *(rev 2026-11-05: was never, while the egress refused a compaction edit)*: `context_editing.edits` names it; the edit goes out as written and its `compaction` block comes back through the IR (`ContentPart::Compaction`). |
+| `effort` | `reasoning.kind` is `levels` | `output_config.effort` becomes the IR's effort, rendered per protocol (§5.3). Each of `low`, `medium`, `high`, `xhigh`, `max`: `reasoning.levels` contains it. |
+| `image_input` | `vision` is `true` | The ingress takes `image` blocks (base64 and URL sources). |
+| `pdf_input` *(rev 2026-11-06: was never)* | `capabilities.context_editing` is present (an Anthropic route) and `input_modalities` names `pdf`, which the catalog sets from Anthropic's `pdf_input` | A `document` block (base64, URL or Files API source) reaches an Anthropic route as the client wrote it (gateway design §6.1, "Anthropic blocks lmgw does not model"); every other route is sent none of it and names it `content.document`. |
+| `server_tools` (+ `code_execution`, `web_search`) | never yet | As `code_execution`: server tools are refused before any upstream sees them, on every protocol. |
+| `structured_outputs` | `structured_output.json_schema` is `true` | The ingress reads `output_config.format` (and the older `output_format`) of type `json_schema`. |
+| `thinking` | the model reasons: `reasoning.kind` is `toggle` or `levels`, or `fixed` with `enabled: true` | Thinking reaches the client as `thinking` blocks. Every type below is `false` when this is. |
+| `thinking.types.adaptive` | An Anthropic route (`reasoning.control` names `thinking`): `reasoning.thinking_types` names `adaptive` *(rev 2026-11-05)*. Elsewhere: `reasoning.enabled` is `true`, or "on" reaches the model through `chat_template_kwargs.enable_thinking` (a local row) | Adaptive is lmgw's bare "on" (§5.2), which an Anthropic route renders as type adaptive: the model's own published types decide there, and unpublished is `false`. OpenAI-protocol and Gemini routes have no spelling for a bare "on" (§5.3), so there it works only where the model thinks by default. |
+| `thinking.types.enabled` | An Anthropic route: `reasoning.thinking_types` names `enabled` *(rev 2026-11-05)*. Elsewhere: `reasoning.control` names `x-lmgw-reasoning-budget` | The budget form needs the budget to reach the model: a Gemini route (`thinkingBudget`), or an Anthropic route, which forwards the form as written, for a model whose catalog says it takes it. A local row's llama-server ignores the budget (§5.3). |
+| `thinking.types.disabled` | `reasoning.can_disable` is `true` (on an Anthropic route the catalog's `thinking.types.disabled`) | A cloud off the model cannot take is fitted (§5.6), not honoured. |
+| `thinking.types.between_tools` | An Anthropic route: `reasoning.thinking_types` names `between_tools` *(rev 2026-11-05)*. Elsewhere: never | The Messages ingress reads the type into the IR as an off spelled `between_tools` (§5.1); an Anthropic route sends it as written, so the model's own published types decide there, and unpublished is `false`. Every other route sends its own off instead and names `between_tools` in `x-lmgw-reasoning-ignored`. Earlier this block followed `reasoning.preserve_history`, which is a different thing. |
 
 `GET /v1/models/{id}` — 404 in the caller's error dialect when the id is not
 exposed. The id may contain `/` (`kilo/anthropic/claude-sonnet-5`): axum
@@ -387,9 +461,10 @@ defaults. `AudioCpp`-kind aliases derive from the audio row.
 | `input_modalities` | `architecture.input_modalities` | absent | `[text, image]` when `capabilities.image_input.supported`; `[text]` when the key is present and false; absent otherwise |
 | `output_modalities` | `architecture.output_modalities` | absent | `[text]` when `capabilities` is present |
 | `task` | `embedding` when `output_modalities == [embedding]`, else `chat` | `embedContent` in `supportedGenerationMethods` ⇒ `embedding`; `generateContent` ⇒ `chat`; neither ⇒ `chat` with a note that lmgw has no route to it (`bidiGenerateContent` is a live-session API) | `chat` |
-| `reasoning` | `supported_parameters ∋ reasoning \| reasoning_effort` ⇒ supported. `opencode.variants` keys (minus `none`) ⇒ kind `levels`, `can_disable = variants ∋ none`; supported without variants ⇒ `toggle`. No `enabled`, no `default`. Not supported ⇒ absent (not `fixed/false` — the catalog does not say the model cannot reason, only that no parameter controls it) | `thinking: true` ⇒ `toggle`, no `enabled`, no `can_disable` (Gemini 2.5 Pro refuses budget 0; the catalog does not say which do); `thinking` absent/false ⇒ `fixed`, `enabled: false` | `capabilities.thinking.supported` ⇒ `levels` from `capabilities.effort.<level>.supported`; no `enabled`, no `can_disable` (the tree has no `types.disabled`); `thinking.supported == false` ⇒ `fixed`, `enabled: false` |
+| `reasoning` | `supported_parameters ∋ reasoning \| reasoning_effort` ⇒ supported. `opencode.variants` keys (minus `none`) ⇒ kind `levels`, `can_disable = variants ∋ none`; supported without variants ⇒ `toggle`. No `enabled`, no `default`. Not supported ⇒ absent (not `fixed/false` — the catalog does not say the model cannot reason, only that no parameter controls it) | `thinking: true` ⇒ `toggle`, no `enabled`, no `can_disable` (Gemini 2.5 Pro refuses budget 0; the catalog does not say which do); `thinking` absent/false ⇒ `fixed`, `enabled: false` | `capabilities.thinking.supported` ⇒ `levels` from `capabilities.effort.<level>.supported`; no `enabled`; `can_disable` from `thinking.types.disabled.supported` and `thinking_types` from the types that say `supported: true` *(rev 2026-11-05)*; `thinking.supported == false` ⇒ `fixed`, `enabled: false` |
 | `tool_calls` | `supported_parameters ∋ tools` ⇒ `native`, `format: provider` | `native` for `generateContent` models | `native` |
-| `structured_output` | `response_format` / `structured_outputs` ∈ `supported_parameters` | absent | absent |
+| `structured_output` | `response_format` / `structured_outputs` ∈ `supported_parameters` | absent | absent *(2026-10-22: `json_schema` from `capabilities.structured_outputs.supported`, `json_object: false` — structured-output design §10)* |
+| `context_editing` *(rev 2026-11-05)* | absent | absent | `capabilities.context_management`: its `supported` and the edit types under it that say `supported: true` (§2.1) |
 | `source` | `catalog` | `catalog` | `catalog` |
 
 A field the catalog does not publish is **absent**, never defaulted. Gemini's
@@ -439,9 +514,18 @@ pub struct ReasoningControl {
     pub enabled: Option<bool>,     // None = leave the route's default
     pub effort: Option<String>,    // verbatim level
     pub budget_tokens: Option<i64>,
+    pub between_tools: bool,       // an off spelled as Anthropic's between_tools (rev 2026-11-05)
 }
 // Params.reasoning: Option<ReasoningControl>
 ```
+
+`between_tools` *(rev 2026-11-05)* is a spelling of off, not a fourth knob:
+normalisation makes it `enabled = Some(false)`, and drops it from anything
+that is not an off. A Messages client's `thinking: {type: "between_tools"}`
+sets it, and so does the fit (§5.6). In a merge it goes with `enabled`: a
+lower tier's spelling survives while the merged control is still an off
+the higher tier did not turn on. It is not in the API mirror of the type
+(alias overrides) yet.
 
 `Params::with_defaults` merges `reasoning` **field-wise** *(rev)*: a client
 that sets only `enabled` keeps the alias's `effort` default.
@@ -472,12 +556,17 @@ maps the normalised triple, so no cell can contradict another.
      cannot disagree. `chat_template_kwargs` stays passthrough; its
      `enable_thinking` key is read as a source at the same tier as
      `reasoning_effort`.
-   - Anthropic messages: `thinking {type: enabled|adaptive|disabled,
-     budget_tokens}` and `output_config.effort`.
+   - Anthropic messages: `thinking {type: enabled|adaptive|disabled|
+     between_tools, budget_tokens}` and `output_config.effort`. *(rev
+     2026-11-05)* `between_tools` is an off in Anthropic's spelling (§5.1);
+     any other type, or a `thinking` without a string type, is a 400 naming
+     it, never dropped. `thinking.display` is not a reasoning control: it
+     rides on the IR beside it and goes only to an Anthropic upstream, inside
+     a type that takes it (gateway design §6.1).
    - Responses: `reasoning {effort}`; on the native passthrough for
      `supports_responses` upstreams *(rev)* the header controls are injected
      into the forwarded body as `reasoning.effort` (the only control that API
-     has), the rest reported ignored.
+     has), an off fitted to the model as in §5.6, the rest reported ignored.
 3. Alias `param_defaults.reasoning`.
 4. Nothing ⇒ `None`, egress emits nothing, the model's own configuration
    applies.
@@ -488,7 +577,7 @@ maps the normalised triple, so no cell can contradict another.
 |---|---|---|---|---|
 | llama-server (`UpstreamKind::LlamaServer`, local rows) | `chat_template_kwargs.enable_thinking: false` and no `reasoning_effort` key at all *(rev 2: a live probe of the shipped build showed `reasoning_effort: "none"` does not switch thinking off there — that special case is newer than the build — and Qwen3.8's template raises on an unknown level)* | `chat_template_kwargs.enable_thinking: true` | `reasoning_effort: L` + `chat_template_kwargs.enable_thinking: true` (so a `--reasoning off` row honours it) | `reasoning_budget_tokens: N` — forwarded; whether the running llama.cpp build honours a per-request budget is the build's business (the shipped build did not in the probe), so `control` for local rows does not list the budget header |
 | generic OpenAI-protocol upstream | `reasoning_effort: "none"` — fitted to the model (§5.6) | ignored ⇒ `enabled` | `reasoning_effort: L` | ignored ⇒ `budget` |
-| Anthropic upstream | `thinking: {type: "disabled"}` — fitted to the model (§5.6) | `thinking: {type: "adaptive"}` | `thinking: {type: "adaptive"}`, `output_config: {effort: L}` | `thinking: {type: "enabled", budget_tokens: N}`; `max_tokens` raised to `N + 1024` when smaller (the API requires it) |
+| Anthropic upstream | `thinking: {type: "disabled"}` — fitted to the model (§5.6); `thinking: {type: "between_tools"}` when the control is spelled so, with no effort beside it | `thinking: {type: "adaptive"}` | `thinking: {type: "adaptive"}`, `output_config: {effort: L}` | `thinking: {type: "enabled", budget_tokens: N}`; `max_tokens` raised to `N + 1024` when smaller (the API requires it) |
 | Gemini upstream | `generationConfig.thinkingConfig.thinkingBudget: 0` — fitted to the model (§5.6): `thinkingLevel: "minimal"` unless known otherwise | ignored ⇒ `enabled` | `thinkingConfig.thinkingLevel: L` | `thinkingConfig.thinkingBudget: N` |
 
 `chat_template_kwargs` on the llama-server route is an **object-level deep
@@ -503,14 +592,23 @@ template does not know is the template's business (Qwen3.8 raises; the
 llama-server 400 comes back with its message), a level the provider rejects
 is the provider's 400. `budget_tokens` on a current Anthropic model is
 likewise the provider's 400 (they removed it) — the model's `levels` say
-effort is the way, the notes say so too.
+effort is the way, the notes say so too. *(rev 2026-11-05)* The reverse
+holds for a model whose catalog publishes `thinking.types` without
+`adaptive` (`reasoning.thinking_types`, §2.1): "on" and an effort level
+still go out as type adaptive, and the provider's 400 comes back. The model's
+notes say so. Rendering "on" as the budget form there is not built yet: it
+needs a budget, and a request with only "on" names none, so lmgw would have
+to invent one.
 
 **Ignored controls** *(rev)*: computed in the **handler** by a pure function
 `reasoning_ignored(protocol, upstream_kind, &control) -> Vec<&'static str>`
 (the table's "ignored" cells) and stamped on the response as
 `x-lmgw-reasoning-ignored: enabled,budget` next to `x-lmgw-fallback`. The
 `Egress` trait signature does not change. An off the fit (§5.6) sent in
-another form adds `enabled`.
+another form adds `enabled`. *(rev 2026-11-05)* An off spelled
+`between_tools` on any route but an Anthropic one adds `between_tools`:
+that route sends its own off, the nearest meaning, and the notes between
+tool calls are not kept.
 
 ### 5.4 Anthropic `max_tokens` default *(rev)*
 
@@ -577,6 +675,49 @@ Decided, in this order, from:
    model thinks — the current models cannot stop, and `minimal` is the least
    level there is.
 
+*(rev 2026-11-05)* On an Anthropic route `can_disable` is the catalog's own
+`thinking.types.disabled.supported` (§4), so step 1 settles the off wherever
+the catalog publishes it: `true` ⇒ `thinking: {type: "disabled"}`, as
+before; `false` ⇒ the lowest effort level (`thinking: {type: "adaptive"}`
+with `output_config.effort` at it, `x-lmgw-reasoning-ignored: enabled`), or
+no control on a model without levels, with no refused send first. Where the
+catalog publishes no `types.disabled`, nothing changed: the off goes out, and
+a refusal takes the path below.
+
+*(rev 2026-11-05)* A model whose catalog names `between_tools` among its
+`thinking_types` and does not say `can_disable: true` gets that type:
+`thinking: {type: "between_tools"}`, bare. Anthropic documents it as Claude
+Sonnet 5.5's lowest thinking setting (it refuses `disabled`): no up-front
+thinking, and without tools the answer is text only. It is checked before
+`can_disable: false`, so such a model no longer goes out at its lowest
+effort level. It counts as the off honoured, as the protocol's own off does
+— it is the model's own documented off — so `x-lmgw-reasoning-ignored`
+does not list `enabled` for it; the short progress notes the model still
+writes between tool calls come back as thinking blocks, and a caller that
+reads the answer (the Chat) observes them as reasoning and says so
+(`enabled`, and its note "at its lowest setting it still reasons between
+tool calls"). A model that takes neither type (Claude Opus 5.5, Fable,
+Mythos) keeps its lowest effort level. A refusal of `between_tools` takes
+the path below like any other form.
+
+A Messages client's own `between_tools` is not fitted on an Anthropic
+route: it is that protocol's spelling, chosen by the client, and goes as
+asked like an explicit level. Elsewhere it is an off like any other, fitted
+to the model.
+
+*Effort beside an off.* `between_tools` is accepted only at effort `high`
+or below, and Claude Haiku 5.5 and Claude Opus 5 take `disabled` only at
+`high` or below; an `xhigh` or `max` beside either is the provider's 400.
+No such combination goes out: an off carries no effort (§5.1 normalisation
+clears it, whichever tier set the level — an alias default of `xhigh` under
+`x-lmgw-reasoning: off` included), so the model's own default effort
+applies: `high` on Sonnet 5.5 and `medium` on Haiku 5.5 (Anthropic's models
+overview, read 2026-11-05); Opus 5's default was not checked. The catalog does not publish which effort a type is limited
+to, so no clamp is decided from facts. The same normalisation also drops a
+client's own `output_config.effort` beside its `disabled` or
+`between_tools`, which Anthropic would take at `high` or below; keeping it
+is not built yet.
+
 **A refusal, and the last resort** *(rev 2026-10-04, the owner's ruling: a
 model that cannot run without reasoning runs with it, not into an error)*.
 When an off went out in any form but none and the provider answers `400` (or
@@ -604,6 +745,25 @@ form that was refused, so a lesson corrects the capabilities only where the
 provider refused exactly the form they give. This applies whatever decided
 the first form: capabilities can be wrong too.
 
+*Rev 2026-11-05 (the review of the native passthrough's off):* the form is
+kept only when every refusal retried on the request was about the control
+alone: its `param`, where the provider names one, is the control; its
+`code`, where it sends one, is about one parameter (`unsupported_value`,
+`unsupported_parameter`, `unknown_parameter`); and its words name nothing
+else the request carried — a native body's hosted tool types and top-level
+keys, a chat request's tools, tool choice, format and the client's own keys.
+A refusal that names no control at all counts unless the request carried a
+hosted tool or a key of the client's; function tools, a tool choice and a
+response format are on nearly every chat request and no provider refuses them
+with a control, so they are not held against it (a refusal that names one of
+them still is about it). Any other one is still retried for its request, but the form
+that answered is not kept, which its note and the INFO line say with the
+reason: "The following tools cannot be used with reasoning.effort 'minimal':
+web_search" would otherwise teach every later off of the route, chat and
+native alike, the level only that request needed. The bare-refusal case on a
+request with function tools (the in-process Chat's tool turns) learns; on one
+with a hosted tool it retries each time.
+
 **Nothing silent.** Every off sent in another form is an INFO line naming
 the model, what went out, and why; each retry is one more. The response
 reports `enabled` in `x-lmgw-reasoning-ignored`, the Chat's `done` in
@@ -624,10 +784,87 @@ it. Nothing there errors on it: llama-server reads the kwarg (over a row's
 `--reasoning` default), its one refusal around it (a prefill) is for
 thinking *on*, and a template that does not read the variable — a model that
 always thinks — simply reasons, which the Chat observes and reports as
-above. Not fitted: the native `/v1/responses` passthrough (the client's
-body, with `reasoning.effort` injected as asked; an off injects nothing
-there and is reported ignored), and the token counters, which send nothing
-to generate.
+above. Not fitted: the token counters, which send nothing to generate.
+
+**The native `/v1/responses` passthrough** *(rev 2026-11-05,
+owner-approved)* fits an off the same way: the same rule, the same retries
+and the same per-route memory, so a form learned on a chat send is what the
+native forward sends first, and the other way round. The forms go into the
+client's body as `reasoning.effort` (`responses/native/reasoning_off.rs`):
+the off as `"none"` (what the synthesized Responses wire sends too), the
+lowest level as that level, no control as no `effort` key (the client's
+other `reasoning` keys stay; an object left empty goes). Each refused
+attempt is a row of its own, with the note spelled `reasoning.effort: …`;
+a stream's refusal is an HTTP status before its first byte, so its retry is
+invisible on the wire. `x-lmgw-reasoning-ignored` says `enabled` when the
+off went out in another form than `"none"`; a bare "on" with no level is
+reported as before. The retries run in one loop with the parameters' (§5.7)
+before any hand-on decision, and a fallback that answers names nothing of
+the hop's off. The fit runs after the out-of-quota skip: a hop that sends
+nothing reads no facts and logs no form. A refusal whose body never arrived
+(empty, its read timed out) earns no retry. A stream whose client left after
+a `4xx` refusal sends no retry; its one row is the `499` with no local
+count, since an error answer ran nothing upstream (as on the chat stream),
+and it names the refusal and says nothing was retried — the refused attempt
+writes no row of its own then. A `5xx` whose body its client did not wait
+for is the plain hang-up, its prompt the budgets' lower bound. Not yet on
+that route: a retry of a refused reasoning summary, and reading whether
+the model reasoned although the off went out (the public chat routes do
+not read it either; the in-process Chat does).
+
+### 5.7 A parameter the model refuses *(rev 2026-11-04, owner-approved)*
+
+The same mechanic for the sampling parameters current models no longer
+take, as the first live compatibility runs met them (api-compat design §9):
+Anthropic answers `400` "`temperature` is deprecated for this model." (the
+same for `top_p`, `top_k`, …), OpenAI `400 invalid_request_error`
+"Unsupported parameter: 'temperature' is not supported with this model."
+or "Unsupported value: 'temperature' does not support 0 with this model.
+Only the default (1) value is supported." (`param` naming it, code
+`unsupported_parameter` / `unsupported_value`).
+
+- **What is read** (`proxy/reasoning_fit/params.rs`): a `400` (or `422`) to
+  a cloud send whose words are one of those wordings and name a parameter
+  the send carried — one lmgw models: `temperature`, `top_p`, `top_k`,
+  `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`,
+  `seed`. OpenAI's relayed `param` counts with its code. `stop` is not one of
+  them: leaving it out changes what the answer says rather than how it is
+  sampled, and the owner's ruling of 2026-10-24 (openai egress design
+  §7.2.5) has OpenAI's own refusal of it (GPT-6) reach the client. Whether
+  it joins is the owner's call, not decided yet. Wording it does not know is no parameter refusal:
+  it goes to the off's retry above, or stands. A client's passthrough keys
+  are not read yet.
+- **The retry**: once more without **exactly** that parameter, every other
+  one as it was; a further refused parameter earns one more, each at most
+  once. Checked before the summary's and the off's retries; the off's
+  forms keep the parameters left out.
+- **On record**: each refused attempt is a request row of its own (status
+  400, its note "… — the model refused temperature; lmgw retried once
+  without it, and leaves it out of this model's requests when it answers"),
+  and an INFO line. When the retry answers, the parameters are remembered
+  per upstream, base URL and model for the process's life (the third kind
+  of lesson in `Learned`), and every later send to that model leaves them
+  out, with an INFO line.
+- **Visible**: the answer names what was left out in
+  `x-lmgw-params-refused` (comma separated), on the request that met the
+  refusal and every later one; on `/v1/chat/completions` and `/v1/messages`
+  streamed and unary, on `/v1/responses` unary after its run (what the
+  run's own sends left out, not the route's record, which a concurrent
+  request or a fallback's turn may differ from). A streamed
+  `/v1/responses` run's headers leave before its first turn, so they name
+  what was on record when it opened; a refusal that run meets itself is in
+  its refused attempt's row, not yet in its headers.
+- **Never pre-emptive**: nothing is left out without a refusal on record
+  for that model; a model that takes the parameter keeps getting it.
+- Not yet: `/v1/completions` (the client's body goes as it came, through
+  no fitted send), the Chat's own display of it (the Chat shows nothing yet;
+  its rows and INFO lines say it), a log-row note for a later send that
+  leaves out a remembered parameter (that send has the header and the INFO
+  line only; only the refused attempt's row carries a note), and a refusal of
+  a parameter lmgw does not model.
+- Should anything start persisting `FinishReason`: `FinishReason::StopSequence`
+  serializes as `{"stop_sequence": "…"}` (the matched sequence inside), where
+  every other reason is a bare string.
 
 ## 6. Audio input for chat
 
@@ -722,5 +959,6 @@ before the shape check.
   (the IR field exists after WP4; the UI does not expose it yet).
 - Gemini effort ↔ `thinkingLevel` vocabulary per model generation; passed
   verbatim, the provider validates.
-- Translating `response_format` to Anthropic / Gemini egress.
+- Translating `response_format` to Anthropic / Gemini egress. *(Done
+  2026-10-22: [2026-10-22-structured-output-design.md](2026-10-22-structured-output-design.md).)*
 - `vram::plan` on the GGUF summary cache.

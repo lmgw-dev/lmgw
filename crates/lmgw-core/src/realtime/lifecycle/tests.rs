@@ -116,7 +116,7 @@ fn types(events: &[Value]) -> Vec<&str> {
 
 fn completion(text: &str) -> Completion {
     Completion {
-        content: vec![ContentPart::Text { text: text.into() }],
+        content: vec![ContentPart::text(text)],
         reasoning: String::new(),
         finish_reason: FinishReason::Stop,
         usage: Usage {
@@ -126,6 +126,10 @@ fn completion(text: &str) -> Completion {
         },
         model: "m".into(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     }
 }
 

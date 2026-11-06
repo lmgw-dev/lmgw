@@ -90,6 +90,24 @@ mod outcome;
 
 pub(crate) use outcome::{GroupSizes, HeldCause, ModelState, Reporter, SkipReason, WarmOutcome};
 
+/// Test-only (`tests/it`): one Background warm of the model `alias` as stage
+/// `stage` — what a session's `speech_started` or a read-aloud warms — and
+/// the `state` frame it is said as (`null` for one said to nobody). `pub`
+/// (unconditional) to match the other `*_for_tests` seams.
+#[doc(hidden)]
+pub async fn background_warm_for_tests(
+    state: &SharedState,
+    stage: &'static str,
+    alias: &str,
+) -> serde_json::Value {
+    let warm = Warm::Model {
+        stage,
+        alias: alias.to_string(),
+    };
+    let out = background::one(state, "test warm", &warm, &Reporter::default()).await;
+    serde_json::to_value(ModelState::of(stage, alias, &out)).unwrap_or_default()
+}
+
 /// How a warm may make room (module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WarmMode {

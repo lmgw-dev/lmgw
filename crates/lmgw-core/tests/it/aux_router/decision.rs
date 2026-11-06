@@ -186,9 +186,14 @@ async fn realtime_never_takes_a_decision_row_as_its_chat_model() {
 async fn the_in_process_callers_refuse_a_decision_row_before_it_starts() {
     let w = decision_world(DEAD).await;
     let laya = w.name(DECISION);
-    let f = lmgw_core::gate::open(&w.state, &laya, RouteCheck::None)
-        .await
-        .unwrap_err();
+    let f = lmgw_core::gate::open(
+        &w.state,
+        &laya,
+        RouteCheck::None,
+        lmgw_core::runtime::registry::Origin::Owner,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(f.error.kind(), "unsupported", "{}", f.error);
     let msg = f.error.to_string();
     assert!(

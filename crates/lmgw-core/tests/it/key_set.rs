@@ -390,7 +390,7 @@ async fn the_unpriced_worklist_sees_the_passthrough_models_usage_shows() {
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('kilo-gw', 'openai', 'generic', 'http://127.0.0.1:1', '[]', 20000, 1, 1,
+         VALUES ('kilo-gw', 'openai_compatible', 'generic', 'http://127.0.0.1:1', '[]', 20000, 1, 1,
                  'kilo', datetime('now'), datetime('now'), 0)",
     )
     .execute(&st.db)

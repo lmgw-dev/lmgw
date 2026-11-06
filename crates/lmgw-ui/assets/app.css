@@ -1,7 +1,9 @@
 /* lmgw UI — the dashboard's own rules. The design tokens, density and the
    shared widgets' rules (toasts, select, modal, popover, model picker, form,
    section, split pane, clamp) are in crates/lmgw-ui-kit/assets/kit.css,
-   linked before this file (index.html).
+   linked before this file (index.html). The Chat's own rules are
+   crates/lmgw-chat-ui/assets/chat.css and voice.css, linked after it; the
+   buttons, fields, chips and notices here are the Chat's base too.
    Contract: docs/design/ui-rebuild/design-sample.html (keep the two in sync when
    tokens change). One component set; density is flipped per surface via
    .density-dense / .density-airy custom properties. */
@@ -76,7 +78,8 @@ a { color: var(--accent); }
 /* Controls and the labels that name things are not text to select, as in any
    desktop app: a drag across the window or a double-click on a tab must not
    light up the interface. What the app shows (chat, code, logs, table values,
-   errors, every field) stays selectable, for copying. */
+   errors, every field) stays selectable, for copying. The Chat's own
+   (its thread list, a code block's tools) are in lmgw-chat-ui's chat.css. */
 .sidebar, .page-head h1, .rail-head, .rail-group, .rail-item,
 button, .btn, select, label, summary, [role="button"], [role="tab"],
 [role="menuitem"], [role="option"], [role="switch"],
@@ -84,11 +87,16 @@ button, .btn, select, label, summary, [role="button"], [role="tab"],
 table.data th, .sec-head, .group-toggle, .group-label,
 .tile-label, .chart-head h3, .ov-section > h2, .ov-section > .row > h2, .ov-title,
 .edit-section h3, .lab-h3, .results-title, .task-head, .dock-title, .dock-rail,
-.thread-group, .thread-row, .thread-folder, .mp-head, .mp-row,
-.md .code-tools, .preview-lang {
+.mp-head, .mp-row, .preview-lang {
   -webkit-user-select: none; user-select: none; }
 input, textarea, [contenteditable]:not([contenteditable="false"]) {
   -webkit-user-select: text; user-select: text; }
+/* Every text box here wraps its text, so none scrolls sideways. And
+   WebKitGTK lays a zoomed page's placeholder out wider than its box (by the
+   zoom: 25% at the app's 125%), which the app's classic scrollbars show as
+   a horizontal bar under every empty textarea with a placeholder. A box
+   that must not wrap sets its own overflow-x. */
+textarea { overflow-x: hidden; }
 .app { --sidebar-w: 216px; display: grid; grid-template-rows: minmax(0, 1fr);
        grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
        grid-template-areas: "sidebar content"; height: 100vh; }
@@ -149,6 +157,9 @@ input, textarea, [contenteditable]:not([contenteditable="false"]) {
 .gpu-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .gpu-list { gap: 4px; max-height: 40vh; }
 .gpu-list .gpu-row { flex-wrap: nowrap; }
+/* A start waiting for its download: the model's row, then its line. */
+.gpu-list .gpu-dl-line { margin-top: -2px; }
+.gpu-dl-line > .dl-gpu { flex: 1 1 auto; font-size: var(--fs-sm); }
 .gpu-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gpu-meta { margin-left: auto; white-space: nowrap; }
 .gpu-act { margin-top: 4px; }
@@ -163,13 +174,33 @@ input, textarea, [contenteditable]:not([contenteditable="false"]) {
 .nav-group:first-child { margin-top: 4px; }
 .nav-eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .09em;
   text-transform: uppercase; color: var(--text-3); padding: 0 10px 4px; }
-.nav-item { display: flex; align-items: center; gap: 9px; padding: 0 10px;
+/* Every row keeps an 18px gutter left of its icon: the chevron column of the
+   entries with pages under them (a macOS source list, a Breeze tree), empty
+   on the others so the icons line up. */
+.nav-item { display: flex; align-items: center; gap: 9px; padding: 0 10px 0 18px;
   height: 30px; border-radius: 8px; color: var(--text-2); text-decoration: none;
   font-size: 13px; font-weight: 500; }
-.nav-item svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
+:is(.nav-item, .fly-item) svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
-.nav-item:hover { background: var(--surface); color: var(--text); }
-.nav-item[aria-current="page"] { background: var(--accent-bg); color: var(--accent); }
+.nav-item:hover, .nav-row:hover > .nav-item { background: var(--surface); color: var(--text); }
+/* The current page; a folded entry carries it for the page under it. */
+:is(.nav-item[aria-current="page"], .nav-item.holds-current) {
+  background: var(--accent-bg); color: var(--accent); }
+/* An entry with pages under it (shell.rs NavBranch). Labs is a button the
+   whole row of; Models is a link with the chevron as a button of its own. */
+button.nav-item { width: 100%; border: 0; background: none; font-family: inherit;
+  text-align: left; cursor: pointer; }
+.nav-row, .nav-head { position: relative; }
+.nav-caret { position: absolute; left: 1px; top: 3px; bottom: 3px; width: 16px;
+  display: flex; align-items: center; justify-content: center; border-radius: 5px; }
+button.nav-caret { padding: 0; border: 0; background: none; cursor: pointer; z-index: 1; }
+:is(button.nav-caret:hover, .nav-head:hover .nav-caret) .caret-icon { color: var(--text); }
+.nav-caret .caret-icon { transition: transform .12s; }
+:is(.nav-caret, .nav-head)[aria-expanded="true"] .caret-icon { transform: rotate(90deg); }
+.nav-caret:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* The pages under it, one step in: their icons under its label. */
+.nav-kids .nav-item { padding-left: 42px; }
+@media (prefers-reduced-motion: reduce) { .nav-caret .caret-icon { transition: none; } }
 .nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Waiting-on-you count (Docs: pending agent doc-requests). Amber, like every
    other "something is live and wants attention" surface. */
@@ -199,6 +230,21 @@ input, textarea, [contenteditable]:not([contenteditable="false"]) {
 /* Something broken (an MCP server in error) is red, in both forms. */
 .nav-badge.bad { background: var(--err-bg); color: var(--err); }
 .app.rail .nav-badge.bad { background: var(--err); }
+/* On the rail an entry with pages under it is one icon, which opens them in
+   a flyout beside the rail (a top-layer popover): the page names, their
+   icons and their counts in full. */
+.fly-list { gap: 1px; }
+.fly-head { padding: 4px 10px; font: 600 10.5px var(--sans); letter-spacing: .09em;
+  text-transform: uppercase; color: var(--text-3); }
+.fly-item { flex: none; display: flex; align-items: center; gap: 9px; height: 30px;
+  padding: 0 10px; border-radius: 6px; color: var(--text-2); text-decoration: none;
+  font-size: 13px; font-weight: 500; white-space: nowrap; outline: none; }
+.fly-item:is(:hover, :focus) { background: var(--surface); color: var(--text); }
+.fly-item[aria-current="page"] { color: var(--accent); }
+.fly-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.app.rail .nav-fly .nav-badge { position: static; width: auto; min-width: 17px;
+  height: 16px; padding: 0 5px; font-size: 10.5px; background: var(--amber-bg); }
+.app.rail .nav-fly .nav-badge.bad { background: var(--err-bg); }
 /* A second count of another kind (Backends: updates available next to live
    runs): blue, marked ↑, and on the rail a dot of its own at the foot. */
 .nav-badge + .nav-badge { margin-left: 4px; }
@@ -216,9 +262,11 @@ input, textarea, [contenteditable]:not([contenteditable="false"]) {
 .app.rail :is(.gpu-pill, .hold-pill) .pill-text { display: none; }
 .app.rail .hold-pill .dot { display: block; }
 /* A short window keeps the whole nav on screen: tighter rows, and rules in
-   place of the group eyebrows. 760px is where the full nav and the status
-   foot stop fitting (measured: 686 + 53 + the sidebar's padding). */
-@media (max-height: 760px) {
+   place of the group eyebrows. 850px is where the full nav with Labs (five
+   pages, Voices the fifth) and Models both open and the status foot stop
+   fitting (776 + 53 + 20, measured 2026-10-19); a folded nav compacts below
+   it too, though it would still fit. */
+@media (max-height: 850px) {
   .nav-item { height: 26px; }
   .nav-eyebrow { display: none; }
   .nav-group, .nav-group:first-child { margin-top: 0; }
@@ -375,6 +423,15 @@ a.btn { text-decoration: none; }
 .chip.off { color: var(--text-3); background: var(--surface-hi); }
 /* A finding, not a verdict (a benchmark probe's `info`). */
 .chip.info { color: var(--accent); background: var(--accent-bg); }
+/* A chip that carries a sentence rather than a label: a listener's status,
+   whose error is the OS's own words ("binding the device listener on
+   [::]:8002 failed: Address already in use…") and runs to any length. It
+   wraps inside its row's width, the dot beside its first line, rather than
+   pushing the card or the settings pane into a sideways scroll. */
+.chip.chip-line { height: auto; min-height: 22px; max-width: 100%; padding-block: 3px;
+  align-items: flex-start; line-height: 16px; white-space: normal; overflow-wrap: anywhere;
+  border-radius: 11px; }
+.chip.chip-line .dot { flex: none; margin-top: 5px; }
 /* model identity chip: hue derived from alias name hash */
 .model-chip { display: inline-flex; align-items: center; gap: 7px;
   font-family: var(--mono); font-size: var(--fs-sm); color: var(--text); }
@@ -427,6 +484,10 @@ table.data tr.group td { position: sticky; top: 28px; z-index: 1; }
 /* Keys: rpm/tpm show from 1000px (a 1440 window); below that Scope and
    Spend need the room, and the key's tooltip has the limits. */
 @container tbl (width < 1000px) { table.keys-table .col-p2 { display: none; } }
+/* Keys: the Spend vs budget meter is the widest column; below the width
+   where the whole table fits its card it gives way (the cell's tooltip, and
+   the editor, have the figures) instead of the table scrolling sideways. */
+@container tbl (width < 800px) { table.keys-table .col-spend { display: none; } }
 table.data th.num-h { text-align: right; }
 /* A tick column for rows acted on together. */
 table.data :is(th, td).pick { width: 1%; padding-right: 0; }
@@ -477,6 +538,10 @@ td.up-catalog .problem { display: inline; padding: 0; }
    under it; an unknown says why in one clipped line, all of it in the
    tooltip. */
 table.data tr.detail-row.up-llama td { padding: 5px 14px 7px 28px; white-space: normal; }
+/* Upstreams: a row remembered out of quota, under it, with Check now. */
+table.data tr.detail-row.up-quota td { padding: 5px 14px 7px 28px; white-space: normal; }
+.up-quota-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+  font-size: var(--fs-sm); }
 .up-llama-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px;
   font-size: var(--fs-sm); }
 .up-llama-label { color: var(--text-2); font-size: 11px; text-transform: uppercase;
@@ -508,6 +573,35 @@ table.data tr.detail-row.up-llama td { padding: 5px 14px 7px 28px; white-space: 
   overflow: hidden; }
 .progress > i { display: block; height: 100%; border-radius: 999px;
   background: var(--amber); }
+/* A download whose total is not known (machine-check design §5): a segment
+   that travels, never a made-up fraction. An infinite keyframe, not a
+   transition: WebKitGTK's compositor blanks an element a frame after an
+   opacity transition ends. */
+.progress.indeterminate > i { width: 35%; animation: dl-travel 1.6s linear infinite; }
+@keyframes dl-travel { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) {
+  .progress.indeterminate > i { animation: none; width: 100%; opacity: .45; }
+}
+
+/* The download for your graphics card: one line wherever a waiting start
+   or a model download shows it (gpu_download.rs) — the sentence with its
+   bytes, who it is for, and the bar under both. */
+.dl-gpu { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px;
+  align-items: baseline; min-width: 0; }
+.dl-gpu-words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-gpu-words.warn-text { color: var(--amber); }
+.dl-gpu > .dl-bar { grid-column: 1 / -1; }
+.gpu-pulls { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.gpu-pulls > .dl-gpu { font-size: var(--fs-sm); }
+/* The Overview's starts waiting for their download: the line takes the
+   rest of the row, its bar as wide as the words. */
+.ov-dl-col, .ov-dl-cell { width: 100%; }
+.ov-dl-cell > .dl-gpu { font-size: var(--fs-sm); max-width: 420px; }
+/* The popover is drawn on the surface the bar's track has: the track takes
+   the border's tone there, so a short bar still reads as a share. */
+.gpu-panel .dl-bar { background: var(--border); }
+.gpu-card .dl-gpu { font-size: var(--fs-sm); margin-top: 2px; }
 
 /* apply bar — the deliberate, explicit step (one per container target) */
 .apply-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
@@ -537,6 +631,9 @@ table.data tr.detail-row.up-llama td { padding: 5px 14px 7px 28px; white-space: 
 
 /* utility text */
 .dim { color: var(--text-2); }
+/* What a device says of itself (name, client): free text it chose, drawn
+   apart from lmgw's own words. */
+.device-claim { color: var(--text-2); font-style: italic; overflow-wrap: anywhere; }
 .mono-sm { font-family: var(--mono); font-size: var(--fs-sm); }
 /* One line, clipped where the cell ends — the *display* is bounded, the value
    is not: the agent review table keeps the model's whole reply and shows it in
@@ -598,7 +695,7 @@ tr.group:not(.closed) .caret-icon { transform: rotate(90deg); }
 .group-meta { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .group-actions { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
 
-/* the "⋯" row menu (widgets/table.rs RowMenu) */
+/* the "⋯" row menu (lmgw-ui-kit widgets/row_menu.rs) */
 .row-menu { display: inline-flex; vertical-align: middle; }
 .row-menu-btn { padding: 0 7px; letter-spacing: .05em; }
 .menu-list { min-width: 160px; }
@@ -671,6 +768,11 @@ tr.group:not(.closed) .caret-icon { transform: rotate(90deg); }
 .gpu-line[aria-expanded="true"] .caret-icon { transform: rotate(90deg); }
 .gpu-line .count { margin-left: 0; }
 .gpu-card { padding: 10px 14px; }
+/* The GPU panel's bar: memory in use, then what admission keeps free on top
+   of it (not in use yet, not free either), side by side. */
+.progress.split { display: flex; }
+.progress.split > i { border-radius: 0; flex: none; }
+.progress.split > i.kept { background: var(--amber-bg); box-shadow: inset 0 0 0 1px var(--amber); }
 table.data tr.day-sep td { background: var(--surface-hi); color: var(--text-2); height: 26px;
   font-size: var(--fs-sm); font-weight: 500; position: sticky; top: 28px; z-index: 1; }
 table.data tr.day-sep:hover td { background: var(--surface-hi); }
@@ -858,6 +960,11 @@ table.data tr.muted > td.pick { opacity: 1; }
 .wiz-file:hover { background: var(--surface-hi); }
 .wiz-file.sel { border-color: var(--accent); background: var(--accent-bg); }
 .wiz-file.companion { opacity: .55; cursor: default; }
+.wiz-mark { flex: none; height: 20px; font-size: 11px; white-space: nowrap; }
+.wiz-size { flex: none; min-width: 60px; text-align: right; }
+/* Find-a-model §3.3: the recommended file and what holds for the list's marks. */
+.wiz-fit { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; font-size: var(--fs-sm);
+  color: var(--text-2); }
 .wiz-err { margin-top: 12px; padding: 9px 12px; border-radius: 9px;
   background: var(--err-bg); color: var(--err); font-size: 13px; }
 .wiz-ok { padding: 9px 12px; border-radius: 9px; background: var(--ok-bg);
@@ -886,7 +993,7 @@ table.data tr.muted > td.pick { opacity: 1; }
 .cat-pkg { padding: 7px 0; border-top: 1px solid var(--border); }
 .cat-pkg:first-of-type { border-top: 0; }
 .cat-pkg-main { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
-.cat-pkg-meta { margin-top: 2px; }
+.cat-pkg-meta { margin-top: 2px; font-size: var(--fs-sm); }
 /* A component several recipes point at. Set off by a rule rather than left to
    read as a third dim paragraph: it is the line that answers "why is this
    downloading under a pipeline I never added". */
@@ -984,10 +1091,9 @@ table.data tr.muted > td.pick { opacity: 1; }
 /* A card's blocks keep their distance from whatever came before them (a
    checkbox row, a note), not only from another field. */
 .edit-section > :not(h3) + :is(.field, .row, .field-grid) { margin-top: 8px; }
-/* The GPU-hold fallback: the mode, and the model when it routes elsewhere. */
-.hold-pick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
-.hold-pick > .model-picker { flex: 1 1 240px; min-width: 0; }
-.hold-pick .mp-btn { width: 100%; }
+/* The Fallback picker spans its field, as the editors' other pickers do. */
+.fallback-field > .model-picker { display: block; width: 100%; min-width: 0; }
+.fallback-field > .model-picker > .mp-btn { display: flex; width: 100%; }
 /* The candidate-alias editor's primary/alternates (candidate-aliases design
    §6): one fixed row for the primary, a reorderable list below it. */
 .candidate-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
@@ -1070,304 +1176,10 @@ tr.detail-row td { background: var(--bg1); height: auto; padding: 10px 14px; }
 .chain-json { margin-top: 8px; }
 .chain-json summary { cursor: pointer; font-size: var(--fs-sm); }
 
-/* chat */
-/* The thread list on the left and the thread's settings on the right are
-   split panes; the conversation between them is a column: head, transcript
-   (the one scroller), stats, composer — the composer always the last row. */
-.chat-shell { height: 100%; min-height: 0; }
-.thread-tools { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column;
-  gap: 6px; padding: 8px; background: var(--bg0); }
-.thread-tools .row { gap: 6px; flex-wrap: nowrap; }
-.thread-tools .row .btn:first-child { flex: 1; }
-.thread-tools > .btn { width: 100%; }
-.thread-tools > .btn.active { background: var(--accent-bg); color: var(--accent);
-  border-color: var(--accent); }
-.thread-q { width: 100%; }
-.thread-list { display: flex; flex-direction: column; padding: 0 6px 10px; }
-.thread-group { display: flex; align-items: center; gap: 6px; padding: 10px 6px 4px;
-  font: 600 10.5px var(--sans); letter-spacing: .09em; text-transform: uppercase;
-  color: var(--text-3); }
-.thread-group .count { margin-left: 0; letter-spacing: 0; text-transform: none; }
-.thread-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 6px;
-  align-items: center; padding: 4px 6px 5px 10px; border-radius: 8px; cursor: pointer;
-  color: var(--text-2); font-size: 13px; outline: none; }
-.thread-row:hover, .thread-row:focus-visible { background: var(--surface); color: var(--text); }
-.thread-row.open { background: var(--accent-bg); color: var(--accent); }
-.thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-meta { grid-column: 1; display: flex; gap: 6px; min-width: 0; font: 400 11px var(--mono);
-  color: var(--text-3); white-space: nowrap; }
-.thread-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.thread-kind { color: var(--text-2); }
-/* An ongoing folder's current thread (client-apps §3.6). */
-.thread-current { color: var(--accent); }
-.thread-row > .thread-row-menu { grid-column: 2; grid-row: 1 / span 2; }
-.thread-row-menu .row-menu-btn { padding: 0 5px; font-size: 11px; color: var(--text-3); }
-.thread-row-menu .row-menu-btn:hover { color: var(--text); }
-.pin-mark { margin-right: 3px; font-size: 11px; color: var(--text-3); }
-.pin-mark svg { width: 10px; height: 10px; stroke: currentColor; fill: none;
-  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
-.thread-purge { color: var(--text-3); }
-.thread-folder-name { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Folders (chat-complete §5): a header line, its threads indented under it. */
-.thread-folder { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 6px;
-  margin-top: 4px; border-radius: 8px; cursor: pointer; outline: none; font-size: 13px;
-  font-weight: 600; color: var(--text); }
-.thread-folder:hover, .thread-folder:focus-visible { background: var(--surface); }
-.thread-folder .count { margin-left: 0; }
-.thread-folder .thread-row-menu { margin-left: auto; }
-.folder-chev { flex: none; width: 12px; font-size: 10px; color: var(--text-3);
-  transition: transform .12s; }
-.folder-chev.collapsed { transform: rotate(-90deg); }
-.folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* A folder a device's delete hid from devices (review F-7): it gives way
-   before the name does, ellipsized, its whole text on hover. */
-.folder-hidden { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  font-size: 11px; font-weight: 400; color: var(--text-3); white-space: nowrap; }
-.folder-rename { flex: 1; min-width: 0; }
-.thread-row.nested { margin-left: 14px; }
-.thread-folder.drop-over, .thread-dropzone.drop-over { background: var(--accent-bg);
-  outline: 1px dashed var(--accent); }
-/* Only there while a thread is dragged; sticky, so it appears without moving
-   anything above it. */
-.thread-dropzone { position: sticky; bottom: 6px; margin-top: 8px; padding: 10px 8px;
-  border: 1px dashed var(--border); border-radius: 8px; background: var(--bg0);
-  color: var(--text-2); font-size: 12px; text-align: center; }
-.move-list { display: flex; flex-direction: column; gap: 4px; }
-.move-list .btn { justify-content: flex-start; }
-.folder-settings { padding: 0; }
-.modal-foot .folder-apply { margin-right: auto; font-size: var(--fs-sm); }
-.chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.chat-head { flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 10px 20px; border-bottom: 1px solid var(--border); min-width: 0; }
-.chat-head .model-picker { min-width: 0; }
-.chat-settings { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 0; }
-.chat-settings .field + .field { margin-top: 0; }
-.chat-settings-save { position: sticky; bottom: 0; display: flex; justify-content: flex-end;
-  align-items: center; gap: 8px; padding: 8px 0 10px; background: var(--bg0); border-top: 1px solid var(--border); }
-
-/* Thread settings → MCP picker. One row per enabled server, its tools
-   indented under it once attached, so what a thread can reach is legible
-   without opening the MCP page. */
-.mcp-pick { padding: 3px 0; }
-/* a checkbox row, not a field's block label */
-.mcp-pick label.row { display: flex; margin-bottom: 0; }
-.mcp-pick .mono { font-size: 12.5px; }
-.mcp-tools { display: flex; flex-wrap: wrap; gap: 4px 14px;
-  margin: 2px 0 6px 22px; }
-.chat-empty { flex: 1; display: grid; place-items: center; }
-.chat-empty .empty { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-/* The transcript reads in a 110ch column centred in the pane; the question
-   sits at the column's right edge, not the window's. Code and tables start on
-   the column's left edge and may run on to the pane's right edge before they
-   scroll sideways (`(100cqi - 100%) / 2` is the gutter beside the column).
-   The stats row and the composer keep to the same column. */
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px;
-  container: transcript / inline-size; }
-.chat-main.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px;
-  background: var(--accent-bg); }
-.chat-col, .stats-row, .composer, .chip-row, .archive-strip { width: 100%;
-  margin-inline: auto; font-size: 14px; }
-.chat-col { max-width: 110ch; display: flex; flex-direction: column; gap: 16px; }
-/* their own 22px sides around the same 110ch */
-.stats-row, .composer, .chip-row, .archive-strip { max-width: calc(110ch + 44px); }
-.msg-user { align-self: flex-end; max-width: 75%; display: flex;
-  flex-direction: column; gap: 6px; background: var(--surface);
-  border: 1px solid var(--border); border-radius: 16px 16px 4px 16px;
-  padding: 10px 14px; font-size: 14px; }
-.msg-user-text { white-space: pre-wrap; }
-.msg-assistant { min-width: 0; font-size: 14px; line-height: 1.55; }
-.chat-col .md > :is(pre, .code-wrap) { width: max-content; min-width: 100%;
-  max-width: calc(100% + (100cqi - 100%) / 2); }
-.chat-col .md > table { display: block; overflow-x: auto; width: max-content;
-  max-width: calc(100% + (100cqi - 100%) / 2); }
-.md :is(h1,h2,h3) { font-size: 15px; margin: 12px 0 6px; }
-.md p { margin: 6px 0; }
-.md pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
-  background: var(--bg0); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; overflow-x: auto; }
-.md code { font-family: var(--mono); font-size: 12.5px;
-  background: var(--surface-hi); border-radius: 4px; padding: 1px 4px; }
-.md pre code { background: none; padding: 0; }
-
-/* Per-code-block toolbar (language chip · Preview · Copy), injected by
-   assets/codeblocks.js into the rendered markdown. Anchored to a .code-wrap
-   around <pre> so it stays put when the block is scrolled horizontally. */
-.md .code-wrap { position: relative; }
-.md .code-tools { position: absolute; top: 7px; right: 7px; display: flex;
-  gap: 5px; opacity: 0; transition: opacity .12s; }
-.md .code-wrap:hover .code-tools, .md .code-tools:focus-within { opacity: 1; }
-.md .code-tools .lang { align-self: center; margin-right: 2px; font-size: 10px;
-  letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
-.md .code-tools button { display: inline-flex; align-items: center; gap: 4px;
-  font: 500 11px var(--sans); background: var(--surface); color: var(--text-2);
-  border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px;
-  cursor: pointer; }
-.md .code-tools button:hover { color: var(--text); border-color: var(--accent); }
-.md .code-tools button.ok { color: var(--ok); border-color: var(--ok); }
-.md .code-tools svg { width: 12px; height: 12px; display: block; }
-
-/* Math (KaTeX, assets/vendor/katex). Display math scrolls inside the message
-   column; it never widens the page. */
-.md .math-display { display: block; overflow-x: auto; overflow-y: hidden;
-  max-width: 100%; margin: 8px 0; padding: 2px 0; }
-.md .math-display .katex-display { margin: 0; }
-.md .katex { font-size: 1.08em; }
-
-/* Mermaid diagrams (assets/codeblocks.js): the SVG on a .code-wrap-like card,
-   the source kept behind the toolbar's Code toggle. */
-.md .mermaid-wrap { position: relative; }
-.chat-col .md > .mermaid-wrap { max-width: 100%; }
-.md .mermaid-view { background: var(--bg0); border: 1px solid var(--border);
-  border-radius: 10px; padding: 12px; overflow-x: auto; text-align: center; }
-.md .mermaid-view svg { max-width: 100%; height: auto; }
-.md .mermaid-wrap .mermaid-src { display: none; }
-.md .mermaid-wrap.show-code .mermaid-src { display: block; }
-.md .mermaid-wrap.show-code .mermaid-view { display: none; }
-.md .mermaid-wrap .mermaid-src .code-tools { display: none; }
-.md .mermaid-wrap:hover > .code-tools, .md .mermaid-wrap > .code-tools:focus-within { opacity: 1; }
-.md .mermaid-error { margin: -4px 0 8px; padding: 6px 10px; font-size: 12px;
-  color: var(--err); background: var(--err-bg); border-radius: 8px;
-  white-space: pre-wrap; overflow-wrap: anywhere; }
-
-/* highlight.js token theme, mapped onto the design tokens (both themes). */
-.md .hljs { color: var(--text); background: transparent; }
-.md .hljs-comment, .md .hljs-quote { color: var(--code-cmt); font-style: italic; }
-.md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-section,
-.md .hljs-doctag { color: var(--code-key); }
-.md .hljs-name, .md .hljs-tag { color: var(--code-tag); }
-.md .hljs-attr, .md .hljs-attribute, .md .hljs-variable,
-.md .hljs-template-variable { color: var(--code-attr); }
-.md .hljs-string, .md .hljs-regexp, .md .hljs-addition,
-.md .hljs-meta .hljs-string { color: var(--code-str); }
-.md .hljs-number, .md .hljs-literal, .md .hljs-bullet, .md .hljs-link,
-.md .hljs-symbol { color: var(--code-num); }
-.md .hljs-built_in, .md .hljs-class .hljs-title,
-.md .hljs-title.class_ { color: var(--code-type); }
-.md .hljs-title, .md .hljs-title.function_,
-.md .hljs-function .hljs-title { color: var(--code-fn); }
-.md .hljs-type, .md .hljs-params, .md .hljs-property { color: var(--code-type); }
-.md .hljs-meta { color: var(--code-meta); }
-.md .hljs-deletion { color: var(--err); }
-.md .hljs-emphasis { font-style: italic; }
-.md .hljs-strong { font-weight: 600; }
-.md table { border-collapse: collapse; margin: 8px 0; }
-.md th, .md td { border: 1px solid var(--border); padding: 4px 10px;
-  font-size: 13px; }
-.reasoning { margin-bottom: 6px; }
-.reasoning summary { cursor: pointer; font-size: 12px; }
-.reasoning-body { font-size: 12.5px; color: var(--text-2); white-space: pre-wrap;
-  border-left: 2px solid var(--border-strong); padding-left: 10px; margin: 6px 0; }
-.tool-card { border: 1px solid var(--border); border-radius: 10px;
-  padding: 6px 10px; margin: 6px 0; background: var(--surface); }
-.tool-card.err { border-color: var(--err); }
-.tool-card summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }
-.tool-io { margin-top: 6px; }
-.stats-row { flex: none; display: flex; align-items: center; gap: 12px;
-  padding: 6px 22px; border-top: 1px solid var(--border); min-height: 30px; }
-.stats-row.live .mono-sm { color: var(--amber); }
-.stats-row .fallback-badge { flex: none; white-space: nowrap; margin-left: 0; }
-.ctx-bar { width: 120px; height: 5px; border-radius: 999px;
-  background: var(--surface-hi); overflow: hidden; display: inline-block; }
-.ctx-bar i { display: block; height: 100%; background: var(--accent);
-  border-radius: 999px; }
-/* The composer keeps a usable text box at every size (chat-voice WP7 review
-   M3): its icon buttons are square, attach and knowledge sit together, the
-   voice group is one split control, and where the composer is narrow the
-   text box takes a row of its own with the buttons under it. */
-.composer-wrap { flex: none; container: composer / inline-size; }
-.composer { flex: none; display: flex; gap: 10px; padding: 10px 22px 16px;
-  align-items: flex-end; }
-.composer-input { flex: 1; min-height: 44px; max-height: 200px; }
-.composer-tools { flex: none; display: flex; gap: 2px; align-items: flex-end; }
-.composer-attach { flex: none; height: 44px; width: 36px; padding: 0;
-  justify-content: center; font-size: 16px; }
-.composer-attach svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
-  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-/* 640: voice mode's button joined the voice group (chat-voice §9.7.3), and
-   the text box keeps at least half the composer beside the buttons. */
-@container composer (width < 640px) {
-  .composer { flex-wrap: wrap; row-gap: 6px; }
-  .composer-input { order: -1; flex: 1 0 100%; }
-  .voice-split { margin-left: auto; }
-}
-/* For screen readers only (a live region, a label). */
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-
-/* Message actions (chat-complete §3): a row under each message, shown on
-   hover or focus-within, and always on a narrow transcript, where there is no
-   hover to wait for. The row keeps its height hidden, so nothing jumps. */
-.msg-item { min-width: 0; }
-.msg-item-user { align-self: flex-end; max-width: 75%; display: flex;
-  flex-direction: column; align-items: flex-end; }
-.msg-item-user > .msg-user { max-width: 100%; }
-.msg-actions { display: flex; gap: 2px; margin-top: 4px; opacity: 0;
-  transition: opacity .12s; }
-.msg-item:hover .msg-actions, .msg-item:focus-within .msg-actions { opacity: 1; }
-@container transcript (width < 640px) { .msg-actions { opacity: 1; } }
-.msg-actions .msg-act, .msg-actions .confirm .msg-act { display: inline-flex;
-  align-items: center; justify-content: center; width: 26px; height: 24px; padding: 0;
-  border: 0; border-radius: 6px; background: none; color: var(--text-3); cursor: pointer; }
-.msg-actions .msg-act:hover:not(:disabled) { color: var(--text); background: var(--surface-hi); }
-.msg-actions .msg-act:disabled { opacity: .4; cursor: default; }
-.msg-actions .msg-act svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
-  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.msg-actions .confirm { display: inline-flex; align-items: center; gap: 4px; }
-.msg-editor { display: flex; flex-direction: column; gap: 6px; min-width: min(60ch, 100%); }
-.msg-edit-ta { width: 100%; min-height: 6em; resize: vertical; font: inherit; }
-.msg-edit-note { margin-top: 0; }
-.msg-edit-btns { display: flex; gap: 6px; justify-content: flex-end; }
-
-/* Temporary chats (§7): the banner above the composer, and the ✕ on a row
-   of the sidebar's "Temporary" group. */
-.temp-strip { flex: none; display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; padding: 6px 22px; margin-top: 4px; width: 100%; max-width: calc(110ch + 44px);
-  margin-inline: auto; color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
-.temp-strip > span:first-child { flex: 1; }
-/* Export (§6): the head's menu sits at the far end; the sidebar's ⋯ shrinks. */
-.chat-head .export-menu { margin-left: auto; }
-.export-all { flex: none; }
-.thread-x { border: 0; background: none; color: var(--text-3); cursor: pointer;
-  padding: 0 5px; font-size: 11px; }
-.thread-x:hover { color: var(--text); }
-
-/* Archived-thread strip, above the composer: when it was filed away, when
-   the purge sweep takes it, and a way back. */
-.archive-strip { flex: none; display: flex; align-items: center;
-  justify-content: space-between; gap: 10px; padding: 6px 22px; margin-top: 4px;
-  color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
-
-/* Attachment chips: the composer's own drafts (uploading/uploaded/failed),
-   and the ones a sent message carries above its text. Both reuse the
-   `.chip`/`.chip-x` look. */
-.chip-row { flex: none; display: flex; flex-wrap: wrap; gap: 6px;
-  padding: 6px 22px 0; }
-/* Inside a message bubble rather than the page column: shrink to content,
-   none of the composer's page-width centring. */
-.msg-user .msg-attach-row { width: auto; max-width: 100%; margin: 0; padding: 0; }
-/* `height: auto` plus a `min-height` floor, not `.chip`'s fixed `height`: an
-   upload error can be longer than the chip is wide, and it wraps in full
-   rather than being clipped (the rule against silent truncation)
-   — the chip grows to fit it instead of the wrapped lines overflowing a
-   height that never grew. */
-.attach-chip { height: auto; min-height: 26px; padding: 3px 4px; cursor: default;
-  background: var(--surface-hi); color: var(--text); max-width: 220px; }
-.attach-chip[role="button"] { cursor: pointer; }
-.attach-chip[role="button"]:hover { background: var(--surface); }
-.attach-chip.err { background: var(--err-bg); color: var(--err); }
-.attach-chip.warn { background: var(--amber-bg); color: var(--amber); }
-/* The name still ellipsizes (the full name is one hover away in its
-   `title`) — a filename has no useful information past its start the way an
-   error message does. */
-.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  max-width: 120px; }
-.chip-err-text { white-space: normal; overflow-wrap: anywhere; }
-.chip-thumb { width: 18px; height: 18px; border-radius: 4px; object-fit: cover;
-  flex: none; }
-.chip-warn-mark { color: var(--amber); }
-.chip-dot-pending { width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--text-3); animation: blink 1.4s ease-in-out infinite; }
-.attach-modal-img { max-width: 100%; display: block; border-radius: 8px; }
+/* The image recipes' Upscalers, under the pipelines in the same list. */
+.upscaler-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.upscaler-list > .mini-note { margin: 0 0 4px; }
+.cat-group-head { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
 
 /* checkbox row (shared) */
 .check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
@@ -1886,6 +1698,44 @@ table.data tr.detail-row.dl-item-open td { padding: 8px 10px 12px; }
 .lab-help audio { width: 100%; }
 .path-note { word-break: break-all; margin: 6px 0 0; }
 
+/* the Voices lab (pages/voice_lab): a round's candidates as a grid of
+   players, the save row under one, the library's samples with their record */
+.vl-warn { color: var(--amber); }
+.input.ta.vl-desc { min-height: 56px; }
+.input.ta.vl-text { min-height: 96px; }
+.vl-text-actions { margin-top: 8px; gap: 6px 8px; }
+.vl-text-actions .mini-note { margin: 0; }
+.vl-meta { margin: 0 0 6px; overflow-wrap: anywhere; }
+.vl-cands { display: grid; gap: 10px; margin-top: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); }
+.vl-cand { border: 1px solid var(--border); border-radius: var(--card-r);
+  background: var(--bg0); padding: 8px 10px; min-width: 0; }
+.vl-cand-head { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+.vl-cand-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; min-height: 24px; }
+.vl-cand-foot .spacer { flex: 1; }
+.vl-cand-foot .btn { height: 24px; padding: 0 10px; }
+.vl-cand audio { display: block; width: 100%; margin: 8px 0 0; }
+.vl-save { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.vl-save > .input { flex: 1; min-width: 0; }
+.vl-taken, .vl-cand > .notice.err { margin-top: 8px; }
+.vl-file-err { margin-top: 8px; }
+.vl-library .empty { padding: 4px 0; }
+.vl-sample { border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.vl-sample .clip-item { padding-left: 0; padding-right: 0; }
+.vl-sample .clip-item .n { font-weight: 500; color: var(--text); }
+.vl-transcript { font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.vl-sample-actions { gap: 6px; margin-top: 6px; }
+.vl-sample-actions .btn { height: 24px; padding: 0 8px; }
+.vl-prov { margin-top: 6px; font-size: 11.5px; }
+.vl-prov > summary { cursor: pointer; color: var(--text-2); }
+.vl-prov > summary:hover { color: var(--text); }
+.vl-prov-rows { display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px; margin: 6px 0 0; }
+.vl-prov-rows dt { color: var(--text-3); }
+.vl-prov-rows dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.vl-clone audio { display: block; width: 100%; margin-top: 10px; }
+
 /* ===========================================================================
    Usage page + inline-SVG charts (usage-analytics design §6.2–§6.4).
    Ported from docs/design/ui-rebuild/usage-mockup.html, which is the visual contract.
@@ -1976,6 +1826,22 @@ table.devices-table tr.dev-detail .mini-note:first-child { margin-top: 0; }
 .dev-urls { display: inline; }
 .dev-url { display: inline-block; max-width: 100%; margin-right: 12px; overflow-wrap: anywhere;
   vertical-align: top; }
+/* The transfers between devices (device transfers design §11.1): a section
+   under the device rows, its own head and table in the same card. */
+.xfer-section { margin-top: 14px; }
+.xfer-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  margin: 0 0 6px; }
+.xfer-sum { font-size: var(--fs-sm); }
+table.xfer-table td.xfer-what { white-space: normal; overflow-wrap: anywhere; min-width: 16ch;
+  padding-block: 4px; }
+.xfer-title { font-weight: 600; }
+.xfer-file { font-size: 11.5px; }
+table.xfer-table td.xfer-size { min-width: 12ch; }
+.xfer-progress { margin-top: 4px; width: 100%; min-width: 80px; }
+.xfer-progress > i { background: var(--accent); }
+table.xfer-table td.xfer-state { white-space: normal; overflow-wrap: anywhere; min-width: 14ch;
+  max-width: 40ch; padding-block: 4px; }
+table.xfer-table td.xfer-state .mini-note { margin-top: 3px; max-width: none; }
 .dev-online { color: var(--ok); white-space: nowrap; }
 .dev-online::before { content: ""; display: inline-block; width: 7px; height: 7px;
   margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: 1px; }
@@ -2029,7 +1895,7 @@ table.price-table tr.unpriced-row .chip { height: 20px; }
 /* Each row says its unit (billable units): a unit other than tokens has one
    rate, which takes the In and Out cells — the number in the numbers' face,
    what it is per beside it. */
-table.price-table td.price-unit { white-space: nowrap; }
+table.price-table td.price-unit, table.price-table td.price-tier { white-space: nowrap; }
 table.price-table td.price-rate { white-space: nowrap; font-size: var(--fs-sm); }
 table.price-table td.price-rate .num-v { font-family: var(--mono); color: var(--text-2); }
 .price-unit-row { margin-top: 10px; }
@@ -2272,6 +2138,9 @@ a.chip { text-decoration: none; }
 /* A line a live block (the GPU hold, a benchmark run) changes: amber, as the
    chip it stands beside. */
 .field-hint.warn { color: var(--amber); }
+/* A cloud speech model's voice: the choice, then the box its name is typed
+   in (chat_media_defaults.rs). */
+.media-voice-typed { display: block; width: 100%; margin-top: 6px; }
 
 /* A config form as rows of label | control | help (widgets/schema_form.rs).
    The help keeps a column of its own beside the control while the form is
@@ -2422,12 +2291,16 @@ table.data.review-table td.wrap.review-lead .link-btn { display: block; white-sp
 .fill-pane.def-pane { display: flex; flex-direction: column; gap: 10px; }
 .def-pane > * { flex: none; }
 /* The pane is the one scroller: the warnings lead, and the editor is as tall
-   as the manifest (rows = its lines) — at least the pane's rest — so it never
-   scrolls inside the pane. Qualified with `.input.ta` because that rule sets
-   `min-height: 72px` and would otherwise win on specificity. */
+   as the wrapped manifest (measured in agent_detail/manifest_editor.rs) — at
+   least the pane's rest — so it never scrolls inside the pane. Its lines
+   wrap: what makes them long is a description's prose, and pre-wrap keeps
+   every newline and indent of the JSON; a token with no break in it (a
+   long URL) breaks anywhere rather than scroll sideways. Qualified with
+   `.input.ta` because that rule sets `min-height: 72px` and would otherwise
+   win on specificity. */
 .def-pane > .input.ta.manifest-editor { flex: 1 0 auto; height: auto; min-height: 300px;
-  font-size: var(--fs-sm); line-height: 1.5; white-space: pre; overflow-wrap: normal;
-  overflow-x: auto; overflow-y: hidden; resize: none; }
+  font-size: var(--fs-sm); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+  overflow: hidden; resize: none; }
 .def-notes { margin: 6px 0 0 18px; padding: 0; }
 /* A secret's box and its "clear" tick on one line: the tick is an intent the
    next Save carries out, so it belongs with the control it empties. */
@@ -2543,7 +2416,19 @@ a.rail-item { text-decoration: none; }
   var(--text-3) 0 3px, transparent 3px 6px); }
 .rt-bar > b.rt-cap { width: 2px; margin-left: -1px; background: var(--err); }
 .rt-summary { margin: 0; }
-.rt-stages td.wrap { min-width: 24ch; font-size: var(--fs-sm); }
+/* The stages table fits a narrow pane (the app at 125% in a half-screen
+   window) by wrapping: the stage's name, the model's alias at its `/` and
+   `-` only (break-word leaves the column's minimum at its longest part, so
+   an alias never breaks mid-word), the note, which keeps enough width to read as prose, and the
+   headers (the note's is the widest thing in its column). Only a pane
+   narrower than all that scrolls the table, in its own box. */
+.rt-stages td.rt-note { min-width: 16ch; font-size: var(--fs-sm); }
+table.data.rt-stages th { white-space: normal; }
+.rt-stages td.rt-alias { overflow-wrap: break-word; }
+/* A wrapped stage name stays beside its swatch, its second line under its
+   first rather than under the swatch. */
+.rt-stage { display: flex; align-items: flex-start; }
+.rt-stage > .rt-swatch { flex: none; margin-top: 5px; }
 .rt-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2.5px;
   margin-right: 6px; vertical-align: baseline; }
 .chip.rt-up { height: 18px; margin-left: 6px; font-size: 11px; padding: 0 6px; }
@@ -2579,13 +2464,14 @@ table.data:is(.rt-stages, .vad-table) th { position: static; }
    guarded modal of cards; a run's log fills its modal under a phase strip. */
 .bk-toggle { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
 .bk-toggle[aria-expanded="true"] .caret-icon { transform: rotate(90deg); }
+/* The name is the builds table's one clipped cell: it ends in an ellipsis. */
+.bk-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .edit-section h3 .bk-toggle { font: inherit; letter-spacing: inherit; text-transform: inherit;
   color: inherit; }
-.bk-slug { margin-left: 8px; }
-.bk-flag { margin-left: 8px; height: 18px; font-size: 11px; vertical-align: 1px;
-  max-width: 30ch; min-width: 0; }
-.bk-flag-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bk-flag-n { flex: none; opacity: .8; }
+/* A build's update chips sit in its Last run cell, after the status and
+   the time: one short word each, whole at every width; the reasons are the
+   tooltip's. */
+.bk-flag { flex: none; height: 18px; font-size: 11px; }
 /* The unfolded row's update block: the reasons, the extras, Check now. */
 .bk-upd .row { flex-wrap: nowrap; gap: 10px; }
 .bk-upd-list { margin: 4px 0 2px; padding-left: 18px; }
@@ -2611,8 +2497,15 @@ table.data td.bk-cut { max-width: 28ch; overflow: hidden; text-overflow: ellipsi
 table.data td.bk-cut-s { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
 /* Columns whose value is also in a neighbour's tooltip go before the p2 ones,
    so the build name and the image ref keep room on a medium window. */
-@container tbl (width < 1180px) { :is(table.bk-builds, table.bk-images) .bk-early { display: none; } }
+@container tbl (width < 1180px) { table.bk-images .bk-early { display: none; } }
+/* The builds table gives up more, and sooner (its Extras fold at 1180 as a
+   many-cols table): its Last run cell carries the update chips, which never
+   fold, and the build name is the one cell that clips. Repository is in the
+   name's tooltip, the image in the Image tab, the engine in the moving tag
+   the name's tooltip ends with. */
+@container tbl (width < 1400px) { table.bk-builds .bk-early { display: none; } }
 @container tbl (width < 1000px) { table.bk-builds .bk-mid { display: none; } }
+@container tbl (width < 760px) { table.bk-builds .bk-late { display: none; } }
 /* A table inside a detail row or a card: its head does not stick (the pane
    scrolls the outer table), and it reads as a panel of its own. */
 table.data.bk-sub th { position: static; background: none; }
@@ -2655,6 +2548,8 @@ table.data tr.detail-row table.bk-sub tr:hover td { background: var(--surface-hi
    of a row line up whether or not a neighbour has a hint. */
 .bk-editor .field-grid { align-items: start; }
 .field-warn { font-size: 11.5px; color: var(--amber); margin-top: 4px; }
+/* Where a model's fallback leads (pages/fallback_field.rs). */
+.fallback-chain { color: var(--text-2); margin-top: 4px; overflow-wrap: anywhere; }
 .bk-combo { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .bk-combo > .input { flex: 1 1 auto; min-width: 0; }
 .select-opt.bk-ref { display: flex; align-items: center; gap: 8px; }
@@ -2961,13 +2856,6 @@ table.bn-stops td { height: 30px; }
 .kb-excerpt-text { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; cursor: pointer;
   font-family: var(--mono); font-size: 12.5px; color: var(--text); }
 .kb-excerpt { padding-top: 10px; }
-/* the source viewer: the extracted text, the cited chunk marked */
-.kb-src-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 4px; }
-.kb-src-where { margin-bottom: 8px; }
-.kb-src { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono);
-  font-size: 12.5px; line-height: 1.55; color: var(--text); }
-mark.kb-hl { background: var(--amber-bg); color: var(--text);
-  box-shadow: 0 0 0 1px var(--amber); border-radius: 2px; }
 .kb-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .kb-stack > .notice { margin: 0; }
 .kb-search-row { display: grid; gap: 10px 14px; align-items: end;
@@ -2975,181 +2863,5 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 .kb-search-row > .field { margin-top: 0; min-width: 0; }
 @container (max-width: 560px) { .kb-search-row { grid-template-columns: 1fr; } }
 
-/* chat search: the sidebar's Messages section and the flash on a revealed hit */
-.msg-hits { border-top: 1px solid var(--border); margin-top: 8px; }
-.msg-hits-arch { display: flex; align-items: center; gap: 4px; padding: 0 6px 4px; font-size: 11.5px; }
-.msg-hit-list { display: flex; flex-direction: column; gap: 8px; padding: 2px 0; }
-.msg-hit-thread { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.msg-hit-title { all: unset; cursor: pointer; padding: 2px 6px; font-weight: 500; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; }
-.msg-hit-meta { display: flex; gap: 6px; padding: 0 6px; font-size: 11px; }
-.msg-hit-meta:empty { display: none; }
-.msg-hit { all: unset; cursor: pointer; display: grid; grid-template-columns: 44px minmax(0, 1fr);
-  gap: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px; color: var(--text-2);
-  line-height: 1.4; }
-.msg-hit-who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding-top: 1px; }
-.msg-hit-text { overflow-wrap: anywhere; }
-.msg-hit-title:hover, .msg-hit:hover, .msg-hit-title:focus-visible, .msg-hit:focus-visible {
-  background: var(--surface); color: var(--text); }
-.msg-hit-text mark { background: var(--amber-bg); color: var(--text); border-radius: 2px; padding: 0 1px; }
-.msg-hit-more { padding: 0 6px; font-size: 11px; }
-.msg-item.msg-flash { animation: msg-flash 1.5s ease-out; }
-@keyframes msg-flash {
-  0%, 40% { background: var(--amber-bg); box-shadow: 0 0 0 4px var(--amber-bg); }
-  100% { background: transparent; box-shadow: 0 0 0 4px transparent; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .msg-item.msg-flash { animation: none; background: var(--amber-bg); box-shadow: 0 0 0 4px var(--amber-bg); }
-}
-
-/* ===== Chat knowledge (chat-complete §9.3): settings section, `#` picker,
-   chips, the retrieval summary above an answer, citation badges ===== */
-.kb-section .kb-pick { display: flex; align-items: center; gap: 8px; padding: 2px 0; flex-wrap: wrap; margin-bottom: 0; }
-.kb-warn { color: var(--amber); font-size: 11.5px; }
-.kb-gone .mono { text-decoration: line-through; }
-.kb-mode { margin: 8px 0 10px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.kb-chip { background: var(--accent-bg); color: var(--text); }
-.kb-chip.warn { background: var(--amber-bg); color: var(--amber); }
-.kb-chip-tag { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
-  color: var(--accent); padding: 0 3px; }
-.kb-chip.warn .kb-chip-tag { color: var(--amber); }
-.msg-editor .kb-chips { padding: 6px 0 0; }
-.composer-kb svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
-  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-.kb-pop .mp-row { cursor: pointer; }
-.kb-ctx { margin-bottom: 6px; font-size: 12.5px; }
-.kb-ctx summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
-.kb-ctx-sum { margin-right: 6px; }
-.kb-ctx.empty summary { color: var(--amber); }
-.kb-notes { margin: 4px 0 0; padding-left: 18px; color: var(--amber); font-size: 12px; }
-.kb-excerpts { list-style: none; margin: 6px 0 4px; padding: 0; display: flex;
-  flex-direction: column; gap: 4px; }
-.kb-ex { all: unset; box-sizing: border-box; cursor: pointer; display: grid; width: 100%;
-  grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 8px;
-  border: 1px solid var(--border); border-radius: 8px; align-items: baseline; }
-.kb-ex:hover, .kb-ex:focus-visible { background: var(--surface); border-color: var(--border-strong); }
-.kb-ex-n { font: 600 11px var(--mono); color: var(--accent); text-align: center; }
-.kb-ex-file { font-weight: 500; overflow-wrap: anywhere; }
-.kb-ex-head { grid-column: 2 / 4; font-size: 11.5px; overflow-wrap: anywhere; }
-.kb-ex-text { grid-column: 2 / 4; color: var(--text-2); overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.md .cite { display: inline-block; min-width: 1.5em; padding: 0 5px; margin: 0 1px; border-radius: 999px;
-  font: 600 11px/1.6 var(--mono); text-align: center; vertical-align: 1px; cursor: pointer;
-  color: var(--accent); background: var(--accent-bg); }
-.md .cite::before { content: "["; opacity: .6; }
-.md .cite::after { content: "]"; opacity: .6; }
-.md .cite:hover, .md .cite:focus-visible { outline: 1px solid var(--accent); }
-.kb-ex .mono-sm { grid-column: 3; grid-row: 1; }
-.kb-ex-n { grid-row: 1; }
-
-/* --- Chat attachment kinds (chat-complete §8): chip icons and facts, the
-   PDF Text | Pages switch, the Send blockers, the extracted-text viewer. --- */
-.attach-chip.rich { max-width: 100%; flex-wrap: wrap; row-gap: 2px; }
-.attach-ico { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none;
-  stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; color: var(--text-2); }
-.chip-name.chip-open { cursor: pointer; }
-.chip-name.chip-open:hover { text-decoration: underline; }
-.chip-fact { color: var(--text-2); font-size: 11px; white-space: nowrap; }
-.chip-fact.warn { color: var(--amber); white-space: normal; }
-.chip-fact::before { content: "·"; margin-right: 6px; color: var(--text-3); }
-.seg-mini { display: inline-flex; border: 1px solid var(--border); border-radius: 5px;
-  overflow: hidden; flex: none; }
-.seg-mini .seg-btn { border: 0; background: none; color: var(--text-2); font-size: 11px;
-  padding: 0 7px; height: 18px; cursor: pointer; }
-.seg-mini .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
-.seg-mini .seg-btn:hover { color: var(--text); }
-.seg-mini .seg-btn.on { background: var(--accent-bg); color: var(--accent); }
-.attach-blockers { flex-direction: column; gap: 2px; }
-.attach-blocker { color: var(--amber); }
-/* What a draft becomes on the way (a GPU block's fallback that cannot see):
-   amber like the blockers above, and Send stays on. */
-.attach-hints { flex-direction: column; gap: 2px; }
-.attach-hint { color: var(--amber); }
-.viewer-meta { display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; margin-bottom: 8px; }
-.attach-text { margin: 0; white-space: pre-wrap;
-  overflow-wrap: anywhere; font-family: var(--mono, monospace); font-size: 12px; }
-/* A reply the server refused to store: dimmed, with its note (Copy only). */
-.msg-unsaved > .md, .msg-unsaved > .reasoning { opacity: .6; }
-.msg-unsaved-note { color: var(--amber); }
-/* A reply a fallback that cannot see answered: what it got in the images' place. */
-.msg-images-note { color: var(--amber); }
-
-/* A gated tool call (client-apps design §6): the card that waits for a
-   decision joins the bar with Approve and Decline under it; a call that did
-   not run says why in a line under its card. */
-.tool-card.await { margin-bottom: 0; border-color: var(--accent);
-  border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-.tool-state { font-family: var(--mono); font-size: 11.5px; }
-.tool-state.await, .tool-state.sending { color: var(--accent); }
-.tool-state.declined, .tool-state.moved, .tool-state.held { color: var(--text-3); }
-.tool-state.notrun { color: var(--amber); }
-.tool-ask, .tool-batch { display: flex; align-items: center; justify-content: space-between;
-  flex-wrap: wrap; gap: 6px 12px; padding: 6px 10px; margin: 0 0 6px;
-  border: 1px solid var(--accent); background: var(--surface);
-  border-top: 0; border-radius: 0 0 10px 10px; font-size: 12.5px; }
-.tool-ask-text { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
-.tool-ask-btns { display: inline-flex; gap: 6px; }
-.tool-ask .btn.on:not(.primary), .tool-batch .btn.on:not(.primary) {
-  background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
-.tool-batch { border-top: 1px solid var(--accent); border-radius: 10px; }
-.tool-note { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--text-3); }
-.tool-said { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--err); }
-/* The approval rule of a tool source in the Chat's picker. */
-.mcp-approval { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
-  margin: 2px 0 2px 22px; font-size: 12px; }
-.tool-pick { display: inline-flex; align-items: center; gap: 6px; }
-.tool-pick .ask-tick { font-size: 11.5px; }
-
-/* MCP Tasks in the Chat (MCP Tasks design §6). A late result is a card of
-   its own in the transcript, its status in its colour: completed green,
-   failed red, abandoned amber, cancelled grey. */
-.job-card .job-sum { display: inline-flex; align-items: baseline; flex-wrap: wrap;
-  gap: 4px 8px; width: calc(100% - 1.2em); vertical-align: top; }
-.job-card .job-head { color: var(--text-2); }
-.job-card .type-badge { margin-left: 0; }
-.job-card .job-when { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
-.job-card.completed { border-left: 3px solid var(--ok); }
-.job-card.failed { border-color: var(--err); border-left-width: 3px; }
-.job-card.abandoned { border-color: var(--amber); border-left-width: 3px; }
-.job-card.cancelled { border-left: 3px solid var(--text-3); }
-.tool-state.completed { color: var(--ok); }
-.tool-state.failed { color: var(--err); }
-.tool-state.abandoned { color: var(--amber); }
-.tool-state.cancelled { color: var(--text-3); }
-.tool-state.working { color: var(--accent); }
-.tool-state.input_required { color: var(--amber); }
-.job-unanswered { color: var(--accent); }
-/* The open thread's jobs, above the composer, in the composer's column. Many
-   jobs (there is no cap) scroll inside the strip rather than squeezing the
-   transcript away; the head counts them all. */
-.job-strip { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
-  padding: 0 22px; display: flex; flex-direction: column; gap: 4px; max-height: 35vh;
-  overflow-y: auto; font-size: 12.5px; }
-.job-strip-head { display: flex; align-items: baseline; justify-content: space-between;
-  flex-wrap: wrap; gap: 2px 12px; color: var(--text-2); }
-.job-strip-head .job-count { font-weight: 500; }
-.job-strip-head .job-fresh { font-size: 11.5px; }
-.job-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
-  padding: 5px 10px; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); }
-/* A running job is not a focused field: the neutral border, a 3px left accent as the
-   result cards have, the blue dot and status word say it is live. */
-.job-row.working { border-left: 3px solid var(--accent); }
-.job-row.input_required { border-left: 3px solid var(--amber); }
-.job-row .type-badge { margin-left: 0; }
-.job-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
-.job-dot.live { background: var(--accent); animation: blink 1.4s ease-in-out infinite; }
-.job-row.input_required .job-dot.live { background: var(--amber); }
-.job-msg { color: var(--text); overflow-wrap: anywhere; }
-.job-since { font-size: 11.5px; }
-.job-wait { color: var(--amber); overflow-wrap: anywhere; }
-.job-cancel { margin-left: auto; }
-/* A refused Answer: the gateway's reason, until dismissed or the thread changes. */
-.job-said { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
-  padding: 0 22px; display: flex; align-items: baseline; justify-content: space-between;
-  gap: 10px; font-size: 12.5px; color: var(--amber); }
-.answer-btn { flex: none; border-color: var(--accent); color: var(--accent); }
-.answer-btn:hover:not(:disabled) { background: var(--accent-bg); }
 /* The MCP page: a server's open jobs beside its status. */
 .mcp-servers .open-tasks { margin-left: 6px; }

@@ -465,10 +465,19 @@ impl LlamaClient {
         }
         let mut bytes = resp.bytes_stream();
         let mut sse = SseDecoder::new();
-        while let Some(chunk) = bytes.next().await {
-            let chunk = chunk.map_err(|e| failed("POST /completion: stream", &e))?;
+        loop {
+            // The body's end flushes the decoder: a last event whose final
+            // line ended in a lone CR is only complete then
+            // (`SseDecoder::finish`).
+            let (events, ended) = match bytes.next().await {
+                Some(chunk) => {
+                    let chunk = chunk.map_err(|e| failed("POST /completion: stream", &e))?;
+                    (sse.feed(&chunk), false)
+                }
+                None => (sse.finish(), true),
+            };
             let at = Instant::now();
-            for ev in sse.feed(&chunk) {
+            for ev in events {
                 let Some(parsed) = parse_chunk(&ev.data)
                     .map_err(|e| BenchError::Failed(format!("POST /completion: {e}")))?
                 else {
@@ -479,6 +488,9 @@ impl LlamaClient {
                 if stop {
                     return Ok(());
                 }
+            }
+            if ended {
+                break;
             }
         }
         Err(BenchError::Failed(

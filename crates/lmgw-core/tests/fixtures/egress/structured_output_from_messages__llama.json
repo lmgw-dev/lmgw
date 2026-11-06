@@ -1,0 +1,41 @@
+{
+  "request": {
+    "body": "{\"max_tokens\":16,\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"response_format\":{\"json_schema\":{\"name\":\"response\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"}}",
+    "body_json": {
+      "max_tokens": 16,
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "response_format": {
+        "json_schema": {
+          "name": "response",
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok"
+            ],
+            "type": "object"
+          },
+          "strict": true
+        },
+        "type": "json_schema"
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

@@ -48,16 +48,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use super::audio_spec::{
-    field_spec, fmt_ms, is_openai_shaped, multipart_preview, samples_to_secs, speech_body,
-    task_body, task_fields, task_label, timeline_rate, transcription_body, SpeechForm, Widget,
-    GROUPS, TASKS,
+    field_spec, fmt_ms, is_openai_shaped, multipart_preview, speech_body, task_body, task_fields,
+    task_label, time_text, timeline_rate, transcription_body, SpeechForm, Widget, GROUPS, TASKS,
 };
 use super::audio_stream::{read_sse, AudioEvent, StreamAcc};
 use super::lab_frame::{Check, Fname, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
 use super::lab_history::{ExportMenu, HistoryList, LabHistory};
 use super::lab_presets::PresetsCard;
 use crate::catalog::CatalogEntry;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::scope::Latest;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
@@ -192,6 +191,15 @@ impl RunResult {
     }
     fn result_rate(&self) -> Option<f64> {
         self.tracks.iter().find_map(|t| t.sample_rate)
+    }
+    /// Whether any timeline row counts its time in samples only, which
+    /// takes a rate to read: the rows that state `start` and `end` in
+    /// seconds (the alignment answer's words) do not.
+    fn rows_need_rate(&self) -> bool {
+        [&self.segments, &self.speaker_turns, &self.words]
+            .into_iter()
+            .flatten()
+            .any(|row| row["start"].as_f64().is_none() || row["end"].as_f64().is_none())
     }
 }
 
@@ -438,6 +446,20 @@ impl Lab {
         self.runtime.with(|rows| {
             rows.iter()
                 .any(|r| r.model_id == m.model_id && r.state == "ready")
+        })
+    }
+
+    /// The download the selected model's start waits for, while its
+    /// container is not up (machine-check design §5).
+    fn download(&self) -> Option<crate::gpu_download::Dl> {
+        if self.model_ready() {
+            return None;
+        }
+        let model_id = self.model()?.model_id;
+        let live = crate::live::use_live();
+        live.vram.with(|v| {
+            v.as_ref()
+                .and_then(|v| crate::gpu_download::for_model(v, "audio", &model_id))
         })
     }
 
@@ -838,6 +860,11 @@ pub fn AudioLab() -> impl IntoView {
     // (the picker never writes the alias back), so no notify-on-equal
     // ping-pong. The history stays: comparing models is what it is for.
     let model_ready = Memo::new(move |_| lab.model_ready());
+    // A start waiting for its download (machine-check design §5): the flag
+    // alone redraws the state chip, the bytes move inside it, so its bar
+    // is not drawn anew with every `vram` frame.
+    let download = Memo::new(move |_| lab.download());
+    let downloading = Memo::new(move |_| download.with(Option::is_some));
     Effect::new(move |prev: Option<(String, bool)>| {
         let alias = lab.alias.get();
         let ready = model_ready.get();
@@ -1095,6 +1122,16 @@ pub fn AudioLab() -> impl IntoView {
                     </Show>
                     <span class="spacer"></span>
                     {move || {
+                        // A start waiting for its download (machine-check
+                        // design §5): that is what the first run waits for.
+                        if downloading.get() {
+                            return view! {
+                                <crate::gpu_download::DlChip dl=Signal::derive(move || {
+                                    download.get().unwrap_or_default()
+                                })/>
+                            }
+                            .into_any();
+                        }
                         let (cls, label, title) = if model_ready.get() {
                             ("chip ok", "running", "This model's container is up")
                         } else {
@@ -1112,6 +1149,7 @@ pub fn AudioLab() -> impl IntoView {
                                 {label}
                             </span>
                         }
+                        .into_any()
                     }}
                     <button
                         class="btn ghost"
@@ -1898,6 +1936,7 @@ fn result_body(
     // without rebuilding the card (and the field being typed in).
     let rate = Signal::derive(move || timeline_rate(result_rate, &rate_field.get()));
     let has_timeline = r.has_timeline();
+    let needs_rate = r.rows_need_rate();
     let locked = result_rate.is_some();
     let raw_json = r
         .json
@@ -1922,7 +1961,7 @@ fn result_body(
                         <span class="dim mono-sm">
                             {format!(
                                 "{}{}",
-                                human_bytes(t.size as u64),
+                                fmt_bytes(t.size as u64),
                                 t.sample_rate.map(|r| format!(" · {r:.0} Hz")).unwrap_or_default(),
                             )}
                         </span>
@@ -1942,7 +1981,7 @@ fn result_body(
                         })}
                 }
             })}
-        {has_timeline
+        {(has_timeline && needs_rate)
             .then(|| {
                 view! {
                     <div class="field rate-field">
@@ -2019,7 +2058,7 @@ fn result_body(
                     format!("total {}", fmt_ms(s.total_ms)),
                 ];
                 if let Some(b) = s.bytes {
-                    parts.push(format!("size {}", human_bytes(b as u64)));
+                    parts.push(format!("size {}", fmt_bytes(b as u64)));
                 }
                 if s.wall_ms.is_some() {
                     parts.push(format!("infer {}", fmt_ms(s.wall_ms)));
@@ -2078,15 +2117,15 @@ fn Timeline(
                             .iter()
                             .map(|row| {
                                 let (start, end) = (
-                                    row["start_sample"].as_f64(),
-                                    row["end_sample"].as_f64(),
+                                    (row["start"].as_f64(), row["start_sample"].as_f64()),
+                                    (row["end"].as_f64(), row["end_sample"].as_f64()),
                                 );
                                 view! {
                                     <tr>
                                         <td class="num">
-                                            {move || samples_to_secs(start, rate.get())}
+                                            {move || time_text(start.0, start.1, rate.get())}
                                         </td>
-                                        <td class="num">{move || samples_to_secs(end, rate.get())}</td>
+                                        <td class="num">{move || time_text(end.0, end.1, rate.get())}</td>
                                         {cols
                                             .iter()
                                             .map(|c| {
@@ -2343,7 +2382,7 @@ fn VoiceLibrary(
                             view! {
                                 <div class="clip-item" title=c.server_path.clone()>
                                     <span class="n">{c.name.clone()}</span>
-                                    <span class="dim mono-sm">{human_bytes(c.size)}</span>
+                                    <span class="dim mono-sm">{fmt_bytes(c.size)}</span>
                                     <button
                                         class="btn ghost"
                                         title="Preview"

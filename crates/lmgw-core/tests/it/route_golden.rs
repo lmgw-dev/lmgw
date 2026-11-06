@@ -1,7 +1,9 @@
 //! The route corpus (llama-egress design §9.2, WP0): the upstream requests
 //! every route makes, on a managed row (`support/gpu_world.rs`'s containers)
 //! and on an external llama.cpp row (a wiremock upstream), captured before
-//! the llama.cpp egress existed.
+//! the llama.cpp egress existed — and on two external OpenAI-shaped rows, an
+//! OpenAI-compatible provider and the OpenAI platform, captured before the
+//! two were split (openai egress design §10.1, WP0).
 //!
 //! Each case writes `tests/fixtures/egress_routes/<case>__<row>.json`: the
 //! client-facing status, every POST the upstream got — path, headers (secrets
@@ -11,19 +13,24 @@
 //!
 //! **The protocol name.** No fixture names a protocol, with one exception
 //! kept in a field of its own: `chat_whole`'s `egress_proto`, the request
-//! log's record of the wire a request left on (I4, WP2a). WP2a re-blesses
-//! that field alone. The external row is stored under
+//! log's record of the wire a request left on (I4, WP2a). WP2a re-blessed
+//! that field alone, and so did the openai split (I1). The external row is stored under
 //! [`LLAMA_SPELLING`](crate::egress_golden::LLAMA_SPELLING), the same one
 //! place the egress corpus spells a llama.cpp upstream; [`external`] is the
 //! only function that reads it. WP2a ran every route on that row spelled
 //! the old way too (`openai` + `llama_server`) and found the same requests,
 //! Continue and `/tokenize` aside (their guards key on `llama_cpp`); WP2c
 //! removed the OpenAI egress's kind branches, so that spelling means a
-//! generic row now.
+//! generic row now. The two OpenAI-shaped rows are stored under
+//! [`GENERIC_SPELLING`](crate::egress_golden::GENERIC_SPELLING) and
+//! [`PLATFORM_SPELLING`](crate::egress_golden::PLATFORM_SPELLING), both
+//! `openai` + `generic` when they were captured; since migration 0090 the
+//! generic row is `openai_compatible`, which re-blessed `chat_whole`'s
+//! `egress_proto` alone (openai egress design I1).
 
 use std::time::Duration;
 
-use lmgw_core::config::{AuxKind, Settings};
+use lmgw_core::config::{AuxKind, Protocol, Settings, UpstreamKind};
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewAlias, NewUpstream};
 use serde_json::{json, Value};
@@ -33,9 +40,10 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use crate::chat_actions::post;
 use crate::chat_golden::{mcp_stub, openai_call, register_stub};
 use crate::common::{serve, Gw};
-use crate::egress_golden::LLAMA_SPELLING;
+use crate::egress_golden::{GENERIC_SPELLING, LLAMA_SPELLING, PLATFORM_SPELLING};
 use crate::support::golden;
 use crate::support::gpu_world::{Gpu, GIB};
+use crate::support::responses_wire as rw;
 
 /// The fixtures' directory under `tests/fixtures`.
 const DIR: &str = "egress_routes";
@@ -44,7 +52,7 @@ const DIR: &str = "egress_routes";
 const TRANSPORT_HEADERS: [&str; 2] = ["host", "content-length"];
 
 // ---------------------------------------------------------------------------
-// The two rows
+// The rows
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,16 +61,30 @@ pub(crate) enum Row {
     Managed,
     /// An upstream row of llama.cpp's kind with a key and an extra header.
     External,
+    /// An OpenAI-compatible provider's row with a key and an extra header,
+    /// answering as [`Row::External`]'s server does.
+    Generic,
+    /// The OpenAI platform's row with a key and an extra header, answering
+    /// as [`Row::External`]'s server does.
+    Platform,
 }
 
 impl Row {
-    pub(crate) const ALL: [Row; 2] = [Row::Managed, Row::External];
+    pub(crate) const ALL: [Row; 4] = [Row::Managed, Row::External, Row::Generic, Row::Platform];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Row::Managed => "managed",
             Row::External => "external",
+            Row::Generic => "generic",
+            Row::Platform => "openai_platform",
         }
+    }
+
+    /// Whether `route` runs on this row: OpenAI has no rerank route, and the
+    /// platform's egress offers none (openai egress design §3.2).
+    pub(crate) fn runs(self, route: Route) -> bool {
+        !(self == Row::Platform && matches!(route, Route::Rerank))
     }
 }
 
@@ -81,7 +103,9 @@ impl World {
     pub(crate) async fn new(row: Row) -> World {
         match row {
             Row::Managed => managed().await,
-            Row::External => external().await,
+            Row::External => external(LLAMA_SPELLING).await,
+            Row::Generic => external(GENERIC_SPELLING).await,
+            Row::Platform => external(PLATFORM_SPELLING).await,
         }
     }
 
@@ -200,9 +224,50 @@ fn external_chat(req: &Request) -> ResponseTemplate {
     }))
 }
 
-/// An external llama.cpp server behind one upstream row, with the aliases
-/// `m` (chat), `e` (embeddings) and `r` (rerank) on it.
-async fn external() -> World {
+/// The external server's Responses answer, on the platform's row only: a
+/// call of the MCP stub's `echo` when it is offered and no tool result came
+/// back yet, a stream (a reasoning summary, then text) when one is asked,
+/// else a whole Response saying "Hello".
+fn external_responses(req: &Request) -> ResponseTemplate {
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+    let sse = |s: String| ResponseTemplate::new(200).set_body_raw(s, "text/event-stream");
+    let streamed = body["stream"] == true;
+    if rw::offers(&body, "stub__echo") && !rw::after_tool(&body) {
+        let items = [rw::call("fc_1", "c1", "stub__echo", "{\"text\":\"hi\"}")];
+        return match streamed {
+            true => sse(rw::stream("resp_1", &items)),
+            false => ResponseTemplate::new(200).set_body_json(rw::response(
+                "resp_1",
+                "completed",
+                json!(items),
+            )),
+        };
+    }
+    if streamed {
+        return sse(rw::stream(
+            "resp_1",
+            &[
+                rw::reasoning("rs_1", "Let me think."),
+                rw::message("msg_1", "Hello"),
+            ],
+        ));
+    }
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "resp_1", "object": "response", "created_at": 0, "status": "completed",
+        "model": "chat-gguf",
+        "output": [{"type": "message", "id": "msg_1", "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello",
+                                 "annotations": []}]}],
+        "usage": {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8},
+    }))
+}
+
+/// An external server behind one upstream row spelled `spelling`, with the
+/// aliases `m` (chat), `e` (embeddings) and `r` (rerank) on it. It answers
+/// as a llama.cpp server does, whatever the row says it is, so the rows
+/// differ only in what lmgw sends and reads.
+async fn external(spelling: (Protocol, UpstreamKind)) -> World {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -236,6 +301,14 @@ async fn external() -> World {
         })))
         .mount(&mock)
         .await;
+    // Only the OpenAI platform's row asks this: its native `/v1/responses`
+    // (openai egress design §6) and, since WP7, its chat sends (§7.2). The
+    // others synthesize Responses from `/v1/chat/completions`.
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(external_responses)
+        .mount(&mock)
+        .await;
     Mock::given(method("POST"))
         .and(path("/tokenize"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tokens": [1, 2, 3, 4, 5]})))
@@ -248,7 +321,7 @@ async fn external() -> World {
         .await;
 
     let state = lmgw_core::state::AppState::init_for_tests().await.unwrap();
-    let (protocol, kind) = LLAMA_SPELLING;
+    let (protocol, kind) = spelling;
     let up = store::insert_upstream(
         &state.db,
         &NewUpstream {
@@ -282,6 +355,7 @@ async fn external() -> World {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -603,10 +677,11 @@ async fn egress_protos(state: &SharedState) -> Value {
 // The corpus
 // ---------------------------------------------------------------------------
 
-/// Run `route` on both rows and compare each with its fixture.
+/// Run `route` on every row it applies to and compare each with its fixture.
 async fn check(route: Route) {
     let mut failures = Vec::new();
-    for row in Row::ALL {
+    let rows: Vec<Row> = Row::ALL.into_iter().filter(|r| r.runs(route)).collect();
+    for &row in &rows {
         let w = World::new(row).await;
         let got = golden::to_fixture(&route.run(&w).await);
         let name = format!("{}__{}", route.name(), row.name());
@@ -622,7 +697,7 @@ async fn check(route: Route) {
             }
         }
     }
-    golden::assert_all(route.name(), Row::ALL.len(), failures);
+    golden::assert_all(route.name(), rows.len(), failures);
 }
 
 macro_rules! route_tests {
@@ -656,9 +731,15 @@ route_tests! {
 /// No fixture outlives its case.
 #[test]
 fn no_route_fixture_is_stale() {
-    let written = Route::ALL
+    let written: std::collections::BTreeSet<String> = Route::ALL
         .iter()
-        .flat_map(|r| Row::ALL.map(|row| format!("{}__{}", r.name(), row.name())))
+        .flat_map(|&r| {
+            Row::ALL
+                .into_iter()
+                .filter(move |row| row.runs(r))
+                .map(move |row| format!("{}__{}", r.name(), row.name()))
+        })
         .collect();
-    golden::assert_all("route", Route::ALL.len() * 2, golden::stale(DIR, &written));
+    let n = written.len();
+    golden::assert_all("route", n, golden::stale(DIR, &written));
 }

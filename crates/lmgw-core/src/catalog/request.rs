@@ -4,24 +4,28 @@
 //! text. Jev and every other decision model, the embedders, rerankers,
 //! speech, transcription, image and video models appear only with
 //! `?output_modalities=all` (Appendix B.3). So the catalog request of an
-//! `openai` row of kind `generic` carries that query unless its owner turned
+//! `openai_compatible` row of kind `generic` carries that query unless its
+//! owner turned
 //! `catalog_all_modalities` off. OpenAI, Kilo's gateway and llama-server
 //! answered the same list with and without it; Gemini's OpenAI-compatible
 //! endpoint refuses it with a 400, which is why the option exists (live
 //! check, 2026-10-14, §6.2). A `llama_cpp` row lists every model it serves
-//! anyway, so its request stays bare.
+//! anyway, so its request stays bare, and so does the OpenAI platform's
+//! (`openai`), which answers the same list either way.
 
 use crate::config::{Protocol, Snapshot, Upstream, UpstreamKind};
 
 /// The query that asks a catalog for every output modality.
 pub const ALL_MODALITIES: &str = "output_modalities=all";
 
-/// Whether `u`'s catalog request asks for every output modality: an `openai`
-/// row of kind `generic` whose `catalog_all_modalities` is on. An `openai`
-/// row of another kind (an audio.cpp server, say) lists its own models and
-/// was never asked, so it stays bare.
+/// Whether `u`'s catalog request asks for every output modality: an
+/// `openai_compatible` row of kind `generic` whose `catalog_all_modalities`
+/// is on. A row of another kind (an audio.cpp server, say) lists its own
+/// models and was never asked, so it stays bare. The OpenAI platform is
+/// never asked: it answers the same list either way (0080's comment, openai
+/// egress design §1.1).
 pub fn asks_all_modalities(snap: &Snapshot, u: &Upstream) -> bool {
-    u.protocol == Protocol::Openai
+    u.protocol == Protocol::OpenaiCompatible
         && u.kind == UpstreamKind::Generic
         && !snap.catalog_bare.contains(&u.id)
 }
@@ -65,21 +69,36 @@ mod tests {
     }
 
     #[test]
-    fn only_an_openai_row_with_the_option_on_asks_for_every_modality() {
+    fn only_an_openai_compatible_row_with_the_option_on_asks_for_every_modality() {
         let mut snap = Snapshot::default();
-        assert!(asks_all_modalities(&snap, &upstream(5, Protocol::Openai)));
-        for p in [Protocol::LlamaCpp, Protocol::Anthropic, Protocol::Gemini] {
+        assert!(asks_all_modalities(
+            &snap,
+            &upstream(5, Protocol::OpenaiCompatible)
+        ));
+        // The OpenAI platform answers the same list either way.
+        for p in [
+            Protocol::Openai,
+            Protocol::LlamaCpp,
+            Protocol::Anthropic,
+            Protocol::Gemini,
+        ] {
             assert!(!asks_all_modalities(&snap, &upstream(5, p)), "{p:?}");
         }
         snap.catalog_bare.insert(5);
-        assert!(!asks_all_modalities(&snap, &upstream(5, Protocol::Openai)));
-        assert!(asks_all_modalities(&snap, &upstream(6, Protocol::Openai)));
+        assert!(!asks_all_modalities(
+            &snap,
+            &upstream(5, Protocol::OpenaiCompatible)
+        ));
+        assert!(asks_all_modalities(
+            &snap,
+            &upstream(6, Protocol::OpenaiCompatible)
+        ));
         for kind in [
             UpstreamKind::AudioCpp,
             UpstreamKind::SdCpp,
             UpstreamKind::LlamaServer,
         ] {
-            let mut u = upstream(6, Protocol::Openai);
+            let mut u = upstream(6, Protocol::OpenaiCompatible);
             u.kind = kind;
             assert!(!asks_all_modalities(&snap, &u), "{kind:?}");
         }
@@ -92,8 +111,8 @@ mod tests {
             "https://openrouter.ai/api/v1/models?output_modalities=all"
         );
         assert_eq!(
-            openai_models_url("http://127.0.0.1:9292/v1", false),
-            "http://127.0.0.1:9292/v1/models"
+            openai_models_url("http://127.0.0.1:9393/v1", false),
+            "http://127.0.0.1:9393/v1/models"
         );
     }
 

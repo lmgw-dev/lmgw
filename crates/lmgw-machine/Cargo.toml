@@ -1,0 +1,43 @@
+[package]
+name = "lmgw-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What lmgw reads about the computer it runs on: the graphics card and its driver, the package database and repositories, and CDI specs"
+
+# The machine check's library (machine-check design §3.2, WP1): the facts the
+# check in lmgw-core reads with the user's rights, and that the root helper
+# (WP6) will read the same way. Everything goes through the `Facts` seam, so a
+# test states a machine instead of reading this one.
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# The system's CDI specs are YAML (nvidia-ctk writes YAML by default, and
+# NVIDIA's refresh unit does). serde_yaml is unmaintained; serde-saphyr is a
+# maintained, pure-Rust, panic-free deserializer (machine-check design WP1:
+# "the builder picks a maintained fork for review"). Only its deserializer, and
+# only for the system's specs: lmgw's own spec is JSON, read with serde_json.
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
+# containers.conf, for Podman's configured CDI spec dirs (§1.2). The version
+# lmgw-core's tests and tauri-build already lock.
+toml = "1.1.2"
+# getuid, for Podman's per-UID rootless drop-in dir. Already in the lock.
+libc = "0.2.186"
+# The plan's hash (machine-check design §3.2): SHA-256 over HashedPlan. The
+# version lmgw-core already uses.
+sha2 = "0.11.0"
+
+# `fake`: `fake::FakeFacts`, a machine a test states in memory. For tests
+# only: this crate's own (the dev-dependency on itself below) and lmgw-core's
+# (its dev-dependency), never a release build.
+[features]
+fake = []
+
+[dev-dependencies]
+lmgw-machine = { path = ".", features = ["fake"] }
+tempfile = "3.27.0"
+# The embedded key's fingerprint, computed from its packets in the test that
+# pins it (§6, "The embedded key"): a v4 fingerprint is SHA-1 over the
+# public-key packet. Both versions are already in the lock.
+base64 = "0.22.1"
+sha1 = "0.11.0"

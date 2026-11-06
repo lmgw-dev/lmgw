@@ -129,6 +129,10 @@ pub struct Sheet {
     pub mchar: Option<UnitRate>,
     pub image: Option<UnitRate>,
     pub request: Option<UnitRate>,
+    /// Set when a unit has usable rows at some service tier but none at
+    /// the one the sheet was resolved for (openai egress design §5.6): the
+    /// request is then unpriced, never priced at another tier.
+    pub tier_gap: Option<super::TierGap>,
 }
 
 impl Sheet {
@@ -219,7 +223,9 @@ pub(super) fn part_micro(unit: PriceUnit, quantity: u64, rate: f64) -> i64 {
 ///    when its quantity is `None` — except at a rate of 0, which is a known
 ///    0 whatever the quantity;
 /// 5. **any part unknown → the whole request unknown**: NULL, never 0, never
-///    a partial sum. The rates that would have applied are still snapshotted;
+///    a partial sum. A unit the served tier has no row for
+///    ([`Sheet::tier_gap`]) is such a part. The rates that would have applied
+///    are still snapshotted;
 /// 6. otherwise the total is the integer sum of the parts.
 ///
 /// The source is `manual` if any rate used was manual; otherwise the token
@@ -235,6 +241,7 @@ pub fn price_request(tokens: &TokenUsage, q: &Quantities, sheet: &Sheet) -> Cost
             used: Prices::free_local(),
             units_micro: None,
             used_units: UnitRates::default(),
+            budget_floor_micro: None,
         };
     }
 
@@ -242,7 +249,8 @@ pub fn price_request(tokens: &TokenUsage, q: &Quantities, sheet: &Sheet) -> Cost
     let token_part = token_sheet.map(|p| price_tokens(tokens, Some(&p)));
 
     let mut any_unit = false;
-    let mut units_known = true;
+    // A unit the served tier has no row for is unknown (§5.6).
+    let mut units_known = sheet.tier_gap.is_none();
     let mut units_micro = 0i64;
     let mut used_units = UnitRates::default();
     let mut manual = token_sheet.is_some_and(|p| p.source == PriceSource::Manual);
@@ -292,6 +300,7 @@ pub fn price_request(tokens: &TokenUsage, q: &Quantities, sheet: &Sheet) -> Cost
         used: token_part.used,
         units_micro,
         used_units,
+        budget_floor_micro: None,
     }
 }
 

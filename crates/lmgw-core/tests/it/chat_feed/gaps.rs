@@ -79,13 +79,13 @@ async fn a_device_s_lag_state_leaves_admin_chat_out() {
         .unwrap();
     assert_eq!(send.status(), 200);
     let mut device = Feed::open(&w, &d.client, "", None).await;
-    let publish = |fallback: Option<&str>| {
+    let publish = |held: bool| {
         let mut snap = (*w.state.snapshot()).clone();
-        snap.settings.hold.fallback_alias = fallback.map(str::to_string);
+        snap.settings.hold.active = held;
         w.state.set_snapshot_for_tests(snap);
     };
     for i in 0..6 {
-        publish((i % 2 == 0).then_some("other"));
+        publish(i % 2 == 0);
     }
     device
         .until(10, |f| f.iter().any(|f| f.event == "state"))

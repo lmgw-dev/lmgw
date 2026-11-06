@@ -89,7 +89,7 @@ pub(crate) fn start(
         // the warm below can load it; the speaker counts each call.
         if let Err(e) = device_check(&state, charged.as_ref(), &plan).await {
             let error = frames::SpeechError {
-                code: e.code().to_string(),
+                code: e.kind().to_string(),
                 message: e.to_string(),
             };
             return out.frame(super::super::chat_turn::TurnFrame::of(

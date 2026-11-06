@@ -7,7 +7,7 @@ use crate::config::{Protocol, Route, Upstream, UpstreamKind};
 fn fitted(off: Off, basis: Basis) -> Fitted {
     Fitted {
         off: Some((off, basis)),
-        reasoned: false,
+        ..Fitted::default()
     }
 }
 
@@ -103,4 +103,26 @@ fn reasoning_seen_after_an_off_is_reported_and_said() {
     let mut none = Fitted::default();
     none.observe(&route, true);
     assert_eq!((none.ignored(), none.note("m")), (None, None));
+}
+
+#[test]
+fn between_tools_is_honoured_until_the_model_is_seen_reasoning() {
+    // The model's own off (Claude Sonnet 5.5): not reported, nothing said.
+    let mut f = fitted(Off::BetweenTools, Basis::Facts("x"));
+    assert_eq!((f.ignored(), f.note("sonnet")), (None, None));
+    assert_eq!(f.retryable(), Some(&Off::BetweenTools));
+    // Notes it wrote between tool calls come back as reasoning.
+    f.observe(&local_route(), true);
+    assert_eq!(f.ignored(), Some("enabled"));
+    assert_eq!(
+        f.note("sonnet").as_deref(),
+        Some(
+            "sonnet cannot switch reasoning off entirely; at its lowest setting it still \
+             reasons between tool calls"
+        )
+    );
+    assert_eq!(
+        Off::BetweenTools.describe(Protocol::Anthropic),
+        "thinking: {type: \"between_tools\"}"
+    );
 }

@@ -40,6 +40,28 @@ fn upstream(status: u16, message: &str) -> GatewayError {
     }
 }
 
+fn relayed(status: u16, message: &str) -> GatewayError {
+    GatewayError::UpstreamRelayed(Box::new(crate::error::Relayed {
+        status,
+        error_type: Some("invalid_request_error".into()),
+        code: None,
+        param: None,
+        message: message.into(),
+    }))
+}
+
+#[test]
+fn a_relayed_refusal_names_the_audio_like_a_plain_one() {
+    assert!(super::refusal::names_audio(&relayed(
+        400,
+        "This model does not support audio input"
+    )));
+    assert!(!super::refusal::names_audio(&relayed(
+        400,
+        "bad temperature"
+    )));
+}
+
 #[test]
 fn only_refusals_of_the_audio_go_again_as_the_transcript() {
     let unheard = crate::web::chat_voice::bound::AUDIO_NOT_HEARD;
@@ -70,6 +92,9 @@ fn only_refusals_of_the_audio_go_again_as_the_transcript() {
             Refusal::Server,
         ),
         (upstream(400, "invalid audio"), Refusal::Server),
+        // The OpenAI platform's relayed 4xx is the same refusal.
+        (relayed(400, "invalid audio"), Refusal::Server),
+        (relayed(422, "unprocessable"), Refusal::Server),
         (upstream(413, "too large"), Refusal::Server),
         (
             upstream(
@@ -98,6 +123,7 @@ fn only_refusals_of_the_audio_go_again_as_the_transcript() {
         upstream(502, "bad gateway"),
         upstream(503, "Loading model"),
         upstream(429, "slow down"),
+        relayed(404, "no such thing"),
         GatewayError::Transport("connection reset".into()),
         GatewayError::Timeout,
         GatewayError::GpuHold {
@@ -230,7 +256,7 @@ async fn world(setting: &str) -> (crate::state::SharedState, MockServer, i64) {
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -254,6 +280,7 @@ async fn world(setting: &str) -> (crate::state::SharedState, MockServer, i64) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -478,7 +505,7 @@ async fn a_refusal_and_a_failed_transcription_fail_with_transcription_failed() {
     let (state, mock, tid) = world("on").await;
     let said = respond(&state, tid, vec![audio()], settles(UserRow::Failed)).await;
     let e = said.result.unwrap().unwrap_err();
-    assert_eq!(e.code(), "transcription_failed", "{e}");
+    assert_eq!(e.kind(), "transcription_failed", "{e}");
     assert_eq!(e.http_status().as_u16(), 500);
     let codes: Vec<_> = said
         .frames

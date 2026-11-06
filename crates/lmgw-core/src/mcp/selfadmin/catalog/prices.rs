@@ -1,7 +1,7 @@
 //! Price-sheet mutations: `lmgw__prices_sync`, `lmgw__price_set`,
 //! `lmgw__price_delete`.
 
-use crate::config::PriceUnit;
+use crate::config::{PriceTier, PriceUnit};
 use crate::mcp::selfadmin::{enum_p, int_p, num_p, str_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
@@ -9,6 +9,7 @@ pub(super) fn tools() -> Vec<Builtin> {
     // gateway prices with (billable-units design §2.1), so the tool cannot
     // offer a unit the op refuses or describe a scale it does not use.
     let units: Vec<&str> = PriceUnit::ALL.iter().map(|u| u.as_str()).collect();
+    let tiers: Vec<&str> = PriceTier::ALL.iter().map(|t| t.as_str()).collect();
     let price_scales = PriceUnit::ALL
         .iter()
         .filter(|u| !u.is_tokens())
@@ -47,8 +48,11 @@ pub(super) fn tools() -> Vec<Builtin> {
                  per minute of input audio, per_mchar per 1M characters of input text, \
                  per_image per generated image, per_request per answered request. A scope \
                  may hold one row per unit, and a request costs the sum of every unit priced \
-                 for it (tokens plus a request fee, say). A manual row always wins over a \
-                 catalog-synced row for the same scope and unit and is never overwritten by \
+                 for it (tokens plus a request fee, say). service_tier (default standard) \
+                 is the OpenAI price tier the row is for: an OpenAI platform answer is \
+                 priced with the rows of the tier it reported, and is unpriced while that \
+                 tier has none (lmgw__prices' unpriced_tiers lists them). A manual row always \
+                 wins over a catalog-synced row for the same scope, unit and tier and is never overwritten by \
                  lmgw__prices_sync — this is how you price an upstream that publishes no \
                  catalog pricing at all (Gemini, for one). Prices are in the gateway's \
                  configured currency (lmgw__settings). Omitting \
@@ -75,6 +79,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                          one rather than changing it.",
                         &units,
                     ),
+                ),
+                (
+                    "service_tier",
+                    enum_p(PriceTier::PRICE_SET_DOC, &tiers),
                 ),
                 (
                     "price_in",

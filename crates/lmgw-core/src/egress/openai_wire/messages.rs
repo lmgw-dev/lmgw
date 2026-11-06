@@ -109,6 +109,21 @@ pub fn messages_json(ir: &ChatRequest, tool_results: &dyn ToolResultRenderer) ->
     out
 }
 
+/// The audio container a MIME type names, in `input_audio.format`'s
+/// spelling: `wav`, `mp3` or `flac`. The one table the egress and the chat's
+/// native-audio decision share. Case and parameters (`; codecs=…`) do not
+/// matter; MP3's registered type is `audio/mpeg`, WAV has four spellings.
+pub fn audio_format(mime: &str) -> Option<&'static str> {
+    let essence = mime.split(';').next().unwrap_or(mime).trim();
+    match essence.to_ascii_lowercase().as_str() {
+        "audio/wav" | "audio/wave" | "audio/x-wav" | "audio/vnd.wave" => Some("wav"),
+        "audio/mpeg" | "audio/mp3" | "audio/mpeg3" | "audio/x-mpeg-3" | "audio/x-mp3"
+        | "audio/x-mpeg" => Some("mp3"),
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        _ => None,
+    }
+}
+
 /// User content: plain string when text-only, parts array when multimodal.
 fn user_content_json(parts: &[ContentPart]) -> Value {
     let has_media = parts
@@ -118,7 +133,7 @@ fn user_content_json(parts: &[ContentPart]) -> Value {
         let text = parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -128,7 +143,7 @@ fn user_content_json(parts: &[ContentPart]) -> Value {
     let mut arr = Vec::new();
     for p in parts {
         match p {
-            ContentPart::Text { text } => arr.push(json!({"type": "text", "text": text})),
+            ContentPart::Text { text, .. } => arr.push(json!({"type": "text", "text": text})),
             ContentPart::Image { mime, source } => {
                 let url = match source {
                     ImageSource::Url { url } => url.clone(),
@@ -136,12 +151,18 @@ fn user_content_json(parts: &[ContentPart]) -> Value {
                 };
                 arr.push(json!({"type": "image_url", "image_url": {"url": url}}));
             }
-            // Raw base64 (not a data: URI) — llama-server sniffs the bytes
-            // and ignores `format`, but cloud OpenAI requires it, so it is
-            // always sent, derived from the mime's subtype (`audio/wav` →
-            // `wav`).
+            // Raw base64 (not a data: URI), with the `format` OpenAI requires
+            // (and ik_llama.cpp too): `wav` or `mp3`, the two it takes.
             ContentPart::Audio { mime, data } => {
-                let format = mime.split('/').nth(1).unwrap_or(mime.as_str());
+                // Any container this does not know goes as its (lowercased)
+                // subtype, which the upstream judges.
+                let format = audio_format(mime).map_or_else(
+                    || {
+                        let m = mime.to_ascii_lowercase();
+                        m.split('/').nth(1).unwrap_or(&m).to_string()
+                    },
+                    str::to_string,
+                );
                 arr.push(json!({
                     "type": "input_audio",
                     "input_audio": {"data": data, "format": format},

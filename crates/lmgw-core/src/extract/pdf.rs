@@ -88,14 +88,14 @@ pub enum PdfError {
     )]
     Timeout { tool: &'static str },
     #[error(
-        "{tool} produced more than MAX_UNCOMPRESSED_BYTES ({} MiB) of output and was stopped",
-        MAX_UNCOMPRESSED_BYTES >> 20
+        "{tool} produced more than MAX_UNCOMPRESSED_BYTES ({}) of output and was stopped",
+        crate::hf::fmt_bytes(MAX_UNCOMPRESSED_BYTES)
     )]
     OutputTooLarge { tool: &'static str },
     #[error(
-        "{tool} needed more than POPPLER_MEMORY_LIMIT_BYTES ({} GiB) of memory and was stopped; \
+        "{tool} needed more than POPPLER_MEMORY_LIMIT_BYTES ({}) of memory and was stopped; \
          the PDF is probably malformed or declares an enormous page",
-        POPPLER_MEMORY_LIMIT_BYTES >> 30
+        crate::hf::fmt_bytes(POPPLER_MEMORY_LIMIT_BYTES)
     )]
     OutOfMemory { tool: &'static str },
     #[error("pdftoppm finished but wrote no image (is page {0} in the document?)")]

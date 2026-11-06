@@ -110,6 +110,13 @@ pub async fn render(
 ) -> Rendered {
     let model = thread.model_alias.as_str();
     let mut out = Rendered::default();
+    // A picture or a recording goes with its ref, which the image and audio
+    // tools take (chat-media-tools design §3.6): always, not only while a
+    // media toolset is attached, so a thread's replay does not change when
+    // one is toggled.
+    if matches!(att.kind.as_str(), "image" | "audio") {
+        out.parts.push(ContentPart::text(ref_label(att)));
+    }
     match att.kind.as_str() {
         "image" if caps.vision == Some(false) => {
             out.note(format!(
@@ -146,6 +153,16 @@ pub async fn render(
         )),
     }
     out
+}
+
+/// `[attachment att:42: image "cat.png"]`.
+pub(crate) fn ref_label(att: &ChatAttachmentFull) -> String {
+    format!(
+        "[attachment att:{}: {} \"{}\"]",
+        att.id,
+        att.kind,
+        escape_attr(&att.name)
+    )
 }
 
 fn format_attr(att: &ChatAttachmentFull) -> String {

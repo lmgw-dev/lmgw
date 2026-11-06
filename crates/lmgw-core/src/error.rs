@@ -64,10 +64,43 @@ pub enum GatewayError {
         provider_type: Option<String>,
         message: String,
     },
+    /// A 4xx of the OpenAI platform that lmgw does not classify (an unknown
+    /// parameter, a deprecated model, ...): OpenAI's own error object, relayed
+    /// as sent (its `message`, `type`, `code` and `param`) with its status.
+    /// A `401` or `403` is never relayed: the upstream key is lmgw's own
+    /// config, and the plain [`Upstream`](Self::Upstream) says so. On the
+    /// Anthropic wire the type maps to the nearest Anthropic one. Behaves as
+    /// [`Upstream`](Self::Upstream) everywhere else.
+    #[error("{}", .0.message)]
+    UpstreamRelayed(Box<Relayed>),
+    /// A whole Response object the OpenAI platform answered with a 2xx and
+    /// `status: "failed"` (openai egress design §7.2.3): the request reached
+    /// the model and failed there. OpenAI's own `error.code` and `message`
+    /// reach the client, as a stream's `response.failed` does; the usage and
+    /// tier the Response reported stay with it for the row, which counts
+    /// them like an answer's (decision 22). A `502` like
+    /// [`Upstream`](Self::Upstream)'s server errors, and the same kind.
+    #[error("{}", .0.text())]
+    UpstreamFailed(Box<FailedAnswer>),
     #[error("upstream transport error: {0}")]
     Transport(String),
+    /// A cloud upstream could not be connected to (openai egress design
+    /// §14.4, decision 28): the connect failed, so nothing reached the
+    /// upstream and nothing reached the client. A `502` as
+    /// [`Transport`](Self::Transport) is, with the kind `unreachable`; a
+    /// fallback answers it (reason `unreachable`). A local container's
+    /// connect failure stays `Transport`, which the dead-container recovery
+    /// reads.
+    #[error("upstream unreachable: {0}")]
+    Unreachable(String),
     #[error("upstream timeout")]
     Timeout,
+    /// A stream the upstream fell silent on past its headers for longer than
+    /// its timeout (`proxy::silence`): [`Timeout`](Self::Timeout)'s kind and
+    /// status, and a message that says how long it was silent, which a
+    /// turn's caller (the Responses loop's `response.failed`) passes on.
+    #[error("{0}")]
+    Stalled(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
     /// The model is larger than the GPU it would have to load on (quickdoc
@@ -150,14 +183,14 @@ pub enum GatewayError {
     /// GPU hold is active (gpu-hold design §1/§4) and this local model has no
     /// usable fallback — refused at resolve time, before any stream byte.
     /// `detail` is `""` or names why a configured fallback did not help, e.g.
-    /// `" (fallback 'x' is itself a local model)"`.
+    /// `" (fallback 'x' cannot serve this endpoint) (tried: a → x)"`.
     ///
     /// Not Anthropic's `overloaded_error`: that type is the SDKs' own
     /// retry-with-backoff signal, and a hold can last an hour — telling a
     /// client to keep retrying would be a lie.
     #[error(
         "'{model}' is a local model and lmgw is holding the GPU{detail} — release the hold or \
-         configure a fallback alias"
+         give the model a fallback that can answer"
     )]
     GpuHold { model: String, detail: String },
     /// A benchmark run holds the card (benchmark design §3.2): no local model
@@ -175,23 +208,65 @@ pub enum GatewayError {
         run_id: i64,
         detail: String,
     },
-    /// Background traffic (candidate-aliases design §4.3) could not be
-    /// served without disturbing the owner, and its alias has no fallback
-    /// (`none`) — nothing local was loaded that could take it, and starting
-    /// or climbing one would have meant evicting or waiting on the owner's
-    /// work. `detail` says what was in the way ("GPU in use by …").
+    /// A local model's start on the graphics card failed, and the machine
+    /// check names why: the card or its driver (§1.1) or, for a row that
+    /// gives its container the NVIDIA card, what lets models use it (§1.2)
+    /// — machine-check design §2.5, D23, D64. `problem` is what follows the
+    /// model's name (D65): "could not start on the graphics card of the
+    /// computer lmgw runs on." and the item's plain sentence, with "Open
+    /// lmgw there to see what to do." when the item has a plan or steps to
+    /// show (no card at all has words of its own); `detail` the start's own
+    /// error and any clause saying why a configured fallback did not
+    /// answer, so nothing of Podman's text is lost.
     ///
-    /// On the wire it is the hold's refusal — 503, code `gpu_hold`
-    /// ([`Self::code`]) — because that is the answer the owner's clients
-    /// already handle as "local models are paused, not down". In the request
-    /// log and the rollup it is its own kind, `gpu_deferred`, so a deferral
-    /// can be told from a real hold. Not `overloaded_error` for the same
-    /// reason as the hold.
+    /// 503 with its own code, `gpu_setup`, like the hold's family: the
+    /// request may succeed once the computer is set up, which no retry
+    /// window brings about, so never Anthropic's `overloaded_error`. Not a
+    /// deliberate refusal, so not in `telemetry::REFUSAL_KINDS`: the usage
+    /// page counts it as a failure.
+    #[error("'{model}' {problem}{detail}")]
+    GpuSetup {
+        model: String,
+        problem: String,
+        detail: String,
+    },
+    /// The engine image a local model runs in is not on this machine, and
+    /// downloading it before the start failed, or cannot begin (a
+    /// `localhost/` build): machine-check design §5, D32. `message` is the
+    /// whole plain sentence ("The engine chat model 'm' runs in could not be
+    /// downloaded, so the model could not start: …", why in the job's or
+    /// Podman's own words after the colon, the image reference and the
+    /// setting the engine is chosen in) and any clause saying why a
+    /// configured fallback did not answer. A `502`, as WP10 answered it, with a code of its own,
+    /// `engine_download`, so a client and the log tell it from an
+    /// upstream's error; a configured fallback answers it (reason
+    /// `engine_download`, WP5).
+    #[error("{message}")]
+    EngineDownload { message: String },
+    /// Background traffic (candidate-aliases design §4.3, per-request
+    /// background design §4) could not be served without disturbing the
+    /// owner, and what it named has no fallback that can answer — nothing
+    /// local was loaded that could take it, and starting or climbing one
+    /// would have meant evicting or waiting on the owner's work. `detail` says
+    /// what was in the way ("GPU in use by …"); `on` is what was named, a
+    /// candidate alias or a model, which is what the fallback would be
+    /// given to.
+    ///
+    /// 503 with its own code, `gpu_deferred`, on the wire as in the request
+    /// log (*changed 2026-10-21*, the owner's decision A: it used to answer
+    /// `gpu_hold`). A client must not retry the hold, which can last an hour;
+    /// a deferral is "retry later". Not `overloaded_error` for the same reason
+    /// as the hold: the SDKs' backoff would spend the wait retrying.
     #[error(
         "'{model}' deferred: {detail} — background traffic never disturbs the owner's models; \
-         retry later, or give the alias a fallback"
+         retry later, or give the {} a fallback",
+        .on.noun()
     )]
-    GpuDeferred { model: String, detail: String },
+    GpuDeferred {
+        model: String,
+        detail: String,
+        on: Deferred,
+    },
     /// A candidate alias's model went away under a request that was using it
     /// — its container died, or a stop or a failed climb took it — and this
     /// request may not start it again (candidate-aliases design §4.1, §12
@@ -253,6 +328,35 @@ pub enum GatewayError {
         /// Keys, the gateway's on Settings → Usage & cost.
         set_on: &'static str,
     },
+    /// A budgeted caller's request on a cloud route whose scope prices none
+    /// of the units the request is billed in (openai egress design §13.3,
+    /// decision 24): its spend could not be counted, so a budget could not
+    /// be enforced on it. Flex without a flex price is one case: no other
+    /// tier's price bounds a flex answer. `scope` is whose budget it is
+    /// ([`crate::config::ApiKey::described`], or "this gateway" for the
+    /// global one), `missing` the price that is missing, its units and the
+    /// tiers that do have one. `or_default`: the request asked for flex and
+    /// another tier has a price, so sending `service_tier: default` is a way
+    /// out too.
+    ///
+    /// **403 with a code of its own**, like [`KeyBudget`](Self::KeyBudget):
+    /// a missing price does not clear during a retry window, and a client
+    /// tells "out of budget" from "a price is missing" by the code.
+    ///
+    /// `target` names the model and its upstream ("'gpt-5' on upstream
+    /// 'OpenAI'"), in one field so the variant stays as small as the others.
+    #[error(
+        "{scope} has a budget, and {target} has no {missing}, so its spend could not be \
+         counted: enter one on the Prices page or with lmgw__price_set (a manual price \
+         of 0 is fine for a free upstream, such as one on your LAN){}",
+        or_send_default(.or_default)
+    )]
+    BudgetUnpriced {
+        scope: String,
+        target: String,
+        missing: String,
+        or_default: bool,
+    },
     /// A rate or concurrency limit. Unlike a budget this *does* clear in
     /// seconds, so it keeps 429 and carries a `Retry-After` that is a real
     /// number rather than a shrug.
@@ -282,6 +386,11 @@ pub enum GatewayError {
     /// the message then states the prompt alone against the limit, rather
     /// than a sum that silently dropped a term.
     ///
+    /// The OpenAI platform's `context_length_exceeded` also arrives here
+    /// when its message states the prompt and the limit (openai egress
+    /// design §8); one that does not is
+    /// [`ContextExceededAsWorded`](Self::ContextExceededAsWorded).
+    ///
     /// `top_rung` names the rung `limit` belongs to — `3/3 (top.gguf)` — when
     /// the refusal is a ladder's "too big for the top rung" (ladder design
     /// §3.1): the limit is then the top rung's per-slot context, and the
@@ -294,6 +403,278 @@ pub enum GatewayError {
         limit: u64,
         top_rung: Option<String>,
     },
+    /// The OpenAI platform's `context_length_exceeded` in a wording that does
+    /// not state both the prompt and the limit (openai egress design §8),
+    /// e.g. "Your input exceeds the context window of this model." The same
+    /// code and status as [`ContextExceeded`](Self::ContextExceeded); the
+    /// message is OpenAI's, verbatim, after the model's name. `model` is
+    /// empty until the send site's `gate::attribute` names it.
+    #[error("'{model}': {message}")]
+    ContextExceededAsWorded { model: String, message: String },
+    /// An upstream refused for a limit of the account or of the service —
+    /// read on the OpenAI platform only, so far, by its egress's `map_error`
+    /// (openai egress design §8): a rate limit, an exhausted quota or
+    /// spend limit, or no flex capacity — told apart because a client acts on
+    /// each differently, and the request log keeps them apart by
+    /// [`kind`](Self::kind). A `429`, as OpenAI answers it, on the OpenAI
+    /// and Responses wires; on Anthropic's, an exhausted quota is its `402
+    /// billing_error` ([`Self::anthropic_status`]). `code` and `error_type`
+    /// are OpenAI's own `error.code` and `error.type`, which the OpenAI and
+    /// Responses wires send back as OpenAI sent them; `message` its
+    /// `error.message`, verbatim. `hints` are the upstream's rate-limit
+    /// headers, relayed onto lmgw's answer ([`RateHints`]).
+    ///
+    /// `note` is lmgw's words after the provider's (§14.8: "'C' has no
+    /// fallback configured (tried: A → B → C)"), rendered after the message
+    /// on every wire. The optional texts are boxed: this variant sizes
+    /// `GatewayError`, which `clippy.toml`'s `large-error-threshold` and
+    /// the enums carrying it are measured against.
+    #[error("{}{}", upstream_limit_message(.limit, .code, .message), note_text(.note))]
+    UpstreamLimited {
+        limit: UpstreamLimit,
+        code: Option<Box<str>>,
+        error_type: Option<Box<str>>,
+        message: String,
+        hints: RateHints,
+        note: Option<Box<str>>,
+    },
+    /// The model, or its upstream, cannot produce the structured output the
+    /// request asked for (structured-output design §7–§9): lmgw's early
+    /// refusal on an explicit `false` flag, an egress with no equivalent
+    /// (Anthropic's missing JSON-object mode), or an upstream refusal
+    /// classified as such. A `400` with the code
+    /// `response_format_unsupported` and `param` naming the format field, so
+    /// a client can step down to a weaker type without reading the text.
+    ///
+    /// Not [`Upstream`](Self::Upstream) even when an upstream said it: the
+    /// reasoning-off retry, the candidate re-pick and the fallbacks read only
+    /// that variant as "maybe something else", and this one never is.
+    #[error("{message}")]
+    ResponseFormatUnsupported { message: String },
+    /// The upstream rejected the request's JSON Schema itself (structured-
+    /// output design §9). `message` is the upstream's own, verbatim. A `400`
+    /// with the code `invalid_json_schema` and `param` naming the format
+    /// field.
+    #[error("{message}")]
+    InvalidJsonSchema { message: String },
+}
+
+/// An upstream's own error object, kept whole for
+/// [`GatewayError::UpstreamRelayed`] (boxed there: the error type stays small).
+#[derive(Debug, Clone)]
+pub struct Relayed {
+    pub status: u16,
+    pub error_type: Option<String>,
+    pub code: Option<String>,
+    pub param: Option<String>,
+    pub message: String,
+}
+
+/// What a failed whole Response said and reported, kept for
+/// [`GatewayError::UpstreamFailed`] (boxed there, like [`Relayed`]).
+#[derive(Debug, Clone)]
+pub struct FailedAnswer {
+    /// OpenAI's `error.code` (`server_error`, `invalid_prompt`, ...), when
+    /// it sent one.
+    pub code: Option<String>,
+    /// OpenAI's `error.message`, or lmgw's words when it sent none.
+    pub message: String,
+    /// The usage the failed Response reported (`Usage::default()` when it
+    /// reported none: the send site counts locally then).
+    pub usage: crate::ir::Usage,
+    /// The tier the failed Response names, which the row is priced at.
+    pub service_tier: Option<String>,
+}
+
+impl FailedAnswer {
+    /// The words a client and the row see: "the upstream's response failed:
+    /// <message> (<code>)".
+    fn text(&self) -> String {
+        match self.code.as_deref() {
+            Some(code) => format!("the upstream's response failed: {} ({code})", self.message),
+            None => format!("the upstream's response failed: {}", self.message),
+        }
+    }
+}
+
+/// The request field a structured-output error is about, as the OpenAI error
+/// body's `param` names it (structured-output design §8): chat completions
+/// say `response_format`, legacy completions `json_schema`, `/v1/responses`
+/// `text.format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatParam {
+    ResponseFormat,
+    TextFormat,
+    /// Legacy `/v1/completions`, whose llama.cpp spelling of the format is
+    /// the top-level `json_schema` field.
+    JsonSchema,
+}
+
+impl FormatParam {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ResponseFormat => "response_format",
+            Self::TextFormat => "text.format",
+            Self::JsonSchema => "json_schema",
+        }
+    }
+}
+
+/// What a [`GatewayError::GpuDeferred`] was named for — and so what its
+/// message says to give a fallback to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deferred {
+    /// A candidate alias (candidate-aliases design §4.3): the fallback is the
+    /// alias's own.
+    Alias,
+    /// A local model a request named with `x-lmgw-background: on`
+    /// (per-request background design §4): the fallback is its row's.
+    Model,
+}
+
+impl Deferred {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::Model => "model",
+        }
+    }
+}
+
+/// Which of the OpenAI platform's limits a [`GatewayError::UpstreamLimited`]
+/// names (openai egress design §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamLimit {
+    /// A rate limit (`rate_limit_exceeded`, `slow_down`): clears in seconds.
+    Rate,
+    /// The account's credit, quota, spend or usage limit is exhausted:
+    /// retrying does not help until the owner raises it.
+    Quota,
+    /// Flex processing had no capacity (`429 Resource Unavailable`); OpenAI
+    /// does not charge for it.
+    FlexCapacity,
+}
+
+impl UpstreamLimit {
+    /// The kind the request log groups by: OpenAI's own word for each, as
+    /// [`GatewayError::ContextExceeded`] keeps `context_length_exceeded`.
+    /// The quota family's several codes (`credit_balance_exhausted`, the
+    /// spend and usage limits) collapse into `insufficient_quota`, the
+    /// `error.type` OpenAI gives the family; the exact code stays in the
+    /// message, and the OpenAI and Responses wires send the upstream's own
+    /// code ([`GatewayError::to_openai_json`]). The wire's `code` where the
+    /// upstream sent none.
+    fn code(self) -> &'static str {
+        match self {
+            Self::Rate => "rate_limit_exceeded",
+            Self::Quota => "insufficient_quota",
+            Self::FlexCapacity => "resource_unavailable",
+        }
+    }
+}
+
+/// The headers an upstream's rate-limit answer carries that tell a client
+/// when to come back — `Retry-After`, `retry-after-ms` and every
+/// `x-ratelimit-*` — copied off the upstream's `429` by
+/// [`GatewayError::with_rate_hints`] and onto lmgw's by
+/// [`RateHints::stamp`] (openai egress design §8). Names lower-cased, as the
+/// upstream's `HeaderMap` holds them; values verbatim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RateHints(Box<[(String, String)]>);
+
+impl RateHints {
+    /// Whether `name` (lower-case) is one of the relayed headers.
+    pub fn relays(name: &str) -> bool {
+        name == "retry-after" || name == "retry-after-ms" || name.starts_with("x-ratelimit-")
+    }
+
+    /// The relayed headers of `headers`, in their order.
+    pub fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        Self(
+            headers
+                .iter()
+                .filter(|(name, _)| Self::relays(name.as_str()))
+                .filter_map(|(name, value)| {
+                    Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// When the upstream said to ask again: `retry-after-ms`, or
+    /// `retry-after` in seconds or as an HTTP date. `None` when it said
+    /// neither, or nothing readable (openai egress design §14.6).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        let get = |n: &str| {
+            self.0
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                .map(|(_, v)| v.trim())
+        };
+        // Whatever it says, however long: past what a `Duration` holds is
+        // `Duration::MAX`, never a panic (review B4) and never a cap of
+        // lmgw's own; a negative or non-finite value is unreadable.
+        let secs = |s: f64| {
+            (s.is_finite() && s >= 0.0).then(|| {
+                std::time::Duration::try_from_secs_f64(s).unwrap_or(std::time::Duration::MAX)
+            })
+        };
+        if let Some(ms) = get("retry-after-ms").and_then(|v| v.parse::<f64>().ok()) {
+            return secs(ms / 1000.0);
+        }
+        let v = get("retry-after")?;
+        if let Ok(s) = v.parse::<f64>() {
+            return secs(s);
+        }
+        let at = chrono::DateTime::parse_from_rfc2822(v).ok()?;
+        let left = at.timestamp() - chrono::Utc::now().timestamp();
+        Some(std::time::Duration::from_secs(left.max(0) as u64))
+    }
+
+    /// The headers, onto `headers` (an answer's), replacing any of the same
+    /// name.
+    pub fn stamp(&self, headers: &mut axum::http::HeaderMap) {
+        for (name, value) in self.0.iter() {
+            match (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                axum::http::HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(value)) => {
+                    headers.insert(name, value);
+                }
+                _ => tracing::warn!("cannot relay the upstream's {name} header"),
+            }
+        }
+    }
+}
+
+/// [`GatewayError::UpstreamLimited`]'s note, after its message.
+fn note_text(note: &Option<Box<str>>) -> String {
+    note.as_deref().map(|n| format!(" {n}")).unwrap_or_default()
+}
+
+/// [`GatewayError::UpstreamLimited`]'s message: what happened and what helps, in
+/// front of OpenAI's own words.
+fn upstream_limit_message(limit: &UpstreamLimit, code: &Option<Box<str>>, message: &str) -> String {
+    let code = code
+        .as_deref()
+        .map(|c| format!(" ({c})"))
+        .unwrap_or_default();
+    match limit {
+        UpstreamLimit::Rate => format!("OpenAI rate limit reached{code}: {message}"),
+        UpstreamLimit::Quota => format!(
+            "OpenAI quota exhausted{code}: {message} — retrying will not help until the \
+             account's credits or limits are raised"
+        ),
+        UpstreamLimit::FlexCapacity => format!(
+            "OpenAI had no flex capacity{code}; not charged — retry, or send service_tier \
+             auto: {message}"
+        ),
+    }
 }
 
 /// [`GatewayError::ContextExceeded`]'s message: states the prompt tokens, the
@@ -356,9 +737,18 @@ fn ladder_drain_message(
     };
     format!(
         "'{model}' waited {waited_seconds}s to climb to rung {rung} and {busy} — it keeps \
-         serving on the running rung; retry once they finish, or raise \
-         vram.queue_timeout_seconds"
+         serving on the running rung; retry once they finish, or raise the queue timeout ({})",
+        crate::config::QUEUE_TIMEOUT_LABEL
     )
+}
+
+/// [`GatewayError::BudgetUnpriced`]'s second way out, when it has one.
+fn or_send_default(or_default: &bool) -> &'static str {
+    if *or_default {
+        ", or send service_tier default"
+    } else {
+        ""
+    }
 }
 
 impl GatewayError {
@@ -372,7 +762,10 @@ impl GatewayError {
             Self::BadRequest(_)
             | Self::InvalidRequest { .. }
             | Self::Unsupported(_)
-            | Self::ContextExceeded { .. } => StatusCode::BAD_REQUEST,
+            | Self::ContextExceeded { .. }
+            | Self::ContextExceededAsWorded { .. }
+            | Self::ResponseFormatUnsupported { .. }
+            | Self::InvalidJsonSchema { .. } => StatusCode::BAD_REQUEST,
             Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             // Pass client-attributable upstream statuses through, otherwise 502.
             Self::Upstream { status, .. } => match *status {
@@ -385,8 +778,15 @@ impl GatewayError {
                 529 => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::BAD_GATEWAY,
             },
-            Self::Transport(_) => StatusCode::BAD_GATEWAY,
-            Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::UpstreamRelayed(r) => StatusCode::from_u16(r.status)
+                .ok()
+                .filter(|s| s.is_client_error())
+                .unwrap_or(StatusCode::BAD_GATEWAY),
+            Self::Transport(_)
+            | Self::Unreachable(_)
+            | Self::UpstreamFailed(_)
+            | Self::EngineDownload { .. } => StatusCode::BAD_GATEWAY,
+            Self::Timeout | Self::Stalled(_) => StatusCode::GATEWAY_TIMEOUT,
             Self::VramTooLarge { .. } => StatusCode::INSUFFICIENT_STORAGE,
             Self::VramQueueTimeout { .. }
             | Self::KvPoolTimeout { .. }
@@ -394,11 +794,14 @@ impl GatewayError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::GpuHold { .. }
             | Self::GpuBenchmark { .. }
+            | Self::GpuSetup { .. }
             | Self::GpuDeferred { .. }
             | Self::CandidateLost { .. }
             | Self::CandidateUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            Self::KeyScope { .. } | Self::KeyBudget { .. } => StatusCode::FORBIDDEN,
-            Self::KeyRate { .. } => StatusCode::TOO_MANY_REQUESTS,
+            Self::KeyScope { .. } | Self::KeyBudget { .. } | Self::BudgetUnpriced { .. } => {
+                StatusCode::FORBIDDEN
+            }
+            Self::KeyRate { .. } | Self::UpstreamLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::KeyExpired { .. } => StatusCode::UNAUTHORIZED,
         }
     }
@@ -416,9 +819,12 @@ impl GatewayError {
             Self::BadRequest(_) => "bad_request",
             Self::InvalidRequest { code, .. } => code,
             Self::BodyTooLarge { .. } => "body_limit",
-            Self::Upstream { .. } => "upstream",
+            Self::Upstream { .. } | Self::UpstreamRelayed(_) | Self::UpstreamFailed(_) => {
+                "upstream"
+            }
             Self::Transport(_) => "transport",
-            Self::Timeout => "timeout",
+            Self::Unreachable(_) => "unreachable",
+            Self::Timeout | Self::Stalled(_) => "timeout",
             Self::Unsupported(_) => "unsupported",
             Self::VramTooLarge { .. } => "vram_too_large",
             // One code for both waits (see `KvPoolTimeout`'s doc comment): a
@@ -430,18 +836,78 @@ impl GatewayError {
             Self::Internal(_) => "internal",
             Self::GpuHold { .. } => "gpu_hold",
             Self::GpuBenchmark { .. } => "gpu_benchmark",
+            Self::GpuSetup { .. } => "gpu_setup",
+            Self::EngineDownload { .. } => "engine_download",
             Self::GpuDeferred { .. } => "gpu_deferred",
             Self::CandidateLost { .. } => "candidate_lost",
             Self::CandidateUnavailable { .. } => "candidate_unavailable",
             Self::KeyScope { .. } => "key_scope",
             Self::KeyBudget { .. } => "key_budget",
+            Self::BudgetUnpriced { .. } => "budget_unpriced",
             Self::KeyRate { .. } => "key_rate",
+            Self::UpstreamLimited { limit, .. } => limit.code(),
             Self::KeyExpired { .. } => "key_expired",
             // The one code both dialects' `code`/error-shape render as
             // `context_length_exceeded` — see `to_openai_json`, which reuses
             // this same `kind()` for its `code` field.
-            Self::ContextExceeded { .. } => "context_length_exceeded",
+            Self::ContextExceeded { .. } | Self::ContextExceededAsWorded { .. } => {
+                "context_length_exceeded"
+            }
+            Self::ResponseFormatUnsupported { .. } => "response_format_unsupported",
+            Self::InvalidJsonSchema { .. } => "invalid_json_schema",
         }
+    }
+
+    /// The HTTP status an upstream answered with, for the errors that carry
+    /// one: [`Upstream`](Self::Upstream) and the relayed
+    /// [`UpstreamRelayed`](Self::UpstreamRelayed). The one reading for a
+    /// classification that goes by the upstream's status.
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::Upstream { status, .. } => Some(*status),
+            Self::UpstreamRelayed(r) => Some(r.status),
+            _ => None,
+        }
+    }
+
+    /// The upstream's own message, for the same two variants as
+    /// [`upstream_status`](Self::upstream_status).
+    pub fn upstream_message(&self) -> Option<&str> {
+        match self {
+            Self::Upstream { message, .. } => Some(message),
+            Self::UpstreamRelayed(r) => Some(&r.message),
+            _ => None,
+        }
+    }
+
+    /// What a failed whole Response reported, for the row that counts it
+    /// ([`UpstreamFailed`](Self::UpstreamFailed)); `None` for every other
+    /// error, whose row has no usage.
+    pub fn failed_answer(&self) -> Option<&FailedAnswer> {
+        match self {
+            Self::UpstreamFailed(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The error as `request_logs.error_message` keeps it: its text, with a
+    /// relayed upstream error led by the same `upstream error (NNN): ` as
+    /// [`Upstream`](Self::Upstream)'s, so the status survives in the log.
+    /// The client's body keeps the bare message ([`Display`](std::fmt::Display)).
+    pub fn log_text(&self) -> String {
+        match self {
+            Self::UpstreamRelayed(r) => format!("upstream error ({}): {}", r.status, r.message),
+            other => other.to_string(),
+        }
+    }
+
+    /// Whether the error is about the request's structured output — the
+    /// errors whose OpenAI body names a `param` (structured-output design §8).
+    pub fn about_format(&self) -> bool {
+        matches!(
+            self,
+            Self::ResponseFormatUnsupported { .. } | Self::InvalidJsonSchema { .. }
+        )
     }
 
     /// OpenAI error `type` field.
@@ -453,16 +919,30 @@ impl GatewayError {
             | Self::InvalidRequest { .. }
             | Self::BodyTooLarge { .. }
             | Self::Unsupported(_)
-            | Self::ContextExceeded { .. } => "invalid_request_error",
+            | Self::ContextExceeded { .. }
+            | Self::ContextExceededAsWorded { .. }
+            | Self::ResponseFormatUnsupported { .. }
+            | Self::InvalidJsonSchema { .. } => "invalid_request_error",
             Self::Unauthorized(_) | Self::AgentDisabled { .. } => "authentication_error",
             Self::Refused { status, .. } => match status {
                 401 => "authentication_error",
                 501 => "invalid_request_error",
                 _ => "permission_error",
             },
-            Self::Upstream { .. }
+            Self::UpstreamRelayed(_) => "invalid_request_error",
+            // By the upstream's status: its refusal of the request is the
+            // client's request error, its rate limit a rate limit; its own
+            // failure, and its refusal of lmgw's key (a 502 here), lmgw's.
+            Self::Upstream { status, .. } => match status {
+                400 | 404 | 413 | 422 => "invalid_request_error",
+                429 => "rate_limit_error",
+                _ => "api_error",
+            },
+            Self::UpstreamFailed(_)
             | Self::Transport(_)
+            | Self::Unreachable(_)
             | Self::Timeout
+            | Self::Stalled(_)
             | Self::VramTooLarge { .. }
             | Self::VramQueueTimeout { .. }
             | Self::KvPoolTimeout { .. }
@@ -470,13 +950,20 @@ impl GatewayError {
             | Self::Internal(_)
             | Self::GpuHold { .. }
             | Self::GpuBenchmark { .. }
+            | Self::GpuSetup { .. }
+            | Self::EngineDownload { .. }
             | Self::GpuDeferred { .. }
             | Self::CandidateLost { .. }
             | Self::CandidateUnavailable { .. } => "api_error",
-            Self::KeyScope { .. } | Self::KeyBudget { .. } | Self::KeyExpired { .. } => {
-                "permission_error"
-            }
+            Self::KeyScope { .. }
+            | Self::KeyBudget { .. }
+            | Self::BudgetUnpriced { .. }
+            | Self::KeyExpired { .. } => "permission_error",
             Self::KeyRate { .. } => "rate_limit_error",
+            Self::UpstreamLimited { limit, .. } => match limit {
+                UpstreamLimit::Quota => "insufficient_quota",
+                UpstreamLimit::Rate | UpstreamLimit::FlexCapacity => "rate_limit_error",
+            },
         }
     }
 
@@ -494,8 +981,28 @@ impl GatewayError {
             | Self::InvalidRequest { .. }
             | Self::BodyTooLarge { .. }
             | Self::Unsupported(_)
-            | Self::ContextExceeded { .. } => "invalid_request_error",
-            Self::Timeout | Self::Upstream { .. } | Self::Transport(_) => "api_error",
+            | Self::ContextExceeded { .. }
+            | Self::ContextExceededAsWorded { .. }
+            | Self::ResponseFormatUnsupported { .. }
+            | Self::InvalidJsonSchema { .. } => "invalid_request_error",
+            Self::Upstream { status, .. } => upstream_anthropic_type(*status),
+            Self::Timeout
+            | Self::Stalled(_)
+            | Self::UpstreamFailed(_)
+            | Self::Transport(_)
+            | Self::Unreachable(_)
+            | Self::EngineDownload { .. } => "api_error",
+            // The nearest of Anthropic's types to what OpenAI said, by its
+            // type first and its status after.
+            Self::UpstreamRelayed(r) => match (r.error_type.as_deref(), r.status) {
+                (Some("authentication_error"), _) => "authentication_error",
+                (Some("permission_error"), _) => "permission_error",
+                (Some("rate_limit_error"), _) => "rate_limit_error",
+                (Some("insufficient_quota"), _) => "billing_error",
+                (Some("not_found_error"), _) | (_, 404) => "not_found_error",
+                (_, 413) => "request_too_large",
+                _ => "invalid_request_error",
+            },
             // Anthropic's own word for "the server is at capacity, retry".
             Self::VramQueueTimeout { .. }
             | Self::KvPoolTimeout { .. }
@@ -507,36 +1014,185 @@ impl GatewayError {
             | Self::Internal(_)
             | Self::GpuHold { .. }
             | Self::GpuBenchmark { .. }
+            | Self::GpuSetup { .. }
             | Self::GpuDeferred { .. }
             | Self::CandidateLost { .. }
             | Self::CandidateUnavailable { .. } => "api_error",
-            Self::KeyScope { .. } | Self::KeyBudget { .. } => "permission_error",
+            Self::KeyScope { .. } | Self::KeyBudget { .. } | Self::BudgetUnpriced { .. } => {
+                "permission_error"
+            }
             Self::KeyExpired { .. } => "authentication_error",
             Self::KeyRate { .. } => "rate_limit_error",
+            // Anthropic's word for an account out of credit; a rate limit and
+            // the flex 429 are its rate_limit_error, as the status says.
+            Self::UpstreamLimited { limit, .. } => match limit {
+                UpstreamLimit::Quota => "billing_error",
+                UpstreamLimit::Rate | UpstreamLimit::FlexCapacity => "rate_limit_error",
+            },
         }
     }
 
-    /// The OpenAI body's `code` — what a client branches on. The same word
-    /// as [`Self::kind`], except where the log needs a finer word than the
-    /// client should have to learn: a background deferral is logged
-    /// `gpu_deferred` and answers `gpu_hold`, the code the owner's clients
-    /// already read as "local models are paused" (candidate-aliases design
-    /// §4.3).
-    pub fn code(&self) -> &'static str {
+    /// The status on Anthropic's wire: [`Self::http_status`], except that an
+    /// exhausted quota is Anthropic's `402 billing_error` — "There's an issue
+    /// with your billing or payment information" — and not a `429`, which
+    /// Anthropic's SDKs retry ("The official SDK automatically retries
+    /// transient failures (such as connection errors, rate limits, and 5xx
+    /// server errors)"); <https://platform.claude.com/docs/en/api/errors>,
+    /// checked 2026-10-24. A rate limit and flex's missing capacity stay its
+    /// `429 rate_limit_error`.
+    pub fn anthropic_status(&self) -> StatusCode {
         match self {
-            Self::GpuDeferred { .. } => "gpu_hold",
-            _ => self.kind(),
+            Self::UpstreamLimited {
+                limit: UpstreamLimit::Quota,
+                ..
+            } => StatusCode::PAYMENT_REQUIRED,
+            _ => self.http_status(),
         }
     }
 
-    /// OpenAI-shaped error body.
+    /// The upstream's rate-limit headers this error carries, to relay onto
+    /// the answer ([`RateHints`]); none for every other error.
+    pub fn rate_hints(&self) -> Option<&RateHints> {
+        match self {
+            Self::UpstreamLimited { hints, .. } if !hints.is_empty() => Some(hints),
+            _ => None,
+        }
+    }
+
+    /// `self` with the rate-limit headers of the upstream answer it was read
+    /// from: an [`UpstreamLimited`](Self::UpstreamLimited) takes them, every
+    /// other error is returned as it is.
+    pub fn with_rate_hints(mut self, headers: &reqwest::header::HeaderMap) -> Self {
+        if let Self::UpstreamLimited { hints, .. } = &mut self {
+            *hints = RateHints::from_headers(headers);
+        }
+        self
+    }
+
+    /// `self` with lmgw's `clause` after its words (openai egress design
+    /// §14.8: " (fallback 'B' is disabled) (tried: A → B)"): an exhausted
+    /// quota's [`note`](Self::UpstreamLimited), the text of a variant that
+    /// is one, the message of an upstream's error. A variant whose words are
+    /// fixed is returned as it is.
+    pub fn with_clause(self, clause: &str) -> Self {
+        let clause = clause.trim_start();
+        if clause.is_empty() {
+            return self;
+        }
+        let add = |s: String| format!("{s} {clause}");
+        match self {
+            Self::UpstreamLimited {
+                limit,
+                code,
+                error_type,
+                message,
+                hints,
+                note,
+            } => Self::UpstreamLimited {
+                limit,
+                code,
+                error_type,
+                message,
+                hints,
+                note: Some(match note {
+                    Some(n) => format!("{n} {clause}").into(),
+                    None => clause.into(),
+                }),
+            },
+            Self::GpuSetup {
+                model,
+                problem,
+                detail,
+            } => Self::GpuSetup {
+                model,
+                problem,
+                detail: add(detail),
+            },
+            Self::EngineDownload { message } => Self::EngineDownload {
+                message: add(message),
+            },
+            Self::UnknownAlias(s) => Self::UnknownAlias(add(s)),
+            Self::Internal(s) => Self::Internal(add(s)),
+            Self::Transport(s) => Self::Transport(add(s)),
+            Self::Unreachable(s) => Self::Unreachable(add(s)),
+            Self::BadRequest(s) => Self::BadRequest(add(s)),
+            Self::Unsupported(s) => Self::Unsupported(add(s)),
+            Self::Upstream {
+                status,
+                message,
+                provider_type,
+            } => Self::Upstream {
+                status,
+                message: add(message),
+                provider_type,
+            },
+            other => other,
+        }
+    }
+
+    /// [`Self::rate_hints`] onto an answer built from this error.
+    pub fn stamp_rate_hints(&self, resp: &mut axum::response::Response) {
+        if let Some(hints) = self.rate_hints() {
+            hints.stamp(resp.headers_mut());
+        }
+    }
+
+    /// OpenAI-shaped error body. Its `code` is [`Self::kind`], the word the
+    /// request log records — for every variant, a deferral's `gpu_deferred`
+    /// included (per-request background design §8) — except an
+    /// [`UpstreamLimited`](Self::UpstreamLimited), whose `code` and `type`
+    /// are the upstream's own as it sent them (`credit_balance_exhausted`,
+    /// `tokens`, …), the family word only where it sent none. `param` names
+    /// `response_format` for a structured-output error, `null` otherwise
+    /// (structured-output design §8).
     pub fn to_openai_json(&self) -> serde_json::Value {
+        self.openai_json(FormatParam::ResponseFormat)
+    }
+
+    /// [`Self::to_openai_json`] for `/v1/responses`, whose structured output
+    /// is `text.format` (structured-output design §8).
+    pub fn to_responses_json(&self) -> serde_json::Value {
+        self.openai_json(FormatParam::TextFormat)
+    }
+
+    /// [`Self::to_openai_json`] with a format error's `param` naming
+    /// `format`: legacy `/v1/completions` says the field the client sent,
+    /// `json_schema` or `response_format`.
+    pub fn to_openai_json_naming(&self, format: FormatParam) -> serde_json::Value {
+        self.openai_json(format)
+    }
+
+    fn openai_json(&self, format: FormatParam) -> serde_json::Value {
+        let param = self.about_format().then(|| format.as_str());
+        let (kind, code) = match self {
+            Self::UpstreamLimited {
+                code, error_type, ..
+            } => (
+                error_type.as_deref().unwrap_or(self.openai_type()),
+                code.as_deref().unwrap_or(self.kind()),
+            ),
+            // OpenAI's own code, as a stream's `response.failed` names it.
+            Self::UpstreamFailed(f) => {
+                (self.openai_type(), f.code.as_deref().unwrap_or(self.kind()))
+            }
+            Self::UpstreamRelayed(r) => {
+                return serde_json::json!({
+                    "error": {
+                        "message": self.to_string(),
+                        "type": r.error_type.as_deref().unwrap_or(self.openai_type()),
+                        "param": r.param,
+                        "code": r.code,
+                    }
+                });
+            }
+            _ => (self.openai_type(), self.kind()),
+        };
         serde_json::json!({
             "error": {
                 "message": self.to_string(),
-                "type": self.openai_type(),
-                "param": null,
-                "code": self.code(),
+                "type": kind,
+                "param": param,
+                "code": code,
             }
         })
     }
@@ -550,6 +1206,24 @@ impl GatewayError {
                 "message": self.to_string(),
             }
         })
+    }
+}
+
+/// Anthropic's error `type` for an upstream's error answer of `status`
+/// (<https://platform.claude.com/docs/en/api/errors>): what the client is
+/// answered by [`GatewayError::http_status`], in Anthropic's words. A `401`
+/// or `403` is lmgw's own upstream key refused, answered `502`: an
+/// `api_error`, never the client's `authentication_error`.
+fn upstream_anthropic_type(status: u16) -> &'static str {
+    match status {
+        400 | 422 => "invalid_request_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        // Only an upstream's own 529 is "overloaded": a 503 is answered 502
+        // (`http_status`), and a 502 is an `api_error`.
+        529 => "overloaded_error",
+        _ => "api_error",
     }
 }
 
@@ -578,6 +1252,78 @@ impl From<serde_json::Error> for GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GatewayError` rides in the gate's refusal shapes, which
+    /// `clippy.toml`'s `large-error-threshold` (224) measures, and in enums
+    /// beside smaller variants: a new field boxes its text (openai egress
+    /// design §14.8, `UpstreamLimited.note`). 104 bytes as WP10 left it.
+    #[test]
+    fn the_error_stays_small() {
+        let size = std::mem::size_of::<GatewayError>();
+        assert!(size <= 104, "{size}");
+    }
+
+    /// The note of an exhausted quota comes after the provider's words, on
+    /// every wire; an unreachable upstream is a 502 of its own kind.
+    #[test]
+    fn a_quota_note_follows_the_message_and_unreachable_has_its_kind() {
+        let e = GatewayError::UpstreamLimited {
+            limit: UpstreamLimit::Quota,
+            code: Some("insufficient_quota".into()),
+            error_type: Some("insufficient_quota".into()),
+            message: "You exceeded your current quota.".into(),
+            hints: Default::default(),
+            note: Some("'C' has no fallback configured (tried: A → B → C)".into()),
+        };
+        let text = e.to_string();
+        assert!(
+            text.ends_with("raised 'C' has no fallback configured (tried: A → B → C)"),
+            "{text}"
+        );
+        assert_eq!(e.to_openai_json()["error"]["message"], text);
+        let u = GatewayError::Unreachable("tcp connect error".into());
+        assert_eq!(
+            (u.http_status().as_u16(), u.kind(), u.openai_type()),
+            (502, "unreachable", "api_error")
+        );
+        assert_eq!(u.to_string(), "upstream unreachable: tcp connect error");
+    }
+
+    /// An upstream's error answer types by its status in both dialects
+    /// (api-compat design §9 finding 7): a refused request is the client's
+    /// `invalid_request_error`, not lmgw's `api_error`; lmgw's own key
+    /// refused (a 502 to the client) and the upstream's failure stay
+    /// `api_error`.
+    #[test]
+    fn an_upstream_error_types_by_its_status() {
+        let up = |status| GatewayError::Upstream {
+            status,
+            provider_type: Some("whatever_error".into()),
+            message: "m".into(),
+        };
+        let cases = [
+            (400, "invalid_request_error", "invalid_request_error"),
+            (401, "api_error", "api_error"),
+            (403, "api_error", "api_error"),
+            (404, "invalid_request_error", "not_found_error"),
+            (413, "invalid_request_error", "request_too_large"),
+            (422, "invalid_request_error", "invalid_request_error"),
+            (429, "rate_limit_error", "rate_limit_error"),
+            (500, "api_error", "api_error"),
+            // Answered 502, so an `api_error`, never an overloaded one.
+            (503, "api_error", "api_error"),
+            (529, "api_error", "overloaded_error"),
+        ];
+        for (status, openai, anthropic) in cases {
+            let e = up(status);
+            assert_eq!(e.openai_type(), openai, "{status}");
+            assert_eq!(
+                e.to_anthropic_json()["error"]["type"],
+                anthropic,
+                "{status}"
+            );
+        }
+    }
 
     /// A refusal's status is its layer's: `/v1/systemone`'s 501 reads as a
     /// request problem in both dialects, not as a permission one, and a
@@ -710,26 +1456,42 @@ mod tests {
         );
     }
 
-    /// A background deferral answers exactly like the hold on the wire —
-    /// 503, code `gpu_hold`, never `overloaded_error` — and is its own kind
-    /// in the log (candidate-aliases design §4.3).
+    /// A background deferral is a 503 with its own code on the wire and in
+    /// the log — `gpu_deferred`, never the hold's `gpu_hold` and never
+    /// `overloaded_error` (per-request background design §8) — and says what
+    /// to give a fallback to.
     #[test]
-    fn a_deferral_answers_like_the_hold_and_logs_as_its_own_kind() {
+    fn a_deferral_answers_and_logs_its_own_code() {
         let e = GatewayError::GpuDeferred {
             model: "jobs".into(),
-            detail: "GPU in use by chat/qwen (18.0 GB, 1 in flight)".into(),
+            detail: "GPU in use by chat/qwen (18.0 GiB, 1 in flight)".into(),
+            on: Deferred::Alias,
         };
         assert_eq!(e.http_status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(e.kind(), "gpu_deferred");
-        assert_eq!(e.code(), "gpu_hold");
         let openai = e.to_openai_json();
-        assert_eq!(openai["error"]["code"], "gpu_hold");
+        assert_eq!(openai["error"]["code"], "gpu_deferred");
         assert_eq!(openai["error"]["type"], "api_error");
         assert_eq!(e.to_anthropic_json()["error"]["type"], "api_error");
+        let msg = e.to_string();
         assert!(
-            e.to_string()
-                .starts_with("'jobs' deferred: GPU in use by chat/qwen"),
-            "{e}"
+            msg.starts_with("'jobs' deferred: GPU in use by chat/qwen"),
+            "{msg}"
+        );
+        assert!(
+            msg.ends_with("retry later, or give the alias a fallback"),
+            "{msg}"
+        );
+        let model = GatewayError::GpuDeferred {
+            model: "qwen".into(),
+            detail: "GPU in use by the owner".into(),
+            on: Deferred::Model,
+        };
+        assert!(
+            model
+                .to_string()
+                .ends_with("retry later, or give the model a fallback"),
+            "{model}"
         );
 
         let lost = GatewayError::CandidateLost {
@@ -738,7 +1500,121 @@ mod tests {
         };
         assert_eq!(lost.http_status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(lost.kind(), "candidate_lost");
-        assert_eq!(lost.code(), "candidate_lost");
+        assert_eq!(lost.to_openai_json()["error"]["code"], "candidate_lost");
+    }
+
+    /// A start the machine check blames on the computer (machine-check
+    /// design §2.5) is a 503 with its own code, `api_error` in both dialects
+    /// (never `overloaded_error`: no retry window sets a computer up), and a
+    /// failure in the usage rollup, not a refusal; the plain sentence comes
+    /// first and a fallback's clause after the start's own words. A failed
+    /// engine download keeps WP10's 502 with a code of its own.
+    #[test]
+    fn a_machine_not_ready_and_a_failed_download_answer_their_own_codes() {
+        let e = GatewayError::GpuSetup {
+            model: "qwen".into(),
+            problem: "could not start on the graphics card of the computer lmgw runs on. \
+                      Restart the computer to finish the graphics driver update."
+                .into(),
+            detail: " (its start: podman run failed)".into(),
+        };
+        assert_eq!(e.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e.kind(), "gpu_setup");
+        assert_eq!(e.to_openai_json()["error"]["code"], "gpu_setup");
+        assert_eq!(e.to_openai_json()["error"]["type"], "api_error");
+        assert_eq!(e.to_anthropic_json()["error"]["type"], "api_error");
+        assert_eq!(
+            crate::telemetry::outcome_of(503, Some(e.kind())),
+            "upstream_error"
+        );
+        let e = e.with_clause(" (fallback 'cloud' is disabled) (tried: qwen → cloud)");
+        assert_eq!(
+            e.to_string(),
+            "'qwen' could not start on the graphics card of the computer lmgw runs on. Restart \
+             the computer to finish the graphics driver update. (its start: podman run failed) \
+             (fallback 'cloud' is disabled) (tried: qwen → cloud)"
+        );
+
+        let d = GatewayError::EngineDownload {
+            message: "The engine chat model 'qwen' runs in could not be downloaded, so the model \
+                      could not start: its download failed: x."
+                .into(),
+        };
+        assert_eq!(d.http_status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(d.kind(), "engine_download");
+        assert_eq!(d.to_anthropic_json()["error"]["type"], "api_error");
+        assert_eq!(
+            d.with_clause(" (tried: qwen → cloud)").to_string(),
+            "The engine chat model 'qwen' runs in could not be downloaded, so the model could \
+             not start: its download failed: x. (tried: qwen → cloud)"
+        );
+    }
+
+    /// A relayed upstream error reads its status and message like a plain
+    /// one, and its log text leads with the status while the client's body
+    /// keeps the bare message.
+    #[test]
+    fn a_relayed_error_reads_and_logs_like_a_plain_upstream_one() {
+        let relayed = GatewayError::UpstreamRelayed(Box::new(Relayed {
+            status: 404,
+            error_type: Some("invalid_request_error".into()),
+            code: Some("model_not_found".into()),
+            param: None,
+            message: "The model 'x' does not exist".into(),
+        }));
+        let plain = GatewayError::Upstream {
+            status: 404,
+            provider_type: None,
+            message: "The model 'x' does not exist".into(),
+        };
+        assert_eq!(relayed.upstream_status(), Some(404));
+        assert_eq!(relayed.upstream_message(), plain.upstream_message());
+        assert_eq!(relayed.log_text(), plain.to_string());
+        assert_eq!(
+            relayed.to_openai_json()["error"]["message"],
+            "The model 'x' does not exist"
+        );
+        assert_eq!(GatewayError::Timeout.upstream_status(), None);
+    }
+
+    /// The two structured-output codes (structured-output design §8): a 400
+    /// `invalid_request_error` in both dialects, `param` naming the format
+    /// field per route, the message as given; every other error keeps
+    /// `param: null`.
+    #[test]
+    fn a_format_error_names_its_param_per_route() {
+        for (e, code) in [
+            (
+                GatewayError::ResponseFormatUnsupported {
+                    message: "no json_object here".into(),
+                },
+                "response_format_unsupported",
+            ),
+            (
+                GatewayError::InvalidJsonSchema {
+                    message: "JSON schema conversion failed:\nx".into(),
+                },
+                "invalid_json_schema",
+            ),
+        ] {
+            assert_eq!(e.http_status(), StatusCode::BAD_REQUEST);
+            let chat = e.to_openai_json();
+            assert_eq!(chat["error"]["code"], code);
+            assert_eq!(chat["error"]["type"], "invalid_request_error");
+            assert_eq!(chat["error"]["param"], "response_format");
+            assert_eq!(chat["error"]["message"], e.to_string());
+            assert_eq!(e.to_responses_json()["error"]["param"], "text.format");
+            assert_eq!(
+                e.to_openai_json_naming(FormatParam::JsonSchema)["error"]["param"],
+                "json_schema"
+            );
+            let anthropic = e.to_anthropic_json();
+            assert_eq!(anthropic["error"]["type"], "invalid_request_error");
+            assert!(anthropic["error"].get("param").is_none());
+        }
+        let other = GatewayError::BadRequest("x".into());
+        assert!(other.to_openai_json()["error"]["param"].is_null());
+        assert!(other.to_responses_json()["error"]["param"].is_null());
     }
 
     #[test]

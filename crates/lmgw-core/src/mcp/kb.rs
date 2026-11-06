@@ -17,6 +17,7 @@ use serde_json::{json, Map, Value};
 use crate::knowledge::retrieve::{self, Excerpt, Options};
 use crate::knowledge::store::{self, Kb};
 use crate::knowledge::{ops, read};
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use super::selfadmin::err_result;
@@ -214,19 +215,21 @@ fn budget(
 /// Invoke one `kb__*` tool for a caller that reaches `access`.
 /// `default_budget` is the caller's own default for `budget_tokens` (a Chat
 /// thread's retrieval budget); `None` falls back to the owner's knowledge
-/// budget (`chat_kb_budget_tokens`). `Err(CallError)` means "not one of these tools"; everything else
-/// is an `isError` result the model can read and act on.
+/// budget (`chat_kb_budget_tokens`). `charged` and `origin` are whom a search's
+/// model calls are for ([`search_tool`]). `Err(CallError)` means "not one of
+/// these tools"; everything else is an `isError` result the model can read
+/// and act on.
 pub async fn call(
     state: &SharedState,
     name: &str,
     args: Option<Map<String, Value>>,
     access: &KbAccess,
-    (default_budget, charged): (Option<usize>, Option<&crate::proxy::RequestCtx>),
+    (default_budget, charged, origin): (Option<usize>, Option<&crate::proxy::RequestCtx>, Origin),
 ) -> Result<Value, CallError> {
     let a = args.unwrap_or_default();
     let out = match name {
         "kb__list" => list_tool(state, access).await.map(|v| ok_json(&v)),
-        "kb__search" => search_tool(state, &a, access, (default_budget, charged))
+        "kb__search" => search_tool(state, &a, access, (default_budget, charged, origin))
             .await
             .map(ok_text),
         "kb__read" => read_tool(state, &a, access, default_budget)
@@ -308,12 +311,13 @@ async fn pick_bases(
 }
 
 /// `charged`: whose request the search's embedder and reranker run for
-/// (`retrieve::Options::caller`).
+/// (`retrieve::Options::caller`); `origin`: whose traffic they are
+/// (`retrieve::Options::origin`).
 async fn search_tool(
     state: &SharedState,
     args: &Map<String, Value>,
     access: &KbAccess,
-    (default_budget, charged): (Option<usize>, Option<&crate::proxy::RequestCtx>),
+    (default_budget, charged, origin): (Option<usize>, Option<&crate::proxy::RequestCtx>, Origin),
 ) -> Result<String, String> {
     let query = arg_str(args, "query")?
         .map(str::trim)
@@ -330,6 +334,7 @@ async fn search_tool(
             budget_tokens: budget,
             params: None,
             caller: charged.cloned(),
+            origin,
         },
     )
     .await;

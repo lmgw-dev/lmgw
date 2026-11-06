@@ -13,8 +13,12 @@ fn request() -> ChatRequest {
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -34,6 +38,10 @@ fn answer(ir: &ChatRequest) -> Completion {
         usage: usage(10, 3),
         model: ir.model_alias.clone(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     }
 }
 

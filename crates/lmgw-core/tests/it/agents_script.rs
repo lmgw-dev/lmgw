@@ -59,7 +59,7 @@ async fn gateway() -> (SharedState, Gw, String) {
     state.reload_snapshot().await.unwrap();
     let key = dashboard_key(&state);
     let app = build_router(state.clone());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     (
         state,
         Gw {

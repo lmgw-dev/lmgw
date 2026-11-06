@@ -40,10 +40,9 @@ use leptos::task::spawn_local;
 use lmgw_api_types::{CandidateAliasPreview, CandidateAliasSaved, CandidateAliasView, ModelsFull};
 use serde_json::{json, Value};
 
-use crate::catalog::CatalogEntry;
-use crate::widgets::{use_toasts, Modal, ModalFooter, ModalSize, ModelPicker, Select};
+use crate::widgets::{use_toasts, Modal, ModalFooter, ModalSize, Select};
 
-use super::model_editors::{hold_body, hold_signals};
+use super::fallback_field::{fallback_value, FallbackField, Saves};
 
 /// The five capability facets (candidates design §4.6, fact 13) — wire name
 /// and editor label. Duplicated from `lmgw_core::candidates::facets::Facet`
@@ -58,17 +57,25 @@ const FACETS: [(&str, &str); 5] = [
     ("structured_output", "Structured output"),
 ];
 
+/// A draft's fallback as the preview sends it: `null` for none, which the
+/// draft's `clear` names.
+fn draft_fallback(f: String) -> Value {
+    match f.trim() {
+        "" => Value::Null,
+        f => json!(f),
+    }
+}
+
 /// A blank candidate alias (id 0) opens the editor in "create" mode — the
 /// defaults `ops::candidate_alias_set` applies to a create that leaves them
-/// out (background off, fallback inherits the global hold fallback,
-/// enabled). `capabilities_disabled` stays empty here on purpose: the save
-/// omits it entirely until the owner touches a toggle, so a fresh alias with
-/// nothing chosen yet still saves with every common facet on, the same
-/// lenient default a bare MCP `create` gets (§12 entry 49).
+/// out (background off, no fallback, enabled). `capabilities_disabled`
+/// stays empty here on purpose: the save omits it entirely until the owner
+/// touches a toggle, so a fresh alias with nothing chosen yet still saves
+/// with every common facet on, the same lenient default a bare MCP `create`
+/// gets (§12 entry 49).
 pub(super) fn blank_candidate_alias() -> CandidateAliasView {
     CandidateAliasView {
         enabled: true,
-        fallback_mode: "inherit".into(),
         ..Default::default()
     }
 }
@@ -91,20 +98,27 @@ pub(super) fn CandidateStateCell(problems: usize, deferrals_24h: Option<u64>) ->
             <span class="dot"></span>
             {label}
         </span>
-        {deferrals_24h
-            .filter(|n| *n > 0)
-            .map(|n| {
-                view! {
-                    <span
-                        class="type-badge"
-                        style="margin-left:4px"
-                        title="gpu_deferred refusals in the last 24 hours: the alias's own fallback answered instead of waiting for the GPU"
-                    >
-                        {format!("{n} deferred/24h")}
-                    </span>
-                }
-            })}
+        <DeferredBadge deferrals_24h=deferrals_24h/>
     }
+}
+
+/// "N deferred/24h" beside a row's state when background requests for its
+/// name were deferred (`gpu_deferred`) in the last 24 hours — a candidate
+/// alias's (§6), or a local model's asked for with `x-lmgw-background: on`
+/// (per-request background design §10). Nothing when there were none.
+#[component]
+pub(super) fn DeferredBadge(deferrals_24h: Option<u64>) -> impl IntoView {
+    deferrals_24h.filter(|n| *n > 0).map(|n| {
+        view! {
+            <span
+                class="type-badge"
+                style="margin-left:4px"
+                title="gpu_deferred refusals in the last 24 hours: background requests that found no room that disturbs nobody and no fallback to answer them, and were told to retry later"
+            >
+                {format!("{n} deferred/24h")}
+            </span>
+        }
+    })
 }
 
 /// Settle a fast-changing value a beat after it stops changing — the same
@@ -180,11 +194,12 @@ fn CandidateAliasForm(
 ) -> impl IntoView {
     let toasts = use_toasts();
     let create = c.id == 0;
-    let id = c.id;
+    // A second save is an update of what the first created (review C-a).
+    let saves = Saves::new(c.id);
     let alias = RwSignal::new(c.alias.clone());
     let candidates = RwSignal::new(c.candidates.clone());
     let background = RwSignal::new(c.background);
-    let (fallback_mode, fallback_alias) = hold_signals(&c.fallback_mode, &c.fallback);
+    let fallback = fallback_value(&c.fallback);
     // `None` only for a brand-new draft that has never had a stored opinion
     // — the save then omits `capabilities_disabled` entirely, same
     // leniency a bare `create` gets over MCP (§12 entry 49's `Option`
@@ -203,18 +218,6 @@ fn CandidateAliasForm(
     let local = Signal::derive(move || {
         full.with(|f| f.as_ref().map(|f| f.local.clone()).unwrap_or_default())
     });
-    let candidate_names = Signal::derive(move || {
-        full.with(|f| {
-            f.as_ref()
-                .map(|f| {
-                    f.candidate_aliases
-                        .iter()
-                        .map(|c| c.alias.to_lowercase())
-                        .collect::<HashSet<_>>()
-                })
-                .unwrap_or_default()
-        })
-    });
     let name_of = move |id: &str| {
         local.with(|rows| {
             rows.iter()
@@ -229,12 +232,12 @@ fn CandidateAliasForm(
     let draft = Memo::new(move |_| {
         json!({
             "action": "preview",
-            "id": if create { Value::Null } else { json!(id) },
+            "id": saves.target().1,
             "alias": alias.get().trim(),
             "candidates": candidates.get().join(","),
             "background": background.get(),
-            "fallback_mode": fallback_mode.get(),
-            "fallback": fallback_alias.get().trim(),
+            "fallback": draft_fallback(fallback.get()),
+            "clear": if fallback.get().trim().is_empty() { "fallback" } else { "" },
             "capabilities_disabled": disabled_facets.get().map(|s| {
                 let mut v: Vec<String> = s.into_iter().collect();
                 v.sort();
@@ -367,20 +370,6 @@ fn CandidateAliasForm(
         });
     };
 
-    let fallback_mode_options: Signal<Vec<(String, String)>> = Signal::derive(|| {
-        vec![
-            (
-                "inherit".to_string(),
-                "Inherit — use the global hold fallback".to_string(),
-            ),
-            ("none".to_string(), "None — refuse with a 503".to_string()),
-            ("alias".to_string(), "Route to another alias".to_string()),
-        ]
-    });
-    let fallback_disallow = Callback::new(move |e: CatalogEntry| {
-        e.local || candidate_names.get().contains(&e.id.to_lowercase())
-    });
-
     // A plain binding rather than an inline closure in the `<For each=…>`
     // attribute below: a turbofish (`::<Vec<_>>`) inside a `view!` tag's
     // attribute value trips up its tag parser (the `<`/`>` read as markup),
@@ -401,26 +390,20 @@ fn CandidateAliasForm(
             ));
             return;
         }
-        let (fb_mode, fb_alias) = match hold_body(fallback_mode, fallback_alias) {
-            Ok(v) => v,
-            Err(e) => {
-                save_error.set(Some(e));
-                return;
-            }
-        };
         let notes_v = notes.get_untracked();
         let mut clear: Vec<&str> = Vec::new();
         if notes_v.trim().is_empty() {
             clear.push("notes");
         }
+        let fb = super::fallback_field::fallback_arg(&mut clear, fallback);
+        let (action, id) = saves.target();
         let args = json!({
-            "action": if create { "create" } else { "update" },
-            "id": if create { Value::Null } else { json!(id) },
+            "action": action,
+            "id": id,
             "alias": alias.get_untracked().trim(),
             "candidates": cands.join(","),
             "background": background.get_untracked(),
-            "fallback_mode": fb_mode,
-            "fallback": fb_alias,
+            "fallback": fb,
             "capabilities_disabled": disabled_facets.get_untracked().map(|s| {
                 let mut v: Vec<String> = s.into_iter().collect();
                 v.sort();
@@ -438,10 +421,19 @@ fn CandidateAliasForm(
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
-                    open.set(false);
+                    // What the saves said about the fallback stays on the
+                    // form, under the field, until the owner closes it.
+                    if saves.answered(v.id, v.fallback_notes) {
+                        open.set(false);
+                    }
                     on_saved();
                 }
-                Err(e) => save_error.set(Some(e.to_string())),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        save_error.set(Some(e));
+                    }
+                }
             }
         });
     };
@@ -606,34 +598,25 @@ fn CandidateAliasForm(
             </section>
 
             <section class="card edit-section">
-                <h3>"Fallback"</h3>
-                <div class="hold-pick">
-                    <Select value=fallback_mode options=fallback_mode_options/>
-                    <Show when=move || fallback_mode.get() == "alias">
-                        <ModelPicker
-                            value=fallback_alias
-                            tasks=&["chat"]
-                            recent_key="candidate-fallback"
-                            disallow=(
-                                fallback_disallow,
-                                "must not need this GPU, and must not be another candidate alias",
-                            )
-                        />
-                    </Show>
-                </div>
-                <p class="field-hint">
-                    "Answers every request this alias cannot route locally right now: under the \
-                     GPU hold, when VRAM this gateway cannot free is short, or — for a background \
-                     job — whenever the primary cannot start without disturbing your own work."
-                </p>
+                <h3>"When none of its models can answer"</h3>
+                <FallbackField
+                    value=fallback
+                    tasks=Signal::derive(|| &["chat"][..])
+                    own_name=Signal::derive(move || alias.get().trim().to_string())
+                    saves=saves
+                    hint="Answers for the whole alias whenever none of its models can: under the \
+                          GPU hold, when VRAM this gateway cannot free is short, for a background \
+                          job whose primary cannot start without disturbing your own work, and \
+                          when no candidate is usable. A chat model; never a candidate's own \
+                          fallback."
+                />
                 {move || {
-                    (fallback_mode.get() == "alias" && !fallback_alias.get().trim().is_empty()
-                        && !fallback_usable())
+                    (!fallback.get().trim().is_empty() && !fallback_usable())
                         .then(|| {
                             view! {
                                 <p class="field-err" role="alert">
-                                    "This fallback does not support every facet this alias enables \
-                                     yet — see the problems below."
+                                    "This fallback cannot stand in right now — see the problems \
+                                     below."
                                 </p>
                             }
                         })

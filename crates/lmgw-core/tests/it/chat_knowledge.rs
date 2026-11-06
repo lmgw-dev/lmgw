@@ -43,7 +43,7 @@ async fn world() -> World {
         &state.db,
         &NewUpstream {
             name: "chat-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: chat.uri(),
             api_key: None,
@@ -67,6 +67,7 @@ async fn world() -> World {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

@@ -150,9 +150,10 @@ pub fn tmpfs_refusal(path: &Path) -> Option<String> {
     is_tmpfs(path).then(|| {
         format!(
             "the builds directory {} is on tmpfs, i.e. in RAM — a build keeps git mirrors and a \
-             full worktree per run there (gigabytes), so it refuses to run on it. Point \
-             builds_dir (Settings) at a disk-backed directory, e.g. one under your home",
-            path.display()
+             full worktree per run there (gigabytes), so it refuses to run on it. Point {} \
+             at a disk-backed directory, e.g. one under your home",
+            path.display(),
+            lmgw_api_types::settings_labels::BUILDS_DIR_AT
         )
     })
 }
@@ -314,9 +315,13 @@ mod tests {
             assert!(is_tmpfs(Path::new("/dev/shm")));
             // Not there yet: judged by the ancestor it would be created in.
             assert!(is_tmpfs(Path::new("/dev/shm/lmgw-no-such/builds")));
-            assert!(tmpfs_refusal(Path::new("/dev/shm/x"))
-                .unwrap()
-                .contains("builds_dir"));
+            // Named where the dashboard shows it, not by its key.
+            let refusal = tmpfs_refusal(Path::new("/dev/shm/x")).unwrap();
+            assert!(
+                refusal.contains("Settings → Engines → Builds → Builds directory"),
+                "{refusal}"
+            );
+            assert!(!refusal.contains("builds_dir"), "{refusal}");
         }
         assert_eq!(tmpfs_refusal(Path::new("/proc")), None);
     }

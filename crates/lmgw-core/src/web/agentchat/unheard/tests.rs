@@ -28,8 +28,12 @@ fn request(spoken: Vec<ContentPart>) -> ChatRequest {
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 

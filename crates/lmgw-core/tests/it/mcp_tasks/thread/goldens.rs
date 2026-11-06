@@ -54,7 +54,7 @@ fn gemini_sse(text: &str) -> String {
 
 /// The four upstreams: a name for the fixture, and the row's spelling.
 const UPSTREAMS: [(&str, UpstreamKind, Protocol); 4] = [
-    ("openai", UpstreamKind::Generic, Protocol::Openai),
+    ("openai", UpstreamKind::Generic, Protocol::OpenaiCompatible),
     ("anthropic", UpstreamKind::Generic, Protocol::Anthropic),
     ("gemini", UpstreamKind::Generic, Protocol::Gemini),
     ("llama", UpstreamKind::LlamaServer, Protocol::LlamaCpp),
@@ -62,7 +62,7 @@ const UPSTREAMS: [(&str, UpstreamKind, Protocol); 4] = [
 
 /// Whether `protocol`'s wire is OpenAI-shaped (`assert_strict` reads it).
 fn openai_shaped(protocol: Protocol) -> bool {
-    matches!(protocol, Protocol::Openai | Protocol::LlamaCpp)
+    matches!(protocol, Protocol::OpenaiCompatible | Protocol::LlamaCpp)
 }
 
 /// A gateway on `protocol` with a thread holding `build it`, the tool turn

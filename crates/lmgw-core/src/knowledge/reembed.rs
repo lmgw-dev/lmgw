@@ -43,6 +43,11 @@ use crate::state::SharedState;
 use super::store::{self, Kb, Unembedded};
 use super::{chunk, fit, job_key};
 
+/// What a re-embed's error says when its embedder refused the stored chunks
+/// as larger than one input — the words [`super::ops`]'s resume reads off the
+/// failed job's stored error, which keeps no variant.
+pub(super) const OVERSIZE_NOTE: &str = "The stored chunks are larger than";
+
 /// Request payload of a `kb_reembed` job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
@@ -252,10 +257,9 @@ async fn run(ctx: &JobCtx, input: Input) -> Result<JobOutcome, String> {
             .map(|c| chunk::embed_text(&c.heading_path, &c.payload))
             .collect();
         let vectors = embedder.embed(&texts).await.map_err(|e| {
-            let e = e.to_string();
-            if super::ingest_split::is_oversize(&e) {
+            if super::ingest_split::refused_as_oversize(&e) {
                 format!(
-                    "re-embedding {}: {e}. The stored chunks are larger than '{}' takes per \
+                    "re-embedding {}: {e}. {OVERSIZE_NOTE} '{}' takes per \
                      input — they were sized for another model or limit. Resume re-chunks the \
                      files that hold them for this model; or lower chunk_tokens, or raise the \
                      model's -ub/-b.",

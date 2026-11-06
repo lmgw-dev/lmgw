@@ -192,6 +192,8 @@ pub struct World {
     pub external: Vec<FakeExternal>,
     /// `podman tag <src> <dst>` fails for these `dst`s.
     pub fail_tag: Vec<String>,
+    /// `podman images` fails: podman cannot be asked.
+    pub fail_images: bool,
     pub calls: Vec<Vec<String>>,
     pub devices_out: String,
     pub next: u64,
@@ -281,8 +283,9 @@ impl FakePodman {
                     FakeExternal::new("exited1", "bridges_db_1", "exited"),
                 ],
                 fail_tag: Vec::new(),
+                fail_images: false,
                 calls: Vec::new(),
-                devices_out: "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, \
+                devices_out: "Available devices:\n  CUDA0: NVIDIA GeForce RTX 3090 (24080 MiB, \
                               23000 MiB free)\n"
                     .into(),
                 next: 0,
@@ -362,8 +365,15 @@ impl CommandRunner for FakePodman {
             assert_eq!(program, "podman");
             let mut w = self.world();
             w.calls.push(args.to_vec());
-            Ok(match a.as_slice() {
-            ["image", "inspect", "--format", fmt, r] => match w.find(r) {
+            // Podman's global options come before the subcommand (lmgw's
+            // own CDI spec dir, machine-check design §3.6.4): answered by
+            // the subcommand, recorded whole.
+            let mut a = a.as_slice();
+            while let ["--cdi-spec-dir", _, rest @ ..] = a {
+                a = rest;
+            }
+            Ok(match a {
+            ["image", "inspect", "--format", fmt, "--", r] => match w.find(r) {
                 None => fail(125, "Error: failed to find image x: image not known"),
                 Some(i) => {
                     let img = &w.images[i];
@@ -477,6 +487,9 @@ impl CommandRunner for FakePodman {
             }
             // As podman 5 prints it: the whole row once per tag (an untagged
             // image once), which lmgw must merge back into one image.
+            ["images", "--format", "json"] if w.fail_images => {
+                fail(125, "Error: podman is unavailable (injected)")
+            }
             ["images", "--format", "json"] => ok(serde_json::to_string(
                 &w.images
                     .iter()

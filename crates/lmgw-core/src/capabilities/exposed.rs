@@ -98,8 +98,17 @@ pub async fn exposed_entries(state: &SharedState) -> Vec<ExposedEntry> {
         .cloned()
         .collect();
     passthrough.sort_by(|a, b| a.name.cmp(&b.name));
-    for u in &passthrough {
-        match catalog::upstream_models(state, u).await {
+    // Read at once, not one after another: a slow provider's catalog costs
+    // the listing its own time, not the sum of all of them. Folded in name
+    // order, so the first upstream to name a model still has it.
+    let catalogs = join_all(
+        passthrough
+            .iter()
+            .map(|u| catalog::upstream_models(state, u)),
+    )
+    .await;
+    for (u, read) in passthrough.iter().zip(catalogs) {
+        match read {
             Ok(models) => {
                 for m in models {
                     if snap.hidden_passthrough.contains(&(u.id, m.id.clone())) {
@@ -339,7 +348,8 @@ async fn entry_for(
 /// `structured_output` both flags `false`), and simply absent where it does
 /// not (`reasoning`, which has no "off" shape).
 ///
-/// Detail fields (reasoning `levels`/`default`/`control`/`can_disable`,
+/// Detail fields (reasoning `levels`/`default`/`control`/`can_disable`/
+/// `thinking_types`, `context_editing`,
 /// tool-call `format`/`parallel`) are published only when every `routable`
 /// candidate agrees on the value — [`identical`] — otherwise left absent
 /// rather than picking one candidate's answer arbitrarily. A `reasoning.kind`
@@ -400,18 +410,16 @@ async fn candidate_alias_entry(
         },
     };
 
+    // `json_object` is what every routable candidate says, absent when none
+    // is routable (structured-output design §11.20); off, both are `false`.
     let structured_on = enabled(Facet::StructuredOutput);
     let structured_output = StructuredOutputCaps {
         json_schema: Some(structured_on),
-        json_object: Some(
-            structured_on
-                && !routable_caps.is_empty()
-                && routable_caps.iter().all(|c| {
-                    c.structured_output
-                        .as_ref()
-                        .is_some_and(|s| s.json_object == Some(true))
-                }),
-        ),
+        json_object: if structured_on {
+            d.json_object
+        } else {
+            Some(false)
+        },
     };
 
     let mut notes = vec![format!(
@@ -459,6 +467,13 @@ async fn candidate_alias_entry(
                         .unwrap_or_default()
                 }))
                 .unwrap_or_default(),
+                thinking_types: identical(routable_caps.iter().map(|c| {
+                    c.reasoning
+                        .as_ref()
+                        .map(|r| r.thinking_types.clone())
+                        .unwrap_or_default()
+                }))
+                .unwrap_or_default(),
                 ..Default::default()
             },
             _ => {
@@ -487,6 +502,12 @@ async fn candidate_alias_entry(
         reasoning,
         tool_calls: Some(tool_calls),
         structured_output: Some(structured_output),
+        // Only when every routable candidate is on an Anthropic route and
+        // says the same: whichever answers forwards it the same way.
+        context_editing: identical(routable_caps.iter().map(|c| c.context_editing.clone()))
+            .flatten(),
+        languages: Vec::new(),
+        multilingual: None,
         speech: None,
         source: "candidate_alias".to_string(),
     };
@@ -614,10 +635,6 @@ async fn alias_entry(
     )
     .then(zero_pricing);
 
-    // The backing row, when the alias points at one of our own containers
-    // (§3.6); `None` means the capabilities have to come from the catalog.
-    let backing = backing_derived(state, snap, &upstream, &model_id, &overrides).await;
-
     // The context window and the price always come from the catalog, exactly
     // as they did before capabilities existed — including the "not listed" and
     // "upstream unreachable" cases, which both fall back to the local-zero
@@ -627,7 +644,41 @@ async fn alias_entry(
         Some(m) => (m.context_length, m.pricing.clone().or(local_zero)),
         None => (None, local_zero),
     };
+    let derived = alias_derived(
+        state,
+        snap,
+        &upstream,
+        &model_id,
+        &overrides,
+        owner_override.as_ref(),
+        info,
+    )
+    .await;
 
+    assemble(
+        name,
+        "lmgw".to_string(),
+        ctx,
+        pricing,
+        derived,
+        default_created,
+    )
+}
+
+/// What an alias of `model_id` on `upstream` can do: the backing row's facts
+/// when it points at one of our own containers (§3.6), else the catalog
+/// entry's (`info`), with the alias's own override on top — the same way
+/// `param_overrides` sit above the row's params.
+async fn alias_derived(
+    state: &SharedState,
+    snap: &Snapshot,
+    upstream: &Upstream,
+    model_id: &str,
+    overrides: &Params,
+    owner_override: Option<&serde_json::Value>,
+    info: Option<ModelInfo>,
+) -> Derived {
+    let backing = backing_derived(state, snap, upstream, model_id, overrides).await;
     let derived = match (backing, info) {
         (Some(d), _) => d,
         (None, Some(m)) => super::for_catalog(&m, upstream.protocol, &upstream.name),
@@ -643,19 +694,33 @@ async fn alias_entry(
             created: None,
         },
     };
-    // The alias' own override sits above the backing row's (which
-    // `local_derived` already applied), the same way `param_overrides` sit
-    // above the row's params.
-    let derived = with_owner_override(derived, owner_override.as_ref(), "alias", upstream.protocol);
+    with_owner_override(derived, owner_override, "alias", upstream.protocol)
+}
 
-    assemble(
-        name,
-        "lmgw".to_string(),
-        ctx,
-        pricing,
-        derived,
-        default_created,
+/// The capabilities an alias of `model_id` on `upstream` would publish, for
+/// an alias that is not saved yet (the fallback save check's type of a plain
+/// alias, openai egress design §14.2 item 4). `None` when nothing about the
+/// model could be read: the catalog does not list it, or cannot be read now.
+pub async fn alias_capabilities(
+    state: &SharedState,
+    snap: &Snapshot,
+    upstream: &Upstream,
+    model_id: &str,
+    overrides: &Params,
+    owner_override: Option<&serde_json::Value>,
+) -> Option<ModelCapabilities> {
+    let info = catalog_lookup(state, upstream, model_id).await;
+    alias_derived(
+        state,
+        snap,
+        upstream,
+        model_id,
+        overrides,
+        owner_override,
+        info,
     )
+    .await
+    .capabilities
 }
 
 /// The local row behind an alias, when there is one (design §3.6): a
@@ -839,6 +904,8 @@ async fn audio_derived(state: &SharedState, model: &AudioModel) -> Derived {
         ));
     }
     let facts = super::AudioFacts {
+        languages: crate::audio::language::iso_languages(&speech.profile),
+        multilingual: crate::audio::language::multilingual(&speech.profile),
         speech: super::speech::speaks(&model.task).then(|| {
             let rate = state.audio_rates.get(&model.model_id);
             super::speech::from_profile(&speech.profile, model, rate)
@@ -855,7 +922,7 @@ fn image_derived(state: &SharedState, model: &ImageModel) -> Derived {
         derived,
         model.capabilities_override.as_ref(),
         "image row",
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
     )
 }
 
@@ -964,7 +1031,7 @@ async fn local_derived(
                 }
             }
         }
-        None => match sibling_mmproj(weights_path).await {
+        None => match sibling_mmproj(state, weights_path).await {
             Some(name) => (Projector::Sibling(name), None),
             None => (Projector::None, None),
         },
@@ -1003,6 +1070,29 @@ async fn local_derived(
 /// it). A malformed override is **loud**: the derived facts stay, and the
 /// error becomes a note on the model it was written for, so the owner sees it
 /// where they will look rather than only in a log.
+/// The routes a cloud alias onto `model_id` at `upstream` publishes by its
+/// configuration alone: what the model's name says (`task::by_name`), under
+/// the owner's `capabilities_override` — what `/v1/models` publishes for it
+/// whenever its catalog states no task, read without that catalog. The
+/// media tools list cloud aliases by it (chat-media-tools design §3.2): a
+/// tool list that changed when some other look happened to read a catalog
+/// would change every chat turn's prompt prefix with it.
+pub(crate) fn configured_endpoints(
+    model_id: &str,
+    owner_override: Option<&serde_json::Value>,
+    upstream: &Upstream,
+) -> Vec<String> {
+    let info = ModelInfo {
+        id: model_id.to_string(),
+        ..Default::default()
+    };
+    let derived = super::for_catalog(&info, upstream.protocol, &upstream.name);
+    with_owner_override(derived, owner_override, "alias", upstream.protocol)
+        .capabilities
+        .map(|c| c.endpoints)
+        .unwrap_or_default()
+}
+
 fn with_owner_override(
     derived: Derived,
     override_: Option<&serde_json::Value>,
@@ -1025,31 +1115,49 @@ fn with_owner_override(
     }
 }
 
-/// A `*mmproj*.gguf` sitting next to the weights (design §3.3). llama-server
+/// A projector GGUF sitting next to the weights (design §3.3). llama-server
 /// started with `-m` never picks one up by itself, so this is only ever a
 /// note — but it is the note that explains why a multimodal repo answers
 /// text-only.
 ///
-/// The `read_dir` goes to the blocking pool with the header reads: one
-/// directory listing is cheap, thousands of them on a cold listing are not.
-async fn sibling_mmproj(weights_path: PathBuf) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        let dir = weights_path.parent()?;
-        let mut hits: Vec<String> = std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let lower = name.to_lowercase();
-                (lower.contains("mmproj") && lower.ends_with(".gguf")).then_some(name)
+/// The one the plans would take (find-a-model design D121): each `.gguf`
+/// in the weights' directory is a projector when its header says so
+/// ([`crate::modelinfo::role_of`], as the disk plans decide), its size the
+/// header reader's (the file a symlink points at, as the plans charge it),
+/// and [`crate::hf::pick_projector`] picks among them. The headers come
+/// through the state's summary cache, so a listing that asks again reads
+/// nothing; the directory listing goes to the blocking pool.
+async fn sibling_mmproj(state: &SharedState, weights_path: PathBuf) -> Option<String> {
+    let dir = weights_path.parent()?.to_path_buf();
+    let names: Vec<String> = {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::read_dir(&dir).ok().map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.to_lowercase().ends_with(".gguf"))
+                    .collect()
             })
-            .collect();
-        // Stable across calls: a directory listing is in whatever order the
-        // filesystem feels like, and the note names the file.
-        hits.sort();
-        hits.into_iter().next()
-    })
-    .await
-    .ok()
-    .flatten()
+        })
+        .await
+        .ok()
+        .flatten()?
+    };
+    let own = weights_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    let mut projectors: Vec<(String, u64)> = Vec::new();
+    for name in names {
+        if Some(&name) == own.as_ref() {
+            continue;
+        }
+        let Ok(s) = state.gguf_cache.summarize_cached(&dir.join(&name)).await else {
+            continue;
+        };
+        if crate::modelinfo::role_of(&s) == "mmproj" {
+            projectors.push((name, s.file_size));
+        }
+    }
+    crate::hf::pick_projector(projectors.iter().map(|(n, s)| (n.as_str(), *s))).map(str::to_string)
 }

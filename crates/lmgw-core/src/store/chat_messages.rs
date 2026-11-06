@@ -25,6 +25,9 @@ use super::*;
 pub struct ChatMessageUpdate {
     pub content: String,
     pub reasoning: String,
+    /// The reply's reasoning seals, written beside `reasoning`
+    /// ([`ChatMessageRow::reasoning_seals`]): an edit clears both.
+    pub reasoning_seals: Vec<super::ReplySeal>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub ir_messages: Option<String>,
@@ -40,6 +43,8 @@ pub struct ChatMessageUpdate {
 pub struct ChatReply {
     pub content: String,
     pub reasoning: String,
+    /// A plain reply's reasoning seals ([`ChatMessageRow::reasoning_seals`]).
+    pub reasoning_seals: Vec<super::ReplySeal>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub ir_messages: Option<String>,
@@ -57,6 +62,9 @@ pub struct ChatReply {
     /// A gated turn's calls (client-apps design §6.2): `Some` when the turn
     /// stopped on one, and on a reply a resumed turn saves.
     pub pending_approvals: Option<super::PendingApprovals>,
+    /// The files the turn's image and audio tools stored (chat-media-tools
+    /// design §6.3), bound to this reply in its own write.
+    pub tool_files: Vec<i64>,
 }
 
 /// What [`continue_chat_reply`] did.
@@ -89,8 +97,8 @@ pub async fn append_chat_reply_by(
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
-            model, answered_by, voice, images_note, pending_approvals)
-         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            model, answered_by, voice, images_note, pending_approvals, reasoning_seals)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )
     .bind(thread_id)
     .bind(&r.content)
@@ -107,9 +115,11 @@ pub async fn append_chat_reply_by(
             .as_ref()
             .map(super::PendingApprovals::to_json),
     )
+    .bind(super::chat_seals::to_column(&r.reasoning_seals))
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
+    super::chat_tool_files::bind_tool_files(&mut tx, thread_id, id, &r.tool_files).await?;
     feed::record_added(&mut tx, thread_id, id, by).await?;
     super::chat_approvals::record_requested(
         &mut tx,
@@ -158,7 +168,7 @@ pub async fn continue_chat_reply(
     sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
            completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, voice=?10,
-           images_note=?11
+           images_note=?11, reasoning_seals=?12
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -172,8 +182,10 @@ pub async fn continue_chat_reply(
     .bind(&r.answered_by)
     .bind(super::chat_voice::message_voice_json(voice.as_ref()))
     .bind(&r.images_note)
+    .bind(super::chat_seals::to_column(&r.reasoning_seals))
     .execute(&mut *tx)
     .await?;
+    super::chat_tool_files::bind_tool_files(&mut tx, thread_id, id, &r.tool_files).await?;
     feed::record_updated(&mut tx, thread_id, id, by).await?;
     touch_thread(&mut tx, thread_id).await?;
     tx.commit().await?;
@@ -186,7 +198,8 @@ pub async fn continue_chat_reply(
 /// is deleted with its attachments — but a late MCP task result (role
 /// `tool`), which stays and is answered again (MCP Tasks design T13). Its own attachments stay bound. A
 /// dictated message whose text changed loses its `voice`: the text is no
-/// longer what was spoken (chat-voice design §3). `false` — and nothing
+/// longer what was spoken (chat-voice design §3). Its `origin` stays unless
+/// the edit names one (chat-plane design §9.10). `false` — and nothing
 /// written — when no such user message is in this thread. The feed hears
 /// `message.updated` for it and `message.deleted` for what went, `by` the
 /// editor.
@@ -196,18 +209,21 @@ pub async fn rewrite_chat_user_message(
     id: i64,
     content: &str,
     kb_refs: &[i64],
+    origin: Option<&str>,
     by: feed::By<'_>,
 ) -> DbResult<bool> {
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content = ?3, kb_refs = ?4, context = NULL,
-           voice = CASE WHEN content = ?3 THEN voice ELSE NULL END
+           voice = CASE WHEN content = ?3 THEN voice ELSE NULL END,
+           origin = COALESCE(?5, origin)
          WHERE id = ?1 AND thread_id = ?2 AND role = 'user'",
     )
     .bind(id)
     .bind(thread_id)
     .bind(content)
     .bind(super::chat_knowledge::id_list_json(kb_refs))
+    .bind(origin)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -271,7 +287,7 @@ pub async fn chat_messages_by_ids(
     .fetch_all(&mut *tx)
     .await?;
     let atts = sqlx::query(
-        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta
+        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta, source, call_id
          FROM chat_attachments
          WHERE thread_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))
          ORDER BY ord, id",
@@ -316,7 +332,8 @@ pub async fn update_chat_message(
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
-           completion_tokens=?6, ir_messages=?7, voice=?8, pending_approvals=NULL
+           completion_tokens=?6, ir_messages=?7, voice=?8, pending_approvals=NULL,
+           reasoning_seals=?9
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -327,6 +344,7 @@ pub async fn update_chat_message(
     .bind(m.completion_tokens)
     .bind(&m.ir_messages)
     .bind(super::chat_voice::message_voice_json(m.voice.as_ref()))
+    .bind(super::chat_seals::to_column(&m.reasoning_seals))
     .execute(&mut *tx)
     .await?
     .rows_affected();

@@ -30,12 +30,20 @@ mod aux_batch;
 mod aux_plan;
 mod class_check;
 pub(crate) mod decision;
+pub mod fit;
+pub mod hub_fit;
 pub(crate) mod licence;
+pub mod pick;
+pub mod plan_files;
 mod plan_fit;
 mod projector_floor;
+pub mod refit;
+/// A load test that did not pass: its log lines and its hint.
+mod test_failed;
 
 use aux_plan::aux_plan;
 pub(crate) use class_check::{aux_file_on_chat_row, chat_row_still_serves};
+use plan_files::PlanFiles;
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -58,14 +66,14 @@ pub(crate) fn resolve(
         .trim_start_matches("/models/")
         .trim_start_matches('/');
     if rel.is_empty() {
-        return Err("gguf_path must not be empty".into());
+        return Err("the file's path in the models directory must not be empty".into());
     }
     if rel.split('/').any(|c| c == ".." || c == ".") {
         return Err(format!("'{rel}' must be a plain path under the models dir"));
     }
     if models_dir.trim().is_empty() {
         return Err(format!(
-            "the {} models directory is not configured (Settings → {})",
+            "the {} models directory is not set ({})",
             class.as_str(),
             settings_page(class)
         ));
@@ -103,15 +111,10 @@ fn models_dir_of(snap: &Snapshot, class: Class) -> String {
     }
 }
 
-/// Where the dashboard configures a class's models dir.
-/// Where the dashboard sets a class's directory (Settings → Runtimes → …).
-fn settings_page(class: Class) -> &'static str {
-    match class {
-        Class::Chat => "Runtimes → Chat",
-        Class::Aux => "Runtimes → Aux",
-        Class::Audio => "Runtimes → Audio",
-        Class::Image => "Runtimes → Image",
-    }
+/// Where the dashboard sets a class's models dir
+/// (`Settings → Runtimes → Chat → Models dir`).
+fn settings_page(class: Class) -> String {
+    crate::hf::models_dir_location(class.as_str())
 }
 
 /// `gguf::summarize` does blocking file I/O; keep it off the async runtime.
@@ -704,7 +707,7 @@ pub async fn gguf_files(
     let dir = models_dir_of(&snap, class);
     if dir.trim().is_empty() {
         return Err(format!(
-            "the {} models directory is not configured (Settings → {})",
+            "the {} models directory is not set ({})",
             class.as_str(),
             settings_page(class)
         ));
@@ -827,7 +830,7 @@ pub async fn gguf_files(
              others. \
              lmgw cannot see files outside these directories — download into the right one \
              with lmgw__hf_add target=…, or change the directory in the dashboard \
-             (Settings → {}).",
+             ({}).",
             crate::hf::accepted_extensions_phrase(t),
             settings_page(class)
         ),
@@ -869,10 +872,28 @@ pub async fn model_inspect(
             gguf::kv_cache_bytes(&s, c, bits)
         }
     };
+    // Every part of a split GGUF, as its row is charged
+    // (`vram::plan::split`); a missing part leads the note.
+    // A split set's host-kept input embeddings are the whole set's, as its
+    // row is charged (`vram::plan::split::whole_set`).
+    let (on_disk, host_input_bytes) = {
+        let (dir, rel, first) = (std::path::PathBuf::from(&dir), rel.clone(), (*s).clone());
+        tokio::task::spawn_blocking(move || {
+            use crate::vram::plan::split;
+            let host = split::whole_set(&dir, &rel, first).host_input_bytes;
+            (split::gguf_bytes(&dir, &rel), host)
+        })
+        .await
+        .map_err(|e| format!("sizing thread failed: {e}"))?
+    };
+    let (file_bytes, missing) = match on_disk {
+        Ok(b) => (b, None),
+        Err(m) => (m.present_bytes, Some(m.message)),
+    };
     let weights_bytes = if chat {
-        s.file_size.saturating_sub(s.host_input_bytes)
+        file_bytes.saturating_sub(host_input_bytes)
     } else {
-        s.file_size
+        file_bytes
     };
     let kv_note = if chat {
         "KV figures are for context_length tokens in one slot at llama-server's default ubatch, \
@@ -937,7 +958,10 @@ pub async fn model_inspect(
             weights_bytes,
             kv_cache_bytes_at_full_ctx_f16: kv("f16", 16),
             kv_cache_bytes_at_full_ctx_q8_0: kv("q8_0", 8),
-            note: kv_note.to_string(),
+            note: match missing {
+                Some(m) => format!("{m}. {kv_note}"),
+                None => kv_note.to_string(),
+            },
         },
     })
 }
@@ -950,6 +974,58 @@ const SPEC_KNOBS: &[&str] = &[
     "spec_draft_n_min",
     "spec_draft_ngl",
 ];
+
+/// The `spec_draft_n_max` a drafter file calls for, with the reason, or no
+/// value and a note when a dflash header gives no block size.
+fn draft_window(spec_type: &str, drafter: &ModelSummary) -> (Option<u64>, String) {
+    if spec_type != "draft-dflash" {
+        return (Some(4), format!("typical draft window for {spec_type}"));
+    }
+    let arch = drafter.architecture.as_deref().unwrap_or("dflash");
+    match drafter.block_size.filter(|b| *b > 0) {
+        Some(b) => (
+            Some(b - 1),
+            format!(
+                "the drafter's block size is {b} ({arch}.block_size); llama.cpp drafts \
+                 at most block_size \u{2212} 1 = {} tokens per step",
+                b - 1
+            ),
+        ),
+        None => (
+            None,
+            format!(
+                "the dflash drafter's header has no {arch}.block_size, so spec_draft_n_max \
+                 is left out of the plan and llama.cpp uses its own default"
+            ),
+        ),
+    }
+}
+
+/// The advisory for a row whose `spec_draft_n_max` is past what its dflash
+/// drafter can draft: llama.cpp drafts at most `block_size − 1` tokens per
+/// step, so a larger value reads as a window the row does not get. No
+/// advisory for another spec type, an unset window, or a header without a
+/// block size (the plan says so for that one).
+pub(crate) fn draft_window_advisory(
+    spec_type: &str,
+    n_max: Option<i64>,
+    drafter: &ModelSummary,
+) -> Option<String> {
+    if spec_type != "draft-dflash" {
+        return None;
+    }
+    let n_max = n_max?;
+    let b = drafter.block_size.filter(|b| *b > 0)?;
+    let cap = b - 1;
+    if n_max <= cap as i64 {
+        return None;
+    }
+    let arch = drafter.architecture.as_deref().unwrap_or("dflash");
+    Some(format!(
+        "spec_draft_n_max is {n_max}, but the drafter's block size is {b} ({arch}.block_size): \
+         llama.cpp drafts at most {cap} per step; set it to {cap}"
+    ))
+}
 
 /// The delta between a plan and a configured row that already uses the same
 /// GGUF, as a patch that can be handed straight to `lmgw__local_model_set`.
@@ -1300,60 +1376,191 @@ pub async fn local_model_plan(
     // `.safetensors` with no GGUF metadata at all. Which flag each one belongs
     // under is a property of the *family*, so the plan matches the file
     // against the shipped recipes instead of reading it. See [`image_plan`].
-    let (rel, full) = resolve(&dir, gguf_path, class)?;
+    let (rel, _full) = resolve(&dir, gguf_path, class)?;
     if class == Class::Image {
         return Ok(image_plan(&dir, &rel));
     }
-    let s = summarize(full).await?;
+    // Every read of the disk the plan makes, in one place (find-a-model
+    // design WP2): nothing after this touches the disk.
+    let files = {
+        let (dir, rel, aux_dir) = (dir.clone(), rel.clone(), models_dir_of(&snap, Class::Aux));
+        tokio::task::spawn_blocking(move || PlanFiles::from_disk(&dir, &rel, class, &aux_dir))
+            .await
+            .map_err(|e| format!("gguf read panicked: {e}"))??
+    };
+    plan_from(state, &snap, class, &files).await
+}
 
+/// The plan of a file named either way (find-a-model design §9.1): `path`
+/// on disk, or `repo` + `file` on Hugging Face. Exactly one form.
+pub async fn local_model_plan_of(
+    state: &SharedState,
+    path: Option<&str>,
+    repo: Option<&str>,
+    file: Option<&str>,
+    target: Option<&str>,
+) -> Result<Value, String> {
+    fn some(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    match (some(path), some(repo), some(file)) {
+        (Some(path), None, None) => local_model_plan(state, path, target).await,
+        (None, Some(repo), Some(file)) => local_model_plan_hub(state, repo, file, target).await,
+        (None, Some(_), None) | (None, None, Some(_)) => Err(
+            "a plan from Hugging Face names both the repo and the file in it (repo and file)"
+                .into(),
+        ),
+        (None, None, None) => Err(
+            "name the file to plan: its path in the target's models directory for a file on \
+             disk, or repo and file for one on Hugging Face"
+                .into(),
+        ),
+        (Some(_), ..) => Err(
+            "name the file one way: its path in the target's models directory for a file on \
+             disk, or repo and file for one on Hugging Face, not both"
+                .into(),
+        ),
+    }
+}
+
+/// A plan for `file` in the Hugging Face repo `repo`, read from the hub
+/// before anything is downloaded (find-a-model design §2.3, §9.1): the same
+/// plan the file gets once `hf_add` has put it and its companions on disk,
+/// under the paths it puts them at. `target` is the class: `chat` or `aux`
+/// as the caller chooses, else the header's (an embedder plans as aux). The
+/// image class plans from its recipes, which a hub plan has none of.
+pub async fn local_model_plan_hub(
+    state: &SharedState,
+    repo: &str,
+    file: &str,
+    target: Option<&str>,
+) -> Result<Value, String> {
+    let class = hub_class(target)?;
+    crate::hf::validate_repo(repo)?;
+    let snap = state.snapshot();
+    let listing =
+        crate::hf::list_repo_files(&state.hub_http, &snap.settings.hf_token, repo).await?;
+    let files = plan_files::hub::from_hub(state, repo, file, &listing, class).await?;
+    plan_from(state, &snap, files.found_in, &files).await
+}
+
+/// The class a hub plan's `target` asks for: chat, aux, or the header's
+/// (`None`). The image and audio classes plan from their own catalogs.
+fn hub_class(target: Option<&str>) -> Result<Option<Class>, String> {
+    let asked = crate::ops::parse_class_target(target)?;
+    if matches!(asked, Some(Class::Image | Class::Audio)) {
+        return Err(format!(
+            "a plan from Hugging Face reads a GGUF's header for the chat or aux class; the {} \
+             class plans from its own catalog (lmgw__image_recipes, lmgw__audio_catalog)",
+            asked.map(Class::as_str).unwrap_or_default()
+        ));
+    }
+    Ok(asked)
+}
+
+/// The plan of `files` for `class` (the class asked for, or whose models dir
+/// the file is in), with the plan's source and its fit on the card beside
+/// it (find-a-model design §9.1).
+async fn plan_from(
+    state: &SharedState,
+    snap: &Snapshot,
+    class: Class,
+    files: &PlanFiles,
+) -> Result<Value, String> {
+    let card = fit::CardNow::of(state, snap).await;
+    plan_from_on(state, snap, class, files, card).await
+}
+
+/// [`plan_from`] with its fit measured on `card`, a reading of the card the
+/// caller took: the file list measures every file of one answer on one
+/// reading (find-a-model design D66).
+async fn plan_from_on(
+    state: &SharedState,
+    snap: &Snapshot,
+    class: Class,
+    files: &PlanFiles,
+    card: Option<fit::CardNow>,
+) -> Result<Value, String> {
     // An embedding or rerank model is an aux model wherever it was found, and
     // anything planned against the aux dir is one by the caller's choice: both
     // get the aux plan, whose parameters are `lmgw__aux_model_set`'s.
-    let (serve_as, aux_kind) = class_for(&s);
-    if class == Class::Aux || serve_as == "aux" {
-        return aux_plan(state, &snap, class, &dir, &rel, &s, aux_kind).await;
+    let (serve_as, aux_kind) = class_for(&files.summary);
+    let aux = class == Class::Aux || serve_as == "aux";
+    let mut plan = if aux {
+        aux_plan(state, snap, files, aux_kind).await?
+    } else {
+        chat_plan(state, snap, class, files).await?
+    };
+    let params = plan["params"].as_object().cloned().unwrap_or_default();
+    let sizer = plan_sizer(class, files, &params);
+    let card = card.map(|c| c.beside_itself(snap, files.found_in, &files.rel));
+    let fit = dto::model_find::PlanFit {
+        card: card.as_ref().map(fit::CardNow::dto),
+        whole_card: fit::fit(
+            files,
+            &sizer,
+            card.as_ref(),
+            dto::model_find::FitMeasure::WholeCard,
+        ),
+        beside: fit::fit(
+            files,
+            &sizer,
+            card.as_ref(),
+            dto::model_find::FitMeasure::Beside,
+        ),
+    };
+    if let Some(o) = plan.as_object_mut() {
+        o.insert("source".into(), json!(files.source_dto()));
+        o.insert("fit".into(), json!(fit));
     }
+    Ok(plan)
+}
 
+/// The footprint search of `files` planned for `class` with the plan's
+/// `params` ([`plan_from`]): the aux sizer for an aux plan, else the chat
+/// one. The file list sizes the other files of a repo with one file's plan
+/// this way (find-a-model design §3.3, [`hub_fit::marks`]).
+fn plan_sizer(
+    class: Class,
+    files: &PlanFiles,
+    params: &serde_json::Map<String, Value>,
+) -> fit::Sizer {
+    match class == Class::Aux || class_for(&files.summary).0 == "aux" {
+        true => plan_fit::Sizer::aux(files, params),
+        false => plan_fit::Sizer::chat(files, params),
+    }
+}
+
+/// The chat class's plan of `files` (see [`local_model_plan`]).
+async fn chat_plan(
+    state: &SharedState,
+    snap: &Snapshot,
+    class: Class,
+    files: &PlanFiles,
+) -> Result<Value, String> {
+    let (s, rel) = (&files.summary, &files.rel);
     let mut warnings: Vec<String> = Vec::new();
-    if role_of(&s) != "weights" {
+    if role_of(s) != "weights" {
         warnings.push(format!(
             "{rel} looks like a '{}', not model weights — plan against the \
              weights file instead and pass this one as mmproj_path or \
              draft_gguf_path",
-            role_of(&s)
+            role_of(s)
         ));
     }
 
-    // Companions live in the same directory: a repo ships one projector and
-    // one drafter shared by every quantization of the weights.
-    let parent = rel
-        .rsplit_once('/')
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_default();
-    let siblings = {
-        let dir = dir.clone();
-        tokio::task::spawn_blocking(move || crate::hf::scan_gguf_files(&dir))
-            .await
-            .map_err(|e| format!("scan panicked: {e}"))?
-    };
-    let (mut mmproj, mut drafter): (Option<Companion>, Option<Companion>) = (None, None);
-    for cand in siblings {
-        if cand == rel {
-            continue;
-        }
-        let cand_parent = cand.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        if cand_parent != parent {
-            continue;
-        }
-        let Ok(cs) = summarize(std::path::Path::new(&dir).join(&cand)).await else {
-            continue;
-        };
-        match role_of(&cs) {
-            "mmproj" if mmproj.is_none() => mmproj = Some((cand, cs)),
-            "drafter" if drafter.is_none() => drafter = Some((cand, cs)),
-            _ => {}
-        }
-    }
+    // Companions live in the same directory, shared by every quantization of
+    // the weights. Of the projectors there, the one rule's pick (find-a-model
+    // design D121): a repo often ships one in two or three widths, and only
+    // the picked one is planned and charged. The plan's input found them.
+    let mmproj: Option<Companion> = files
+        .projector
+        .as_ref()
+        .map(|c| (c.path.clone(), c.summary.clone()));
+    let drafter: Option<Companion> = files
+        .drafter
+        .as_ref()
+        .map(|c| (c.path.clone(), c.summary.clone()));
 
     let mut params = serde_json::Map::new();
     let mut why = serde_json::Map::new();
@@ -1422,7 +1629,7 @@ pub async fn local_model_plan(
         .map(|(_, ms)| image_attention(Some(ms), s.embedding_length));
     projector_floor::plan(image.as_ref(), (None, None), &mut put);
 
-    match (&drafter, spec_type_for(&s)) {
+    match (&drafter, spec_type_for(s)) {
         (Some((path, ds)), _) => {
             let st = spec_type_for(ds).unwrap_or("draft-mtp");
             put(
@@ -1439,14 +1646,14 @@ pub async fn local_model_plan(
                     ds.architecture.as_deref().unwrap_or("?")
                 ),
             );
-            // dflash drafters state their own draft block size; 4 is
-            // llama.cpp's working default for MTP heads.
-            let n_max = if st == "draft-dflash" { 16 } else { 4 };
-            put(
-                "spec_draft_n_max",
-                json!(n_max),
-                format!("typical draft window for {st}"),
-            );
+            // A dflash drafter states its own draft block in its header
+            // (`dflash.block_size`); llama.cpp drafts at most one token fewer
+            // per step, the anchor taking a slot. 4 is llama.cpp's working
+            // default for MTP heads.
+            match draft_window(st, ds) {
+                (Some(n), why_n) => put("spec_draft_n_max", json!(n), why_n),
+                (None, note) => warnings.push(note),
+            }
         }
         // No separate drafter, but the weights carry MTP heads themselves.
         (None, Some("draft-mtp")) if s.has_mtp_layers => {
@@ -1487,9 +1694,19 @@ pub async fn local_model_plan(
                 .into(),
         );
     }
+    // A split GGUF with a part missing cannot load, wherever it runs.
+    let mut named = vec![rel.as_str()];
+    named.extend(
+        ["mmproj_path", "draft_gguf_path"]
+            .into_iter()
+            .filter_map(|k| params.get(k).and_then(Value::as_str)),
+    );
+    warnings.extend(files.missing_parts(&named));
+    // What the hub's read couldn't give (a companion's header).
+    warnings.extend(files.notes.iter().cloned());
     // Owner finding 3: a plan that cannot fit the card says so, with the
     // largest context that does; the trained context stays the plan.
-    if let Some(w) = plan_fit::chat(state, &snap, &dir, &rel, &s, &params).await {
+    if let Some(w) = plan_fit::warning(state, snap, &plan_fit::Sizer::chat(files, &params)).await {
         warnings.push(w);
     }
 
@@ -1498,7 +1715,7 @@ pub async fn local_model_plan(
     let mut configured: Vec<Value> = Vec::new();
     match store::list_local_models(&state.db).await {
         Ok(rows) => {
-            for row in rows.iter().filter(|m| m.gguf_path == rel) {
+            for row in rows.iter().filter(|m| m.gguf_path == *rel) {
                 configured.push(plan_diff(
                     row,
                     &params,
@@ -1539,7 +1756,7 @@ pub async fn local_model_plan(
     Ok(json!({
         "class": "chat",
         "target": class.as_str(),
-        "model_id": suggest_model_id(&rel),
+        "model_id": suggest_model_id(rel),
         "params": params,
         "rationale": why,
         "warnings": warnings,
@@ -1630,7 +1847,7 @@ fn capitalize(s: &str) -> String {
 pub(crate) fn load_failure_hint(haystack: &str) -> Option<&'static str> {
     Some(if haystack.contains("unknown model architecture") {
         "the llama.cpp build in this container predates the model's architecture \
-         — update the container image (Backends page) or pick a newer one for this row; the model config itself is fine"
+         — update the container image (Engines page) or pick a newer one for this row; the model config itself is fine"
     } else if haystack.contains("mtp layers") {
         "spec_type is draft-mtp but this GGUF has no MTP layers — clear spec_type, \
          or point draft_gguf_path at a real drafter"
@@ -1770,14 +1987,26 @@ pub async fn local_model_test(
     }
 
     let started = std::time::Instant::now();
-    // Errors here are lmgw's own (no room, load timed out, podman refused);
-    // they are the answer, not a reason to fall through to an HTTP attempt.
-    let hold = crate::vram::admit(state, &route, model_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!("'{model_id}' has no runtime descriptor — nothing to start or test")
-        })?;
+    // Errors here are lmgw's own (no room, load timed out, podman refused,
+    // the graphics card not ready): the model did not load, so they are the
+    // test's failed answer with their code and the container's log, not a
+    // reason to fall through to an HTTP attempt (machine-check design D179).
+    let hold = match crate::vram::admit(state, &route, model_id).await {
+        Ok(Some(hold)) => hold,
+        Ok(None) => {
+            return Err(format!(
+                "'{model_id}' has no runtime descriptor — nothing to start or test"
+            ))
+        }
+        Err(e) => {
+            let failure = test_failed::Failure {
+                detail: e.to_string(),
+                code: Some(e.kind().to_string()),
+                latency_ms: started.elapsed().as_millis() as u64,
+            };
+            return Ok(test_failed::failed(state, &snap, class, model_id, probe, failure).await);
+        }
+    };
     // The generation probe is real traffic to the model's KV pool, so it takes
     // the gate's per-send half like any chat send: on a guarded row it is
     // counted and reserves its tokens, and a load test never overfills a pool
@@ -1796,8 +2025,12 @@ pub async fn local_model_test(
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let mut probe_params = probe_ir.params.clone();
     let mut lease = match probe {
@@ -1884,6 +2117,9 @@ pub async fn local_model_test(
         Err(e) => Err(e),
     };
     let latency_ms = started.elapsed().as_millis() as u64;
+    // A failure of lmgw's own (a dead container's restart that the machine
+    // check blamed, a queue that timed out) keeps its code.
+    let code = resp.as_ref().err().map(|e| e.kind().to_string());
 
     // A 200 is necessary, not sufficient: an embedder misconfigured as a
     // reranker answers with an all-zero vector (spike-verified), and that is
@@ -2001,98 +2237,23 @@ pub async fn local_model_test(
         // `LocalModel` row — aux rows have no chat template to disagree over.
         if let Some(model) = &chat_row {
             let check = props_cross_check(state, &hold, model).await;
-            return Ok(dto::ModelTest::ChatPassed(dto::ChatTestPassed {
+            return Ok(dto::ModelTest::ChatPassed(Box::new(dto::ChatTestPassed {
                 base: passed,
                 props: check.props,
                 static_caps: check.static_caps,
                 disagreements: check.disagreements,
                 note: check.note,
-            }));
+            })));
         }
         return Ok(dto::ModelTest::Passed(passed));
     }
 
-    // The HTTP error is usually a generic "failed to load"; the reason is in
-    // this model's own container log (§3.6's `logs` verb, the same tail
-    // `lmgw__container action=logs` reads — there is no shared container log
-    // to grep any more, and that is an improvement: these lines are about
-    // this model and nothing else).
-    let container =
-        crate::runtime::container_name(&snap.settings.container_prefix, class, model_id);
-    let log_lines: Vec<String> = match state.runtime().logs_tail(&container, 60).await {
-        Ok(text) => text
-            .lines()
-            .filter(|l| {
-                let low = l.to_ascii_lowercase();
-                ["error", "failed", "unknown model", "exiting"]
-                    .iter()
-                    .any(|n| low.contains(n))
-            })
-            .map(|l| l.trim().to_string())
-            .rev()
-            .take(12)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-
-    // A chat row whose file is really an aux model (an encoder, a reranker,
-    // a decision model): the classic misfiling, and worth naming over any
-    // generic hint, because no amount of parameter tuning makes it a chat
-    // model.
-    let misfiled = if class == Class::Chat && probe == Probe::Generate {
-        let dir = models_dir_of(&snap, Class::Chat);
-        let rel = snap
-            .local_models
-            .iter()
-            .find(|m| m.model_id == model_id)
-            .map(|m| m.gguf_path.clone())
-            .unwrap_or_default();
-        summarize(std::path::Path::new(&dir).join(&rel))
-            .await
-            .ok()
-            .and_then(|s| aux_file_on_chat_row("this GGUF", &s))
-    } else {
-        None
-    };
-
-    let haystack = format!("{detail}\n{}", log_lines.join("\n")).to_ascii_lowercase();
-    let hint: &str = if let Some(misfiled) = misfiled.as_deref() {
-        misfiled
-    } else if let Some(hint) = load_failure_hint(&haystack) {
-        hint
-    } else if probe == Probe::Embed && haystack.contains("all-zero") {
-        "an all-zero vector is what llama-server returns when an embedder is served with \
-         --reranking, or when pooling is wrong for the model — check kind and pooling with \
-         lmgw__local_model_get, and lmgw__local_model_plan target=aux for what the header says"
-    } else if probe == Probe::Embed && haystack.contains("pooling") {
-        "llama-server rejected the pooling — lmgw__local_model_plan target=aux reports the \
-         value the GGUF header declares"
-    } else if probe != Probe::Generate
-        && (haystack.contains("not supported") || haystack.contains("only supported"))
-    {
-        "the server refused this endpoint — the row's kind (embed / rerank / decision) decides which \
-         flag it starts with; check it with lmgw__local_model_get"
-    } else {
-        "see container_log below, and lmgw__local_model_get for the exact command \
-         line this model renders to"
-    };
-
-    Ok(dto::ModelTest::Failed(dto::ModelTestFailed {
-        ok: false,
-        loaded: false,
-        model_id: model_id.to_string(),
-        class: class.as_str().to_string(),
-        public_name: None,
-        probe: probe.as_str().to_string(),
-        endpoint: None,
+    let failure = test_failed::Failure {
+        detail,
+        code,
         latency_ms,
-        error: detail,
-        container_log: log_lines,
-        hint: hint.to_string(),
-    }))
+    };
+    Ok(test_failed::failed(state, &snap, class, model_id, probe, failure).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -2356,8 +2517,12 @@ async fn generate_probe(
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let mut probe_params = probe_ir.params.clone();
     let mut lease = match crate::gate::fit_chat(
@@ -2541,6 +2706,11 @@ async fn image_model_test(
     let latency_ms = started.elapsed().as_millis() as u64;
 
     let parsed: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    // The route's own error code (`gpu_setup`, `engine_download`, …), as the
+    // `/v1` error envelope carries it.
+    let code = (!(200..300).contains(&status))
+        .then(|| parsed["error"]["code"].as_str().map(str::to_string))
+        .flatten();
     let detail = if (200..300).contains(&status) {
         let images = parsed["data"].as_array().cloned().unwrap_or_default();
         let first = images
@@ -2635,6 +2805,7 @@ async fn image_model_test(
         endpoint: Some("/v1/images/generations".to_string()),
         latency_ms,
         error: detail,
+        code,
         container_log: log_lines,
         hint: hint.to_string(),
     }))
@@ -2800,777 +2971,4 @@ fn props_disagreements(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn summary(arch: &str) -> ModelSummary {
-        ModelSummary {
-            architecture: Some(arch.to_string()),
-            ..ModelSummary::default()
-        }
-    }
-
-    #[test]
-    fn model_ids_drop_the_quantization_label() {
-        assert_eq!(
-            suggest_model_id("unsloth/Muse-Glimmer-30B-GGUF/Muse-Glimmer-30B-UD-Q4_K_XL.gguf"),
-            "muse-glimmer-30b"
-        );
-        assert_eq!(suggest_model_id("Qwen3.6-27B-IQ4_XS.gguf"), "qwen3.6-27b");
-        assert_eq!(
-            suggest_model_id("translategemma-27b-it-Q4_K_M.gguf"),
-            "translategemma-27b-it"
-        );
-        // Nothing to strip is not an error.
-        assert_eq!(suggest_model_id("plainmodel.gguf"), "plainmodel");
-    }
-
-    /// The classification that keeps an embedding model out of the chat
-    /// table: decided by the header's pooling_type / classifier head, never
-    /// by the filename or the architecture name a chat model shares.
-    #[test]
-    fn encoders_classify_as_aux_by_their_header() {
-        // Qwen3-Embedding is architecture `qwen3` — the same as the chat
-        // model — and differs only in pooling_type.
-        let mut embed = summary("qwen3");
-        embed.pooling_type = Some(3);
-        assert_eq!(class_for(&embed), ("aux", Some(AuxKind::Embed)));
-
-        let mut rerank = summary("bert");
-        rerank.pooling_type = Some(4);
-        assert_eq!(class_for(&rerank), ("aux", Some(AuxKind::Rerank)));
-
-        // An older reranker conversion: no pooling_type, but the head.
-        let mut old_rerank = summary("bert");
-        old_rerank.has_classifier_head = true;
-        assert_eq!(class_for(&old_rerank), ("aux", Some(AuxKind::Rerank)));
-
-        // A BERT-family encoder with neither is still an embedder.
-        assert_eq!(
-            class_for(&summary("nomic-bert")),
-            ("aux", Some(AuxKind::Embed))
-        );
-
-        // A chat model, and a chat model's companions.
-        let mut chat = summary("qwen35");
-        chat.has_chat_template = true;
-        assert_eq!(class_for(&chat), ("chat", None));
-        let mut proj = summary("clip");
-        proj.is_mmproj = true;
-        proj.pooling_type = Some(1);
-        assert_eq!(class_for(&proj), ("chat", None));
-        assert_eq!(class_for(&summary("dflash")), ("chat", None));
-    }
-
-    /// A chat row carrying `--embedding` in its extra args (the shape the
-    /// old workaround took) is probed as an embedder, not by generation.
-    #[test]
-    fn a_chat_row_flagged_as_an_embedder_is_probed_for_embeddings() {
-        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(args_request_embeddings(&args(&[
-            "--embedding",
-            "--pooling",
-            "last"
-        ])));
-        assert!(args_request_embeddings(&args(&["--embeddings"])));
-        assert!(args_request_embeddings(&args(&["--embedding=true"])));
-        assert!(!args_request_embeddings(&args(&["--no-warmup"])));
-        assert!(!args_request_embeddings(&[]));
-    }
-
-    #[test]
-    fn draft_architectures_map_to_their_spec_type() {
-        assert_eq!(spec_type_for(&summary("dflash")), Some("draft-dflash"));
-        assert_eq!(spec_type_for(&summary("dspark")), Some("draft-dspark"));
-        assert_eq!(spec_type_for(&summary("eagle3")), Some("draft-eagle3"));
-        // A plain model with no MTP heads cannot self-draft.
-        assert_eq!(spec_type_for(&summary("qwen35")), None);
-
-        let mut mtp = summary("qwen35");
-        mtp.has_mtp_layers = true;
-        assert_eq!(spec_type_for(&mtp), Some("draft-mtp"));
-
-        // A projector is never a drafter, whatever else it says.
-        let mut proj = summary("clip");
-        proj.is_mmproj = true;
-        proj.has_mtp_layers = true;
-        assert_eq!(spec_type_for(&proj), None);
-    }
-
-    #[test]
-    fn a_full_model_carrying_mtp_tensors_is_still_weights() {
-        // The trap: `-MTP-GGUF` repos ship full models *with* MTP tensors, so
-        // tensor presence alone would misfile a 27B model as a drafter.
-        let mut big = summary("qwen35");
-        big.has_mtp_layers = true;
-        big.block_count = Some(64);
-        assert_eq!(role_of(&big), "weights");
-
-        let mut module = summary("qwen35");
-        module.has_mtp_layers = true;
-        module.block_count = Some(1);
-        assert_eq!(role_of(&module), "drafter");
-
-        assert_eq!(role_of(&summary("dflash")), "drafter");
-        let mut proj = summary("clip");
-        proj.is_mmproj = true;
-        assert_eq!(role_of(&proj), "mmproj");
-        assert_eq!(role_of(&ModelSummary::default()), "unknown");
-    }
-
-    // -- the batch a projector needs -----------------------------------------
-
-    fn with_projector() -> LlamaParams {
-        LlamaParams {
-            mmproj_path: Some("gemma4/mmproj-BF16.gguf".into()),
-            ..LlamaParams::default()
-        }
-    }
-
-    fn argv(a: &[&str]) -> Vec<String> {
-        a.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Gemma 4 12B's projector, the live crash.
-    fn gemma4uv() -> ImageAttention {
-        ImageAttention::NonCausal {
-            ty: "gemma4uv".into(),
-            tokens: ImageTokens::Measured(GEMMA4_IMAGE_UBATCH),
-        }
-    }
-
-    fn advise(params: &LlamaParams, args: &[String]) -> Option<String> {
-        projector_ubatch_advisory(params, args, &gemma4uv())
-    }
-
-    fn projector(ty: Option<&str>) -> ModelSummary {
-        ModelSummary {
-            is_mmproj: true,
-            has_vision_encoder: Some(true),
-            projector_type: ty.map(str::to_string),
-            ..ModelSummary::default()
-        }
-    }
-
-    /// A Gemma 3 projector as its header states it: 896 px images in 14 px
-    /// patches, no scale-factor key.
-    fn gemma3_projector() -> ModelSummary {
-        ModelSummary {
-            vision_image_size: Some(896),
-            vision_patch_size: Some(14),
-            ..projector(Some("gemma3"))
-        }
-    }
-
-    /// The types and widths of the projectors on this box (2026-09-24),
-    /// against what `mtmd_decode_use_non_causal` in its llama.cpp answers.
-    #[test]
-    fn image_attention_follows_llama_cpps_non_causal_list() {
-        let measured = |ty: &str| ImageAttention::NonCausal {
-            ty: ty.to_string(),
-            tokens: ImageTokens::Measured(1280),
-        };
-        // Gemma 4 12B: always non-causal.
-        assert_eq!(
-            image_attention(Some(&projector(Some("gemma4uv"))), Some(3840)),
-            measured("gemma4uv")
-        );
-        // gemma4v depends on the text model: 26B-A4B and 31B are non-causal,
-        // E2B and E4B causal.
-        let g4v = projector(Some("gemma4v"));
-        assert_eq!(image_attention(Some(&g4v), Some(2816)), measured("gemma4v"));
-        assert_eq!(image_attention(Some(&g4v), Some(5376)), measured("gemma4v"));
-        assert_eq!(
-            image_attention(Some(&g4v), Some(2560)),
-            ImageAttention::Causal
-        );
-        assert_eq!(
-            image_attention(Some(&g4v), Some(1536)),
-            ImageAttention::Causal
-        );
-        // Without the weights' width, the projector's own projection_dim is
-        // the same number.
-        let e4b = ModelSummary {
-            vision_projection_dim: Some(2560),
-            ..projector(Some("gemma4v"))
-        };
-        assert_eq!(image_attention(Some(&e4b), None), ImageAttention::Causal);
-        assert!(matches!(
-            image_attention(Some(&g4v), None),
-            ImageAttention::Unknown(why) if why.contains("gemma4v")
-        ));
-        // A type with no measured ceiling is still non-causal, and says so.
-        assert_eq!(
-            image_attention(Some(&projector(Some("deepseek4v"))), None),
-            ImageAttention::NonCausal {
-                ty: "deepseek4v".into(),
-                tokens: ImageTokens::Unmeasured
-            }
-        );
-        // Everything else on this box decodes causally.
-        for ty in [
-            "qwen3vl_merger",
-            "qwen2vl_merger",
-            "pixtral",
-            "muse-glimmer",
-        ] {
-            assert_eq!(
-                image_attention(Some(&projector(Some(ty))), Some(4096)),
-                ImageAttention::Causal,
-                "{ty}"
-            );
-        }
-        // No images at all: nothing to decode.
-        let audio_only = ModelSummary {
-            has_vision_encoder: Some(false),
-            ..projector(Some("qwen2a"))
-        };
-        assert_eq!(
-            image_attention(Some(&audio_only), None),
-            ImageAttention::Causal
-        );
-    }
-
-    /// Gemma 3 resizes every image to one square, so its token count is a
-    /// property of the header: (896 / 14)^2 / 4^2 = 256. That fits llama.cpp's
-    /// default ubatch of 512, so there is nothing to plan or warn about.
-    #[test]
-    fn gemma3_images_are_a_fixed_256_tokens_and_fit_the_default() {
-        let attention = image_attention(Some(&gemma3_projector()), None);
-        assert_eq!(
-            attention,
-            ImageAttention::NonCausal {
-                ty: "gemma3".into(),
-                tokens: ImageTokens::Fixed(256)
-            }
-        );
-        let (floor, basis) = projector_ubatch_floor(&attention, &[]).unwrap();
-        assert_eq!(floor, 256);
-        assert!(basis.contains("exactly 256 tokens"), "{basis}");
-        assert!(floor <= LLAMA_DEFAULT_UBATCH);
-        assert_eq!(
-            projector_ubatch_advisory(&with_projector(), &[], &attention),
-            None
-        );
-        // A fixed-size projector ignores --image-max-tokens.
-        assert_eq!(
-            projector_ubatch_floor(&attention, &argv(&["--image-max-tokens", "4096"]))
-                .unwrap()
-                .0,
-            256
-        );
-        // Below 256 it would still abort, and says so.
-        let tiny = LlamaParams {
-            ubatch_size: Some(128),
-            ..with_projector()
-        };
-        let w = projector_ubatch_advisory(&tiny, &[], &attention).expect("must advise");
-        assert!(w.contains("aborts llama-server"), "{w}");
-        assert!(w.contains("at least 256"), "{w}");
-        // The header's own scale factor, where it states one, is used.
-        let scaled = ModelSummary {
-            vision_scale_factor: Some(2),
-            ..gemma3_projector()
-        };
-        assert!(matches!(
-            image_attention(Some(&scaled), None),
-            ImageAttention::NonCausal {
-                tokens: ImageTokens::Fixed(1024),
-                ..
-            }
-        ));
-    }
-
-    /// Not knowing is not the same as knowing it is safe.
-    #[test]
-    fn an_unreadable_untyped_or_unknown_projector_is_unknown() {
-        for (p, says) in [
-            (None, "could not be read"),
-            (Some(projector(None)), "names no projector type"),
-            (Some(projector(Some("brand-new-vl"))), "'brand-new-vl'"),
-        ] {
-            match image_attention(p.as_ref(), Some(4096)) {
-                ImageAttention::Unknown(why) => assert!(why.contains(says), "{why}"),
-                other => panic!("expected Unknown, got {other:?}"),
-            }
-        }
-    }
-
-    /// The live crash: a Gemma 4 row with a projector and no ubatch_size, so
-    /// llama.cpp's 512 was in force and a full-page image aborted the server.
-    #[test]
-    fn a_projector_at_the_default_ubatch_is_advised_about_by_the_assert_it_trips() {
-        let w = advise(&with_projector(), &[]).expect("must advise");
-        assert!(
-            w.contains("(gemma4uv projector) with non-causal attention"),
-            "{w}"
-        );
-        assert!(
-            w.contains(
-                "ubatch_size is unset, so llama.cpp's default of 512 applies: an image of more \
-                 than 512 tokens aborts llama-server"
-            ),
-            "{w}"
-        );
-        assert!(
-            w.contains("GGML_ASSERT \"non-causal attention requires n_ubatch >= n_tokens\""),
-            "{w}"
-        );
-        assert!(
-            w.contains("Set ubatch_size to at least 1280 (Gemma 4 images stop"),
-            "{w}"
-        );
-        // The default batch (2048) is not the problem, so it is not named.
-        assert!(!w.contains("and batch_size"), "{w}");
-        assert!(
-            w.contains("still starts"),
-            "an advisory, not a refusal: {w}"
-        );
-    }
-
-    /// The four live Qwen3.5 rows: a qwen3vl_merger projector, batch_size
-    /// 1024 and llama.cpp's default ubatch. Causal decoding splits an image
-    /// across physical batches, so there is nothing to advise.
-    #[test]
-    fn a_causal_projector_gets_no_advisory_whatever_its_batch() {
-        let qwen = LlamaParams {
-            mmproj_path: Some("unsloth/Qwen3.5-9B-GGUF/mmproj-BF16.gguf".into()),
-            batch_size: Some(1024),
-            ..LlamaParams::default()
-        };
-        let attention = image_attention(Some(&projector(Some("qwen3vl_merger"))), Some(4096));
-        assert_eq!(projector_ubatch_floor(&attention, &[]), None);
-        assert_eq!(projector_ubatch_advisory(&qwen, &[], &attention), None);
-    }
-
-    /// When lmgw cannot tell, it still advises, says it could not tell, and
-    /// says where the number it uses comes from.
-    #[test]
-    fn unknown_and_unmeasured_projectors_say_what_they_do_not_know() {
-        let w = projector_ubatch_advisory(
-            &with_projector(),
-            &[],
-            &ImageAttention::Unknown("its projector's header could not be read".into()),
-        )
-        .expect("must advise");
-        assert!(
-            w.contains(
-                "lmgw could not tell whether llama.cpp decodes its images with non-causal \
-                 attention: its projector's header could not be read. If it does"
-            ),
-            "{w}"
-        );
-        assert!(
-            w.contains("at least 1280 (with the projector unknown"),
-            "{w}"
-        );
-
-        let deepseek = ImageAttention::NonCausal {
-            ty: "deepseek4v".into(),
-            tokens: ImageTokens::Unmeasured,
-        };
-        let w = projector_ubatch_advisory(&with_projector(), &[], &deepseek).expect("must advise");
-        assert!(
-            w.contains("no image size has been measured for deepseek4v"),
-            "{w}"
-        );
-    }
-
-    #[test]
-    fn a_text_only_row_or_large_enough_batches_get_no_advisory() {
-        // Nothing to split without a projector.
-        assert_eq!(advise(&LlamaParams::default(), &[]), None);
-        // `--no-mmproj` claims the flag, so an extra-args projector never loads.
-        let text_only = LlamaParams {
-            no_mmproj: true,
-            ..LlamaParams::default()
-        };
-        assert_eq!(
-            advise(&text_only, &argv(&["--mmproj", "/models/x.gguf"])),
-            None
-        );
-        // The floor exactly, with the batch left at llama.cpp's 2048.
-        let at_floor = LlamaParams {
-            ubatch_size: Some(GEMMA4_IMAGE_UBATCH),
-            ..with_projector()
-        };
-        assert_eq!(advise(&at_floor, &[]), None);
-        // The live gemma4 rows run 2048/2048.
-        let live = LlamaParams {
-            ubatch_size: Some(2048),
-            batch_size: Some(2048),
-            ..with_projector()
-        };
-        assert_eq!(advise(&live, &[]), None);
-        // An extra arg reaches llama-server while the field is unset, so it
-        // counts, in either spelling.
-        for args in [&["-ub", "1280"][..], &["--ubatch-size=4096"][..]] {
-            assert_eq!(advise(&with_projector(), &argv(args)), None, "{args:?}");
-        }
-    }
-
-    /// mtmd hands an image over in pieces of at most batch_size tokens and
-    /// llama.cpp clamps ubatch to batch. A ubatch at or above a too-small
-    /// batch therefore never aborts: it splits the image, which degrades it.
-    #[test]
-    fn a_batch_too_small_for_the_image_splits_it_rather_than_aborting() {
-        let clamped = LlamaParams {
-            ubatch_size: Some(2048),
-            batch_size: Some(1024),
-            ..with_projector()
-        };
-        let w = advise(&clamped, &[]).expect("must advise");
-        assert!(
-            w.contains(
-                "batch_size is 1024: an image of more than 1024 tokens is split across \
-                 separate decodes. Nothing aborts"
-            ),
-            "{w}"
-        );
-        assert!(w.contains("degrades"), "{w}");
-        assert!(!w.contains("aborts llama-server"), "{w}");
-        // Only the field that is short is named.
-        assert!(w.contains("Set batch_size to at least 1280"), "{w}");
-
-        let equal = LlamaParams {
-            ubatch_size: Some(1024),
-            batch_size: Some(1024),
-            ..with_projector()
-        };
-        let w = advise(&equal, &[]).expect("must advise");
-        assert!(w.contains("split across separate decodes"), "{w}");
-        assert!(
-            w.contains("Set ubatch_size and batch_size to at least 1280"),
-            "{w}"
-        );
-    }
-
-    /// A ubatch below the batch aborts on any piece larger than the ubatch,
-    /// whatever the batch.
-    #[test]
-    fn a_ubatch_below_the_batch_aborts_and_names_every_short_field() {
-        let small_batch = LlamaParams {
-            batch_size: Some(1024),
-            ..with_projector()
-        };
-        let w = advise(&small_batch, &[]).expect("must advise");
-        assert!(
-            w.contains("an image of more than 512 tokens aborts llama-server"),
-            "{w}"
-        );
-        assert!(
-            w.contains("Set ubatch_size and batch_size to at least 1280"),
-            "{w}"
-        );
-
-        // A value that came from the extra args is not described as unset.
-        let w = advise(&with_projector(), &argv(&["-ub", "1024"])).expect("must advise");
-        assert!(
-            w.contains("ubatch_size is 1024: an image of more than 1024"),
-            "{w}"
-        );
-    }
-
-    #[test]
-    fn a_raised_image_budget_raises_the_floor() {
-        // The owner raised the image budget past the constant: that is the
-        // ceiling now, and the constant must not hide it.
-        let p = LlamaParams {
-            ubatch_size: Some(2048),
-            ..with_projector()
-        };
-        let w = advise(&p, &argv(&["--image-max-tokens", "4096"])).expect("must advise");
-        assert!(
-            w.contains(
-                "Set ubatch_size and batch_size to at least 4096 (the row's own \
-                 --image-max-tokens is 4096)"
-            ),
-            "{w}"
-        );
-        // A smaller budget does not lower the measured floor.
-        assert_eq!(
-            projector_ubatch_floor(&gemma4uv(), &argv(&["--image-max-tokens=256"]))
-                .unwrap()
-                .0,
-            1280
-        );
-    }
-
-    /// A projector outside the models dir loads, and its header cannot be
-    /// read from here, so it is unknown. One that is missing from the models
-    /// dir cannot load at all: the missing file is the problem, and there is
-    /// no batch advice to give about it.
-    #[tokio::test]
-    async fn an_outside_projector_is_unknown_and_a_missing_one_is_skipped() {
-        let outside = argv(&["-mm", "/srv/p.gguf"]);
-        let attention = row_image_attention("/models-dir", &LlamaParams::default(), &outside, None)
-            .await
-            .expect("an outside projector is still checked");
-        assert!(
-            matches!(&attention, ImageAttention::Unknown(why) if why.contains("outside")),
-            "{attention:?}"
-        );
-        let w = projector_ubatch_advisory(&LlamaParams::default(), &outside, &attention);
-        assert!(w.is_some_and(|w| w.contains("could not tell")));
-
-        let dir = tempfile::tempdir().unwrap();
-        let missing = row_image_attention(
-            &dir.path().display().to_string(),
-            &with_projector(),
-            &[],
-            None,
-        )
-        .await;
-        assert_eq!(missing, None);
-    }
-
-    fn row_with(params: Value, args: &[&str]) -> LocalModel {
-        serde_json::from_value(json!({
-            "id": 1, "model_id": "gemma4", "gguf_path": "gemma4/w.gguf",
-            "params": params, "args": args, "idle_seconds": 0,
-            "enabled": true, "public": false, "warm_start": false,
-        }))
-        .unwrap()
-    }
-
-    /// What `local_model_plan` proposes for weights with a sibling projector,
-    /// reduced to the fields that matter here.
-    fn projector_plan() -> (
-        serde_json::Map<String, Value>,
-        serde_json::Map<String, Value>,
-    ) {
-        let params = json!({
-            "mmproj_path": "gemma4/mmproj-BF16.gguf",
-            "ubatch_size": GEMMA4_IMAGE_UBATCH,
-        });
-        let why = json!({ "mmproj_path": "sibling", "ubatch_size": "the assert" });
-        (
-            params.as_object().unwrap().clone(),
-            why.as_object().unwrap().clone(),
-        )
-    }
-
-    fn changed_fields(d: &Value) -> Vec<&str> {
-        typed(d);
-        d["change"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c["field"].as_str().unwrap())
-            .collect()
-    }
-
-    /// `d` read into the api-types `ConfiguredAs` the editors fill from,
-    /// which must hold it whole.
-    fn typed(d: &Value) -> dto::ConfiguredAs {
-        let t: dto::ConfiguredAs =
-            serde_json::from_value(d.clone()).unwrap_or_else(|e| panic!("{e}: {d}"));
-        assert_eq!(serde_json::to_value(&t).unwrap(), *d, "ConfiguredAs drifts");
-        t
-    }
-
-    /// A chat row's comparison, `unset` and `apply.clear` included, is the
-    /// typed `ConfiguredAs`: speculation its files cannot support is cleared.
-    #[test]
-    fn a_chat_row_s_comparison_reads_as_the_typed_configured_as() {
-        let none = serde_json::Map::new();
-        let row = row_with(
-            json!({ "spec_type": "draft-mtp", "spec_draft_n_max": 3 }),
-            &[],
-        );
-        let t = typed(&plan_diff(&row, &none, &none, false, None));
-        assert!(!t.in_sync);
-        let unset = t.unset.unwrap();
-        assert_eq!(
-            unset.iter().map(|u| u.field.as_str()).collect::<Vec<_>>(),
-            ["spec_type", "spec_draft_n_max"]
-        );
-        let clear = t.apply.unwrap()["clear"].as_str().unwrap().to_string();
-        assert_eq!(clear, "spec_type,spec_draft_n_max");
-        let synced = typed(&plan_diff(
-            &row_with(json!({}), &[]),
-            &none,
-            &none,
-            false,
-            None,
-        ));
-        assert!(synced.in_sync && synced.apply.is_none() && synced.change.is_empty());
-    }
-
-    #[test]
-    fn the_plan_diff_raises_a_small_ubatch_and_never_lowers_a_large_one() {
-        let (params, why) = projector_plan();
-        let mm = "gemma4/mmproj-BF16.gguf";
-        let image = gemma4uv();
-        let diff = |row: &LocalModel| plan_diff(row, &params, &why, false, Some(&image));
-
-        // The crashing row: ubatch unset, batch at llama.cpp's default. Only
-        // the ubatch needs to change; the patch applies as-is.
-        let d = diff(&row_with(json!({ "mmproj_path": mm }), &[]));
-        assert_eq!(changed_fields(&d), ["ubatch_size"], "{d}");
-        assert_eq!(d["apply"]["ubatch_size"], 1280);
-        assert!(d["apply"]["batch_size"].is_null(), "{d}");
-        assert_eq!(d["change"][0]["why"], "the assert");
-        assert!(d["change"][0]["current"].is_null(), "{d}");
-
-        // A deliberately larger pair is in sync, not a proposal to shrink it.
-        let big = json!({ "mmproj_path": mm, "ubatch_size": 2048, "batch_size": 2048 });
-        assert_eq!(diff(&row_with(big, &[]))["in_sync"], true);
-
-        // Nor is a large enough ubatch passed through the extra args.
-        let d = diff(&row_with(json!({ "mmproj_path": mm }), &["-ub", "1536"]));
-        assert_eq!(d["in_sync"], true, "{d}");
-
-        // A too-small one there is what is in force, and `current` says so
-        // rather than showing the empty field.
-        let d = diff(&row_with(
-            json!({ "mmproj_path": mm }),
-            &["-ub", "1024", "-b", "1024"],
-        ));
-        assert_eq!(changed_fields(&d), ["ubatch_size", "batch_size"], "{d}");
-        assert_eq!(d["change"][0]["current"], 1024, "{d}");
-        assert_eq!(d["change"][1]["current"], 1024, "{d}");
-
-        // A batch below the floor would split the image or clamp the new
-        // ubatch, so it is raised with it — the Qwen3.5 rows' batch_size 1024.
-        let d = diff(&row_with(
-            json!({ "mmproj_path": mm, "batch_size": 1024 }),
-            &[],
-        ));
-        assert_eq!(changed_fields(&d), ["ubatch_size", "batch_size"], "{d}");
-        assert_eq!(d["apply"]["batch_size"], 1280);
-        assert!(d["change"][1]["why"].as_str().unwrap().contains("clamps"));
-
-        // The row's own raised image budget is the floor it is diffed against.
-        let d = diff(&row_with(
-            json!({ "mmproj_path": mm }),
-            &["--image-max-tokens", "4096"],
-        ));
-        assert_eq!(d["apply"]["ubatch_size"], 4096, "{d}");
-        assert_eq!(d["apply"]["batch_size"], 4096, "{d}");
-    }
-
-    // -- against the real files, when this box has them ----------------------
-
-    const MUSE: &str = "unsloth/Muse-Glimmer-30B-GGUF";
-    const QWEN9B: &str = "unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-UD-Q4_K_XL.gguf";
-
-    /// The models root (`LMGW_TEST_MODELS_DIR`), or `None` with a skip note.
-    fn models_root() -> Option<std::path::PathBuf> {
-        let root = std::env::var_os("LMGW_TEST_MODELS_DIR").map(std::path::PathBuf::from);
-        if root.is_none() {
-            eprintln!("skipping: LMGW_TEST_MODELS_DIR is not set");
-        }
-        root
-    }
-
-    /// Summary of the file at `rel` below the models root; `None` (skip) when
-    /// `LMGW_TEST_MODELS_DIR` is unset or the file is missing.
-    fn real(rel: &str) -> Option<ModelSummary> {
-        let p = models_root()?.join(rel);
-        p.is_file().then(|| gguf::summarize(&p).ok()).flatten()
-    }
-
-    /// All sixteen projectors on this box (2026-09-24), typed through the
-    /// header reader and classified against llama.cpp's non-causal list. The
-    /// Gemma 4 files name their type only under `clip.vision.projector_type`.
-    #[test]
-    fn real_projectors_decode_the_way_llama_cpp_says() {
-        let nc = |ty: &str| ImageAttention::NonCausal {
-            ty: ty.to_string(),
-            tokens: ImageTokens::Measured(GEMMA4_IMAGE_UBATCH),
-        };
-        let gemma = |size: &str| {
-            (
-                format!("unsloth/gemma-4-{size}-it-qat-GGUF/mmproj-BF16.gguf"),
-                Some(format!(
-                    "unsloth/gemma-4-{size}-it-qat-GGUF/gemma-4-{size}-it-qat-UD-Q4_K_XL.gguf"
-                )),
-            )
-        };
-        let causal = |path: &str| (path.to_string(), None);
-        // (mmproj, the weights beside it when the width matters), type, answer.
-        type Case = ((String, Option<String>), &'static str, ImageAttention);
-        let cases: Vec<Case> = vec![
-            (gemma("12B"), "gemma4uv", nc("gemma4uv")),
-            (gemma("26B-A4B"), "gemma4v", nc("gemma4v")),
-            (gemma("31B"), "gemma4v", nc("gemma4v")),
-            (gemma("E4B"), "gemma4v", ImageAttention::Causal),
-            (
-                causal("bartowski/UI-TARS-7B-DPO-GGUF/mmproj-UI-TARS-7B-DPO-f16.gguf"),
-                "qwen2vl_merger",
-                ImageAttention::Causal,
-            ),
-            (
-                causal("noctrex/Shieldstral-1.0-3B-GGUF/mmproj-BF16.gguf"),
-                "pixtral",
-                ImageAttention::Causal,
-            ),
-            (
-                causal("unsloth/Muse-Glimmer-30B-GGUF/mmproj-kquant.gguf"),
-                "muse-glimmer",
-                ImageAttention::Causal,
-            ),
-            (
-                causal("Qwen/Qwen3-VL-4B-Instruct-GGUF/mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf"),
-                "qwen3vl_merger",
-                ImageAttention::Causal,
-            ),
-            (
-                causal("example/Qwen3.6-27B-Finetune-NEO-MTP-GGUF/mmproj-BF16.gguf"),
-                "qwen3vl_merger",
-                ImageAttention::Causal,
-            ),
-        ];
-        let qwen: Vec<_> = [
-            "Qwen3.5-0.8B",
-            "Qwen3.5-2B",
-            "Qwen3.5-4B",
-            "Qwen3.5-9B",
-            "Qwen3.6-27B-MTP",
-            "Qwen3.6-35B-A3B-MTP",
-            "Qwen3.8-27B",
-        ]
-        .into_iter()
-        .map(|m| {
-            (
-                causal(&format!("unsloth/{m}-GGUF/mmproj-BF16.gguf")),
-                "qwen3vl_merger",
-                ImageAttention::Causal,
-            )
-        })
-        .collect();
-        for ((mmproj, weights), ty, want) in cases.into_iter().chain(qwen) {
-            let Some(p) = real(&mmproj) else {
-                continue;
-            };
-            assert_eq!(p.projector_type.as_deref(), Some(ty), "{mmproj}");
-            let width = weights
-                .and_then(|w| real(&w))
-                .and_then(|w| w.embedding_length);
-            assert_eq!(image_attention(Some(&p), width), want, "{mmproj}");
-        }
-    }
-
-    #[test]
-    fn real_files_classify_correctly() {
-        if let Some(s) = real(&format!("{MUSE}/dflash-kquant.gguf")) {
-            assert_eq!(role_of(&s), "drafter");
-            assert_eq!(spec_type_for(&s), Some("draft-dflash"));
-        }
-        if let Some(s) = real(&format!("{MUSE}/mmproj-kquant.gguf")) {
-            assert_eq!(role_of(&s), "mmproj");
-            assert_eq!(spec_type_for(&s), None);
-        }
-        if let Some(s) = real(&format!("{MUSE}/Muse-Glimmer-30B-UD-Q4_K_XL.gguf")) {
-            assert_eq!(role_of(&s), "weights");
-            assert_eq!(s.context_length, Some(131072));
-        }
-        // The model behind the live misconfiguration: no MTP layers, so
-        // spec_type=draft-mtp against it can never load.
-        if let Some(s) = real(QWEN9B) {
-            assert!(!s.has_mtp_layers);
-            assert_eq!(spec_type_for(&s), None);
-        }
-    }
-}
+mod tests;

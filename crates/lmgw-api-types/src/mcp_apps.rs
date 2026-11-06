@@ -140,6 +140,13 @@ pub struct ToolResultFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub task: Option<ResultTask>,
+    /// The files the call stored in the thread — an image or audio tool's
+    /// pictures and recordings in a Chat turn — so a page shows them
+    /// without reading the thread again. Their bytes are at
+    /// `GET /chat/api/attachments/{id}`; `content` names them as
+    /// `lmgw:attachment/N` resources. Empty for every other call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::chat_threads::AttachmentMeta>,
 }
 
 /// The MCP task a call started, on its `result` frame.

@@ -43,7 +43,7 @@ async fn stored_rows(state: &SharedState) -> (usize, usize) {
 async fn a_temporary_thread_is_negative_listed_apart_and_never_stored() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "hello there", 5, 2).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
 
     // `kind` is ignored: a temporary chat is always a plain one.
     let t: Value = post(
@@ -122,7 +122,7 @@ async fn a_temporary_thread_is_negative_listed_apart_and_never_stored() {
 async fn keep_writes_the_whole_thread_and_discards_it_from_memory() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "a reply", 9, 3).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = temporary(&gw).await["id"].as_i64().unwrap();
 
     let att: Value = gw
@@ -245,7 +245,7 @@ async fn keep_writes_the_whole_thread_and_discards_it_from_memory() {
 #[tokio::test]
 async fn a_temporary_thread_cannot_be_pinned_or_archived_and_delete_discards_it() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = temporary(&gw).await["id"].as_i64().unwrap();
 
     for (route, body) in [
@@ -365,7 +365,7 @@ async fn message_actions_work_on_a_temporary_thread() {
 #[tokio::test]
 async fn keeping_twice_at_once_stores_it_once() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     for _ in 0..5 {
         let tid = temporary(&gw).await["id"].as_i64().unwrap();
         let before = stored_rows(&state).await.0;

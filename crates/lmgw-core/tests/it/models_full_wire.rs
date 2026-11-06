@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use lmgw_api_types as dto;
-use lmgw_core::config::{AuxKind, HoldFallbackMode, LlamaParams, Protocol, UpstreamKind};
+use lmgw_core::config::{AuxKind, LlamaParams, Protocol, UpstreamKind};
 use lmgw_core::ir::{Params, ReasoningControl};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{
@@ -45,7 +45,7 @@ fn map(v: Value) -> Map<String, Value> {
 fn upstream(name: &str, expose_all: bool, enabled: bool, prefix: &str) -> NewUpstream {
     NewUpstream {
         name: name.into(),
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind: UpstreamKind::Generic,
         base_url: "http://127.0.0.1:1/v1".into(),
         api_key: None,
@@ -71,8 +71,7 @@ fn local(model_id: &str) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -96,8 +95,7 @@ fn aux(model_id: &str, kind: AuxKind) -> NewAuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -124,8 +122,7 @@ fn audio(model_id: &str) -> NewAudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -141,9 +138,10 @@ fn image(model_id: &str) -> NewImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -165,7 +163,13 @@ fn z_full_params() -> Params {
             enabled: Some(true),
             effort: Some("high".into()),
             budget_tokens: Some(2048),
+            ..Default::default()
         }),
+        // A send's own lesson, which no stored override carries (serde
+        // skips it).
+        reasoning_summary_refused: false,
+        // A request's own (a Responses client's), which serde skips too.
+        reasoning_summary: None,
     }
 }
 
@@ -205,6 +209,7 @@ async fn fill(state: &SharedState) {
             param_overrides: z_full_params(),
             enabled: true,
             capabilities_override: Some(json!({"max_output_tokens": 100, "notes": ["n"]})),
+            fallback: None,
         },
     )
     .await
@@ -218,6 +223,7 @@ async fn fill(state: &SharedState) {
             param_overrides: Params::default(),
             enabled: false,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -270,8 +276,7 @@ async fn fill(state: &SharedState) {
     full.warm_start = true;
     full.public = false;
     full.enabled = false;
-    full.hold_fallback_mode = HoldFallbackMode::Alias;
-    full.hold_fallback = Some("z-full".into());
+    full.fallback = Some("z-full".into());
     full.capabilities_override = Some(json!({"max_output_tokens": 77}));
     full.ladder = vec![lmgw_core::ladder::Rung {
         gguf_path: "r1.gguf".into(),
@@ -294,8 +299,7 @@ async fn fill(state: &SharedState) {
     emb.image = Some("img".into());
     emb.extra_run_args = Some(vec!["--cpus=1".into()]);
     emb.warm_start = true;
-    emb.hold_fallback_mode = HoldFallbackMode::Alias;
-    emb.hold_fallback = Some("z-full".into());
+    emb.fallback = Some("z-full".into());
     store::insert_aux_model(db, &emb).await.unwrap();
 
     let bare_audio = store::insert_audio_model(db, &audio("tts-bare"))
@@ -317,8 +321,7 @@ async fn fill(state: &SharedState) {
     tts.image = Some("audio-img".into());
     tts.extra_run_args = Some(vec!["--a".into()]);
     tts.warm_start = true;
-    tts.hold_fallback_mode = HoldFallbackMode::Alias;
-    tts.hold_fallback = Some("z-full".into());
+    tts.fallback = Some("z-full".into());
     let full_audio = store::insert_audio_model(db, &tts).await.unwrap();
     let mut cpu = audio("tts-cpu");
     cpu.backend = Some("cpu".into());
@@ -353,8 +356,7 @@ async fn fill(state: &SharedState) {
     pipeline.extra_run_args = Some(vec!["--x".into()]);
     pipeline.warm_start = true;
     pipeline.idle_seconds = 600;
-    pipeline.hold_fallback_mode = HoldFallbackMode::Alias;
-    pipeline.hold_fallback = Some("z-full".into());
+    pipeline.fallback = Some("z-full".into());
     pipeline.capabilities_override = Some(json!({"notes": ["i"]}));
     store::insert_image_model(db, &pipeline).await.unwrap();
     store::set_image_model_peak(db, first, Some(2_000_000_000))
@@ -368,11 +370,6 @@ async fn fill(state: &SharedState) {
                 alias: alias.into(),
                 candidates: vec!["c1".into(), "c2-full".into(), "ghost".into()],
                 background,
-                fallback_mode: if fallback.is_some() {
-                    HoldFallbackMode::Alias
-                } else {
-                    HoldFallbackMode::Inherit
-                },
                 fallback: fallback.map(str::to_string),
                 capabilities_disabled: vec!["vision".into()],
                 capabilities_enabled: vec![],
@@ -469,10 +466,10 @@ async fn every_class_with_every_field_set_is_the_documented_type() {
     let c2 = &full.local[1].model;
     assert_eq!(c2.params.ctx_size, Some(131072));
     assert_eq!(c2.params.chat_template_kwargs["n"], json!(1.5));
-    assert_eq!(c2.hold_fallback_mode, "alias");
+    assert!(c2.fallback.is_some(), "{c2:?}");
     assert_eq!(c2.ladder.len(), 1);
     assert_eq!(c2.extra_run_args, Some(vec!["--cpus=4".to_string()]));
-    assert_eq!(full.local[0].model.hold_fallback_mode, "inherit");
+    assert_eq!(full.local[0].model.fallback, None);
     assert!(live["local"][0]["model"]
         .get("capabilities_override")
         .is_none());
@@ -515,6 +512,7 @@ async fn every_class_with_every_field_set_is_the_documented_type() {
     assert_eq!(
         keys(&live["audio"][0]),
         set(&[
+            "deferrals_24h",
             "model",
             "public_name",
             "residency_charged_bytes",
@@ -660,6 +658,7 @@ async fn aux_rows_say_their_thread_count_and_where_it_comes_from() {
     assert_eq!(
         keys(&live["aux"][0]),
         set(&[
+            "deferrals_24h",
             "licence",
             "model",
             "public_name",

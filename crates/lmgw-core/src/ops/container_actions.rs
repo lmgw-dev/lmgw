@@ -122,42 +122,80 @@ pub(super) fn find_model_classes(snap: &Snapshot, model_id: &str) -> Vec<Class> 
 /// resident-but-unclaimed instead of pinned against eviction/the idle reaper
 /// forever (design §3.2: "admit-less registry acquire→drop guard").
 async fn start_model(state: &SharedState, class: Class, model_id: &str) -> Result<u16, String> {
-    let snap = state.snapshot();
-    let runtime = model_runtime(&snap, class, model_id)
-        .ok_or_else(|| format!("no {class} model '{model_id}' is configured"))?;
-    // An operator start is not a request: nothing is waiting on it, so it is
-    // refused rather than allowed to evict a model that is in use (§4). When
-    // admission is inactive this is a no-op and the start proceeds exactly as
-    // it did before. The permit holds the ledger reservation until the
-    // acquire settles, so two concurrent starts (group start, group apply)
-    // cannot both be told the same free bytes.
-    let permit = match state
-        .vram
-        .check_background_start(state, &snap, class, model_id)
-        .await
-    {
-        Fit::Full(why) => {
-            return Err(format!("not enough GPU memory to start it — {why}"));
-        }
-        // Deliberately not the "not enough GPU memory" wording (gpu-hold
-        // design §4): the card may be completely empty, and telling the owner
-        // to free memory would send them looking for a victim that does not
-        // exist. `container start`/`restart` are refused earlier, before
-        // anything is stopped; this catches the paths that reach a start
-        // another way — group apply, and a hold or a benchmark's lease that
-        // came on mid-operation. The sentence names which of the two it is
-        // and how it ends, so it is passed on as it is: under a lease,
-        // "GPU hold is active" in front of it was wrong.
-        Fit::Held(why) => {
-            return Err(why);
-        }
-        Fit::Go(permit) => Some(permit),
-        Fit::Unchecked => None,
+    // Read again whenever the check downloaded the model's engine image
+    // first (machine-check design §5, `Fit::Downloaded`): that can take
+    // minutes, and the row may have been edited or removed meanwhile. The
+    // image is here then, so the next check does not wait for it.
+    let (snap, runtime, permit) = loop {
+        let snap = state.snapshot();
+        let runtime = model_runtime(&snap, class, model_id)
+            .ok_or_else(|| format!("no {class} model '{model_id}' is configured"))?;
+        // An operator start is not a request: nothing is waiting on it, so
+        // it is refused rather than allowed to evict a model that is in use
+        // (§4). When admission is inactive this is a no-op and the start
+        // proceeds exactly as it did before. The permit holds the ledger
+        // reservation until the acquire settles, so two concurrent starts
+        // (group start, group apply) cannot both be told the same free bytes.
+        let permit = match state
+            .vram
+            .check_background_start(state, &snap, class, model_id)
+            .await
+        {
+            Fit::Full(why) => {
+                return Err(format!("not enough GPU memory to start it — {why}"));
+            }
+            // Deliberately not the "not enough GPU memory" wording (gpu-hold
+            // design §4): the card may be completely empty, and telling the
+            // owner to free memory would send them looking for a victim that
+            // does not exist. `container start`/`restart` are refused
+            // earlier, before anything is stopped; this catches the paths
+            // that reach a start another way — group apply, and a hold or a
+            // benchmark's lease that came on mid-operation. The sentence
+            // names which of the two it is and how it ends, so it is passed
+            // on as it is: under a lease, "GPU hold is active" in front of it
+            // was wrong.
+            Fit::Held(why) => {
+                return Err(why);
+            }
+            // Its engine image could not be downloaded (machine-check design
+            // §5): the sentence names the image and where it is set.
+            Fit::Failed(why) => {
+                return Err(why);
+            }
+            Fit::Downloaded => continue,
+            Fit::Go(permit) => Some(permit),
+            Fit::Unchecked => None,
+        };
+        break (snap, runtime, permit);
     };
     let spec = lifecycle::acquire_spec(state, &snap, &runtime);
+    // Whether it was up already: only a start that brought it up tells the
+    // machine check anything (machine-check design §2.5, D68).
+    let up = state.vram.is_up(
+        state,
+        &crate::vram::Target {
+            class,
+            model_id: model_id.to_string(),
+        },
+    );
     let started = state.runtime().acquire(&spec).await;
     drop(permit);
-    let port = started.map_err(|e| e.to_string())?.port();
+    let port = match started {
+        Ok(guard) => {
+            if !up {
+                crate::machine::after_start(state, &runtime);
+            }
+            guard.port()
+        }
+        // A start that failed on the graphics card checks the machine
+        // again, and says what on this computer keeps it from starting
+        // (machine-check design §2.5).
+        Err(e) => {
+            return Err(crate::vram::start_error(state, &runtime, e)
+                .await
+                .to_string())
+        }
+    };
     // Up now: learn its PID while it is known to be here (§4.7).
     state.vram.cache_pids(state);
     Ok(port)
@@ -440,8 +478,7 @@ async fn chat_model_problems(dir: &str, m: &LocalModel) -> ModelChecks {
         image: m.image.clone(),
         extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
-        hold_fallback_mode: m.hold_fallback_mode,
-        hold_fallback: m.hold_fallback.clone(),
+        fallback: m.fallback.clone(),
         capabilities_override: m.capabilities_override.clone(),
         ladder: m.ladder.clone(),
     };

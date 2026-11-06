@@ -44,7 +44,7 @@ use super::validate;
 use crate::runtime::registry::CommandRunner;
 
 /// The CUDA toolkit every engine builds against unless the build says
-/// otherwise (§14.2): 13.0.0 works for all four on driver 615.71, and one
+/// otherwise (§14.2): 13.0.0 works for all four on driver 600.10, and one
 /// version everywhere means one set of base images instead of three.
 pub const DEFAULT_CUDA_VERSION: &str = "13.0.0";
 
@@ -1875,7 +1875,7 @@ pub async fn detect_cuda_arch(runner: &dyn CommandRunner) -> Result<Vec<String>,
 
 /// The newest CUDA the driver supports, from plain `nvidia-smi`'s header:
 /// `… CUDA Version: 13.1 |` up to the 61x drivers, `… CUDA UMD Version: 13.4
-/// |` since 615.71.09.
+/// |` since 600.10.01.
 pub fn parse_driver_cuda_version(output: &str) -> Option<String> {
     ["CUDA Version:", "CUDA UMD Version:"]
         .iter()

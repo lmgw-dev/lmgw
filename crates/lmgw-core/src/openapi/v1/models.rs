@@ -2,7 +2,8 @@
 //! from `server::openai_model_object`/`anthropic_model_object`/`lmgw_block`
 //! (the model-capabilities wire shape). Served OpenAI-shaped unless the
 //! caller sends `anthropic-version` (`wants_anthropic`); both shapes publish the same
-//! [`crate::capabilities::ModelCapabilities`] object.
+//! [`crate::capabilities::ModelCapabilities`] object, the Anthropic one with
+//! Anthropic's capability blocks merged in (`capabilities::anthropic_blocks`).
 
 use schemars::generate::SchemaGenerator;
 use schemars::Schema;
@@ -73,21 +74,91 @@ pub(crate) fn openai_model(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
+/// The body of the component `reference` names, taken out of `g` when
+/// `take` (a schema only ever inlined into another must not stay behind as a
+/// component nothing reaches).
+fn definition(
+    g: &mut SchemaGenerator,
+    reference: &Schema,
+    take: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let name = reference
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|r| r.rsplit('/').next())
+        .unwrap_or_default()
+        .to_string();
+    let body = if take {
+        g.definitions_mut().remove(&name)
+    } else {
+        g.definitions().get(&name).cloned()
+    };
+    match body {
+        Some(serde_json::Value::Object(o)) => o,
+        _ => panic!("openapi: no component behind {reference:?}"),
+    }
+}
+
+/// The Anthropic dialect's `capabilities` (`capabilities::anthropic_blocks`):
+/// lmgw's own object with Anthropic's blocks merged in, as one object
+/// schema — an `allOf` cannot say it, because lmgw's object refuses keys it
+/// does not define.
+fn anthropic_capabilities(g: &mut SchemaGenerator) -> Schema {
+    let lmgw = g.subschema_for::<crate::capabilities::ModelCapabilities>();
+    let blocks = g.subschema_for::<crate::capabilities::anthropic_blocks::AnthropicBlocks>();
+    let mut merged = definition(g, &lmgw, false);
+    let blocks = definition(g, &blocks, true);
+    merged.remove("additionalProperties");
+    if let (Some(serde_json::Value::Object(ours)), Some(serde_json::Value::Object(theirs))) =
+        (merged.get_mut("properties"), blocks.get("properties"))
+    {
+        for (k, v) in theirs {
+            assert!(
+                ours.insert(k.clone(), v.clone()).is_none(),
+                "openapi: Anthropic block {k} collides with an lmgw capability key"
+            );
+        }
+    }
+    if let (Some(serde_json::Value::Array(ours)), Some(serde_json::Value::Array(theirs))) =
+        (merged.get_mut("required"), blocks.get("required"))
+    {
+        ours.extend(theirs.iter().cloned());
+    }
+    if merged.contains_key("title") {
+        merged.insert("title".into(), json!("AnthropicModelCapabilities"));
+    }
+    merged.insert(
+        "description".into(),
+        json!(
+            "lmgw's own capabilities object (as on the OpenAI shape, where an absent field \
+            means unknown) plus Anthropic's ten capability blocks. In the blocks, \
+            supported: true means a /v1/messages request using the feature works on this \
+            model through lmgw; false means lmgw does not serve it yet or does not know — \
+            Anthropic's schema has no unknown."
+        ),
+    );
+    schemas::named(
+        g,
+        "AnthropicModelCapabilities",
+        Schema::try_from(serde_json::Value::Object(merged)).expect("an object is a schema"),
+    )
+}
+
 pub(crate) fn anthropic_model(g: &mut SchemaGenerator) -> Schema {
-    let caps = g
-        .subschema_for::<crate::capabilities::ModelCapabilities>()
-        .to_value();
+    let caps = anthropic_capabilities(g).to_value();
     schemas::named(
         g,
         "AnthropicModel",
         schemars::json_schema!({
             "type": "object",
-            "required": ["type", "id", "display_name", "created_at"],
+            "required": ["type", "id", "display_name", "created_at", "lifecycle"],
             "properties": {
                 "type": {"type": "string", "enum": ["model"]},
                 "id": {"type": "string"},
                 "display_name": {"type": "string"},
                 "created_at": {"type": "string", "format": "date-time"},
+                "lifecycle": {"type": "string", "enum": ["active"], "description": "Always \
+                    active: a model lmgw lists is one it serves."},
                 "context_window": {"type": "integer"},
                 "max_input_tokens": {"type": "integer", "description": "Alias of \
                     context_window, under the name the Anthropic SDK types it by."},

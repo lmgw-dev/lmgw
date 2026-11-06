@@ -56,6 +56,10 @@ mod bench;
 /// package B7) — the tools themselves are `catalog/audio.rs`.
 mod audio;
 
+/// `lmgw__voice_generate` / `lmgw__voice_sample_save` dispatch (the Voices
+/// lab) — the tools themselves are `catalog/voice_lab.rs`.
+mod voice_lab;
+
 /// `lmgw__profiles`, `lmgw__profile_set` and `lmgw__profile_delete`
 /// dispatch (personality-profiles design §3.4) — the tools themselves are
 /// `catalog/chat_profiles.rs`.
@@ -104,6 +108,18 @@ fn num_p(desc: &str) -> Value {
 }
 fn enum_p(desc: &str, values: &[&str]) -> Value {
     json!({ "type": "string", "enum": values, "description": desc })
+}
+/// The one `fallback` argument every model and alias setter takes (openai
+/// egress design §14.11): one description, `of_type` saying which model type
+/// it must be for this setter.
+fn fallback_p(of_type: &str) -> Value {
+    str_p(&format!(
+        "The model or alias that answers when this one cannot: the GPU hold, VRAM outside \
+         lmgw, background traffic deferred, an unavailable candidate, an exhausted upstream \
+         quota, an unreachable upstream, or a disabled row. A local model id, a passthrough id \
+         or a plain alias of the same model type ({of_type}); not a candidate alias. Chains are \
+         allowed; a loop is refused. clear: 'fallback' removes it."
+    ))
 }
 /// A ladder's higher rungs (ladder design §4.1, §6): a JSON array of
 /// `{gguf_path, ctx_size}` objects, given as a JSON-encoded **string** —
@@ -188,12 +204,12 @@ pub fn full_catalog() -> Vec<(Value, bool)> {
 // Result shaping
 // ---------------------------------------------------------------------------
 
-/// A successful tool result: the JSON payload pretty-printed into a single text
-/// block. Text rather than `structuredContent` because a plain content block is
-/// what every client — and every small model — reads without an output schema.
+/// A successful tool result: the JSON payload, compact, in a single text
+/// block (indentation is output a client pays for in context). Text rather
+/// than `structuredContent` because a plain content block is what every
+/// client — and every small model — reads without an output schema.
 fn ok_result(v: &Value) -> Value {
-    let text = serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string());
-    json!({ "content": [{ "type": "text", "text": text }], "isError": false })
+    json!({ "content": [{ "type": "text", "text": v.to_string() }], "isError": false })
 }
 
 /// A failed tool result. Modelled as `isError: true` rather than a JSON-RPC
@@ -226,6 +242,22 @@ fn arg_i64(args: &Map<String, Value>, key: &str) -> Result<Option<i64>, String> 
             .map(Some)
             .ok_or_else(|| format!("argument '{key}' must be an integer")),
         Some(_) => Err(format!("argument '{key}' must be an integer")),
+    }
+}
+
+/// An optional array of integers, rejecting a wrong-typed array or element.
+fn arg_i64_list(args: &Map<String, Value>, key: &str) -> Result<Option<Vec<i64>>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_i64()
+                    .ok_or_else(|| format!("argument '{key}' must be an array of integers"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(format!("argument '{key}' must be an array of integers")),
     }
 }
 
@@ -288,7 +320,9 @@ fn hoist_json_arg(args: &mut Map<String, Value>, key: &str) -> Result<(), String
 /// name like a patch tool's `deny_unknown_fields` refuses it, instead of
 /// running with the default. (`lmgw__build_set` goes through a patch struct
 /// that already refuses.)
-const CLOSED_ARG_TOOLS: [&str; 11] = [
+const CLOSED_ARG_TOOLS: [&str; 13] = [
+    "lmgw__machine_check",
+    "lmgw__model_find",
     "lmgw__builds",
     "lmgw__build_log",
     "lmgw__container_images",
@@ -403,6 +437,10 @@ async fn stored_levels(
 /// `Err(CallError)` is reserved for "this name is not a tool" — everything else,
 /// including a mode refusal or a bad argument, comes back as an `isError`
 /// result the calling model can read and act on.
+///
+/// An operator action: a tool that admits a model runs as the owner's
+/// traffic, inside a guest's run too — no origin reaches it yet
+/// (per-request background design §12).
 pub async fn call_capped(
     state: &SharedState,
     name: &str,
@@ -479,6 +517,50 @@ async fn run(
             ops::backends::to_json(ops::models(state, kind, search).await)
         }
         "lmgw__upstreams" => ops::backends::to_json(ops::upstreams(state).await),
+        "lmgw__model_find" => {
+            let defaults = lmgw_api_types::model_find::ModelFindArgs::default();
+            let count = |key: &str, default: u32| -> Result<u32, String> {
+                match arg_i64(&a, key)? {
+                    None => Ok(default),
+                    Some(n) => {
+                        u32::try_from(n).map_err(|_| format!("argument '{key}' must be 0 or more"))
+                    }
+                }
+            };
+            ops::backends::to_json(
+                ops::model_find(
+                    state,
+                    lmgw_api_types::model_find::ModelFindArgs {
+                        query: arg_str(&a, "query")?
+                            .ok_or("query is required: a model's name or a Hugging Face address")?
+                            .to_string(),
+                        cursor: arg_str(&a, "cursor")?.map(str::to_string),
+                        others_offset: count("others_offset", 0)?,
+                        others_count: count("others_count", defaults.others_count)?,
+                        did_you_mean_offset: count("did_you_mean_offset", 0)?,
+                        did_you_mean_count: count(
+                            "did_you_mean_count",
+                            defaults.did_you_mean_count,
+                        )?,
+                        other_uploads_offset: count("other_uploads_offset", 0)?,
+                        other_uploads_count: count(
+                            "other_uploads_count",
+                            defaults.other_uploads_count,
+                        )?,
+                    },
+                )
+                .await,
+            )
+        }
+        "lmgw__machine_check" => ops::backends::to_json(
+            crate::machine::op(
+                state,
+                lmgw_api_types::machine::MachineCheckArgs {
+                    fresh: arg_bool(&a, "fresh")?.unwrap_or(false),
+                },
+            )
+            .await,
+        ),
         "lmgw__agents" => ops::backends::to_json(ops::agents(state).await),
         "lmgw__agent_get" => ops::backends::to_json(
             ops::agent_get(state, arg_str(&a, "id")?.ok_or("id is required")?).await,
@@ -560,8 +642,14 @@ async fn run(
             )
         }
         "lmgw__local_model_plan" => {
-            let path = arg_str(&a, "gguf_path")?.ok_or("gguf_path is required")?;
-            crate::modelinfo::local_model_plan(state, path, arg_str(&a, "target")?).await
+            crate::modelinfo::local_model_plan_of(
+                state,
+                arg_str(&a, "gguf_path")?,
+                arg_str(&a, "repo")?,
+                arg_str(&a, "file")?,
+                arg_str(&a, "target")?,
+            )
+            .await
         }
         "lmgw__local_model_test" => {
             let mid = arg_str(&a, "model_id")?.ok_or("model_id is required")?;
@@ -580,17 +668,31 @@ async fn run(
                     repo,
                     arg_str(&a, "search")?,
                     arg_str(&a, "target")?.unwrap_or("chat"),
+                    match arg_bool(&a, "fit")?.unwrap_or(false) {
+                        // An agent's ask reads, metered or not (D59).
+                        true => lmgw_api_types::RepoFit::Headers,
+                        false => lmgw_api_types::RepoFit::No,
+                    },
                 )
                 .await,
             )
         }
-        "lmgw__hf_downloads" => ops::backends::to_json(ops::hf_downloads(state).await),
+        "lmgw__hf_downloads" => {
+            let ids = arg_i64_list(&a, "ids")?;
+            let active = arg_bool(&a, "active")?.unwrap_or(false);
+            ops::backends::to_json(ops::hf_downloads(state, ids.as_deref(), active).await)
+        }
         "lmgw__image_recipes" => ops::backends::to_json(ops::image_recipes(state).await),
         "lmgw__image_recipe_add" => {
             let key = arg_str(&a, "key")?.ok_or("key is required (see lmgw__image_recipes)")?;
             ops::backends::to_json(
                 ops::image_recipe_add(state, key, arg_str(&a, "diffusion_file")?).await,
             )
+        }
+        "lmgw__image_upscaler_add" => {
+            let key = arg_str(&a, "key")?
+                .ok_or("key is required (see upscalers.shipped of lmgw__image_recipes)")?;
+            ops::backends::to_json(ops::image_upscaler_add(state, key).await)
         }
         "lmgw__usage" => ops::backends::to_json(
             ops::usage(
@@ -619,6 +721,13 @@ async fn run(
                 .await,
             )
         }
+        // Get it (find-a-model design §6, WP5).
+        "lmgw__model_get" => {
+            ops::backends::to_json(ops::model_get(state, ops::patch_from_args(args)?).await)
+        }
+        "lmgw__model_get_status" => {
+            ops::backends::to_json(ops::model_get_status(state, ops::patch_from_args(args)?).await)
+        }
         "lmgw__hf_set" => {
             let action = arg_str(&a, "action")?
                 .ok_or("action is required (redownload|delete|check_updates)")?;
@@ -634,6 +743,9 @@ async fn run(
         }
         "lmgw__upstream_set" => ops::backends::to_json(
             ops::upstream_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await,
+        ),
+        "lmgw__upstream_quota_clear" => ops::backends::to_json(
+            ops::upstream_quota_clear(state, ops::patch_from_args(args)?).await,
         ),
         "lmgw__model_set" => {
             ops::backends::to_json(ops::model_set(state, ops::patch_from_args(args)?).await)
@@ -668,14 +780,17 @@ async fn run(
         }
         "lmgw__hold_set" => {
             let active = arg_bool(&a, "active")?.ok_or("active is required (true|false)")?;
-            ops::backends::to_json(ops::hold_set(state, active).await)
+            ops::backends::to_json(ops::hold_set(state, active).await.map_err(|r| r.message))
         }
         "lmgw__settings_set" => {
             let mut a = args.unwrap_or_default();
             hoist_json_arg(&mut a, "realtime")?;
+            hoist_json_arg(&mut a, "chat_media_defaults")?;
             ops::backends::to_json(ops::settings_set(state, ops::patch_from_args(Some(a))?).await)
         }
-        "lmgw__prices_sync" => ops::backends::to_json(ops::prices_sync(state).await),
+        "lmgw__prices_sync" => {
+            ops::backends::to_json(ops::prices_sync(state).await.map_err(|r| r.message))
+        }
         "lmgw__price_set" => {
             let scope_kind = arg_str(&a, "scope_kind")?
                 .ok_or("scope_kind is required (alias|upstream_model)")?;
@@ -685,6 +800,7 @@ async fn run(
                     scope_kind,
                     arg_str(&a, "scope_key")?,
                     arg_str(&a, "unit")?,
+                    arg_str(&a, "service_tier")?,
                     ops::PriceRates {
                         price_in: arg_f64(&a, "price_in")?,
                         price_out: arg_f64(&a, "price_out")?,
@@ -789,7 +905,8 @@ async fn run(
                 lmgw_api_types::builds::BuildRunArgs { id, rebuild },
                 lmgw_api_types::builds::BuildTrigger::Mcp,
             )
-            .await?;
+            .await
+            .map_err(|r| r.message)?;
             let next_step = format!(
                 "follow the output with lmgw__build_log run_id={} offset=0 (then each \
                  next_offset), and the outcome with lmgw__builds id={id} until live_job_id is \
@@ -845,6 +962,9 @@ async fn run(
         "lmgw__audio_catalog" | "lmgw__audio_model_set" | "lmgw__voice_transcribe" => {
             self::audio::run(state, name, args).await
         }
+        "lmgw__voice_generate" | "lmgw__voice_sample_save" => {
+            self::voice_lab::run(state, name, args).await
+        }
         "lmgw__profiles" | "lmgw__profile_set" | "lmgw__profile_delete" => {
             self::chat_profiles::run(state, name, args, caller).await
         }
@@ -879,15 +999,17 @@ mod tests {
 
     /// The constraint that shapes this whole module: a small local model has to
     /// be able to fill these in, which means no hand-built JSON arguments. A
-    /// list of strings is the one exception (`strs_p`).
+    /// list of strings or of integers is the one exception (`strs_p`, and the
+    /// `ids` of `lmgw__hf_downloads`).
     #[test]
     fn all_parameters_are_flat_scalars() {
         for t in catalog() {
             for (key, spec) in &t.props {
                 let ty = spec["type"].as_str().unwrap_or("");
-                let string_list = ty == "array" && spec["items"]["type"] == "string";
+                let flat_list = ty == "array"
+                    && matches!(spec["items"]["type"].as_str(), Some("string" | "integer"));
                 assert!(
-                    string_list || matches!(ty, "string" | "integer" | "boolean" | "number"),
+                    flat_list || matches!(ty, "string" | "integer" | "boolean" | "number"),
                     "{}.{key} has non-scalar type '{ty}' — tool arguments must stay flat",
                     t.name
                 );

@@ -1,0 +1,48 @@
+{
+ "anthropic": {
+  "bytes": 627479,
+  "container_image": "docker.io/library/python@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30",
+  "fetched": "2026-11-04",
+  "how": "derived from the official Python SDK's request TypedDicts and response models with pydantic's JSON Schema writer (scripts/api_schemas_anthropic_dump.py); Anthropic publishes no standalone OpenAPI document",
+  "pip_freeze": [
+   "annotated-types==0.8.0",
+   "anthropic @ file:///in/wheels/anthropic-2.4.0-py3-none-any.whl#sha256=db2e691364ae2e04083ed9b8deb49f1a6967e9f184f8cbb5afcb3bcda8ab0532",
+   "anyio==4.16.0",
+   "docstring_parser==0.18.0",
+   "h11==0.16.0",
+   "httpcore2==2.16.0",
+   "httpx2==2.16.0",
+   "idna==3.20",
+   "jiter==0.18.0",
+   "opentelemetry-api==1.45.2",
+   "pydantic==2.14.2",
+   "pydantic_core==2.50.2",
+   "sniffio==1.3.1",
+   "truststore==0.10.5",
+   "typing-inspection==0.4.5",
+   "typing_extensions==4.16.0"
+  ],
+  "pydantic_version": "2.14.2",
+  "sdk_version": "2.4.0",
+  "sha256": "160b7930741c10d68e19bf4595fad3703a777733d192fc74e80ea3eb410beffd",
+  "sha256_canonical": "d606c656de3e2eb1c4a2b5a1bb0e644be6d48c85932b7f99f0b4b640afb59a4d",
+  "source": "https://pypi.org/project/anthropic/2.4.0/",
+  "wheel_sha256": "db2e691364ae2e04083ed9b8deb49f1a6967e9f184f8cbb5afcb3bcda8ab0532"
+ },
+ "gemini": {
+  "bytes": 387956,
+  "fetched": "2026-11-04",
+  "revision": "20261103",
+  "sha256": "c0da82cb4e3659f1d1d1d7fd0c9dda12e165d5359f2d4e574406339e26a53c9a",
+  "sha256_canonical": "771d734a969d18f59578b6a2d63164bae0b7ee9bae06959e687c65dc2080d744",
+  "source": "https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta"
+ },
+ "openai": {
+  "bytes": 5112409,
+  "commit": "b4cad10d7cff7fc286f2dbf1992569989522c6f0",
+  "fetched": "2026-11-04",
+  "sha256": "24fe4259875361cb38bc552fc2355758649edbe68191f31338153d129e718ad3",
+  "sha256_canonical": "a4759bf924aba9026fca312458644f2f47f744fccaa5135a31e84b0c4f186728",
+  "source": "https://raw.githubusercontent.com/openai/openai-openapi/b4cad10d7cff7fc286f2dbf1992569989522c6f0/openapi.json"
+ }
+}

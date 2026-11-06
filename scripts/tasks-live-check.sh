@@ -61,7 +61,7 @@ TOKEN="$(sed 's/\x1b\[[0-9;]*m//g' "$WORK/gateway.log" | grep -o 'lmgw-owner-[0-
 op() { curl -fsS -X POST "$BASE/api/op/$1" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$2"; }
 scripts/chat-actions-setup.sh "$TOKEN" "$BASE" "$MOCK_PORT" >/dev/null
 # The voice: an OpenAI-shaped TTS on the mock (silence, which is still audio to send).
-op upstream_set "{\"action\":\"create\",\"name\":\"fake-voice\",\"protocol\":\"openai\",\"kind\":\"generic\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT/v1\"}" >/dev/null
+op upstream_set "{\"action\":\"create\",\"name\":\"fake-voice\",\"protocol\":\"openai_compatible\",\"kind\":\"generic\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT/v1\"}" >/dev/null
 op model_set '{"action":"create","alias":"fake-tts","upstream":"fake-voice","upstream_model":"tts-1","capabilities_override":{"capabilities":{"task":"tts","endpoints":["/v1/audio/speech"],"source":"owner"}}}' >/dev/null
 op settings_set '{"chat_tts_alias":"fake-tts","chat_voice":"alloy"}' >/dev/null
 # The device: a device key hosting the `builder` label, and the mock on its link.

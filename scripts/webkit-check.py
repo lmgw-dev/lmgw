@@ -2,6 +2,7 @@
 # Usage: scripts/webkit-check.py [--base URL] [--routes /a,/b,...] [--sizes WxH,...]
 #                                 [--shots DIR] [--token-file PATH] [--json OUT]
 #                                 [--backend auto|broadway|wayland] [--media] [--zoom 1.25]
+#                                 [--drive STEPS.json]
 """WebKitGTK compatibility check for lmgw's dashboard.
 
 Every other UI script here (ui-matrix.py, ui-drive.py, screenshot.py) drives
@@ -65,8 +66,27 @@ streams showed up there. Everything it starts dies with it (PR_SET_PDEATHSIG)
 and is stopped on exit, SIGTERM and SIGHUP; its work dir is
 target/webkit-check-<pid>, removed after.
 
+--drive STEPS.json runs a scripted interaction instead of the route probes,
+in a subset of ui-drive.py's step language (a file that sticks to it serves
+both engines):
+
+  {"size": "1440x900"}               resize the view
+  {"nav": "/chat"}                   load the URL afresh and wait until quiet
+  {"js": "expr"}                     evaluate, the result printed
+  {"expect": "expr", "label": "…"}   evaluate: truthy is PASS, anything else FAIL
+  {"wait": 0.5}                      sleep (seconds)
+  {"until": "expr", "timeout": 30}   re-evaluate every 0.25 s until truthy (PASS) or
+                                     the timeout runs out (FAIL); a promise is
+                                     not awaited
+  {"shot": "name"}                   viewport PNG to --shots/name.png
+
+There are no trusted key or mouse events here: type by setting a field's
+value and dispatching `input`, click with `el.click()`. A result that is not
+a string is passed through JSON.stringify.
+
 Exit status: 0 the run completed (see the printed report for probe PASS/FAIL;
-with --media, 2 when a media check failed), 1 if no backend could render
+with --media, 2 when a media check failed; with --drive, 2 when an expect
+failed), 1 if no backend could render
 WebKit content at all.
 """
 import argparse
@@ -369,10 +389,12 @@ def orchestrate(args) -> int:
         "settle_max_ms": args.wait * 1000,
         "media": args.media,
         "zoom": args.zoom,
+        "timeout": args.timeout,
         # The realtime phase's session mock rides along (chat-voice WP9).
         "probe": ((Path(__file__).parent / "realtime-mock.js").read_text() + "\n"
                   + (Path(__file__).parent / "media-probe.js").read_text()) if args.media else None,
         "probe_opts": {"inputLabel": "Mock audio device", "outputKind": "default"},
+        "drive": json.loads(Path(args.drive).read_text()) if args.drive else None,
     }
     spec_path = workdir / "spec.json"
     result_path = workdir / "result.json"
@@ -481,6 +503,9 @@ def orchestrate(args) -> int:
         report(backend_used, result, args)
         if args.json:
             Path(args.json).write_text(json.dumps(result, indent=1))
+        if args.drive and any(i.get("drive_pass") is False
+                              for i in result.get("interactions", [])):
+            return 2
         if args.media:
             media = result.get("media") or {}
             if (media.get("error") or not media.get("checks")
@@ -536,6 +561,7 @@ def report(backend: str, result: dict, args) -> None:
                 or d.get("inside_viewport") is False
                 or d.get("save_inside_viewport") is False
             ))
+            or i.get("drive_pass") is False
         )
         status = "FAIL" if semantic_fail else "PASS"
         print(f"\n[{status}] {i['name']}: {json.dumps(d)[:300]}")
@@ -684,7 +710,7 @@ def worker_main(spec_path: str, result_path: str) -> int:
 
     gi.require_version("Gtk", "4.0")
     gi.require_version("WebKit", "6.0")
-    from gi.repository import Gtk, WebKit, GLib  # noqa: E402
+    from gi.repository import Gtk, WebKit, GLib, Gio  # noqa: E402
 
     spec = json.loads(Path(spec_path).read_text())
     base, token = spec["base"], spec["token"]
@@ -699,7 +725,11 @@ def worker_main(spec_path: str, result_path: str) -> int:
     max_w = max([w for w, h in sizes] + [1440]) + 40
     max_h = max([h for w, h in sizes] + [900]) + 40
 
-    app = Gtk.Application(application_id="dev.lmgw.webkitcheck")
+    # NON_UNIQUE: a second run at the same time would otherwise find the id
+    # already owned on the session bus, hand its activation to the first run
+    # and exit 0 without ever running on_activate (no result).
+    app = Gtk.Application(application_id="dev.lmgw.webkitcheck",
+                          flags=Gio.ApplicationFlags.NON_UNIQUE)
 
     def on_activate(app):
         win = Gtk.Window(application=app)
@@ -854,6 +884,12 @@ def worker_main(spec_path: str, result_path: str) -> int:
             # rail) sometimes lands well after 500ms and sometimes before —
             # so poll innerWidth/innerHeight for the resize to actually take,
             # then give the app's listener a moment to react to it.
+            # A zoomed view's innerWidth is the window's over the zoom: at
+            # 1.25 a 1440 px window is 1152 CSS px, and waiting for 1440
+            # spent the whole poll (3 s) on every resize.
+            zoom = spec.get("zoom") or 1.0
+            want = (w / zoom, h / zoom)
+
             def step(nxt):
                 webview.set_size_request(w, h)
 
@@ -863,7 +899,9 @@ def worker_main(spec_path: str, result_path: str) -> int:
                             dims = json.loads(v) if v else None
                         except (TypeError, ValueError):
                             dims = None
-                        if dims == [w, h] or n <= 0:
+                        took = (isinstance(dims, list) and len(dims) == 2
+                                and abs(dims[0] - want[0]) <= 1 and abs(dims[1] - want[1]) <= 1)
+                        if took or n <= 0:
                             wait_ms(500, nxt)
                         else:
                             GLib.timeout_add(150, lambda: (poll(n - 1), False)[1])
@@ -989,7 +1027,89 @@ def worker_main(spec_path: str, result_path: str) -> int:
                            " return JSON.stringify({clicked: true}); })()", "media_popover_open"))
             add(make_wait(800))
             add(make_snapshot("chat_media_popover"))
-        for route in (routes if media is None else []):
+        drive = spec.get("drive")
+
+        def make_drive_eval(expr, name, expect):
+            # The result as a string either way: a value that is not one
+            # (an object, a number) is stringified in the page.
+            script = ("(() => { const v = (" + expr + "); return typeof v === 'string' ? v"
+                      " : JSON.stringify(v === undefined ? null : v); })()")
+
+            def step(nxt):
+                def cb(v, e):
+                    entry = {"name": name, "ok": e is None,
+                             "detail": {"value": v} if e is None else {"error": e}}
+                    if expect:
+                        try:
+                            val = json.loads(v) if v is not None else None
+                        except (TypeError, ValueError):
+                            val = v
+                        entry["drive_pass"] = e is None and bool(val)
+                    interactions.append(entry)
+                    nxt()
+
+                ev(script, cb)
+
+            return step
+
+        def make_drive_until(expr, name, timeout_s):
+            # ui-drive.py's `until`, without the promise: the page's own
+            # truthiness, re-read every 0.25 s. What a fixed wait cannot
+            # cover is the page's own clock: under Broadway WebKit draws an
+            # idle page seldom (an animation frame asked for has waited over
+            # a second), so work that lands on a frame lands late.
+            script = "(() => { try { return (" + expr + ") ? 'true' : 'false'; }" \
+                     " catch (e) { return 'threw: ' + e; } })()"
+
+            def step(nxt):
+                t0 = time.monotonic()
+
+                def poll():
+                    def cb(v, e):
+                        waited = round(time.monotonic() - t0, 2)
+                        if e is None and v == "true":
+                            interactions.append({"name": name, "ok": True, "drive_pass": True,
+                                                 "detail": {"waited_s": waited}})
+                            nxt()
+                        elif waited >= timeout_s:
+                            interactions.append({"name": name, "ok": e is None, "drive_pass": False,
+                                                 "detail": {"waited_s": waited, "last": v or e}})
+                            nxt()
+                        else:
+                            wait_ms(250, poll)
+
+                    ev(script, cb)
+
+                poll()
+
+            return step
+
+        if drive:
+            # The backend check reads the first measurement: one of the
+            # page the drive starts on.
+            first = next((st["nav"] for st in drive if "nav" in st), "/")
+            add(make_nav(first))
+            add(make_measure(first, *sizes[0]))
+        for n, st in enumerate(drive or []):
+            if "size" in st:
+                add(make_resize(*(int(v) for v in st["size"].split("x"))))
+            elif "nav" in st:
+                add(make_nav(st["nav"]))
+            elif "js" in st:
+                add(make_drive_eval(st["js"], st.get("label") or f"js #{n}", False))
+            elif "expect" in st:
+                add(make_drive_eval(st["expect"], st.get("label") or f"expect #{n}", True))
+            elif "until" in st:
+                add(make_drive_until(st["until"], st.get("label") or f"until #{n}",
+                                     float(st.get("timeout", 30))))
+            elif "wait" in st:
+                add(make_wait(int(float(st["wait"]) * 1000)))
+            elif "shot" in st:
+                add(make_snapshot(st["shot"]))
+            else:
+                interactions.append({"name": f"step #{n}", "ok": False,
+                                     "detail": {"error": f"unknown step {st!r}"}})
+        for route in (routes if media is None and not drive else []):
             add(make_nav(route))
             for w, h in sizes:
                 add(make_resize(w, h))
@@ -1032,10 +1152,27 @@ def worker_main(spec_path: str, result_path: str) -> int:
             Path(result_path).write_text(json.dumps(out, indent=1))
             app.quit()
 
-        # Global watchdog: however far the queue got, always write a result.
-        GLib.timeout_add(int(os.environ.get("LMGW_WK_WATCHDOG_MS",
-                                            "330000" if media is not None else "240000")),
-                          lambda: (finish_run(), False)[1] if queue or not Path(result_path).exists() else False)
+        # Global watchdog: however far the queue got, always write a result —
+        # inside --timeout (the parent kills the worker there), and saying
+        # what it cut: a long drive used to end at 240 s with its last steps
+        # silently missing.
+        cut_ms = max(10000, int((spec.get("timeout") or 250) - 10) * 1000)
+        default_ms = min(330000, cut_ms) if media is not None else cut_ms
+        watchdog_ms = int(os.environ.get("LMGW_WK_WATCHDOG_MS", str(default_ms)))
+
+        def watchdog():
+            if queue:
+                entry = {"name": "watchdog", "ok": False,
+                         "detail": {"error": f"{len(queue)} steps left after {watchdog_ms // 1000} s"
+                                             " (raise --timeout)"}}
+                if drive:
+                    entry["drive_pass"] = False
+                interactions.append(entry)
+            if queue or not Path(result_path).exists():
+                finish_run()
+            return False
+
+        GLib.timeout_add(watchdog_ms, watchdog)
 
         run_next()
 
@@ -1064,11 +1201,14 @@ def main() -> int:
     ap.add_argument("--json", metavar="OUT", help="write the full result as JSON")
     ap.add_argument("--backend", choices=["auto", "broadway", "wayland"], default="auto")
     ap.add_argument("--timeout", type=float, default=280.0,
-                     help="seconds allowed per backend attempt")
+                     help="seconds allowed per backend attempt (a long --drive needs more: the run"
+                          " stops 10 s before it, failing with the steps it had left)")
     ap.add_argument("--wait", type=float, default=20.0,
                      help="most seconds to wait for a route to settle")
     ap.add_argument("--media", action="store_true",
                      help="run the page-audio probe (chat-voice WP6) on /chat instead")
+    ap.add_argument("--drive", metavar="STEPS.json",
+                     help="run a scripted interaction instead of the route probes")
     ap.add_argument("--zoom", type=float, default=1.0,
                      help="the webview's zoom, as the app's interface scale (1.25: its default)")
     args = ap.parse_args()

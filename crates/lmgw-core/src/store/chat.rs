@@ -121,6 +121,10 @@ pub struct ChatThread {
     /// The thread's own voice settings (chat-voice design §2.2); every
     /// absent field inherits Settings → Chat → Voice.
     pub voice: ThreadVoice,
+    /// The thread's own default models of the image and audio tools
+    /// (chat-media-tools design §3.8); an absent field inherits its
+    /// folder's, then Settings → Chat's, and an empty one is no default.
+    pub media_defaults: lmgw_api_types::chat_media::MediaDefaults,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -167,6 +171,13 @@ pub struct ChatMessageRow {
     pub content: String,
     /// Reasoning / "thinking" trace for reasoning models (empty otherwise).
     pub reasoning: String,
+    /// A plain reply's reasoning seals (openai egress design §7.3.2,
+    /// migration 0096), in the order its items were answered; empty for a
+    /// reply without one. Replayed into the turn's reasoning parts, never
+    /// in the row's JSON: the OpenAI-encrypted reasoning is the upstream's
+    /// to read, not a page's.
+    #[serde(skip)]
+    pub reasoning_seals: Vec<super::ReplySeal>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     /// The turn's IR messages as JSON, for an agentic (Admin Chat) turn: the
@@ -194,6 +205,11 @@ pub struct ChatMessageRow {
     /// How the turn was spoken (chat-voice design §3); `None` for a typed
     /// turn.
     pub voice: Option<MessageVoice>,
+    /// A user message's origin (chat-plane design §9.10, migration 0099):
+    /// the sentence its client sent about where the user wrote it, which
+    /// the model reads before the message's text. `None` when its client
+    /// sent none, and on every other role.
+    pub origin: Option<String>,
     /// A gated turn's calls and their decisions (client-apps design §6):
     /// `None` on every other row. Not in the row's JSON: the thread's read
     /// lists the waiting calls as `pending_approvals` itself.
@@ -258,6 +274,13 @@ fn chat_thread_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatThread {
         kb_mode: KbMode::parse(row.get::<String, _>("kb_mode").as_str()).unwrap_or_default(),
         kb_budget_tokens: row.get("kb_budget_tokens"),
         voice: ThreadVoice::from_stored(row.get::<String, _>("voice").as_str()),
+        // Read tolerantly, as `voice`: a hand edit opens the thread with
+        // nothing of its own, and a key this build does not know is dropped
+        // on its own (input is strict).
+        media_defaults: lmgw_api_types::chat_media::MediaDefaults::from_stored(
+            serde_json::from_str(row.get::<String, _>("media_defaults").as_str())
+                .unwrap_or_default(),
+        ),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -270,6 +293,7 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         role: row.get("role"),
         content: row.get("content"),
         reasoning: row.get("reasoning"),
+        reasoning_seals: super::chat_seals::from_column(row.get("reasoning_seals")),
         prompt_tokens: row.get("prompt_tokens"),
         completion_tokens: row.get("completion_tokens"),
         ir_messages: row.get("ir_messages"),
@@ -279,6 +303,7 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         answered_by: row.get("answered_by"),
         images_note: row.get("images_note"),
         voice: MessageVoice::from_stored(row.get("voice")),
+        origin: row.get("origin"),
         pending_approvals: PendingApprovals::parse(
             row.get::<Option<String>, _>("pending_approvals").as_deref(),
         ),
@@ -809,6 +834,7 @@ pub(super) async fn write_chat_thread_settings(
          reasoning_budget=?10, top_p=?11, top_k=?12, min_p=?13, repeat_penalty=?14,
          presence_penalty=?15, frequency_penalty=?16, seed=?17, stop=?18,
          kb_ids=?19, kb_mode=?20, kb_budget_tokens=?21, approval_floor=?25,
+         media_defaults=?26,
          profile_id = (SELECT id FROM chat_profiles WHERE id = ?24),
          voice = CASE
            WHEN ?23 AND ",
@@ -844,6 +870,7 @@ pub(super) async fn write_chat_thread_settings(
     .bind(seed == SeedWrite::Keep)
     .bind(t.profile_id)
     .bind(super::chat_approval_floor::to_column(&t.approval_floor))
+    .bind(media_defaults_column(&t.media_defaults))
     .fetch_optional(&mut *conn)
     .await?;
     feed::record_thread_since(&mut *conn, feed::kind::THREAD_UPDATED, t.id, by, was).await?;
@@ -858,6 +885,11 @@ pub(super) async fn write_chat_thread_settings(
         level_before: level(was),
         level_after: level(now),
     }))
+}
+
+/// A thread's `media_defaults` as stored.
+pub(super) fn media_defaults_column(m: &lmgw_api_types::chat_media::MediaDefaults) -> String {
+    serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Set just the title (used to auto-name a thread from its first user

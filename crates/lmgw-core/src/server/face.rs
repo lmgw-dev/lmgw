@@ -1,7 +1,8 @@
 //! Which routes a listener serves (device link design §4.6): its face.
 //!
 //! - **The device listener** serves a route when its `CAPABILITY_TABLE`
-//!   row is `Inference` or `Chat` for the request's method, or when it is
+//!   row is `Inference`, `Chat` or `Transfer` for the request's method
+//!   (device transfers design §10), or when it is
 //!   one of [`DEVICE_ROUTES`]. Everything else is a 404, as an unknown path
 //!   is: no SPA, no `/api`, no labs, no agent proxies.
 //! - **The plain listener** serves every route but [`DEVICE_ROUTES`], which
@@ -38,7 +39,7 @@ pub fn serves_on(via: Via, method: &Method, path: &str, cap: Cap) -> bool {
     let own = is_device_route(method, path);
     match via {
         Via::Plain => !own,
-        Via::Devices => own || matches!(cap, Cap::Inference | Cap::Chat),
+        Via::Devices => own || matches!(cap, Cap::Inference | Cap::Chat | Cap::Transfer),
     }
 }
 

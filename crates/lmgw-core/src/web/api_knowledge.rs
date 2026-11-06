@@ -217,25 +217,34 @@ async fn file_text(
     Path(id): Path<i64>,
     Query(q): Query<dto::knowledge::SourceQuery>,
 ) -> Response {
-    ops_result(
-        read::source(
-            &st,
-            id,
-            q.chunk.as_deref(),
-            &read::Cited {
-                span_start: q.span_start,
-                span_end: q.span_end,
-                file_sha: q.sha.filter(|s| !s.is_empty()),
-            },
-        )
-        .await
-        .map(|s| typed(&wire::source(s))),
+    ops_result(source(&st, id, q).await.map(|s| typed(&s)))
+}
+
+/// What [`file_text`] answers, for the Chat plane's source viewer too
+/// (`chat_reads::knowledge`), which shows less of it.
+pub(super) async fn source(
+    st: &SharedState,
+    id: i64,
+    q: dto::knowledge::SourceQuery,
+) -> Result<dto::knowledge::KnowledgeSource, String> {
+    read::source(
+        st,
+        id,
+        q.chunk.as_deref(),
+        &read::Cited {
+            span_start: q.span_start,
+            span_end: q.span_end,
+            file_sha: q.sha.filter(|s| !s.is_empty()),
+        },
     )
+    .await
+    .map(wire::source)
 }
 
 /// `GET /api/knowledge/files/{id}/original` — the uploaded bytes, as a
-/// download under the file's name.
-async fn original(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
+/// download under the file's name. The Chat plane's source viewer answers
+/// the owner through it too (`chat_reads::knowledge`).
+pub(super) async fn original(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
     let file = match knowledge::store::get_file(&st.knowledge.pool, id).await {
         Ok(Some(f)) => f,
         Ok(None) => {
@@ -248,14 +257,16 @@ async fn original(State(st): State<SharedState>, Path(id): Path<i64>) -> Respons
         Err(e) => return ops_result(Err(e.to_string())),
     };
     match knowledge::originals::read(&st.data_dir, &file.sha256).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, file.mime.clone()),
-                (header::CONTENT_DISPOSITION, attachment(&file.name)),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => super::stored::sandboxed(
+            (
+                [
+                    (header::CONTENT_TYPE, file.mime.clone()),
+                    (header::CONTENT_DISPOSITION, attachment(&file.name)),
+                ],
+                bytes,
+            )
+                .into_response(),
+        ),
         Err(e) => api_error(StatusCode::NOT_FOUND, "not_found", e),
     }
 }
@@ -319,6 +330,7 @@ async fn search(
                     budget_tokens: budget,
                     params,
                     caller: None,
+                    origin: Default::default(),
                 },
             )
             .await;

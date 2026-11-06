@@ -43,8 +43,10 @@ mod images;
 /// Which answer a relay carries, as far as its usage goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Answer {
-    /// The transcription family (`/v1/audio/transcriptions`, its `/details`,
-    /// `/v1/audio/alignments`): a JSON body or an event stream.
+    /// The transcription family (`/v1/audio/transcriptions`, its
+    /// `/details`): a JSON body or an event stream. `/v1/audio/alignments`
+    /// is not of it: lmgw answers that one in its own typed shape, which
+    /// carries no usage.
     Transcript,
     /// `/v1/audio/speech`: its event stream only.
     Speech,
@@ -62,9 +64,7 @@ impl Answer {
     /// `/v1`). The image routes say [`Answer::Image`] themselves.
     pub(crate) fn of_path(path: &str) -> Self {
         match path {
-            "/audio/transcriptions" | "/audio/transcriptions/details" | "/audio/alignments" => {
-                Self::Transcript
-            }
+            "/audio/transcriptions" | "/audio/transcriptions/details" => Self::Transcript,
             "/audio/speech" => Self::Speech,
             _ => Self::Other,
         }
@@ -393,15 +393,11 @@ mod tests {
 
     #[test]
     fn only_the_transcription_family_and_speech_are_read() {
-        for p in [
-            "/audio/transcriptions",
-            "/audio/transcriptions/details",
-            "/audio/alignments",
-        ] {
+        for p in ["/audio/transcriptions", "/audio/transcriptions/details"] {
             assert_eq!(Answer::of_path(p), Answer::Transcript, "{p}");
         }
         assert_eq!(Answer::of_path("/audio/speech"), Answer::Speech);
-        for p in ["/tasks/run", "/tasks/stream"] {
+        for p in ["/tasks/run", "/tasks/stream", "/audio/alignments"] {
             assert_eq!(Answer::of_path(p), Answer::Other, "{p}");
         }
     }

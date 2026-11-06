@@ -88,12 +88,25 @@ pub async fn op(gw: &Gw, name: &str, body: Value) -> (u16, Value) {
 /// A device named `name` paired on `state` (served as `gw`) as this
 /// computer with `policy` (`key_set`'s fields), enrolled and confirmed.
 pub async fn pair(state: &SharedState, gw: &Gw, name: &str, policy: Value) -> Paired {
+    pair_as(state, gw, name, policy, None).await
+}
+
+/// [`pair`], the device's enrolment declaring `app_id` (device transfers
+/// design §2).
+pub async fn pair_as(
+    state: &SharedState,
+    gw: &Gw,
+    name: &str,
+    policy: Value,
+    app_id: Option<&str>,
+) -> Paired {
     let mut body = json!({ "kind": "device", "name": name, "local_only": true });
     for (k, v) in policy.as_object().cloned().unwrap_or_default() {
         body[k] = v;
     }
     let link = mint(state, gw, "key_create", body).await;
-    let enrolled = enrol(&link).await;
+    let (spki, private) = key();
+    let enrolled = enrol_key_as(&link, spki, private, app_id).await;
     confirm(gw, &enrolled).await;
     connected(enrolled, format!("device:{name}")).await
 }
@@ -150,8 +163,27 @@ pub fn key() -> (Vec<u8>, PrivateKeyDer<'static>) {
 /// over TLS pinned to the link's `fp` and without a client certificate: the
 /// status and the body.
 pub async fn post_enrol(link: &str, spki: &[u8]) -> (u16, String) {
+    post_enrol_as(link, spki, None).await
+}
+
+/// [`post_enrol`] declaring `app_id` (device transfers design §2).
+pub async fn post_enrol_as(link: &str, spki: &[u8], app_id: Option<&str>) -> (u16, String) {
+    let device = lmgw_client::requests::DeviceSelf {
+        client: Some("lmgw tests"),
+        app_id,
+        ..Default::default()
+    };
+    post_enrol_with(link, spki, device).await
+}
+
+/// [`post_enrol`] saying `device` of itself.
+pub async fn post_enrol_with(
+    link: &str,
+    spki: &[u8],
+    device: lmgw_client::requests::DeviceSelf<'_>,
+) -> (u16, String) {
     let parsed = PairingLink::parse(link).unwrap();
-    let request = lmgw_client::requests::enrol(&parsed.token, spki, Some("lmgw tests"));
+    let request = lmgw_client::requests::enrol(&parsed.token, spki, device);
     let cfg = lmgw_client::tls::enrol_config(tls::provider(), parsed.fp).unwrap();
     let client = reqwest::Client::builder()
         .tls_backend_preconfigured(cfg)
@@ -179,7 +211,32 @@ pub async fn enrol(link: &str) -> Enrolled {
 /// `lmgw-client` reads it: a device that keeps its key across a re-pair
 /// renews its certificate.
 pub async fn enrol_key(link: &str, spki: Vec<u8>, private: PrivateKeyDer<'static>) -> Enrolled {
-    let (status, body) = post_enrol(link, &spki).await;
+    enrol_key_as(link, spki, private, None).await
+}
+
+/// [`enrol_key`] declaring `app_id` (device transfers design §2).
+pub async fn enrol_key_as(
+    link: &str,
+    spki: Vec<u8>,
+    private: PrivateKeyDer<'static>,
+    app_id: Option<&str>,
+) -> Enrolled {
+    let device = lmgw_client::requests::DeviceSelf {
+        client: Some("lmgw tests"),
+        app_id,
+        ..Default::default()
+    };
+    enrol_key_with(link, spki, private, device).await
+}
+
+/// [`enrol_key`] saying `device` of itself.
+pub async fn enrol_key_with(
+    link: &str,
+    spki: Vec<u8>,
+    private: PrivateKeyDer<'static>,
+    device: lmgw_client::requests::DeviceSelf<'_>,
+) -> Enrolled {
+    let (status, body) = post_enrol_with(link, &spki, device).await;
     let parsed = PairingLink::parse(link).unwrap();
     let credentials = lmgw_client::requests::read_enrolment(status, &body, &parsed, &spki)
         .unwrap_or_else(|e| panic!("the enrolment ({status}) did not read: {e:?}: {body}"));

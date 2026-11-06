@@ -65,6 +65,13 @@ pub struct CandidateDerived {
     pub context_length: Option<u64>,
     /// Same rule as `context_length`.
     pub max_output_tokens: Option<u64>,
+    /// Whether every `routable` candidate publishes
+    /// `structured_output.json_object: true` — what the alias publishes, and
+    /// what the early refusal of a `json_object` request reads
+    /// (structured-output design §7). `None` when nothing is routable: an
+    /// empty set says nothing about the type, and a request then meets
+    /// `candidate_unavailable`, not a format refusal (§11.20).
+    pub json_object: Option<bool>,
 }
 
 /// Why one candidate is not in [`CandidateDerived::routable`] — the
@@ -105,6 +112,8 @@ pub struct CandidatePick {
     /// ([`crate::gate::open::fallback_serves`]) — so its capabilities
     /// changing does not make a cached pick stale.
     pub fallback_usable: bool,
+    /// [`CandidateDerived::json_object`], for the gate's early refusal.
+    pub json_object: Option<bool>,
 }
 
 impl From<&CandidateDerived> for CandidatePick {
@@ -114,6 +123,7 @@ impl From<&CandidateDerived> for CandidatePick {
             routable: d.routable.clone(),
             primary_skipped: d.primary_skipped.clone(),
             fallback_usable: d.fallback_usable,
+            json_object: d.json_object,
         }
     }
 }
@@ -217,13 +227,18 @@ pub async fn derive(
     }
 
     // The fallback: resolved through the one lookup every fallback goes
-    // through (`Snapshot::alias_fallback`). One that lacks a facet the alias
+    // through (`Snapshot::fallback_named`). One that lacks a facet the alias
     // enables is used all the same (changed 2026-10-06, the owner's ruling:
     // a configured fallback is always used): what it cannot take goes to it
     // degraded, and the editor says so beforehand.
-    match snap.alias_fallback(alias) {
+    // Past a disabled hop to its own fallback, as a request goes (openai
+    // egress design §14.3).
+    match snap
+        .past_disabled(snap.fallback_named(alias.fallback.as_deref()), |_| false)
+        .1
+    {
         FallbackRoute::None => out.fallback_usable = false,
-        FallbackRoute::Unusable { alias: fb, why } => {
+        FallbackRoute::Unusable { alias: fb, why, .. } => {
             out.problems
                 .push(format!("fallback '{fb}' {why}: treated as none"));
             out.fallback_usable = false;
@@ -262,6 +277,13 @@ pub async fn derive(
     }
     out.context_length = ctx.filter(|_| ctx_known);
     out.max_output_tokens = mot.filter(|_| mot_known);
+    out.json_object = (!out.routable.is_empty()).then(|| {
+        out.routable_capabilities.iter().all(|c| {
+            c.as_ref()
+                .and_then(|c| c.structured_output.as_ref())
+                .is_some_and(|s| s.json_object == Some(true))
+        })
+    });
 
     // The primary's own reason, for the gate's error messages — a lookup
     // over what is already in hand, no extra I/O.

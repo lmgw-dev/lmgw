@@ -74,7 +74,7 @@ pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl
         let (line, tone) = logic::listener_words(&s.listener);
         Some(view! {
             <span
-                class="chip"
+                class="chip chip-line"
                 class:warn=tone == Tone::Warn
                 class:off=tone == Tone::Off
                 class:ok=tone == Tone::Ok
@@ -94,7 +94,7 @@ pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl
         {
             return Some(
                 view! {
-                    <span class="chip warn" title=e.message.clone()>
+                    <span class="chip chip-line warn" title=e.message.clone()>
                         <span class="dot"></span>
                         {format!("device CA unusable: {}", e.message)}
                     </span>

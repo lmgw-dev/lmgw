@@ -13,7 +13,7 @@
 //! bound responder (`realtime::heard_response_for_tests`); the core and the
 //! journal that feed them are WP3's.
 
-use lmgw_core::config::{HoldFallbackMode, SelfAdmin};
+use lmgw_core::config::SelfAdmin;
 use lmgw_core::ir::ContentPart;
 use lmgw_core::realtime::heard_response_for_tests;
 use lmgw_core::store::{self, NewCandidateAlias, NewLocalModel};
@@ -57,8 +57,7 @@ pub(super) fn row(id: &str) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: Some(hears()),
         ladder: vec![],
     }
@@ -197,7 +196,6 @@ async fn a_cloud_fallback_the_gate_swaps_to_at_admission_gets_the_audio() {
         alias: "writer".into(),
         candidates: vec!["gemma".into()],
         background: false,
-        fallback_mode: HoldFallbackMode::Alias,
         fallback: Some("cloud".into()),
         capabilities_disabled: vec![],
         capabilities_enabled: vec!["audio".into()],
@@ -251,7 +249,6 @@ async fn a_guests_repick_to_its_cloud_fallback_gets_the_audio() {
             alias: "helper".into(),
             candidates: vec!["tooly".into()],
             background: true,
-            fallback_mode: HoldFallbackMode::Alias,
             fallback: Some("cloud".into()),
             capabilities_disabled: vec![],
             capabilities_enabled: vec!["audio".into(), "tool_calls".into()],

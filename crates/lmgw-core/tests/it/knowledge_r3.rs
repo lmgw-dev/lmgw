@@ -425,6 +425,7 @@ async fn the_tokenizer_ratio_is_remembered_per_model_identity() {
                     param_overrides: Default::default(),
                     enabled: true,
                     capabilities_override: None,
+                    fallback: None,
                 },
             )
             .await
@@ -435,7 +436,13 @@ async fn the_tokenizer_ratio_is_remembered_per_model_identity() {
     // A real OpenAI model name has a tokenizer this gateway can run.
     add("emb-oai", "text-embedding-3-small").await;
     assert!(!limit::ratio_known(&state, "emb-oai"));
-    let (c, _) = limit::cached_counter(&state, "emb-oai", "hello world, some text").await;
+    let (c, _) = limit::cached_counter(
+        &state,
+        "emb-oai",
+        "hello world, some text",
+        Default::default(),
+    )
+    .await;
     assert!(c.measured());
     assert!(limit::ratio_known(&state, "emb-oai"), "measured once");
     // What was remembered is what later calls use — no new measurement.
@@ -444,7 +451,8 @@ async fn the_tokenizer_ratio_is_remembered_per_model_identity() {
         "emb-oai",
         &limit::ScaledCounter::with_ratio("emb-oai", 7.0),
     );
-    let (c, why) = limit::cached_counter(&state, "emb-oai", "anything else").await;
+    let (c, why) =
+        limit::cached_counter(&state, "emb-oai", "anything else", Default::default()).await;
     assert_eq!(c.ratio(), 7.0, "{why}");
     assert!(why.contains("remembered"), "{why}");
     // Another model behind another alias has its own entry.
@@ -474,6 +482,7 @@ async fn a_failing_reranker_does_not_embed_the_query_again() {
         budget_tokens: None,
         params: Some(p),
         caller: None,
+        origin: Default::default(),
     };
     w.rerank_fails.store(true, Ordering::Relaxed);
     let before = w.embedded("embed-tgt");
@@ -517,8 +526,7 @@ async fn a_held_local_reranker_is_refused_up_front() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -547,6 +555,7 @@ async fn a_held_local_reranker_is_refused_up_front() {
         budget_tokens: None,
         params: Some(p),
         caller: None,
+        origin: Default::default(),
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(!r.excerpts.is_empty(), "{:?}", r.notes);
@@ -589,6 +598,7 @@ async fn unscored_candidates_are_flagged_not_given_invented_scores() {
         budget_tokens: None,
         params: Some(p),
         caller: None,
+        origin: Default::default(),
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     let skipped: Vec<_> = r.excerpts.iter().filter(|e| e.rerank_skipped).collect();

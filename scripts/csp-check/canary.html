@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>csp-check canary</title>
+</head>
+<body>
+  <!-- The positive control: this inline script must be refused and reported,
+       or the check could not see a violation at all. -->
+  <script>document.body.dataset.ran = "inline";</script>
+</body>
+</html>

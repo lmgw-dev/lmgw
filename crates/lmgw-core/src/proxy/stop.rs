@@ -21,11 +21,20 @@
 //! may already be working on it, and a cloud one bills for it. The row's
 //! message says which numbers are estimated, since the row has no column for
 //! it (realtime §11: no new columns in v1).
+//!
+//! On an `openai` row the estimate is not written as usage (openai egress
+//! design §13.4, after the WP9 review): the platform's text is counted with
+//! its own tokenizer instead ([`stopped_cost`], [`unanswered_cost`]), and
+//! that count is only the budgets' lower bound. The row's tokens and cost
+//! stay unknown, and its note says what the budgets counted, as on the
+//! public path. Every other row keeps the estimate as its usage and cost.
 
 use tokio::sync::watch;
 
 use crate::error::GatewayError;
-use crate::ir::{ChatRequest, Timings, Usage};
+use crate::ir::{ChatRequest, Signer, Timings, Usage};
+
+use super::estimate;
 
 /// The consumer's half. [`Self::stop`] raises the stop, and so does dropping
 /// the handle: a consumer that is gone — a realtime session that ended —
@@ -108,34 +117,140 @@ pub(crate) fn row_status(e: &GatewayError) -> u16 {
     }
 }
 
+/// The budgets' lower bound for an answer on `route` whose usage never
+/// came, on the public path: an `openai` row counts the request and the
+/// `relayed` output with the platform's tokenizer ([`count_chat`]); any
+/// other cloud row (`local`: false) has no tokenizer lmgw knows, so the
+/// bound is the ~4 characters a token estimate the in-process paths use
+/// ([`stopped_usage`]). A local row is free and has none. Only the budgets
+/// read it: the row's own cost stays unknown, with a note.
+///
+/// [`count_chat`]: crate::egress::openai::count_chat
+pub(crate) async fn floor_count(
+    route: &crate::config::Route,
+    local: bool,
+    ir: &ChatRequest,
+    relayed: String,
+) -> Option<crate::pricing::LocalCount> {
+    if route.upstream.protocol == crate::config::Protocol::Openai {
+        return crate::egress::openai::count_chat(route, ir, relayed).await;
+    }
+    if local {
+        return None;
+    }
+    let row = estimate::anthropic_row(&route.upstream);
+    let anthropic = row.as_ref();
+    Some(crate::pricing::LocalCount {
+        prompt: prompt_estimate(ir, anthropic),
+        output: relayed.chars().count().div_ceil(4) as u64,
+        estimated: true,
+        uncounted: estimate::uncounted(ir, anthropic).len(),
+    })
+}
+
+/// The prompt `ir` sends on its route (`anthropic`: an Anthropic row's
+/// scope, [`estimate::anthropic_row`], whose row is sent only what it can
+/// read), at ~4 characters a token ([`super::estimate_text`]).
+fn prompt_estimate(ir: &ChatRequest, anthropic: Option<&Signer>) -> u64 {
+    crate::extract::approx_tokens(&super::estimate_text(ir, anthropic)) as u64
+}
+
 /// What a call stopped after its request went out, before the upstream's
-/// answer began, cost — and the row's message: the prompt, estimated at ~4
+/// answer began, cost — and the row's message: the prompt it sent on its
+/// route (`anthropic`, as in [`prompt_estimate`]), estimated at ~4
 /// characters a token as in [`stopped_usage`] (the upstream may already be
-/// working on it), and no output, of which nothing was read.
-pub(crate) fn unanswered_usage(ir: &ChatRequest) -> (Usage, String) {
-    let prompt = crate::extract::approx_tokens(&super::flatten_for_count(ir)) as u64;
+/// working on it), and no
+/// output, of which nothing was read. The message names what the estimate
+/// leaves out ([`estimate::uncounted`]).
+pub(crate) fn unanswered_usage(ir: &ChatRequest, anthropic: Option<&Signer>) -> (Usage, String) {
     let usage = Usage {
-        prompt_tokens: Some(prompt),
+        prompt_tokens: Some(prompt_estimate(ir, anthropic)),
         completion_tokens: Some(0),
         ..Default::default()
     };
-    let message = "stopped by the caller before the upstream answered; prompt tokens estimated \
-                   at ~4 characters a token (the request had gone out)"
-        .to_string();
+    let message = format!(
+        "stopped by the caller before the upstream answered; prompt tokens estimated at ~4 \
+         characters a token (the request had gone out){}",
+        estimate::left_out_clause(&estimate::uncounted(ir, anthropic))
+    );
     (usage, message)
+}
+
+/// What a stopped call's row carries: the usage it writes, the message it
+/// says, and lmgw's own count of it where that bounds it instead of an
+/// estimate (an `openai` row, §13.4).
+pub(crate) struct StopCost {
+    pub usage: Usage,
+    pub message: String,
+    pub count: Option<crate::pricing::LocalCount>,
+}
+
+/// [`unanswered_usage`], on `route`: on an `openai` row the prompt counted
+/// with the platform's tokenizer as the budgets' lower bound, its tokens
+/// left unknown.
+pub(crate) async fn unanswered_cost(route: &crate::config::Route, ir: &ChatRequest) -> StopCost {
+    if let Some(count) = crate::egress::openai::count_chat(route, ir, String::new()).await {
+        return StopCost {
+            usage: Usage::default(),
+            message: "stopped by the caller before the upstream answered (the request had gone \
+                      out)"
+                .to_string(),
+            count: Some(count),
+        };
+    }
+    let row = estimate::anthropic_row(&route.upstream);
+    let (usage, message) = unanswered_usage(ir, row.as_ref());
+    StopCost {
+        usage,
+        message,
+        count: None,
+    }
+}
+
+/// [`stopped_usage`], on `route`: on an `openai` row whose upstream
+/// reported no usage, the request's text and the `relayed` output counted
+/// with the platform's tokenizer as the budgets' lower bound, its tokens
+/// left unknown. `relayed` is read only there.
+pub(crate) async fn stopped_cost(
+    route: &crate::config::Route,
+    reported: Usage,
+    timings: Option<&Timings>,
+    ir: &ChatRequest,
+    produced: usize,
+    relayed: String,
+) -> StopCost {
+    if !reported.reported() {
+        if let Some(count) = crate::egress::openai::count_chat(route, ir, relayed).await {
+            return StopCost {
+                usage: reported,
+                message: "stopped by the caller".to_string(),
+                count: Some(count),
+            };
+        }
+    }
+    let row = estimate::anthropic_row(&route.upstream);
+    let (usage, message) = stopped_usage(reported, timings, ir, produced, row.as_ref());
+    StopCost {
+        usage,
+        message,
+        count: None,
+    }
 }
 
 /// What a stream its consumer stopped cost so far, and the row's message:
 /// `reported` where the upstream said, llama.cpp's `timings` where it sent
 /// them, and an estimate at ~4 characters a token otherwise — the prompt
-/// from the request's text ([`super::flatten_for_count`]), the output from
-/// the `produced` characters the stream delivered. The message names every
-/// estimated number.
+/// from what the request sent on its route (`anthropic`, as in
+/// [`prompt_estimate`], [`super::estimate_text`]), the output from the
+/// `produced` characters
+/// the stream delivered. The message names every estimated number, and
+/// what an estimated prompt leaves out ([`estimate::uncounted`]).
 pub(crate) fn stopped_usage(
     reported: Usage,
     timings: Option<&Timings>,
     ir: &ChatRequest,
     produced: usize,
+    anthropic: Option<&Signer>,
 ) -> (Usage, String) {
     let mut u = reported;
     let mut estimated = Vec::new();
@@ -144,7 +259,7 @@ pub(crate) fn stopped_usage(
             Some(t) => t.prompt_n + t.cache_n.unwrap_or(0),
             None => {
                 estimated.push("prompt");
-                crate::extract::approx_tokens(&super::flatten_for_count(ir)) as u64
+                prompt_estimate(ir, anthropic)
             }
         });
     }
@@ -160,9 +275,13 @@ pub(crate) fn stopped_usage(
     let message = if estimated.is_empty() {
         "stopped by the caller".to_string()
     } else {
+        let left_out = match estimated.first() {
+            Some(&"prompt") => estimate::left_out_clause(&estimate::uncounted(ir, anthropic)),
+            _ => String::new(),
+        };
         format!(
             "stopped by the caller; {} tokens estimated at ~4 characters a token (the upstream \
-             reported none before the stop)",
+             reported none before the stop){left_out}",
             estimated.join(" and ")
         )
     };
@@ -174,7 +293,9 @@ pub(crate) fn stopped_usage(
 pub(crate) fn produced_chars(d: &crate::ir::StreamDelta) -> usize {
     use crate::ir::StreamDelta;
     match d {
-        StreamDelta::TextDelta(t) | StreamDelta::ReasoningDelta(t) => t.chars().count(),
+        StreamDelta::TextDelta(t)
+        | StreamDelta::RefusalDelta(t)
+        | StreamDelta::ReasoningDelta(t) => t.chars().count(),
         StreamDelta::ToolCallStart { name, .. } => name.chars().count(),
         StreamDelta::ToolCallArgsDelta { fragment, .. } => fragment.chars().count(),
         _ => 0,
@@ -205,8 +326,12 @@ mod tests {
             tool_choice: None,
             stream: true,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         }
     }
 
@@ -221,9 +346,44 @@ mod tests {
         assert_eq!(row_status(&other), other.http_status().as_u16());
 
         // Stopped while the upstream had the request: the prompt counts.
-        let (u, msg) = unanswered_usage(&request("abcdefgh"));
+        let (u, msg) = unanswered_usage(
+            &request("abcdefgh"),
+            Some(&Signer::new("https://api.anthropic.com")),
+        );
         assert_eq!((u.prompt_tokens, u.completion_tokens), (Some(4), Some(0)));
         assert!(msg.contains("prompt tokens estimated"), "{msg}");
+        assert!(!msg.contains("leaves out"), "{msg}");
+    }
+
+    /// On an Anthropic route the estimate counts a verbatim block's text and
+    /// names what it cannot count; off one the block is not sent at all.
+    #[test]
+    fn an_anthropic_estimate_counts_blocks_and_names_what_it_leaves_out() {
+        let ir = crate::ingress::anthropic::parse_messages_request(&serde_json::json!({
+            "model": "m", "max_tokens": 9, "messages": [{"role": "user", "content": [
+                {"type": "search_result", "source": "s", "title": "t",
+                 "content": [{"type": "text", "text": "a long passage of forty characters...."}]},
+                {"type": "document", "source": {"type": "base64",
+                    "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+                {"type": "text", "text": "Sum up."},
+            ]}],
+        }))
+        .unwrap();
+        let row = Signer::new("https://api.anthropic.com");
+        let anthropic = Some(&row);
+        let other = None;
+        let (on, msg) = unanswered_usage(&ir, anthropic);
+        let (off, plain) = unanswered_usage(&ir, other);
+        assert!(on.prompt_tokens > off.prompt_tokens, "{on:?} {off:?}");
+        assert!(
+            msg.ends_with(
+                "; the estimate leaves out what lmgw cannot count locally (content.document)"
+            ),
+            "{msg}"
+        );
+        assert!(!plain.contains("leaves out"), "{plain}");
+        let (_, msg) = stopped_usage(Usage::default(), None, &ir, 0, anthropic);
+        assert!(msg.contains("(content.document)"), "{msg}");
     }
 
     #[test]
@@ -236,10 +396,16 @@ mod tests {
             tool_choice: None,
             stream: true,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         };
-        let (u, msg) = stopped_usage(Usage::default(), None, &ir, 9);
+        let row = Signer::new("https://api.anthropic.com");
+        let anthropic = Some(&row);
+        let (u, msg) = stopped_usage(Usage::default(), None, &ir, 9, anthropic);
         // "user: abcdefgh" is 14 characters.
         assert_eq!(u.prompt_tokens, Some(4));
         assert_eq!(u.completion_tokens, Some(3));
@@ -252,7 +418,7 @@ mod tests {
             prompt_tokens: Some(40),
             ..Default::default()
         };
-        let (u, msg) = stopped_usage(reported, None, &ir, 9);
+        let (u, msg) = stopped_usage(reported, None, &ir, 9, anthropic);
         assert_eq!(u.prompt_tokens, Some(40));
         assert!(msg.contains("completion tokens estimated") && !msg.contains("prompt"));
 
@@ -267,7 +433,7 @@ mod tests {
             draft_n: None,
             draft_n_accepted: None,
         };
-        let (u, msg) = stopped_usage(Usage::default(), Some(&t), &ir, 9);
+        let (u, msg) = stopped_usage(Usage::default(), Some(&t), &ir, 9, anthropic);
         assert_eq!((u.prompt_tokens, u.completion_tokens), (Some(15), Some(7)));
         assert_eq!(msg, "stopped by the caller");
     }

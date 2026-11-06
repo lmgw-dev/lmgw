@@ -31,6 +31,7 @@ use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::quickdoc::embed::refuse_if_held;
 use crate::quickdoc::query::TiktokenCounter;
 use crate::quickdoc::InProcessEmbedder;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use quickdoc_core::embed::TokenCounter;
@@ -422,7 +423,8 @@ async fn ingest_file(
     };
     // Chunks are sized with the embedding model's own tokenizer where the
     // gateway can reach it, so `chunk_tokens` holds for what the model sees.
-    let (counter, tokenizer) = limit::calibrate(state, embedder.alias(), &assembled.text).await;
+    let (counter, tokenizer) =
+        limit::calibrate(state, embedder.alias(), &assembled.text, Origin::Owner).await;
     detail.tokenizer = tokenizer;
     // Chunking is CPU work that grows with the file: on a blocking thread, so
     // the runtime keeps serving, and it stops when the job is cancelled.
@@ -506,7 +508,7 @@ async fn ingest_file(
             }
             // One input over the model's limit fails the whole request: go
             // chunk by chunk, and split the one(s) it refuses.
-            Err(e) if ingest_split::is_oversize(&e.to_string()) => {
+            Err(e) if ingest_split::refused_as_oversize(&e) => {
                 for i in group {
                     let first = chunks[*i].clone();
                     let pieces = embed_splitting(
@@ -612,7 +614,7 @@ async fn embed_splitting(
                 done.embedded += 1;
                 out.push(c);
             }
-            Err(e) if ingest_split::is_oversize(&e.to_string()) => {
+            Err(e) if ingest_split::refused_as_oversize(&e) => {
                 let halved = if c.tokens as u64 <= min_piece {
                     None
                 } else {

@@ -51,11 +51,19 @@ pub(super) async fn config_warnings(
     params: &crate::config::LlamaParams,
     args: &[String],
 ) -> Vec<String> {
+    // A GPU row's restart policy is left out of its container while lmgw
+    // points Podman at its own spec dir (D27).
+    let (_, no_restart) = crate::runtime::cdi::strip_gpu_restart(
+        run_args,
+        &crate::runtime::cdi::podman_globals(state, run_args),
+    );
+    let restart = (!no_restart.is_empty()).then(|| crate::runtime::cdi::restart_note(&no_restart));
     let caps = match llama_vocabulary(state, image, run_args).await {
         Ok(caps) => caps,
-        Err(unchecked) => return vec![unchecked],
+        Err(unchecked) => return restart.into_iter().chain([unchecked]).collect(),
     };
-    let mut out = caps.validate_args(args);
+    let mut out: Vec<String> = restart.into_iter().collect();
+    out.extend(caps.validate_args(args));
 
     // A flag with a dedicated field must not also come through the escape
     // hatch: the renderer drops the duplicate, so the arg would silently do
@@ -256,6 +264,28 @@ pub(super) async fn model_warnings(models_dir: &str, m: &NewLocalModel) -> Model
                         m.model_id
                     ));
                 }
+            }
+        }
+    }
+
+    // A dflash drafter's header caps the window. An unreadable or missing
+    // drafter says nothing here: the callers' path check reports the file.
+    if spec == "draft-dflash" && !models_dir.trim().is_empty() {
+        if let Some(rel) = m
+            .params
+            .draft_gguf_path
+            .as_deref()
+            .filter(|r| !r.is_empty())
+        {
+            let path = std::path::Path::new(models_dir).join(rel);
+            let drafter = tokio::task::spawn_blocking(move || crate::gguf::summarize(&path))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            if let Some(note) = drafter.and_then(|d| {
+                crate::modelinfo::draft_window_advisory(spec, m.params.spec_draft_n_max, &d)
+            }) {
+                out.advisories.push(note);
             }
         }
     }

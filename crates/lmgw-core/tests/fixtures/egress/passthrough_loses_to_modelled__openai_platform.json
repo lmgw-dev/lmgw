@@ -1,0 +1,39 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"max_tokens\":9,\"messages\":[],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"stream\":true,\"stream_options\":{\"include_usage\":false},\"temperature\":0.2}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "max_tokens": 9,
+      "messages": [],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "stream": true,
+      "stream_options": {
+        "include_usage": false
+      },
+      "temperature": 0.2
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

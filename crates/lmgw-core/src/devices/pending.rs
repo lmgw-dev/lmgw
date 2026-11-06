@@ -24,6 +24,9 @@ pub struct PendingTokens(Mutex<HashMap<i64, Pending>>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Pending {
+    /// The token's hash (lowercase hex SHA-256): which token the entry is,
+    /// so a note about an earlier one cannot land on a newer.
+    token_hash: String,
     expires_at: DateTime<Utc>,
     /// The serial of the certificate the token's enrolment answered, once
     /// it was used.
@@ -31,23 +34,30 @@ struct Pending {
 }
 
 impl PendingTokens {
-    /// Device `key_id` has a new token, pending until `expires_at` (it
-    /// replaces the row's earlier one).
-    pub fn set(&self, key_id: i64, expires_at: DateTime<Utc>) {
+    /// Device `key_id` has a new token `token_hash`, pending until
+    /// `expires_at` (it replaces the row's earlier one).
+    pub fn set(&self, key_id: i64, token_hash: &str, expires_at: DateTime<Utc>) {
         self.lock().insert(
             key_id,
             Pending {
+                token_hash: token_hash.to_string(),
                 expires_at,
                 answered: None,
             },
         );
     }
 
-    /// Device `key_id`'s token was used, and its answer carried the
-    /// certificate `serial`.
-    pub fn answered(&self, key_id: i64, serial: &str) {
-        if let Some(p) = self.lock().get_mut(&key_id) {
-            p.answered = Some(serial.to_string());
+    /// Device `key_id`'s token `token_hash` was used, and its answer carried
+    /// the certificate `serial`. Whether the row still has that token: an
+    /// enrolment's tail that comes after the owner minted a new one (*added
+    /// 2026-10-23*) changes nothing, and says so.
+    pub fn answered(&self, key_id: i64, token_hash: &str, serial: &str) -> bool {
+        match self.lock().get_mut(&key_id) {
+            Some(p) if p.token_hash == token_hash => {
+                p.answered = Some(serial.to_string());
+                true
+            }
+            _ => false,
         }
     }
 
@@ -71,14 +81,18 @@ impl PendingTokens {
     }
 
     /// Exactly `alive` from now on: the store's tokens alive, each with its
-    /// device, its expiry and the serial its enrolment answered.
-    pub fn replace(&self, alive: impl IntoIterator<Item = (i64, DateTime<Utc>, Option<String>)>) {
+    /// device, its hash, its expiry and the serial its enrolment answered.
+    pub fn replace(
+        &self,
+        alive: impl IntoIterator<Item = (i64, String, DateTime<Utc>, Option<String>)>,
+    ) {
         *self.lock() = alive
             .into_iter()
-            .map(|(id, expires_at, answered)| {
+            .map(|(id, token_hash, expires_at, answered)| {
                 (
                     id,
                     Pending {
+                        token_hash,
                         expires_at,
                         answered,
                     },
@@ -115,13 +129,13 @@ mod tests {
         let now = Utc::now();
         let t = PendingTokens::default();
         assert!(!t.any(now));
-        t.set(1, now + chrono::Duration::minutes(10));
-        t.set(2, now + chrono::Duration::seconds(1));
+        t.set(1, "a", now + chrono::Duration::minutes(10));
+        t.set(2, "b", now + chrono::Duration::seconds(1));
         assert!(t.any(now));
         t.end(1);
         assert!(t.any(now), "2 is still pending");
         assert!(!t.any(now + chrono::Duration::seconds(2)), "2 expired");
-        t.replace([(3, now + chrono::Duration::minutes(1), None)]);
+        t.replace([(3, "c".into(), now + chrono::Duration::minutes(1), None)]);
         assert_eq!(t.count(now), 1);
         t.replace([]);
         assert!(!t.any(now));
@@ -134,17 +148,33 @@ mod tests {
     fn a_used_token_ends_at_the_certificate_it_answered() {
         let later = Utc::now() + chrono::Duration::minutes(10);
         let t = PendingTokens::default();
-        t.set(1, later);
+        t.set(1, "a", later);
         assert!(!t.take_answered(1, "0a"), "unused");
-        t.answered(1, "0a");
+        assert!(t.answered(1, "a", "0a"));
         assert!(!t.take_answered(1, "0b"), "another certificate");
         assert!(t.take_answered(1, "0a"));
         assert!(!t.take_answered(1, "0a"), "once");
         assert!(!t.any(Utc::now()));
         // A new token replaces the used one before its device asked.
-        t.replace([(2, later, Some("0c".into()))]);
-        t.set(2, later);
+        t.replace([(2, "b".into(), later, Some("0c".into()))]);
+        t.set(2, "d", later);
         assert!(!t.take_answered(2, "0c"));
         assert!(t.any(Utc::now()));
+    }
+
+    /// A stale tail of an enrolment (the reload that follows its commit can
+    /// take seconds) must not stamp its serial onto a token the owner minted
+    /// meanwhile, nor onto none.
+    #[test]
+    fn a_note_about_an_earlier_token_changes_nothing() {
+        let later = Utc::now() + chrono::Duration::minutes(10);
+        let t = PendingTokens::default();
+        t.set(1, "old", later);
+        t.set(1, "new", later);
+        assert!(!t.answered(1, "old", "0a"), "the row has another token now");
+        assert!(!t.take_answered(1, "0a"), "no note landed on the new token");
+        assert!(!t.answered(2, "old", "0a"), "no token at all");
+        assert!(t.answered(1, "new", "0b"));
+        assert!(t.take_answered(1, "0b"));
     }
 }

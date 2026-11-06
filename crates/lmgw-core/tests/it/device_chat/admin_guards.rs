@@ -235,17 +235,19 @@ async fn unbound_with_lmgw(
     (ws, names)
 }
 
-/// Publish a hold whose fallback alias is `marker` (a live event every
-/// feed reads, the hold itself untouched), read it on each of `feeds`, and
-/// count the `state` frames each holds by then.
-async fn marked<const N: usize>(w: &World, feeds: [&mut Feed; N], marker: &str) -> [usize; N] {
-    let alias = marker.to_string();
-    crate::chat_feed::set(w, |s| s.hold.fallback_alias = Some(alias)).await;
+/// Publish the hold on and off again (two live events every feed reads, the
+/// hold off at the end), read the `nth` release on each of `feeds`, and count
+/// the `state` frames each holds by then.
+async fn marked<const N: usize>(w: &World, feeds: [&mut Feed; N], nth: usize) -> [usize; N] {
+    crate::chat_feed::set(w, |s| s.hold.active = true).await;
+    crate::chat_feed::set(w, |s| s.hold.active = false).await;
     let mut counts = [0; N];
     for (i, f) in feeds.into_iter().enumerate() {
         f.until(10, |f| {
             f.iter()
-                .any(|f| f.event == "hold" && f.data["fallback_alias"] == json!(marker))
+                .filter(|f| f.event == "hold" && f.data["active"] == json!(false))
+                .count()
+                >= nth
         })
         .await;
         counts[i] = f.named("state").len();
@@ -285,7 +287,7 @@ async fn the_gateway_s_level_lowered_narrows_a_device_at_full_at_once() {
     assert!(names.contains(&"lmgw__hold_set".to_string()), "{names:?}");
     // The `state` frames the other feeds had before the move: everything
     // published up to a marker they have read.
-    let before = marked(&w, [&mut phones, &mut owners], "before").await;
+    let before = marked(&w, [&mut phones, &mut owners], 1).await;
 
     let (s, v) = op(
         &w,
@@ -324,7 +326,7 @@ async fn the_gateway_s_level_lowered_narrows_a_device_at_full_at_once() {
 
     // A live event published after the move reaches the other feeds behind
     // anything the move queued for them: neither heard a `state`.
-    let after = marked(&w, [&mut phones, &mut owners], "after").await;
+    let after = marked(&w, [&mut phones, &mut owners], 2).await;
     assert_eq!(after, before, "{:#?}", phones.frames);
 
     // Raised again: the device hears `full`.

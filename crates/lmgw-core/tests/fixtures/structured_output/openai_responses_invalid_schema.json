@@ -1,0 +1,14 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/responses (native), openai/gpt-4.1-nano, text.format json_schema strict without additionalProperties: false",
+  "upstream": "openai",
+  "status": 400,
+  "body": {
+    "error": {
+      "message": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+      "type": "invalid_request_error",
+      "param": "text.format.schema",
+      "code": "invalid_json_schema"
+    }
+  },
+  "expect": "invalid_json_schema"
+}

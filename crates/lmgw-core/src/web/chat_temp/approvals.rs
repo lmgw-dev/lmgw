@@ -114,6 +114,7 @@ impl TempChats {
             };
             row.content = r.content.clone();
             row.reasoning = r.reasoning.clone();
+            row.reasoning_seals = r.reasoning_seals.clone();
             row.prompt_tokens = r.prompt_tokens;
             row.completion_tokens = r.completion_tokens;
             row.ir_messages = r.ir_messages.clone();

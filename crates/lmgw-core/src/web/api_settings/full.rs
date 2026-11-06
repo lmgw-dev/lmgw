@@ -43,6 +43,7 @@ async fn settings_view(st: &SharedState) -> dto::SettingsFull {
         local_reference_alias: s.local_reference_alias.clone(),
         global_budget_micro: s.global_budget_micro,
         global_budget_period: s.global_budget_period.as_str().to_string(),
+        quota_recheck_seconds: s.quota_recheck_seconds,
         max_body_mb: s.max_body_mb,
         // The default new Chat threads start with, as in force now, and the
         // built-in one beside it: the page's Reset puts that back in the box.
@@ -50,6 +51,8 @@ async fn settings_view(st: &SharedState) -> dto::SettingsFull {
         chat_system_prompt_builtin: crate::config::BUILTIN_CHAT_SYSTEM_PROMPT.to_string(),
         chat_pdf_mode: s.chat_pdf_mode.clone(),
         chat_stt_alias: s.chat_stt_alias.clone(),
+        // The media tools' default models (chat-media-tools design §3.8).
+        chat_media_defaults: s.chat_media_defaults.clone(),
         // The Chat's Voice group (chat-voice design §2.1).
         chat_tts_alias: s.chat_tts_alias.clone(),
         chat_voice: s.chat_voice.clone(),

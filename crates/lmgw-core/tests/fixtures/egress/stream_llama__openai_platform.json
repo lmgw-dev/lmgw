@@ -1,0 +1,99 @@
+{
+  "deltas": [
+    [
+      {
+        "reasoning": "Let me"
+      }
+    ],
+    [
+      {
+        "reasoning": " think."
+      }
+    ],
+    [
+      {
+        "text": "Checking."
+      }
+    ],
+    [
+      {
+        "tool_call_start": {
+          "id": "call_a",
+          "index": 0,
+          "name": "get_weather"
+        }
+      }
+    ],
+    [
+      {
+        "tool_call_args": {
+          "fragment": "{\"city\":",
+          "index": 0
+        }
+      }
+    ],
+    [
+      {
+        "tool_call_args": {
+          "fragment": "\"Berlin\"}",
+          "index": 0
+        }
+      }
+    ],
+    [
+      {
+        "tool_call_start": {
+          "id": "call_b",
+          "index": 1,
+          "name": "get_time"
+        }
+      },
+      {
+        "tool_call_args": {
+          "fragment": "{}",
+          "index": 1
+        }
+      }
+    ],
+    [
+      {
+        "stop": "tool_use"
+      },
+      {
+        "timings": {
+          "cache_n": 3,
+          "draft_n": 6,
+          "draft_n_accepted": 4,
+          "predicted_ms": 96.0,
+          "predicted_n": 12,
+          "predicted_per_second": 125.0,
+          "prompt_ms": 21.5,
+          "prompt_n": 17,
+          "prompt_per_second": 790.7
+        }
+      }
+    ],
+    [
+      {
+        "usage": {
+          "completion_tokens": 12,
+          "prompt_tokens": 20
+        }
+      },
+      {
+        "timings": {
+          "cache_n": 3,
+          "draft_n": 6,
+          "draft_n_accepted": 4,
+          "predicted_ms": 96.0,
+          "predicted_n": 12,
+          "predicted_per_second": 125.0,
+          "prompt_ms": 21.5,
+          "prompt_n": 17,
+          "prompt_per_second": 790.7
+        }
+      }
+    ],
+    []
+  ]
+}

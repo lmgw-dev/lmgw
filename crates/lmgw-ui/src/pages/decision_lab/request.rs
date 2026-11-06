@@ -1,7 +1,7 @@
 //! The Request panel (labs-store design §2.4): the exact body for the head
 //! model as written, built by `DecisionForm::body` — the function the server
 //! builds each cell with — with each image's payload elided ("data:image/png;
-//! base64,… 1.4 MB", a kept image's from the head it is sent with) and byte
+//! base64,… 1.4 MiB", a kept image's from the head it is sent with) and byte
 //! for byte otherwise.
 //!
 //! "Edit as JSON" copies the body, payloads included, into a textarea that

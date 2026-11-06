@@ -1,0 +1,30 @@
+{
+  "apply_ready": true,
+  "class": "aux",
+  "configured_as": [],
+  "configured_note": "Aux models already serving this GGUF, and how they differ from the plan. Placement (backend, threads) is never compared here, so a deliberate CPU or GPU variant is not a difference.",
+  "model_id": "demo-embedder",
+  "next_step": "pass these to lmgw__aux_model_set action=create (adding model_id, e.g. 'demo-embedder'), then lmgw__local_model_test model_id=<id> target=aux — the test embeds a probe input, since this model cannot generate",
+  "params": {
+    "batch_size": 32768,
+    "ctx_size": 32768,
+    "gguf_path": "embed/demo-embedder-Q8_0.gguf",
+    "kind": "embed",
+    "mmproj_path": "embed/mmproj-demo-embedder-F16.gguf",
+    "pooling": "mean",
+    "ubatch_size": 32768
+  },
+  "rationale": {
+    "batch_size": "= ubatch_size: llama.cpp lowers the ubatch to the batch, and embedding mode lowers the batch to the ubatch, so the two are raised together",
+    "ctx_size": "the model's trained context (32768) — its real ceiling per input, with ubatch_size and batch_size planned at it too, since llama-server evaluates a whole input of this model in one ubatch; llama-server refuses an input longer than this with an error and does not truncate it, so a smaller ctx_size lowers what one input may hold",
+    "gguf_path": "the file this plan was made for",
+    "kind": "the header declares pooling_type 'mean': an encoder with no LM head, served with --embeddings on /v1/embeddings",
+    "mmproj_path": "sibling projector (gemma4uv), so the model can read images; it is loaded beside the weights and charged with them",
+    "pooling": "the pooling the converter recorded ('mean'); the model card's vectors assume it, and a different one retrieves noise while looking fine",
+    "ubatch_size": "= ctx_size (32768, the header's context_length): llama-server cannot split one input of this model across ubatches — its pooling ('mean') reads every token, not only the last one — so a whole input has to fit one ubatch, and embedding mode lowers the batch to the ubatch. At llama-server's default of 512, every input over 512 tokens fails with a 500 (\"input (N tokens) is too large to process. increase the physical batch size\") whatever the context. The compute buffer grows with it: about 3.3 GiB on the GPU at this size, which the VRAM ledger charges with the row (on a backend=cpu row it is RAM)"
+  },
+  "target": "aux",
+  "warnings": [
+    "on the GPU at ctx_size 32768, this row's estimated footprint is 3.8 GiB (weights 7.0 MiB, KV cache 512 MiB, compute buffer 3.3 GiB) plus the 32.0 MiB headroom, more than the declared GPU memory budget, 64.0 MiB (Settings → GPU → Admission → Budget): admission will refuse to load it (\"no eviction can make it fit\"). The largest ctx_size that fits is 450 (32.0 MiB there). The plan keeps the trained context, so the overrun stays visible: lower ctx_size to at most 450 yourself, or run it on the CPU (backend=cpu), where it takes no VRAM"
+  ]
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>lmgw</vendor>
+  <vendor_url>https://github.com/lmgw-dev/lmgw</vendor_url>
+  <action id="io.github.lmgw-dev.lmgw.machine-setup">
+    <description>Set up the graphics card for lmgw's models</description>
+    <message>lmgw wants to set up the graphics card for local models: install or update NVIDIA's container toolkit and its software source.</message>
+    <icon_name>lmgw</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/lmgw/lmgw-machine-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">apply</annotate>
+  </action>
+</policyconfig>

@@ -29,9 +29,27 @@ const SHAPES: [(&str, &str, &str, i64); 9] = [
     ("anthropic-audio", "anthropic", "audio_cpp", 0),
 ];
 
-/// What 0058 stores for each of [`SHAPES`]: `(name, protocol, kind,
-/// supports_responses)`.
+/// What a start from version 57 stores for each of [`SHAPES`]: `(name,
+/// protocol, kind, supports_responses)`. 0058's mapping, and then 0090's in
+/// the same start: every `openai` row becomes `openai_compatible`, and
+/// `anthropic` and `gemini` rows lose native `/v1/responses` (openai egress
+/// design §4.1; an `anthropic` + `audio_cpp` row becomes `generic`;
+/// `openai_compatible.rs` tests 0090 on its own).
 const MAPPED: [(&str, &str, &str, i64); 9] = [
+    ("llama", "llama_cpp", "llama_server", 0),
+    ("llama-responses", "llama_cpp", "llama_server", 0),
+    ("gemini-llama", "gemini", "generic", 0),
+    ("anthropic-llama", "anthropic", "llama_server", 0),
+    ("cloud", "openai_compatible", "generic", 1),
+    ("claude", "anthropic", "generic", 0),
+    ("gemini", "gemini", "generic", 0),
+    ("audio", "openai_compatible", "audio_cpp", 0),
+    ("anthropic-audio", "anthropic", "generic", 0),
+];
+
+/// What 0058 alone stores for each of [`SHAPES`], before 0090 runs in the
+/// same start: a replay of the file sees this.
+const MAPPED_BY_0058: [(&str, &str, &str, i64); 9] = [
     ("llama", "llama_cpp", "llama_server", 0),
     ("llama-responses", "llama_cpp", "llama_server", 0),
     ("gemini-llama", "gemini", "generic", 1),
@@ -180,8 +198,11 @@ async fn sequence(pool: &SqlitePool) -> Option<i64> {
 }
 
 fn expected() -> Vec<(String, String, String, i64)> {
-    MAPPED
-        .iter()
+    owned(&MAPPED)
+}
+
+fn owned(rows: &[(&str, &str, &str, i64)]) -> Vec<(String, String, String, i64)> {
+    rows.iter()
         .map(|(n, p, k, r)| (n.to_string(), p.to_string(), k.to_string(), *r))
         .collect()
 }
@@ -303,10 +324,11 @@ async fn migration_0058_keeps_the_high_water_mark_of_an_emptied_table() {
 
 /// The CHECKs: llama_cpp is always a llama-server without native
 /// `/v1/responses`, and a llama-server speaks llama_cpp or anthropic — on
-/// insert and on update.
+/// insert and on update, as 0058 left them until 0090 (whose own are in
+/// `openai_compatible.rs`).
 #[tokio::test]
 async fn migration_0058_checks_refuse_a_protocol_and_kind_that_disagree() {
-    let pool = lmgw_core::store::open_in_memory().await.unwrap();
+    let pool = db_at_version(89).await;
     let insert = |p: &'static str, k: &'static str, r: i64| {
         let pool = pool.clone();
         async move {
@@ -361,7 +383,7 @@ async fn migration_0058_checks_refuse_a_protocol_and_kind_that_disagree() {
 }
 
 /// A file database at `version`, as an install sitting there has it.
-async fn file_db_at_version(path: &std::path::Path, version: i64) -> SqlitePool {
+pub(super) async fn file_db_at_version(path: &std::path::Path, version: i64) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
         .create_if_missing(true)
@@ -384,7 +406,7 @@ async fn file_db_at_version(path: &std::path::Path, version: i64) -> SqlitePool 
     pool
 }
 
-async fn file_pool(path: &std::path::Path) -> SqlitePool {
+pub(super) async fn file_pool(path: &std::path::Path) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
         .foreign_keys(true)
@@ -469,7 +491,7 @@ async fn a_replay_of_0058_after_its_commit_maps_nothing_twice() {
     // The file ran and committed; the record of it never landed.
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
     assert!(!applied_versions(&pool).await.contains(&58));
-    assert_eq!(shapes(&pool).await, expected());
+    assert_eq!(shapes(&pool).await, owned(&MAPPED_BY_0058));
 
     let (log, capturing) = crate::common::captured_log::capture_log();
     lmgw_core::store::run_migrations(&pool).await.unwrap();

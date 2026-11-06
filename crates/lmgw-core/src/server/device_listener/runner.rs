@@ -470,10 +470,11 @@ fn start(state: &SharedState, plan: Plan, ca: &Ca) -> Result<Live, String> {
     let serving = Serving::new(state.clone(), app, served_at);
     let listener = TlsListener::start(sockets, serving.clone());
     tracing::info!(
-        "lmgw devices listening on {} (CA {}, key {})",
+        "lmgw devices listening on {} (CA {}, key {}; {})",
         urls(&listener).join(" and "),
         ca.facts().fp_short(),
-        ca.key_mode().as_str()
+        ca.key_mode().as_str(),
+        super::keepalive::Timers::of(&state.snapshot().settings).describe()
     );
     Ok(Live {
         plan,

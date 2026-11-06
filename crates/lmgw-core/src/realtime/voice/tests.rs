@@ -140,16 +140,16 @@ fn a_read_list_decides_every_rule() {
 fn a_fallback_s_engine_is_its_protocol_and_kind() {
     use crate::config::{Protocol, UpstreamKind};
     assert_eq!(
-        Engine::of(Protocol::Openai, UpstreamKind::AudioCpp),
+        Engine::of(Protocol::OpenaiCompatible, UpstreamKind::AudioCpp),
         Engine::AudioCpp
     );
     assert_eq!(
-        Engine::of(Protocol::Openai, UpstreamKind::Generic),
+        Engine::of(Protocol::OpenaiCompatible, UpstreamKind::Generic),
         Engine::OpenAi
     );
     for (p, k) in [
         (Protocol::LlamaCpp, UpstreamKind::LlamaServer),
-        (Protocol::Openai, UpstreamKind::SdCpp),
+        (Protocol::OpenaiCompatible, UpstreamKind::SdCpp),
         (Protocol::Gemini, UpstreamKind::Generic),
     ] {
         assert!(matches!(Engine::of(p, k), Engine::Other(_)), "{p:?} {k:?}");

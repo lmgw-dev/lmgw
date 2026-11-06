@@ -18,8 +18,10 @@ use crate::widgets::{
     use_toasts, MenuItem, Modal, ModalFooter, PageFrame, RowMenu, Select, Toasts,
 };
 use llama_facts::LlamaFactsRow;
+use quota::QuotaRow;
 
 mod llama_facts;
+mod quota;
 
 /// One upstream's live catalog on this page: how many models it lists, or
 /// why it could not be read.
@@ -103,6 +105,11 @@ impl Ctx {
             {
                 Ok(v) => {
                     self.toasts.ok(v.message);
+                    // A delete names the fallbacks it leaves without a
+                    // target: its aliases and passthrough ids go with it.
+                    for note in v.fallback_notes {
+                        self.toasts.warn(note);
+                    }
                     self.refresh_catalog.try_run(());
                     self.load();
                 }
@@ -158,7 +165,7 @@ pub fn Upstreams() -> impl IntoView {
                                     Some(UpstreamView {
                                         timeout_ms: 120_000,
                                         enabled: true,
-                                        protocol: "openai".into(),
+                                        protocol: OPENAI_COMPATIBLE.into(),
                                         kind: "generic".into(),
                                         catalog_all_modalities: true,
                                         ..Default::default()
@@ -271,8 +278,15 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
             testing.set(false);
             match res {
                 // The count comes with the OK: a connection that works but
-                // lists nothing is worth knowing about.
-                Ok(_) => ctx.count(id, Some(name)),
+                // lists nothing is worth knowing about. An `openai` row on a
+                // host that is not OpenAI's says so as well (openai egress
+                // design, decision 13).
+                Ok(tested) => {
+                    if let Some(note) = tested.note {
+                        ctx.toasts.warn(note);
+                    }
+                    ctx.count(id, Some(name))
+                }
                 Err(e) => ctx.toasts.err(e.to_string()),
             }
         });
@@ -335,6 +349,18 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
     let llama = (u.protocol == LLAMA_CPP).then(|| {
         view! { <LlamaFactsRow facts=u.llama_facts.clone() enabled=enabled span=8/> }
     });
+    // Remembered out of quota (openai egress design §14.6).
+    let quota = u.quota.clone().map(|q| {
+        view! {
+            <QuotaRow
+                id=id
+                quota=q
+                span=8
+                toasts=ctx.toasts
+                cleared=Callback::new(move |()| ctx.load())
+            />
+        }
+    });
     let menu = Signal::derive(move || {
         vec![
             MenuItem::new("Edit", move || ctx.editing.set(Some(edit_u.get_value()))),
@@ -363,7 +389,12 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
                     {u.name.clone()}
                 </button>
             </td>
-            <td class="col-p3"><span class="type-badge">{u.protocol.clone()}</span></td>
+            <td class="col-p3">
+                <span class="type-badge">{u.protocol.clone()}</span>
+                {u.host_note.clone().map(|note| view! {
+                    " " <span class="problem" title=note>"not OpenAI's host"</span>
+                })}
+            </td>
             <td class="clip dim mono-sm" title=u.base_url.clone()>{u.base_url.clone()}</td>
             <td class="col-p2 dim">{if u.has_api_key { "•••• set" } else { "none" }}</td>
             <td class="col-p2 dim mono-sm">{passthrough}</td>
@@ -387,6 +418,7 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
                 <RowMenu items=menu/>
             </td>
         </tr>
+        {quota}
         {llama}
     }
 }
@@ -483,9 +515,10 @@ fn UpstreamForm(
     let enabled = RwSignal::new(u.enabled);
     let saving = RwSignal::new(false);
 
-    // The kind follows the protocol into and out of llama.cpp (design §5):
-    // the form always posts `kind`, so without the reset a switch away from
-    // llama_cpp would post openai + llama_server, which the server refuses.
+    // The kind follows the protocol into and out of llama.cpp and the OpenAI
+    // platform (llama egress design §5, openai egress design §1.5): the form
+    // always posts `kind`, so without the reset a switch would post a pair
+    // the server refuses, such as openai + audio_cpp.
     Effect::new(move |prev: Option<String>| {
         let p = protocol.get();
         if let Some(prev) = prev {
@@ -497,11 +530,13 @@ fn UpstreamForm(
         p
     });
     let llama_cpp = move || protocol.with(|p| p == LLAMA_CPP);
-    let openai = move || protocol.with(|p| p == "openai");
+    let platform = move || protocol.with(|p| p == OPENAI);
+    let compatible = move || protocol.with(|p| p == OPENAI_COMPATIBLE);
 
     let protocol_opts = Signal::derive(|| {
         [
-            ("openai", "OpenAI-compatible"),
+            (OPENAI, "OpenAI"),
+            (OPENAI_COMPATIBLE, "OpenAI-compatible"),
             ("anthropic", "Anthropic"),
             ("gemini", "Gemini"),
             (LLAMA_CPP, "llama.cpp (llama-server, ik_llama.cpp)"),
@@ -511,9 +546,11 @@ fn UpstreamForm(
         .collect::<Vec<_>>()
     });
     // llama-server is a kind of the Anthropic protocol only: llama.cpp's own
-    // server is the llama_cpp protocol (design §5).
+    // server is the llama_cpp protocol (llama egress design §5). An external
+    // audio.cpp server is OpenAI-compatible (openai egress design §1.5).
     let kind_opts = Signal::derive(move || {
         let anthropic = protocol.with(|p| p == "anthropic");
+        let compatible = protocol.with(|p| p == OPENAI_COMPATIBLE);
         [
             ("generic", "generic"),
             ("llama_server", "llama-server"),
@@ -521,6 +558,7 @@ fn UpstreamForm(
         ]
         .into_iter()
         .filter(|(v, _)| anthropic || *v != "llama_server")
+        .filter(|(v, _)| compatible || *v != "audio_cpp")
         .map(|(v, l)| (v.to_string(), l.to_string()))
         .collect::<Vec<_>>()
     });
@@ -562,10 +600,11 @@ fn UpstreamForm(
             "timeout_ms": timeout_v,
             "expose_all": expose_all.get_untracked(),
             "expose_prefix": expose_prefix.get_untracked().trim(),
-            // Never on for llama_cpp (decision 19); the checkbox is hidden there.
+            // A choice on openai_compatible rows only (openai egress design,
+            // decision 8); the checkbox is hidden everywhere else.
             "supports_responses": supports_responses.get_untracked()
-                && protocol.with_untracked(|p| p != LLAMA_CPP),
-            // Read on an openai row only; kept as set on the others.
+                && protocol.with_untracked(|p| p == OPENAI_COMPATIBLE),
+            // Read on an openai_compatible row only; kept as set on the others.
             "catalog_all_modalities": catalog_all_modalities.get_untracked(),
             "enabled": enabled.get_untracked(),
         });
@@ -576,6 +615,14 @@ fn UpstreamForm(
             match res {
                 Ok(saved) => {
                     toasts.ok(saved.message);
+                    // The same note Test shows, as a warning of its own.
+                    if let Some(note) = saved.note {
+                        toasts.warn(note);
+                    }
+                    // A new prefix rewrites the fallbacks naming its models.
+                    for note in saved.fallback_notes {
+                        toasts.warn(note);
+                    }
                     open.set(false);
                     on_saved();
                 }
@@ -613,10 +660,16 @@ fn UpstreamForm(
                 <label>"Timeout · ms"</label>
                 <input class="input mono" prop:value=move || timeout.get()
                     on:input=move |ev| timeout.set(event_target_value(&ev))/>
+                <div class="field-hint">
+                    "How long lmgw waits for an answer to start, and, once a streamed \
+                     answer has begun, how long it may go silent before lmgw ends it \
+                     with an error. 0 = no limit."
+                </div>
             </div>
-            // llama_cpp is always a llama-server: no kind to pick.
+            // llama_cpp is always a llama-server and openai always generic: no
+            // kind to pick.
             {move || {
-                (!llama_cpp())
+                (!llama_cpp() && !platform())
                     .then(|| {
                         view! {
                             <div class="field">
@@ -644,7 +697,7 @@ fn UpstreamForm(
                 "expose the whole catalog (passthrough)"
             </label>
             {move || {
-                (!llama_cpp())
+                compatible()
                     .then(|| {
                         view! {
                             <label class="row dim" style="gap:5px">
@@ -655,11 +708,21 @@ fn UpstreamForm(
                         }
                     })
             }}
+            {move || {
+                platform()
+                    .then(|| {
+                        view! {
+                            <span class="dim" title="Requests with MCP tools lmgw serves, or continuing a response lmgw stored, stay in lmgw's own loop">
+                                "native /v1/responses"
+                            </span>
+                        }
+                    })
+            }}
             // OpenRouter lists its non-text models (decisions, embeddings,
             // speech, images…) only when asked; Gemini's OpenAI-compatible
             // endpoint refuses the question (decision-models design §6.2).
             {move || {
-                openai()
+                compatible()
                     .then(|| {
                         view! {
                             <label class="row dim" style="gap:5px"
@@ -691,14 +754,26 @@ fn UpstreamForm(
 /// The protocol value of llama.cpp's own server (llama-server, ik_llama.cpp).
 const LLAMA_CPP: &str = "llama_cpp";
 
+/// The protocol value of the OpenAI platform (api.openai.com).
+const OPENAI: &str = "openai";
+
+/// The protocol value of every other OpenAI-shaped provider.
+const OPENAI_COMPATIBLE: &str = "openai_compatible";
+
 /// The kind once the protocol moved from `prev` to `next`: `llama_cpp` is
-/// always `llama_server`, leaving it resets the kind to `generic`, and
-/// `llama_server` survives only under `anthropic` (llama.cpp egress design §5,
-/// what `settle` accepts). Any other move keeps the owner's pick.
+/// always `llama_server` and `openai` always `generic`, leaving `llama_cpp`
+/// resets the kind to `generic`, `llama_server` survives only under
+/// `anthropic` and `audio_cpp` only under `openai_compatible` (llama egress
+/// design §5, openai egress design §1.5, what `settle` accepts). Any other
+/// move keeps the owner's pick.
 fn kind_after_protocol(prev: &str, next: &str, kind: &str) -> String {
     if next == LLAMA_CPP {
         "llama_server".into()
-    } else if prev == LLAMA_CPP || (next != "anthropic" && kind == "llama_server") {
+    } else if next == OPENAI
+        || prev == LLAMA_CPP
+        || (next != "anthropic" && kind == "llama_server")
+        || (next != OPENAI_COMPATIBLE && kind == "audio_cpp")
+    {
         "generic".into()
     } else {
         kind.into()
@@ -712,16 +787,17 @@ mod tests {
     #[test]
     fn the_kind_follows_the_protocol_into_and_out_of_llama_cpp() {
         assert_eq!(
-            kind_after_protocol("openai", "llama_cpp", "generic"),
+            kind_after_protocol("openai_compatible", "llama_cpp", "generic"),
             "llama_server"
         );
         assert_eq!(
             kind_after_protocol("anthropic", "llama_cpp", "audio_cpp"),
             "llama_server"
         );
-        // Leaving llama_cpp: never openai + llama_server, which the server refuses.
+        // Leaving llama_cpp: never openai_compatible + llama_server, which the
+        // server refuses.
         assert_eq!(
-            kind_after_protocol("llama_cpp", "openai", "llama_server"),
+            kind_after_protocol("llama_cpp", "openai_compatible", "llama_server"),
             "generic"
         );
         assert_eq!(
@@ -730,7 +806,7 @@ mod tests {
         );
         // Elsewhere the owner's pick stands.
         assert_eq!(
-            kind_after_protocol("openai", "anthropic", "llama_server"),
+            kind_after_protocol("openai_compatible", "anthropic", "llama_server"),
             "llama_server"
         );
         // llama_server only survives under anthropic.
@@ -739,20 +815,38 @@ mod tests {
             "generic"
         );
         assert_eq!(
-            kind_after_protocol("anthropic", "openai", "llama_server"),
+            kind_after_protocol("anthropic", "openai_compatible", "llama_server"),
             "generic"
-        );
-        assert_eq!(
-            kind_after_protocol("anthropic", "openai", "audio_cpp"),
-            "audio_cpp"
         );
         assert_eq!(
             kind_after_protocol("anthropic", "anthropic", "llama_server"),
             "llama_server"
         );
+    }
+
+    /// The OpenAI platform is always generic; an audio.cpp server lives under
+    /// openai_compatible only (openai egress design, decision 7).
+    #[test]
+    fn the_kind_follows_the_protocol_into_and_out_of_the_openai_platform() {
+        for kind in ["generic", "audio_cpp", "llama_server"] {
+            for prev in ["openai_compatible", "anthropic", "gemini", "llama_cpp"] {
+                assert_eq!(kind_after_protocol(prev, "openai", kind), "generic");
+            }
+        }
+        // audio_cpp survives only under openai_compatible.
         assert_eq!(
-            kind_after_protocol("openai", "gemini", "audio_cpp"),
+            kind_after_protocol("openai_compatible", "openai_compatible", "audio_cpp"),
             "audio_cpp"
         );
+        assert_eq!(
+            kind_after_protocol("openai", "openai_compatible", "generic"),
+            "generic"
+        );
+        for next in ["anthropic", "gemini"] {
+            assert_eq!(
+                kind_after_protocol("openai_compatible", next, "audio_cpp"),
+                "generic"
+            );
+        }
     }
 }

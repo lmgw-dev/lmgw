@@ -49,8 +49,9 @@ fn bad_form(message: String) -> Response {
 }
 
 /// `alias` → a safe file stem for the pictures, runs of unusable characters
-/// collapsing to one dash (the page's own rule for its downloads).
-fn model_stem(alias: &str) -> String {
+/// collapsing to one dash (the page's own rule for its downloads; the media
+/// tools name their files by it too).
+pub(crate) fn model_stem(alias: &str) -> String {
     let mut out = String::with_capacity(alias.len());
     let mut dash = false;
     for c in alias.chars() {

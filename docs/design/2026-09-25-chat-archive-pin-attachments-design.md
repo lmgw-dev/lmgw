@@ -30,7 +30,7 @@ Rules:
 - Pinning an archived thread restores it. Restoring bumps `updated_at` (else the next sweep
   re-archives it). Sending into an archived thread restores it.
 - The sweep runs in the existing hourly janitor in `server.rs` (whose first tick fires at boot,
-  which matters: the app is started by hand each morning). It logs the counts at info level
+  which matters: a desktop app is started by hand). It logs the counts at info level
   when either is non-zero.
 
 Settings (`config.rs` `Settings`, dashboard Settings page, MCP `lmgw__settings` /

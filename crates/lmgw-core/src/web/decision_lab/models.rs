@@ -91,7 +91,14 @@ fn fallback_price(snap: &Snapshot, name: &str) -> DecisionFallbackPrice {
     match snap.resolve(name) {
         Err(e) => out.unresolved = Some(e.to_string()),
         Ok(route) => {
-            match snap.sheet_rows(name, Some(route.upstream.id), Some(&route.upstream_model)) {
+            // What the alias costs, not what one answer cost: Standard
+            // (openai egress design §5.5).
+            match snap.sheet_rows(
+                name,
+                Some(route.upstream.id),
+                Some(&route.upstream_model),
+                Some(crate::config::PriceTier::Standard),
+            ) {
                 None => out.local = true,
                 Some(rows) => out.rows = rows.into_iter().map(price_row_view).collect(),
             }
@@ -146,7 +153,7 @@ async fn model_of(
             state: None,
             warnings: Vec::new(),
             held: false,
-            hold_fallback: None,
+            fallback: None,
             facts: None,
         };
     };
@@ -169,14 +176,19 @@ async fn model_of(
         class: Class::Aux,
         model_id: m.model_id.clone(),
     };
-    let hold_fallback = match snap.fallback_route(&target) {
+    let first = snap.next_hop(&crate::config::HopKey::Local(
+        target.class,
+        target.model_id.clone(),
+    ));
+    // Past a disabled hop to its own fallback, as a request goes.
+    let fallback = match snap.past_disabled(first, |_| false).1 {
         FallbackRoute::Usable { alias, .. } => Some(alias),
         FallbackRoute::None | FallbackRoute::Unusable { .. } => None,
     };
     let held = snap.gpu_block_for(Class::Aux, &m.model_id).is_some();
     // Held with a fallback that can answer: it answers every request, and
     // the gateway records them at its rows.
-    if let (true, Some(alias)) = (held, &hold_fallback) {
+    if let (true, Some(alias)) = (held, &fallback) {
         price.fallback = Some(fallback_price(snap, alias));
     }
     DecisionLabModel {
@@ -191,7 +203,7 @@ async fn model_of(
         state: rt.map(|r| r.state.as_str().to_string()),
         warnings: rt.map(|r| r.warnings.clone()).unwrap_or_default(),
         held,
-        hold_fallback,
+        fallback,
         facts: Some(facts),
         limits,
         price,

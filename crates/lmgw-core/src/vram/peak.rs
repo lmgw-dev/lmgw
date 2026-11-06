@@ -4,8 +4,8 @@
 //! **The gap.** Every other class costs what it costs: llama-server uploads
 //! weights and a KV cache once and holds them, so the driver's `used` figure
 //! *is* the answer and the ledger ([`super::VramScheduler`]) can admit against
-//! it. An sd-server pipeline does not behave that way. Measured on the
-//! 4090: Z-Image-Turbo Q4_K is **7.1 GiB resident when idle** and needs
+//! it. An sd-server pipeline does not behave that way. Measured on a
+//! 24 GiB test card: Z-Image-Turbo Q4_K is **7.1 GiB resident when idle** and needs
 //! **13.7 GiB** while it renders one 1024² image, because the compute buffers
 //! (≈ 6.6 GiB at that size, resolution-dependent) are allocated per job and
 //! freed after it. With the pipeline idle the ledger therefore reads ~16 GiB

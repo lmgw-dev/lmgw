@@ -37,7 +37,7 @@ pub const DEFAULT_THRESHOLD_PCT: f64 = 5.0;
 pub struct BenchOverrides {
     /// A ladder row's rung, 0 = base.
     pub rung: u32,
-    /// Another image, e.g. a Backends build (comparing two builds is two runs
+    /// Another image, e.g. an Engines page build (comparing two builds is two runs
     /// of one row with two images).
     pub image: Option<String>,
     pub ctx_size: Option<i64>,

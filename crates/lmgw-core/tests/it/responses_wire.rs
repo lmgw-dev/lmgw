@@ -26,6 +26,7 @@ fn stored(id: &str, chain: &str, prev: Option<&str>, body: &str) -> StoredRespon
         input_tokens: Some(3),
         output_tokens: Some(4),
         created_at: String::new(),
+        key_id: None,
     }
 }
 

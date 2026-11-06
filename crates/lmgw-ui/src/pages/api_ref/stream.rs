@@ -1,6 +1,6 @@
 //! A generic SSE record splitter and dialect-agnostic delta assembler
 //! (api-docs design §6.3, §6.7). Every documented stream is fair game here —
-//! OpenAI, Anthropic, `/v1/responses` — unlike `pages::chat_stream`'s one
+//! OpenAI, Anthropic, `/v1/responses` — unlike lmgw-chat-ui's `chat_stream`'s one
 //! fixed event set, which stays its own reader (§11: sharing one is out of
 //! scope for now). Pure splitting; the fetch itself lives in `send.rs`.
 
@@ -49,7 +49,7 @@ fn parse_record(record: &str) -> Option<SseFrame> {
 
 /// Buffers bytes across chunk boundaries and yields every complete record
 /// (terminated by a blank line) found so far — the same contract as
-/// `pages::chat_stream::find_record_end`, generalized to hold state across
+/// lmgw-chat-ui's `chat_stream::find_record_end`, generalized to hold state across
 /// calls, and to every line ending SSE allows: `\r\n` and a lone `\r` are
 /// folded to `\n` on the way in (a `\r` that ends one chunk waits to see
 /// whether the next one starts with its `\n`), since a relayed upstream

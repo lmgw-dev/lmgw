@@ -9,14 +9,18 @@
 //!
 //! ## Native passthrough
 //!
-//! An upstream flagged [`supports_responses`](crate::config::Upstream::supports_responses)
-//! gets the body forwarded verbatim (bar the model name and the bare call ids
+//! An upstream that [forwards `/v1/responses`](crate::config::Upstream::forwards_responses)
+//! — the OpenAI platform, or an `openai_compatible` row with the flag — gets
+//! the body forwarded verbatim (bar the model name and the bare call ids
 //! of gateway design §7.1). Synthesizing the API on top of a provider
 //! that already implements it would be strictly *worse* than proxying: the
 //! provider round-trips its own reasoning items between tool calls, and
 //! down-translating through `/v1/chat/completions` discards them. Everything
 //! else — llama-server above all, which has no such endpoint at all — is
-//! served by the loop.
+//! served by the loop, and so is a request only the loop can serve: one with
+//! `mcp` tools lmgw serves, or one continuing a chain lmgw stored
+//! ([`path`]). The passthrough's row carries the tokens and cost the
+//! upstream reported, written when its answer ends ([`native`]).
 //!
 //! ## What a run looks like in the Logs tab
 //!
@@ -35,23 +39,28 @@
 //! received the tool's real blocks, so replaying the wire form would degrade
 //! every chained turn. Eviction is [chain-aware](crate::store::gc_responses)
 //! and lives in Settings + the Responses tab.
+//!
+//! A stored response is the key's that made it ([`reader`]): an owner key
+//! reads and continues every one, any other caller only its own, and another
+//! key's id answers as an unknown one. `GET`/`DELETE` and `input_items` also
+//! reach a response an upstream made natively ([`retrieve`]).
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::extract::Path;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::agent::claim::media::MediaClaim;
+use crate::agent::claim::{CallOn, LoopClaim};
 use crate::agent::{
     self, Budget, DecidedCall, DeltaSink, EventSink, LoopEvent, PendingCall, ResolvedTool,
     RunConfig, RunResult, StopReason, TurnRunner,
 };
 use crate::config::Route;
-use crate::egress::{apply_bearer_auth, for_protocol};
 use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::gate::FallbackReason;
@@ -64,7 +73,26 @@ use crate::state::SharedState;
 use crate::store::{self, StoredResponse};
 use crate::telemetry::RESPONSES_PROTO;
 
+mod loop_items;
+mod native;
+mod path;
+mod references;
+mod retrieve;
+mod seals;
+mod serve;
 mod unseen;
+
+pub use retrieve::{delete_response, get_response, list_input_items};
+
+/// Whose stored responses `ctx` may read and continue (openai egress design
+/// §6): an owner key every one, any other caller its own.
+pub(crate) fn reader(ctx: &RequestCtx) -> store::ResponseReader {
+    if ctx.principal.is_owner() {
+        store::ResponseReader::Owner
+    } else {
+        store::ResponseReader::Key(ctx.principal.key_id())
+    }
+}
 
 /// `POST /v1/responses`.
 pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
@@ -90,10 +118,13 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
         Err(e) => return reject(&state, &ctx, &alias_hint, None, started, e).await,
     };
     req.ir.anthropic_beta = ctx.anthropic_beta.clone();
+    // Whose traffic the run is holds for every turn of it: one admission
+    // serves the run (per-request background design §7).
     let routed = match crate::gate::resolve(
         &state,
         &req.ir.model_alias,
         crate::gate::RouteCheck::Text("/v1/responses"),
+        ctx.origin(),
     )
     .await
     {
@@ -108,6 +139,17 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
     let routed = match routed.using(uses(&req, reasoning.as_ref())) {
         Ok(r) => r,
         Err(f) => return reject(&state, &ctx, &alias_hint, None, started, f.error).await,
+    };
+    // A structured output the model is known not to produce is refused
+    // before either path (structured-output design §7).
+    let format = req.ir.response_format.as_ref().and_then(|f| f.kind());
+    let routed = match routed.serves_format(&state, format).await {
+        Ok(r) => r,
+        Err(f) => {
+            let fallback = f.headers.fallback_reason();
+            let resp = reject(&state, &ctx, &alias_hint, fallback, started, f.error).await;
+            return f.headers.stamp(resp);
+        }
     };
 
     // Scope and budget (usage-analytics §4.2). A `/v1/responses` run is the
@@ -125,151 +167,34 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
     {
         return reject(&state, &ctx, &alias_hint, None, started, e).await;
     }
-    if routed.resolved().upstream.supports_responses {
-        // The provider implements the API — including its own store — so
-        // `previous_response_id` and approvals are its business, not ours.
-        //
-        // The control is resolved through all three tiers here too (§5.2): the
-        // alias' `param_defaults.reasoning` is as much a part of what this
-        // alias means on a native upstream as on a synthesized one, and
-        // reading only the headers would have made the alias default apply
-        // everywhere except the one route that forwards the body verbatim.
-        let route = routed.resolved();
-        let control = proxy::resolve_params(&req.ir, &ctx, route).reasoning_control();
-        let fallback = routed.headers().fallback_reason();
-        // A fallback that cannot see gets the body's images as placeholders,
-        // as every other send gets the IR's (`gate::fallback_images`).
-        let mut body = body;
-        let omitted = unseen::fit(&state, route, &req.ir.model_alias, &mut body).await;
-        let resp = native_passthrough(
-            &state,
-            &ctx,
-            (route, fallback),
-            &body,
-            started,
-            &control,
-            omitted.as_ref().map(|o| o.marker.clone()),
-        )
-        .await;
-        let annotations = proxy::Annotations {
-            images_omitted: omitted.map(|o| o.count),
-            ..native_annotations(&control)
-        };
-        return proxy::with_annotations(routed.headers().stamp(resp), &annotations);
+    // A reasoning seal the client sends back must be one its key was given
+    // (openai egress design §7.3.2), on either path.
+    if let Err(e) = proxy::seals::check(&state.db, reader(&ctx), &req.ir.messages).await {
+        return reject(&state, &ctx, &alias_hint, None, started, e).await;
     }
-
-    // Continue a stored conversation, if asked. This both prepends its history
-    // and settles whatever calls it stopped at.
-    let mut prior: Option<StoredResponse> = None;
-    let mut resume: Vec<DecidedCall> = Vec::new();
-    if let Some(prev_id) = req.previous_response_id.clone() {
-        // Whoever continues the response decides its pending calls: the
-        // request's own principal.
-        let by = crate::mcp::host::CallFrom::of(&ctx).caller;
-        match load_chain(&state, &prev_id, &mut req, &by).await {
-            Ok((stored, decided)) => {
-                prior = Some(stored);
-                resume = decided;
-            }
-            // Refused *after* the hold already picked a fallback, so the
-            // rejection is attributed to it like every other error on this
-            // route (gpu-hold design §4, `proxy::Failed`).
-            Err(e) => {
-                let fallback = routed.headers().fallback_reason();
-                let resp = reject(&state, &ctx, &alias_hint, fallback, started, e).await;
-                return routed.headers().stamp(resp);
-            }
-        }
-    }
-
-    // GPU admission (§9b) for the whole synthesized run — the gate's last
-    // per-request stage: make room for a local model that is not resident, or
-    // refuse by name, before the first turn. A local route comes back on the
-    // port its container answers on (§5); the turn loop below carries this
-    // route in its runner, so that reaches every turn, not only the first.
-    // The stored chain is prepended by now, so this sees every image the
-    // run will send (`Routed::using`).
-    let admitted = match routed.using(uses(&req, reasoning.as_ref())) {
-        Ok(routed) => routed.admit(&state).await,
-        Err(f) => Err(f),
-    };
-    let crate::gate::Opened {
-        mut route,
-        hold: admission,
-        mut headers,
-    } = match admitted {
-        Ok(o) => o,
-        Err(f) => {
-            let fallback = f.headers.fallback_reason();
-            let resp = reject(&state, &ctx, &alias_hint, fallback, started, f.error).await;
-            return f.headers.stamp(resp);
-        }
-    };
-
-    // §5.2/§5.4, once for the whole run: every turn the loop makes reads the
-    // same `req.ir.params` and the same `route.param_defaults`, so resolving
-    // here reaches turn 7 as surely as turn 1.
-    let max_tokens_defaulted =
-        proxy::anthropic_max_tokens_default(&state, &mut route, &req.ir.params, req.stream).await;
-    let resolved = proxy::resolve_params(&req.ir, &ctx, &route);
-    let mut annotations = proxy::Annotations {
-        ignored: proxy::reasoning_ignored(
-            route.upstream.protocol,
-            &resolved.reasoning_control(),
-            crate::egress::openai::has_reasoning_object(&req.ir),
-        ),
-        max_tokens_defaulted,
-        max_tokens_raised: proxy::anthropic_max_tokens_raised(&route, &resolved),
-        // The headers leave before the first turn runs, so this is what every
-        // turn's own per-send clamp will be — they all send these `params`.
-        // Each turn logs its own value as it runs.
-        max_tokens_clamped: crate::gate::planned_clamp(admission.as_ref(), &req.ir, &resolved),
-        // Likewise the images the run opened with that go to a fallback
-        // that cannot see as placeholders (`gate::fallback_images`).
-        images_omitted: crate::gate::fallback_images::decide(&state, &route, &req.ir)
-            .await
-            .map(|_| crate::gate::fallback_images::count_images(&req.ir)),
-    };
-    // Likewise `x-lmgw-rung`: the rung the model runs as the run opens
-    // (ladder design §6). A turn that climbs logs the rung it climbed to; a
-    // unary run one of whose turns the fallback answered says so instead
-    // (`run_loop`).
-    headers.set_rung(crate::gate::planned_rung(admission.as_ref()));
-    req.ir.params = resolved;
-
-    let fallback = headers.fallback_reason();
-    let resp = run_loop(
-        state.clone(),
+    serve::serve_routed(
+        state,
         ctx,
         req,
-        route,
-        fallback,
         body,
+        serve::Ready::Routed(routed),
         started,
-        prior,
-        resume,
-        admission,
-        &mut headers,
+        &alias_hint,
+        None,
     )
-    .await;
-    // A unary run a ladder climb handed to the fallback mid-loop (`run_loop`
-    // set the fallback, which was not there at open): that turn was sent the
-    // client's own body, never clamped, so the clamp planned at open does not
-    // describe the answer — like the rung, it goes (ladder §12 entry 72).
-    if fallback.is_none() && headers.fallback_reason().is_some() {
-        annotations.max_tokens_clamped = None;
-    }
-    proxy::with_annotations(headers.stamp(resp), &annotations)
+    .await
 }
 
 /// The capability facets a run uses (candidate-aliases §4.6): its messages
-/// and parameters, and tool calls whenever the model is given tools — the
-/// client's own function tools or the MCP blocks the loop runs.
+/// and parameters, tool calls whenever the model is given tools — the
+/// client's own function tools or the MCP blocks the loop runs — and what
+/// the parts only a native upstream serves use (a hosted tool is a tool
+/// call, an image by `file_id` is vision), which the IR does not carry.
 fn uses(
     req: &ResponsesRequest,
     header: Option<&crate::ir::ReasoningControl>,
 ) -> crate::candidates::FacetSet {
-    let uses = crate::gate::request_facets(&req.ir, header);
+    let uses = crate::gate::request_facets(&req.ir, header).union(req.native_only.facets());
     if req.client_tools.is_empty() && req.mcp_tools.is_empty() {
         uses
     } else {
@@ -277,21 +202,28 @@ fn uses(
     }
 }
 
-/// What a native `/v1/responses` upstream cannot be told (§5.5). That API has
-/// exactly one reasoning knob — `reasoning.effort` — so a request asking for a
-/// budget, or for thinking to be switched off wholesale, is reported to the
-/// client instead of being quietly dropped into a body that has no field for
-/// it.
-fn native_annotations(c: &crate::ir::ReasoningControl) -> proxy::Annotations {
+/// What a native `/v1/responses` upstream cannot be told (§5.5), and what
+/// its sends did with an off (`native::reasoning_off`). That API has exactly
+/// one reasoning knob — `reasoning.effort` — so a request asking for a
+/// budget, or for thinking to be switched on with no level, is reported to
+/// the client instead of being quietly dropped into a body that has no field
+/// for it. An off goes as `effort: "none"`, and is reported only when it went
+/// out in another form, fitted to the model (`fitted`).
+fn native_annotations(
+    c: &crate::ir::ReasoningControl,
+    fitted: &proxy::reasoning_fit::Fitted,
+) -> proxy::Annotations {
     let mut ignored = Vec::new();
-    if c.enabled.is_some() && c.effort.is_none() {
+    if c.enabled == Some(true) && c.effort.is_none() {
         ignored.push("enabled");
     }
     if c.budget_tokens.is_some() {
         ignored.push("budget");
     }
+    fitted.report(&mut ignored);
     proxy::Annotations {
         ignored,
+        params_refused: fitted.params_refused(),
         ..Default::default()
     }
 }
@@ -319,20 +251,58 @@ async fn reject(
         &e,
     )
     .await;
-    (status, axum::Json(payload)).into_response()
+    let mut resp = (status, axum::Json(payload)).into_response();
+    e.stamp_rate_hints(&mut resp);
+    resp
 }
 
 // ---------------------------------------------------------------------------
 // Continuing a stored conversation
 // ---------------------------------------------------------------------------
 
+/// `req` with the conversation its `previous_response_id` continues in
+/// front, as a run is sent it ([`load_chain`]) — for a count of what that run
+/// would send (`POST /v1/responses/input_tokens`). Nothing is settled or
+/// stored, and no approval is decided: a stored response whose pending calls
+/// have no verdict yet is counted all the same. Returns whether it has
+/// pending calls, whose results are not in the history (the count is
+/// approximate then). A request without the id is left as it is.
+pub(crate) async fn with_stored_history(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    req: &mut ResponsesRequest,
+) -> Result<bool, GatewayError> {
+    let Some(prev_id) = req.previous_response_id.clone() else {
+        return Ok(false);
+    };
+    let (stored, _) = load_chain(state, &prev_id, req, None, reader(ctx)).await?;
+    // `load_chain` read the record already; an unreadable one failed there.
+    Ok(stored
+        .pending
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<PendingCall>>(raw).ok())
+        .is_some_and(|p| !p.is_empty()))
+}
+
+/// The answer for an id that is not the caller's: unknown, evicted, or
+/// another key's — one wording, so none of them tells the others apart.
+pub(crate) fn no_stored_response(id: &str) -> GatewayError {
+    GatewayError::NotFound(format!(
+        "no stored response '{id}' — it may have been evicted (see the \
+         Responses tab and the retention settings), or it was created while \
+         storing was off"
+    ))
+}
+
 /// Load the response a request continues from, splice its conversation in front
-/// of the new turn, and pair its pending calls with the client's verdicts.
+/// of the new turn, and pair its pending calls with the client's verdicts
+/// (`by`: who decides them; `None` for a count, which decides nothing).
 async fn load_chain(
     state: &SharedState,
     prev_id: &str,
     req: &mut ResponsesRequest,
-    by: &crate::agent::approval::Approver,
+    by: Option<&crate::agent::approval::Approver>,
+    reader: store::ResponseReader,
 ) -> Result<(StoredResponse, Vec<DecidedCall>), GatewayError> {
     if !state.snapshot().settings.responses_store {
         return Err(GatewayError::Unsupported(
@@ -342,15 +312,12 @@ async fn load_chain(
                 .into(),
         ));
     }
-    let stored = store::get_response(&state.db, prev_id)
+    // Another key's response is answered as an unknown one.
+    let stored = store::get_response(&state.db, prev_id, reader)
         .await
         .map_err(|e| GatewayError::Internal(format!("reading stored response {prev_id}: {e}")))?;
     let Some(stored) = stored else {
-        return Err(GatewayError::NotFound(format!(
-            "no stored response '{prev_id}' — it may have been evicted (see the \
-             Responses tab and the retention settings), or it was created while \
-             storing was off"
-        )));
+        return Err(no_stored_response(prev_id));
     };
 
     let history: Vec<Message> = serde_json::from_str(&stored.messages).map_err(|e| {
@@ -364,7 +331,11 @@ async fn load_chain(
             GatewayError::Internal(format!("stored response {prev_id} is unreadable: {e}"))
         })?,
     };
-    let decided = decide(&pending, req, by)?;
+    // `by: None` is a count, which decides nothing.
+    let decided = match by {
+        Some(by) => decide(&pending, req, by)?,
+        None => Vec::new(),
+    };
 
     // OpenAI does not carry `instructions` across a chained call, so that a
     // client can swap the system prompt. Honored when the client *says*
@@ -462,177 +433,6 @@ fn decide(
 }
 
 // ---------------------------------------------------------------------------
-// Native passthrough
-// ---------------------------------------------------------------------------
-
-/// Forward the body to an upstream that implements `/v1/responses` itself,
-/// rewriting only the model name, the reasoning effort and any input item's
-/// `call_id` that carries a Gemini thought signature (to its bare id). Streams the response through untouched, so
-/// reasoning items, hosted-tool events and anything the provider adds later
-/// reach the client intact — the whole reason for not synthesizing here.
-/// `degraded`: what the body's content lost to a fallback that cannot see,
-/// for its row (`request_logs.degraded`).
-async fn native_passthrough(
-    state: &SharedState,
-    ctx: &RequestCtx,
-    (route, fallback): (&Route, Option<FallbackReason>),
-    body: &Value,
-    started: Instant,
-    control: &crate::ir::ReasoningControl,
-    degraded: Option<String>,
-) -> Response {
-    let alias = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let streamed = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-
-    let mut upstream_body = body.clone();
-    upstream_body["model"] = Value::String(route.upstream_model.clone());
-    // An earlier step answered by Gemini (a fallback, an alias switched
-    // mid-conversation) left its thought signatures in the call ids; they
-    // stay with Gemini, as on every synthesized send (gateway design §7.1).
-    crate::ir::wire_call_ids_in_responses_body(&mut upstream_body);
-    // The resolved control — headers over body over alias defaults (§5.2).
-    // `reasoning.effort` is the only control this API can carry, so it is the
-    // only one written in; the rest are named in the response's
-    // `x-lmgw-reasoning-ignored` by the caller. Writing it back is not a no-op
-    // even when it came from the body: a header or an alias default may have
-    // replaced the level the body asked for.
-    if let Some(effort) = control.effort.clone() {
-        match upstream_body.get_mut("reasoning") {
-            Some(Value::Object(o)) => {
-                o.insert("effort".into(), Value::String(effort));
-            }
-            _ => upstream_body["reasoning"] = json!({"effort": effort}),
-        }
-    }
-
-    let url = format!("{}/responses", route.upstream.base());
-    let rb = apply_bearer_auth(state.http.post(&url).json(&upstream_body), &route.upstream);
-    // `None` — the upstream's ceiling is 0, the maximum possible — leaves the
-    // send unbounded here; the run as a whole is still bounded by
-    // `responses_timeout_seconds` one level up, which is where a passthrough
-    // /v1/responses call gets its visible ceiling either way.
-    let result = match route.upstream.request_timeout() {
-        Some(d) => tokio::time::timeout(d, rb.send()).await,
-        None => Ok(rb.send().await),
-    };
-
-    let resp = match result {
-        Err(_) => {
-            return passthrough_error(
-                state,
-                ctx,
-                &alias,
-                (route, fallback),
-                started,
-                GatewayError::Timeout,
-                degraded,
-            )
-            .await
-        }
-        Ok(Err(e)) => {
-            return passthrough_error(
-                state,
-                ctx,
-                &alias,
-                (route, fallback),
-                started,
-                GatewayError::from(e),
-                degraded,
-            )
-            .await
-        }
-        Ok(Ok(r)) => r,
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        let bytes = resp.bytes().await.unwrap_or_default();
-        // `map_error`'s backstop can return `GatewayError::ContextExceeded`
-        // with an empty `model` — it has no route to name one. Fill it in
-        // the same way `gate::fit::attribute` does at every other local chat
-        // site (review finding 6): this is native passthrough, but the model
-        // still overflowed *this* row's context.
-        let e = crate::gate::attribute(
-            for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes),
-            route,
-        );
-        return passthrough_error(state, ctx, &alias, (route, fallback), started, e, degraded)
-            .await;
-    }
-
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(if streamed {
-            "text/event-stream"
-        } else {
-            "application/json"
-        })
-        .to_string();
-    let ttfb = started.elapsed().as_millis() as i64;
-
-    // Usage is inside the provider's own body; parsing the stream just to count
-    // tokens would mean buffering it, so the row records latency and status and
-    // leaves tokens NULL rather than guessing.
-    proxy::record_passthrough(
-        state,
-        ctx,
-        RESPONSES_PROTO,
-        &alias,
-        route,
-        fallback,
-        started,
-        Some(ttfb),
-        streamed,
-        StatusCode::OK.as_u16(),
-        None,
-        degraded,
-    )
-    .await;
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header("x-accel-buffering", "no")
-        .body(Body::from_stream(resp.bytes_stream()))
-        .unwrap()
-}
-
-async fn passthrough_error(
-    state: &SharedState,
-    ctx: &RequestCtx,
-    alias: &str,
-    (route, fallback): (&Route, Option<FallbackReason>),
-    started: Instant,
-    e: GatewayError,
-    degraded: Option<String>,
-) -> Response {
-    let status = e.http_status();
-    let payload = wire::serialize_error(&e);
-    proxy::record_passthrough(
-        state,
-        ctx,
-        RESPONSES_PROTO,
-        alias,
-        route,
-        fallback,
-        started,
-        None,
-        false,
-        status.as_u16(),
-        Some((e.kind().to_string(), e.to_string())),
-        degraded,
-    )
-    .await;
-    (status, axum::Json(payload)).into_response()
-}
-
-// ---------------------------------------------------------------------------
 // The synthesized path
 // ---------------------------------------------------------------------------
 
@@ -648,13 +448,24 @@ struct GatewayRunner {
     stream: bool,
     /// GPU admission for the *run*, not for a turn (§9b). A tool loop is many
     /// turns against one model with tool calls in between; the model has to
-    /// survive those gaps, and lmgw's in-flight count has to say so. Dropped
-    /// when the runner is, which is when the loop ends.
-    _admission: Option<crate::vram::LocalHold>,
+    /// survive those gaps, and lmgw's in-flight count has to say so. Let go
+    /// before an image or audio tool call that needs the GPU, and taken again
+    /// by the next turn (`agent::claim`); dropped when the runner is, which
+    /// is when the loop ends.
+    claim: std::sync::Arc<LoopClaim>,
     /// Whether a unary turn was handed to the fallback by a ladder climb:
     /// the unary answer's headers say so. A stream's headers left before its
     /// first turn, so they keep the rung stamped at open.
     fell_back: proxy::FallbackNote,
+    /// The sampling parameters the run's own sends left out because their
+    /// model refused them, now or earlier (`x-lmgw-params-refused` of a
+    /// unary answer): what *these* sends did, not the route's record, which
+    /// a concurrent request may have added to or a fallback's turn may not
+    /// share.
+    params_refused: std::sync::Mutex<Vec<&'static str>>,
+    /// The verbatim Anthropic blocks the run's unary answers carried, which
+    /// the Responses wire has no item for ([`Self::note_answer_blocks`]).
+    answer_blocks: std::sync::Mutex<Vec<String>>,
     /// The run's images that went to a fallback that cannot see as
     /// placeholders: the WARN names each once per run, not once per turn
     /// (`gate::fallback_images::Announced`).
@@ -662,6 +473,11 @@ struct GatewayRunner {
     /// What the turn [`PerRoute::request`] last gave left out, for its row
     /// (`request_logs.degraded`).
     marker: std::sync::Mutex<Option<String>>,
+    /// What every turn carries to be handed on at the send (openai egress
+    /// design §14.4): the `/v1/responses` route check, the run's origin — a
+    /// guest's run hands on as a guest, so a local fallback is admitted only
+    /// where it disturbs nobody — and the chain the run was routed along.
+    hand: crate::proxy::reasoning_fit::Handover,
 }
 
 /// A fallback that cannot see — the run's route, or one the gate re-routes
@@ -684,10 +500,22 @@ impl proxy::PerRoute for GatewayRunner {
                 *marker = None;
                 return Ok(None);
             };
-            let (sent, n) = self.announced.without_images(ir, &u);
+            let (sent, n) = self.announced.without_images(ir, &route.upstream, &u);
             *marker = Some(u.marker(n));
             Ok(Some(sent))
         })
+    }
+
+    fn fitted(&self, fitted: &crate::proxy::reasoning_fit::Fitted) {
+        let mut seen = self
+            .params_refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for name in fitted.params_refused() {
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
     }
 
     fn degraded(&self) -> Option<String> {
@@ -695,6 +523,17 @@ impl proxy::PerRoute for GatewayRunner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn handover(
+        &self,
+        rerouted: Option<&crate::gate::GateHeaders>,
+    ) -> crate::proxy::reasoning_fit::Handover {
+        let mut hand = self.hand.clone();
+        if let Some(h) = rerouted {
+            hand.chain = h.chain().clone();
+        }
+        hand
     }
 }
 
@@ -706,36 +545,100 @@ impl TurnRunner for GatewayRunner {
         sink: &'a mut dyn DeltaSink,
     ) -> Erased<'a, Result<Completion, GatewayError>> {
         Box::pin(async move {
-            if self.stream {
+            let started = Instant::now();
+            // The run's claim, regained when a tool call let it go — or where
+            // the gate sends the turn when a GPU block or a lost candidate
+            // refused that (`agent::claim`).
+            let call = match self.claim.call_on(&self.state, ir).await {
+                Ok(call) => call,
+                Err(r) => {
+                    let route = r.route.as_deref().unwrap_or(&self.route);
+                    let fallback = if r.gate { r.fallback } else { self.fallback };
+                    crate::agent::claim::refused::record(
+                        &self.state,
+                        (self.key.clone(), &ir.model_alias),
+                        RESPONSES_PROTO,
+                        route,
+                        fallback,
+                        started,
+                        &r.error,
+                    )
+                    .await;
+                    return Err(r.error);
+                }
+            };
+            let (hold, route, fallback, rerouted) = match &call {
+                CallOn::Claim(hold) => (hold.as_ref(), &self.route, self.fallback, None),
+                CallOn::Rerouted(o) => (
+                    o.hold.as_ref(),
+                    &o.route,
+                    o.headers.fallback_reason(),
+                    Some(&o.headers),
+                ),
+            };
+            let deadline = deadline.saturating_sub(started.elapsed());
+            let answered = if self.stream {
                 proxy::stream_once_on(
                     &self.state,
-                    self._admission.as_ref(),
-                    &self.route,
-                    self.fallback,
+                    hold,
+                    route,
+                    fallback,
                     ir,
                     RESPONSES_PROTO,
                     self.key.clone(),
                     deadline,
                     sink,
-                    Some((self, None)),
+                    Some((self, rerouted)),
                 )
                 .await
             } else {
                 proxy::sample_once_noting(
                     &self.state,
-                    self._admission.as_ref(),
-                    &self.route,
-                    self.fallback,
+                    hold,
+                    route,
+                    fallback,
                     ir,
                     RESPONSES_PROTO,
                     self.key.clone(),
                     deadline,
                     Some(&self.fell_back),
-                    Some((self, None)),
+                    Some((self, rerouted)),
                 )
                 .await
+            };
+            if let Ok(c) = &answered {
+                self.note_answer_blocks(c);
             }
+            answered
         })
+    }
+}
+
+impl GatewayRunner {
+    /// The verbatim Anthropic blocks of a turn's answer, which the
+    /// Responses wire has no item for: the run's record keeps them (for a
+    /// later turn to the same row), the client is not given them. A unary
+    /// answer's headers name them (`answer.<type>` in
+    /// `x-lmgw-params-ignored`); a stream's headers left before its first
+    /// turn, so a stream's are a log line.
+    fn note_answer_blocks(&self, c: &Completion) {
+        let names = crate::ir::ignored_names("answer", &c.content);
+        if names.is_empty() {
+            return;
+        }
+        if self.stream {
+            tracing::info!(
+                blocks = %names.join(","),
+                "a streamed answer's Anthropic blocks have no /v1/responses item; not relayed"
+            );
+            return;
+        }
+        let mut seen = self.answer_blocks.lock().unwrap_or_else(|e| e.into_inner());
+        for name in names {
+            if !seen.contains(&name) {
+                seen.push(name);
+            }
+        }
     }
 }
 
@@ -801,6 +704,8 @@ async fn run_loop(
     resume: Vec<DecidedCall>,
     admission: Option<crate::vram::LocalHold>,
     headers: &mut crate::gate::GateHeaders,
+    params_refused: &mut Vec<&'static str>,
+    answer_blocks: &mut Vec<String>,
 ) -> Response {
     let budget = budget_for(&state, &req);
     // Who is asking decides which of the attached labels' tools the run gets:
@@ -834,16 +739,41 @@ async fn run_loop(
 
     let stream = req.stream;
     let mut enc = ResponsesEncoder::new(&req.ir.model_alias, echo, stream);
+    // A guest's run (per-request background design §7): sent with
+    // `x-lmgw-background: on`, or admitted as one through a background
+    // candidate alias. Its streamed run ends at its client's hang-up, a
+    // tool call in flight included; the owner's stops its model call then
+    // and lets a tool call in flight finish (§11.16).
+    let guest = ctx.origin() == crate::runtime::registry::Origin::Background
+        || admission
+            .as_ref()
+            .is_some_and(|h| h.origin() == crate::runtime::registry::Origin::Background);
     let runner = GatewayRunner {
         state: state.clone(),
         route,
         fallback,
-        key: ctx.key_ref(),
+        // The client's own request: its answers' items are recorded under
+        // its key, none included (`proxy::answer_items`).
+        key: proxy::KeyRef {
+            public: true,
+            ..ctx.key_ref()
+        },
         stream,
-        _admission: admission,
+        claim: std::sync::Arc::new(LoopClaim::new(admission)),
         fell_back: proxy::FallbackNote::default(),
+        params_refused: Default::default(),
+        answer_blocks: Default::default(),
         announced: Default::default(),
         marker: Default::default(),
+        hand: crate::proxy::reasoning_fit::Handover {
+            check: crate::gate::RouteCheck::Text("/v1/responses"),
+            origin: match guest {
+                true => crate::runtime::registry::Origin::Background,
+                false => ctx.origin(),
+            },
+            chain: headers.chain().clone(),
+            deferred: None,
+        },
     };
     // One executor across all three planes. The built-in half only ever fires
     // for names this request's own `{"type":"mcp"}` blocks resolved (nothing is
@@ -866,7 +796,16 @@ async fn run_loop(
             resolved.builtin.clone(),
             // A name runs where this request listed it from, or not at all.
             McpExecutor::new(state.clone(), ctx.clone()).with_listed(resolved.servers),
-        ),
+        )
+        // A call that leaves out `model` runs on the default the listed
+        // tool named (chat-media-tools §3.8).
+        .with_media_defaults(resolved.media_defaults)
+        // An image or audio call that needs the GPU gets the run's room
+        // (chat-media-tools §4.3).
+        .with_media_hooks(std::sync::Arc::new(MediaClaim::new(
+            state.clone(),
+            runner.claim.clone(),
+        ))),
         state.clone(),
         ctx.clone(),
     );
@@ -882,9 +821,9 @@ async fn run_loop(
         budget,
         parallel_tool_calls: req.parallel_tool_calls,
         resume,
-        // A Responses run is ended by its client going away, which the encoder
-        // sink reports by returning `false`; there is no job behind it to press
-        // Cancel on.
+        // A unary run is ended by its client going away with the handler
+        // future, which hyper drops; a streamed run gets its hang-up as a
+        // cancel below. There is no job behind either to press Cancel on.
         cancel: agent::Cancel::none(),
     };
     let save = SaveCtx {
@@ -894,6 +833,7 @@ async fn run_loop(
         previous_response_id: req.previous_response_id.clone(),
         input_items: req.input_items.clone(),
         server_tools,
+        key_id: ctx.principal.key_id(),
     };
 
     if !stream {
@@ -911,9 +851,25 @@ async fn run_loop(
         // A turn a ladder climb handed to the fallback (review finding 13):
         // the unary answer leaves only now, so it can say so — the fallback
         // replaces the rung stamped at open.
-        if let Some((alias, reason)) = runner.fell_back.take() {
-            headers.fall_back(alias, reason);
+        if let Some(chain) = runner.fell_back.take() {
+            headers.handed_on(chain);
         }
+        *params_refused = std::mem::take(
+            &mut *runner
+                .params_refused
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        *answer_blocks = std::mem::take(
+            &mut *runner
+                .answer_blocks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        // The run's claim goes before its bookkeeping: nothing below calls a
+        // model.
+        drop(exec);
+        drop(runner);
         return match outcome {
             Ok(result) => {
                 persist(&state, &save, &enc, &result).await;
@@ -924,7 +880,6 @@ async fn run_loop(
                 // request-level outcome the client actually saw.
                 let e = e.error;
                 let status = e.http_status();
-                enc.fail(&e);
                 proxy::record_request_failure(
                     &state,
                     &ctx,
@@ -936,13 +891,58 @@ async fn run_loop(
                     &e,
                 )
                 .await;
-                (status, axum::Json(enc.snapshot())).into_response()
+                // A non-2xx answer carries OpenAI's error envelope (`message`,
+                // `type`, `param`, `code`), which is what the platform sends
+                // and what every SDK reads one as (api-compat design §9,
+                // finding 10; *changed 2026-11-05*: it was the failed run's
+                // Response object, which only a structured-output refusal did
+                // not get, structured-output design §11.15). The failed
+                // Response is a stream's `response.failed`. Nothing is
+                // stored: the client was given no response id to fetch.
+                // An upstream rate refusal keeps its own headers, as on the
+                // chat routes (openai egress design §8).
+                let mut resp = (status, axum::Json(wire::serialize_error(&e))).into_response();
+                e.stamp_rate_hints(&mut resp);
+                resp
             }
         };
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    // The client closing its stream is the run's cancel, raised at once
+    // (per-request background design §9, §11.16). The sink alone saw the
+    // hang-up only at the next frame it failed to send, which a long tool
+    // call, a long prefill or a model writing the client nothing put far
+    // away, while the model went on generating.
+    //
+    // A guest's run ends then and there (*changed 2026-10-22*): the cancel
+    // is raced against every await in it — a model call, and a tool call
+    // that can take minutes — so its claim on the model, and a tool's own
+    // image or audio claim, go at once; a guest's claim held that long
+    // blocks the owner it promised not to disturb. The cost is the guest's:
+    // a tool call that does not take the stop (a self-admin op, `docs__*`,
+    // `kb__*`, an MCP server's) is dropped mid-way — it writes no row, and
+    // the stored response has it abandoned instead of its result.
+    //
+    // The owner's run stops its model call at once and lets a tool call in
+    // flight finish with its rows and result, then starts no other call and
+    // no other turn (*changed 2026-10-24*, the owner's decision).
+    let (hang_up, hung_up) = proxy::stop_pair();
+    let cancel = agent::Cancel::signal(hung_up);
+    let cfg = cfg.with_cancel(if guest {
+        cancel
+    } else {
+        cancel.sparing_calls()
+    });
+    // A device's connection gets `TCP_USER_TIMEOUT` for as long as the
+    // stream runs, and its accept-time timers back after it (device link
+    // design §4.3).
+    let timers = crate::server::device_listener::chat_stream_timers(
+        ctx.conn.as_ref(),
+        &state.snapshot().settings,
+    );
     tokio::spawn(async move {
+        let _timers = timers;
         let send = |s: String| {
             let tx = tx.clone();
             async move { s.is_empty() || tx.send(Ok(Bytes::from(s))).await.is_ok() }
@@ -969,8 +969,23 @@ async fn run_loop(
                 enc: &mut enc,
                 tx: Some(tx.clone()),
             };
-            agent::run(ir, cfg, &runner, &exec, &mut sink).await
+            let run = agent::run(ir, cfg, &runner, &exec, &mut sink);
+            tokio::pin!(run);
+            tokio::select! {
+                r = &mut run => r,
+                // Raised, the run winds down — a model call and a tool call
+                // that took its stop still write their rows, an owner's tool
+                // call in flight finishes — and what it made is stored below.
+                () = tx.closed() => {
+                    hang_up.stop();
+                    run.await
+                }
+            }
         };
+        // The run's claim goes before its bookkeeping: nothing below calls a
+        // model.
+        drop(exec);
+        drop(runner);
         match result {
             // Stored even when the client hung up mid-stream: the work was done
             // and paid for, and a chained retry should be able to pick it up.
@@ -1005,6 +1020,8 @@ struct SaveCtx {
     input_items: Value,
     /// The run's server-side tools, by name.
     server_tools: HashSet<String>,
+    /// The key that made the response ([`StoredResponse::key_id`]).
+    key_id: Option<i64>,
 }
 
 /// Write the finished response to the store, so a client can `GET` it and chain
@@ -1047,81 +1064,9 @@ async fn persist(state: &SharedState, save: &SaveCtx, enc: &ResponsesEncoder, ru
         input_tokens: usage.prompt_tokens.map(|v| v as i64),
         output_tokens: usage.completion_tokens.map(|v| v as i64),
         created_at: String::new(), // filled by the column default
+        key_id: save.key_id,
     };
     if let Err(e) = store::insert_response(&state.db, &row).await {
         tracing::error!("storing response {}: {e}", row.id);
     }
-}
-
-// ---------------------------------------------------------------------------
-// The rest of the resource: GET / DELETE / input_items
-// ---------------------------------------------------------------------------
-
-fn not_found(id: &str) -> Response {
-    let e = GatewayError::NotFound(format!(
-        "no stored response '{id}' — it may have been evicted, or storing was off \
-         when it was created"
-    ));
-    (e.http_status(), axum::Json(wire::serialize_error(&e))).into_response()
-}
-
-/// `GET /v1/responses/{id}` — the response object exactly as it was served.
-pub async fn get_response(state: SharedState, Path(id): Path<String>) -> Response {
-    match store::get_response(&state.db, &id).await {
-        Ok(Some(r)) => match serde_json::from_str::<Value>(&r.body) {
-            Ok(v) => (StatusCode::OK, axum::Json(v)).into_response(),
-            Err(e) => {
-                let e = GatewayError::Internal(format!("stored response {id} is unreadable: {e}"));
-                (e.http_status(), axum::Json(wire::serialize_error(&e))).into_response()
-            }
-        },
-        Ok(None) => not_found(&id),
-        Err(e) => {
-            let e = GatewayError::Internal(e.to_string());
-            (e.http_status(), axum::Json(wire::serialize_error(&e))).into_response()
-        }
-    }
-}
-
-/// `DELETE /v1/responses/{id}`.
-///
-/// Deletes the one response, not its chain — that is what the API means, and
-/// the Responses tab is where a whole conversation is dropped. Its descendants
-/// keep their `chain_id`, so the conversation still lists and evicts as a unit.
-pub async fn delete_response(state: SharedState, Path(id): Path<String>) -> Response {
-    match store::delete_response(&state.db, &id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            axum::Json(json!({"id": id, "object": "response", "deleted": true})),
-        )
-            .into_response(),
-        Ok(false) => not_found(&id),
-        Err(e) => {
-            let e = GatewayError::Internal(e.to_string());
-            (e.http_status(), axum::Json(wire::serialize_error(&e))).into_response()
-        }
-    }
-}
-
-/// `GET /v1/responses/{id}/input_items` — the `input` this response was given.
-pub async fn list_input_items(state: SharedState, Path(id): Path<String>) -> Response {
-    let Ok(Some(r)) = store::get_response(&state.db, &id).await else {
-        return not_found(&id);
-    };
-    let items: Vec<Value> = serde_json::from_str(&r.input_items).unwrap_or_default();
-    let first = items.first().and_then(|i| i.get("id")).cloned();
-    let last = items.last().and_then(|i| i.get("id")).cloned();
-    (
-        StatusCode::OK,
-        axum::Json(json!({
-            "object": "list",
-            "data": items,
-            "first_id": first,
-            "last_id": last,
-            // Everything is returned in one page: these are one turn's items on
-            // a single-user gateway, not a cursor-worthy collection.
-            "has_more": false,
-        })),
-    )
-        .into_response()
 }

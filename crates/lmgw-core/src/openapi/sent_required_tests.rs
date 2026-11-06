@@ -19,6 +19,10 @@ use super::schemas::collect_refs;
 /// `<method> <path>/...` for an inline schema).
 const ALL_OPTIONAL: &[(&str, &str)] = &[
     (
+        "AudioTiming",
+        "the engine's own account of one inference: each figure only where the engine reported it",
+    ),
+    (
         "AttachmentFacts",
         "what extraction found: which keys are there depends on the attachment's kind",
     ),
@@ -33,6 +37,21 @@ const ALL_OPTIONAL: &[(&str, &str)] = &[
     (
         "ChatCompletionChunk/properties/choices/items/properties/delta",
         "a stream delta carries the keys that changed; the finish frame's is {}",
+    ),
+    (
+        "ContextEditingCaps",
+        "the provider catalog's statements, each only where it published one; the object's \
+         presence alone says the route forwards context_management",
+    ),
+    (
+        "MediaDefaults",
+        "one level's default models: a field is there only where that level sets it (absent \
+         inherits in a folder or a thread, is no default in Settings)",
+    ),
+    (
+        "MediaFacts",
+        "a produced file's facts: each only where the call had it (a cloud route takes no \
+         seed, an image no voice)",
     ),
     (
         "Params",

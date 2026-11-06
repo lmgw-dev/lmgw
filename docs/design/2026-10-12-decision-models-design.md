@@ -1,5 +1,17 @@
 # Decision models: `POST /v1/systemone` and a decision kind for llama.cpp rows
 
+*Change note, 2026-10-24 (owner rulings, built in WP10 on 2026-10-25):* one fallback setting per model and per
+alias, used for every reason it cannot answer (the hold, a benchmark, VRAM outside lmgw, a
+deferred background request, an unavailable candidate, an exhausted upstream quota, an unreachable
+upstream, a disabled model, alias or upstream); the reason is recorded, never configured. The
+global `settings.hold.fallback_alias` and the `inherit` mode are removed, and a fallback may be a
+local model, with each hop of a chain checked on its own. A fallback is a model of the same type
+(decision 29): a save that would give any row's fallback another type, a candidate alias or a
+loop is refused, naming the row. A decision row's
+`hold_fallback_mode`/`hold_fallback` become its one `fallback` (migration 0095; `inherit` meant
+none for the aux class and becomes none); the rule that it must answer `/v1/systemone` stays. See
+[2026-10-24-openai-egress-design.md](2026-10-24-openai-egress-design.md) §14.
+
 The owner reviewed this on 2026-10-12 and took every recommendation of §7; slice 1 (§6.1) was built
 and accepted live on 2026-10-13. What its final review left to the owner is listed at the end of
 §7; the owner decided those items on 2026-10-13, and they were built the same day. Slice 2

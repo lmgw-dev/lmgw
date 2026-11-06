@@ -9,7 +9,7 @@
 //! with no GPU process would otherwise make every verdict refuse ("a model
 //! running without the GPU").
 
-use crate::config::{FallbackRoute, Route, Snapshot};
+use crate::config::Snapshot;
 use crate::error::GatewayError;
 use crate::runtime::registry::RuntimeView;
 use crate::runtime::Placement;
@@ -26,9 +26,10 @@ pub(crate) fn on_gpu(e: &RuntimeView) -> bool {
 /// The net under a row switched to the CPU while its container still ran on
 /// the GPU: under the hold, the row is not held, but that container is. It
 /// is refused, by name, until the hold's sweep (or an idle stop) takes the
-/// container down; the next request then starts it on the CPU. `None` when
-/// the target's running container (if any) is on the CPU, or the hold is
-/// off.
+/// container down; the next request then starts it on the CPU — unless the
+/// row has a fallback, which answers at resolve as it did a moment before
+/// the switch (`gate::chain::stop_at`). `None` when the target's running
+/// container (if any) is on the CPU, or the hold is off.
 pub(crate) fn gpu_container_under_hold(
     state: &SharedState,
     snap: &Snapshot,
@@ -47,25 +48,6 @@ pub(crate) fn gpu_container_under_hold(
                  starts it on the CPU)"
             .into(),
     })
-}
-
-/// [`gpu_container_under_hold`] at resolve time, for a row with a usable
-/// hold fallback: that fallback answers — as it did a moment before the
-/// switch, when the row was still a GPU row under the hold — rather than a
-/// bare refusal. `(fallback alias, its route)`; `None` when the net does
-/// not apply or the row has no usable fallback (admission then refuses,
-/// saying why).
-pub(crate) fn held_container_fallback(
-    state: &SharedState,
-    snap: &Snapshot,
-    route: &Route,
-) -> Option<(String, Route)> {
-    let target = super::classify(route)?;
-    gpu_container_under_hold(state, snap, &target)?;
-    match snap.fallback_route(&target) {
-        FallbackRoute::Usable { alias, route } => Some((alias, route)),
-        FallbackRoute::None | FallbackRoute::Unusable { .. } => None,
-    }
 }
 
 /// What a container on the CPU is charged: nothing. The on-disk weights stay

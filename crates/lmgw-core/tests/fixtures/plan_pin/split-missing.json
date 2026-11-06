@@ -1,0 +1,29 @@
+{
+  "class": "chat",
+  "configured_as": [],
+  "configured_note": "Models already serving this GGUF, and how they differ from the plan. Values the plan read out of the file are facts; the rest are defaults a deliberate variant (a CPU-only twin, a short-context twin) may be overriding on purpose — so this is a proposal to review, not a correction to apply blindly. The one exception is 'unset', which lists configuration the file provably cannot support.",
+  "model_id": "demo-chat",
+  "next_step": "pass these to lmgw__local_model_set action=create (adding model_id), then lmgw__container target=chat action=apply, then lmgw__local_model_test",
+  "params": {
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q8_0",
+    "ctx_size": 65536,
+    "flash_attn": "on",
+    "gguf_path": "lonely/demo-chat-BF16-00001-of-00002.gguf",
+    "jinja": true,
+    "n_gpu_layers": 999
+  },
+  "rationale": {
+    "cache_type_k": "halves KV cache versus the f16 default, at negligible quality cost",
+    "cache_type_v": "halves KV cache versus the f16 default, at negligible quality cost",
+    "ctx_size": "the model's trained context (65536) — its real ceiling, not a reduced default",
+    "flash_attn": "reduces attention memory",
+    "gguf_path": "the file this plan was made for",
+    "jinja": "the GGUF embeds a chat template; without --jinja it is ignored and tool calling will not work",
+    "n_gpu_layers": "offload every layer"
+  },
+  "target": "chat",
+  "warnings": [
+    "'lonely/demo-chat-BF16-00001-of-00002.gguf' is one part of a GGUF split into 2 files, and part 2 ('lonely/demo-chat-BF16-00002-of-00002.gguf') is not in the models dir: llama-server cannot load the model until every part is there, so only the 1 part(s) on disk are counted (24.0 MiB)"
+  ]
+}

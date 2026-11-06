@@ -26,6 +26,10 @@ pub struct SettingsFull {
     pub global_budget_micro: i64,
     /// `day | month | total`.
     pub global_budget_period: String,
+    /// Seconds before an upstream remembered out of quota is asked again,
+    /// when its answer carried no `Retry-After`; until then a model with a
+    /// fallback on it answers with the fallback.
+    pub quota_recheck_seconds: u64,
     pub max_body_mb: u32,
     /// The system prompt new Chat threads start with, as in force: the
     /// configured prompt, or the built-in one when none was written.
@@ -67,6 +71,11 @@ pub struct SettingsFull {
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (> 0).
     pub chat_kb_budget_tokens: u32,
+    /// The image and audio tools' default models (`GET
+    /// /chat/api/media/defaults` lists the choices and says which no longer
+    /// resolve); an absent field is no default. A folder and a thread can
+    /// override each.
+    pub chat_media_defaults: crate::chat_media::MediaDefaults,
     /// The personality profile new Chat threads start with
     /// (`GET /chat/api/profiles`); `null` for none ("Default").
     pub chat_profile: Option<i64>,
@@ -196,7 +205,6 @@ pub struct HostCpu {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HoldSettingsDto {
     pub active: bool,
-    pub fallback_alias: Option<String>,
 }
 
 /// The GPU admission (VRAM) settings.
@@ -238,7 +246,9 @@ pub struct RouterSettings {
     /// Class default; a model's own `extra_run_args` overrides it.
     pub extra_run_args: Vec<String>,
     pub public_prefix: String,
-    /// Per-request ceiling for the class, in seconds. **0 = the maximum
+    /// Per-request ceiling for the class, in seconds: how long lmgw waits for
+    /// an answer to start, and how long a streamed answer may then go
+    /// without an event before lmgw ends it with an error. **0 = the maximum
     /// possible** — no deadline of lmgw's own. One per class since the four
     /// stopped sharing a single 600 s constant.
     pub request_timeout_seconds: u64,
@@ -348,7 +358,7 @@ pub struct SettingsSaved {
     /// Always `true`; a refusal is an error answer instead.
     pub ok: bool,
     /// The settings the call wrote, in the order the op applies them, by the
-    /// patch's field names (`retention_days`, `hold_fallback_alias`, …); a
+    /// patch's field names (`retention_days`, `jobs_retention_days`, …); a
     /// section's field is named under it (`realtime.asr_alias`).
     pub changed: Vec<String>,
     /// What was done, for a person to read; it says so when the rest of the
@@ -365,10 +375,9 @@ pub struct SettingsSaved {
 pub struct HoldSet {
     /// Always `true`; a refusal is an error answer instead.
     pub ok: bool,
-    /// Whether the hold is on now.
+    /// Whether the hold is on now. A held model answers with its own
+    /// fallback, where one is set.
     pub active: bool,
-    /// The alias a held chat request falls back to; `null` when none is set.
-    pub fallback_alias: Option<String>,
     /// The containers this call stopped, as `class/model` (empty when it
     /// stopped none, and when the hold was released or already as asked).
     pub stopped: Vec<String>,

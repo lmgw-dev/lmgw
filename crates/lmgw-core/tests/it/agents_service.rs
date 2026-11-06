@@ -39,6 +39,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::common;
 use common::{dashboard_key, serve_on, Gw};
 
+mod picker;
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -273,6 +275,18 @@ fn fake_container_app(rest: Arc<tokio::sync::Notify>) -> axum::Router {
     async fn teapot() -> impl IntoResponse {
         (axum::http::StatusCode::IM_A_TEAPOT, "short and stout")
     }
+    /// A page with a script, a policy and a session cookie of the app's own:
+    /// what an app may answer on either face (machine-check design D90, D91).
+    async fn scripted() -> impl IntoResponse {
+        (
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("content-security-policy", CONTAINER_CSP),
+                ("set-cookie", CONTAINER_COOKIE),
+            ],
+            "<h1>board</h1><script>fetch('/api/op/settings_set')</script>",
+        )
+    }
     /// A 302 the proxy must **forward**, not follow.
     async fn go() -> impl IntoResponse {
         (
@@ -425,6 +439,8 @@ fn fake_container_app(rest: Arc<tokio::sync::Notify>) -> axum::Router {
         .route("/echo", get(echo))
         .route("/echo/{*rest}", get(echo))
         .route("/mcp/seen", get(seen))
+        .route("/page", get(scripted))
+        .route("/mcp/page", get(scripted))
         .route("/mcp/{*rest}", post(mcp).get(echo))
         .route(
             "/sse",
@@ -437,6 +453,11 @@ fn fake_container_app(rest: Arc<tokio::sync::Notify>) -> axum::Router {
         .route("/ws", get(ws))
         .route("/mcp", post(mcp))
 }
+
+/// The fake app's own policy and session cookie ([`fake_container_app`]'s
+/// scripted page).
+const CONTAINER_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'";
+const CONTAINER_COOKIE: &str = "board_session=fake-session-value; Path=/; HttpOnly";
 
 /// One JSON-RPC exchange, the shape `tests/it/agents_script.rs`'s `gws_stub`
 /// answers with: the aggregator's client speaks streamable HTTP and takes a
@@ -1702,6 +1723,8 @@ async fn a_chat_thread_attaching_the_agents_label_sees_the_containers_tool() {
         server_label: "board".to_string(),
         allowed_tools: None,
         require_approval: Default::default(),
+        server_url: None,
+        connector_id: None,
     }];
     let resolved =
         lmgw_core::mcp::exec::resolve(&state, &specs, &lmgw_core::mcp::scope::ToolScope::gateway())
@@ -2137,6 +2160,52 @@ async fn the_mcp_face_is_the_owners_and_its_container_never_sees_the_key() {
         .unwrap();
     assert_eq!(seen["x-lmgw-face"], json!("app"), "{seen}");
     assert_eq!(seen["x-forwarded-for"], json!("127.0.0.1"), "{seen}");
+
+    service::stop(&state, "board", "test over").await;
+}
+
+/// The MCP face is a path on the dashboard's own origin, and the owner's
+/// cookie opens it to a plain navigation (a typed address is `Sec-Fetch-Site:
+/// none`). What the container answers there runs nothing and sets nothing:
+/// the router's `nosniff` and a second policy, `sandbox`, beside the
+/// container's own, and its `Set-Cookie` dropped (machine-check design D90,
+/// D91). The same answer on the agent's own origin is the container's,
+/// untouched: that origin is answered above the router's layer.
+#[tokio::test]
+async fn the_mcp_face_sandboxes_a_page_and_drops_its_cookie_and_the_origin_does_neither() {
+    use crate::support::stored::{bare_sandboxes, policies};
+    let (state, base, _calls) = with_fake().await;
+    install(&base, &doc("localhost/board:1", 0, 10, PROVIDES)).await;
+
+    let resp = base
+        .anon()
+        .get(format!("{base}/agents/board/mcp/page"))
+        .header("cookie", format!("lmgw_session={}", base.key))
+        .header("sec-fetch-site", "none")
+        .header("sec-fetch-mode", "navigate")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers().clone();
+    assert_eq!(h["content-type"], "text/html; charset=utf-8");
+    assert_eq!(policies(&h), [CONTAINER_CSP, "sandbox"], "{h:?}");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert!(h.get("set-cookie").is_none(), "{h:?}");
+    assert!(resp.text().await.unwrap().contains("<script>"));
+
+    let resp = base
+        .origin_client(&["board.localhost"])
+        .get(format!("{}/page", base.origin("board.localhost")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers();
+    assert_eq!(policies(h), [CONTAINER_CSP], "{h:?}");
+    assert_eq!(bare_sandboxes(h), 0);
+    assert!(h.get("x-content-type-options").is_none(), "{h:?}");
+    assert_eq!(h["set-cookie"], CONTAINER_COOKIE);
 
     service::stop(&state, "board", "test over").await;
 }
@@ -2815,6 +2884,8 @@ async fn the_real_thing_serves_a_page_an_sse_stream_a_websocket_and_its_tools() 
         server_label: "board".to_string(),
         allowed_tools: None,
         require_approval: Default::default(),
+        server_url: None,
+        connector_id: None,
     }];
     let resolved =
         lmgw_core::mcp::exec::resolve(&state, &specs, &lmgw_core::mcp::scope::ToolScope::gateway())

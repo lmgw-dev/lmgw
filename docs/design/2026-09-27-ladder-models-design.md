@@ -140,7 +140,7 @@ lmgw runs.
     - Headers are stamped at every terminal response via the `with_fallback`
       pattern (`proxy.rs:603`).
 
-### 2.3 Measured on this machine
+### 2.3 Measured on a test machine
 
 17. **Cold start of `gemma4-12b`**, as time to first token minus prefill:
     4.6, 4.7, 9.4, 11.0 and 11.6 s over five cold starts. This includes any

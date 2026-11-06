@@ -202,7 +202,7 @@ pub(super) fn plan(
                      evaluates its whole prompt in one ubatch, and embedding mode forces \
                      n_batch down to n_ubatch, whose default is 512, so without it every \
                      request over 512 tokens fails with a 500. The compute buffer grows with \
-                     it, and on this CPU row it is RAM: Laya's container held 2.22 GB after a \
+                     it, and on this CPU row it is RAM: Laya's container held 2.07 GiB after a \
                      7,669-token prompt at 8192. On the GPU the VRAM ledger would charge it \
                      with the row: {}",
                     gpu_compute(s, Some(ctx), ctx)
@@ -432,7 +432,7 @@ fn no_route(snap: &Snapshot, model_id: &str, body: &str) -> String {
     format!(
         "HTTP 404 on /v1/systemone ({body}): the image '{}' of the decision model \
          '{model_id}' has no System One route. The route needs a llama.cpp build from b11361 \
-         (2026-10-02) on; pick a newer image for the row or the aux class on the Backends \
+         (2026-10-02) on; pick a newer image for the row or the aux class on the Engines \
          page.",
         image_of(snap, model_id)
     )

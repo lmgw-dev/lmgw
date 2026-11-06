@@ -271,6 +271,11 @@ pub struct ThreadRow {
     /// setting.
     pub kb_budget_tokens: Option<i64>,
     pub voice: ThreadVoice,
+    /// The thread's own default models of the image and audio tools; an
+    /// absent field inherits its folder's, then Settings → Chat's, and an
+    /// empty one is no default (`GET /chat/api/media/defaults` says what
+    /// they resolve to).
+    pub media_defaults: crate::chat_media::MediaDefaults,
     pub created_at: String,
     /// Moves with every change to the thread and every new message.
     pub updated_at: String,
@@ -324,7 +329,8 @@ pub struct Thread {
 /// What a new thread in a folder starts with. Every field is optional;
 /// `null` is the Chat's own default. A copy is taken when a thread is
 /// created, except that an ongoing conversation's changed defaults also
-/// reach its current thread.
+/// reach its current thread — and `media_defaults`, which every thread in
+/// the folder reads at each turn.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -354,6 +360,11 @@ pub struct ThreadDefaults {
     /// The personality profile of a new thread; `null` for the Chat's own
     /// default (Settings → Chat).
     pub profile_id: Option<i64>,
+    /// The image and audio tools' default models of every thread in the
+    /// folder, read at each turn rather than copied: an absent field
+    /// inherits Settings → Chat's, an empty one is no default, and a
+    /// thread's own wins.
+    pub media_defaults: Option<crate::chat_media::MediaDefaults>,
 }
 
 /// A Chat folder as `GET /chat/api/folders` lists it, with its thread

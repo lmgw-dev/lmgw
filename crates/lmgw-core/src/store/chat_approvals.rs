@@ -759,7 +759,7 @@ pub async fn resume_chat_reply(
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
            completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, images_note=?10,
-           pending_approvals=?11
+           pending_approvals=?11, reasoning_seals=?12
          WHERE id=?1 AND thread_id=?2 AND role='assistant'",
     )
     .bind(id)
@@ -773,12 +773,14 @@ pub async fn resume_chat_reply(
     .bind(&r.answered_by)
     .bind(&r.images_note)
     .bind(r.pending_approvals.as_ref().map(PendingApprovals::to_json))
+    .bind(super::chat_seals::to_column(&r.reasoning_seals))
     .execute(&mut *tx)
     .await?
     .rows_affected();
     if n == 0 {
         return Ok(false);
     }
+    super::chat_tool_files::bind_tool_files(&mut tx, thread_id, id, &r.tool_files).await?;
     super::feed::record_updated(&mut tx, thread_id, id, by).await?;
     record_requested(&mut tx, thread_id, id, r.pending_approvals.as_ref(), by).await?;
     sqlx::query("UPDATE chat_threads SET updated_at=datetime('now') WHERE id=?1")

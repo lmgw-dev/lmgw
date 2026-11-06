@@ -529,6 +529,7 @@ impl Registry {
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let (tx, _rx) = watch::channel(Phase::Ready);
+                self.remember_image_caps(class, &model_id, probe.capabilities.as_ref());
                 slot.insert(Entry {
                     generation: next_generation(),
                     container_name: name.to_string(),
@@ -613,9 +614,15 @@ impl Registry {
         // its directories were made by the start that created it. Creating
         // them again here would let an unwritable models dir refuse to adopt a
         // healthy container (image-generation §12.2 is why they exist at all).
-        let render = runtime
+        let mut render = runtime
             .preview_spec(container_prefix, port, spec.models_dir, spec.data_dir)
             .map_err(|e| format!("rendering the container spec failed: {e}"))?;
+        // With the options a start passes, so the restart policy it left out
+        // is left out of this digest too.
+        let globals = self
+            .cdi()
+            .globals(container_prefix, &runtime.extra_run_args);
+        render.set_globals(globals);
         let expected = render_engine_args(&render);
         if inspected.config.cmd != expected {
             return Err(format!(

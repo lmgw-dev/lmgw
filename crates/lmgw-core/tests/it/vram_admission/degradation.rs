@@ -26,7 +26,8 @@ async fn without_gpu_telemetry_admission_is_inactive_and_still_starts_the_contai
     assert_eq!(v["telemetry_ok"], false);
     let reason = v["inactive_reason"].as_str().unwrap_or_default();
     assert!(
-        reason.contains("budget_mb") && reason.contains("no driver on this host"),
+        reason.contains("Settings → GPU → Admission → Budget")
+            && reason.contains("no driver on this host"),
         "the reason must name both the missing driver and the way out: {reason}"
     );
     assert!(v["free_bytes"].is_null(), "no measurement, no free figure");

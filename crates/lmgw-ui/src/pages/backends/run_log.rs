@@ -485,7 +485,8 @@ fn AfterRun(
         .unwrap_or_else(|| super::run_moving_tag(&run));
     let moving_sv = StoredValue::new(moving.clone());
     let verified = matches!(status, BuildRunStatus::Succeeded | BuildRunStatus::UpToDate);
-    let has_image = run.image_id.is_some();
+    // Gone from podman: the run keeps its id as history, not as an image to act on.
+    let has_image = run.image_id.is_some() && run.image_present != Some(false);
     let busy = RwSignal::new(false);
 
     // Current: made current here or by the run, or (an up-to-date run, which

@@ -36,6 +36,7 @@
 use crate::config::Snapshot;
 use crate::gate::RouteCheck;
 use crate::hf::fmt_bytes;
+use crate::runtime::registry::Origin;
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::vram::{classify, LocalHold, Target};
@@ -119,7 +120,7 @@ async fn run(
         "chat" => RouteCheck::None,
         _ => RouteCheck::Audio,
     };
-    let routed = match crate::gate::resolve(state, alias, check).await {
+    let routed = match crate::gate::resolve(state, alias, check, Origin::Owner).await {
         Ok(r) => r,
         Err(f) => return (WarmOutcome::refused(&f.error), None),
     };

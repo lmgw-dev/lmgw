@@ -55,7 +55,7 @@ impl Closed {
     }
 
     /// The call's result as the record keeps it.
-    fn result(&self) -> ContentPart {
+    pub fn result(&self) -> ContentPart {
         ContentPart::ToolResult {
             id: self.call_id.clone(),
             name: Some(self.name.clone()),

@@ -8,7 +8,9 @@
 //! covers the whole path from provider JSON to the published object rather
 //! than a hand-made `ModelInfo` that could drift from what the parsers emit.
 
-use lmgw_core::capabilities::{self, ModelCapabilities, ProjectorStatus, StructuredOutputCaps};
+use lmgw_core::capabilities::{
+    self, ContextEditingCaps, ModelCapabilities, ProjectorStatus, StructuredOutputCaps,
+};
 use lmgw_core::catalog::{
     parse_anthropic_entry, parse_gemini_entry, parse_openai_entry, ModelInfo,
 };
@@ -58,7 +60,7 @@ const CHAT_OTHER: [&str; 3] = ["/v1/chat/completions", "/v1/messages", "/v1/resp
 #[test]
 fn kilo_variants_model() {
     let info = parse_openai_entry(&fixture("kilo_anthropic_variants.json")).expect("parses");
-    let d = capabilities::for_catalog(&info, Protocol::Openai, "kilo");
+    let d = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo");
     let caps = d.capabilities.expect("capabilities");
 
     assert_eq!(caps.task, "chat");
@@ -109,7 +111,7 @@ fn kilo_variants_model() {
 #[test]
 fn kilo_model_without_reasoning() {
     let info = parse_openai_entry(&fixture("kilo_no_reasoning.json")).expect("parses");
-    let d = capabilities::for_catalog(&info, Protocol::Openai, "kilo");
+    let d = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo");
     let caps = d.capabilities.expect("capabilities");
 
     assert_eq!(caps.reasoning, None);
@@ -137,7 +139,7 @@ fn kilo_model_without_reasoning() {
 #[test]
 fn kilo_embedding_model_is_routed_to_embeddings_only() {
     let info = parse_openai_entry(&fixture("kilo_embedding.json")).expect("parses");
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
+    let caps = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo")
         .capabilities
         .expect("capabilities");
     assert_eq!(caps.task, "embedding");
@@ -150,7 +152,7 @@ fn kilo_embedding_model_is_routed_to_embeddings_only() {
 #[test]
 fn a_catalog_that_says_nothing_still_publishes_the_route() {
     let info = parse_openai_entry(&json!({"id": "gpt-6", "object": "model"})).expect("parses");
-    let d = capabilities::for_catalog(&info, Protocol::Openai, "openai");
+    let d = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "openai");
     let caps = d.capabilities.expect("capabilities");
     assert_eq!(
         caps,
@@ -192,6 +194,8 @@ fn gemini_thinking_model() {
         ])
     );
     assert_eq!(caps.tool_calls.unwrap().kind, "native");
+    // The egress translates both types, but the catalog says nothing per
+    // model, so neither flag is published (structured-output design §10).
     assert_eq!(caps.structured_output, None);
     assert_eq!(d.max_output_tokens, Some(65_536));
     assert_eq!(d.created, None, "Gemini publishes no timestamp");
@@ -249,7 +253,11 @@ fn anthropic_model_with_the_full_capabilities_tree() {
     assert_eq!(r.kind, "levels");
     assert_eq!(r.levels, ["low", "medium", "high", "xhigh", "max"]);
     assert_eq!(r.enabled, None);
-    assert_eq!(r.can_disable, None, "the tree has no types.disabled");
+    assert_eq!(
+        r.can_disable, None,
+        "this entry publishes no types.disabled"
+    );
+    assert_eq!(r.thinking_types, ["adaptive"]);
     assert_eq!(
         r.control,
         strings(&[
@@ -261,12 +269,21 @@ fn anthropic_model_with_the_full_capabilities_tree() {
         ])
     );
     assert_eq!(caps.tool_calls.unwrap().kind, "native");
+    // json_schema from the tree's own `structured_outputs`; json_object is
+    // `false`: Anthropic has no JSON-object mode (structured-output §10).
+    assert_eq!(
+        caps.structured_output,
+        Some(StructuredOutputCaps {
+            json_schema: Some(true),
+            json_object: Some(false),
+        })
+    );
     assert_eq!(d.max_output_tokens, Some(128_000));
     assert_eq!(d.created, Some(1_769_904_000), "2026-02-01T00:00:00Z");
     assert!(
         d.notes
             .iter()
-            .any(|n| n.contains("current Claude models reject")),
+            .any(|n| n.contains("catalog says it does not take")),
         "{:?}",
         d.notes
     );
@@ -282,6 +299,14 @@ fn anthropic_model_without_a_capabilities_object() {
     let caps = d.capabilities.expect("capabilities");
     assert_eq!(caps.reasoning, None);
     assert_eq!(caps.input_modalities, None);
+    // No tree to read json_schema from; json_object is `false` regardless.
+    assert_eq!(
+        caps.structured_output,
+        Some(StructuredOutputCaps {
+            json_schema: None,
+            json_object: Some(false),
+        })
+    );
     assert_eq!(d.max_output_tokens, None);
     assert!(
         d.notes
@@ -290,6 +315,102 @@ fn anthropic_model_without_a_capabilities_object() {
         "{:?}",
         d.notes
     );
+    // The route sends `context_management` on; nothing is known per model.
+    assert_eq!(caps.context_editing, Some(ContextEditingCaps::default()));
+}
+
+/// The real per-model thinking types reach lmgw's facts and, through them,
+/// Anthropic's blocks: `claude-sonnet-5-5` cannot switch off, `claude-opus-5`
+/// can; neither takes the budget form. Off an Anthropic route the types are
+/// not published (another protocol has no Messages `thinking` field).
+#[test]
+fn anthropic_thinking_types_reach_the_facts_and_the_blocks() {
+    use lmgw_core::capabilities::anthropic_blocks::anthropic_blocks;
+
+    let caps = |id: &str, p: Protocol| {
+        let info = parse_anthropic_entry(&anthropic_entry(id)).expect("parses");
+        capabilities::for_catalog(&info, p, "anthropic")
+            .capabilities
+            .expect("capabilities")
+    };
+
+    let c = caps("claude-sonnet-5-5", Protocol::Anthropic);
+    let r = c.reasoning.as_ref().expect("reasoning");
+    assert_eq!(r.can_disable, Some(false));
+    assert_eq!(r.thinking_types, ["adaptive", "between_tools"]);
+    let t = anthropic_blocks(&c).thinking.types;
+    assert!(t.adaptive.supported);
+    assert!(!t.disabled.supported);
+    assert!(!t.enabled.supported);
+    assert!(t.between_tools.supported, "sent as written on this route");
+    let b = anthropic_blocks(&c).context_management;
+    assert!(b.supported);
+    assert!(b.clear_tool_uses_20250919.supported);
+    assert!(b.clear_thinking_20251015.supported);
+    assert!(b.compact_20260112.supported, "the catalog names it");
+    // lmgw's own half says the same about compaction: the catalog names
+    // compact_20260112 for this model, and lmgw sends it on.
+    assert_eq!(
+        c.context_editing.as_ref().unwrap().edits,
+        strings(&[
+            "clear_thinking_20251015",
+            "clear_tool_uses_20250919",
+            "compact_20260112"
+        ])
+    );
+    // The fixture was listed without the on-demand beta flag: no
+    // `capabilities.compaction`, so the block says no.
+    assert!(!anthropic_blocks(&c).compaction.supported);
+
+    let c = caps("claude-opus-5", Protocol::Anthropic);
+    assert_eq!(c.reasoning.as_ref().unwrap().can_disable, Some(true));
+    let t = anthropic_blocks(&c).thinking.types;
+    assert!(t.adaptive.supported && t.disabled.supported);
+    assert!(!t.between_tools.supported, "its catalog says no");
+
+    let c = caps("claude-haiku-4-5", Protocol::Anthropic);
+    let t = anthropic_blocks(&c).thinking.types;
+    assert!(!t.adaptive.supported, "its catalog says no adaptive");
+    assert!(t.enabled.supported, "the budget form goes out as written");
+
+    let c = caps("claude-sonnet-5-5", Protocol::OpenaiCompatible);
+    assert!(c.reasoning.unwrap().thinking_types.is_empty());
+}
+
+/// `context_editing` is the Anthropic route's: the catalog's statement
+/// there, absent on every other protocol, whatever the entry carries.
+#[test]
+fn context_editing_only_on_an_anthropic_route() {
+    let entry = json!({
+        "id": "claude-test",
+        "capabilities": {"context_management": {
+            "supported": true,
+            "clear_tool_uses_20250919": {"supported": true},
+        }}
+    });
+    let info = parse_anthropic_entry(&entry).expect("parses");
+    let on = |p: Protocol| {
+        capabilities::for_catalog(&info, p, "u")
+            .capabilities
+            .unwrap()
+            .context_editing
+    };
+    assert_eq!(
+        on(Protocol::Anthropic),
+        Some(ContextEditingCaps {
+            supported: Some(true),
+            edits: strings(&["clear_tool_uses_20250919"]),
+            compaction: vec![],
+        })
+    );
+    for p in [
+        Protocol::Openai,
+        Protocol::OpenaiCompatible,
+        Protocol::Gemini,
+        Protocol::LlamaCpp,
+    ] {
+        assert_eq!(on(p), None, "{p:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,8 +436,7 @@ fn aux(model_id: &str, kind: AuxKind, args: &[&str]) -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -473,7 +593,7 @@ fn a_catalog_decision_model_and_an_openrouter_embedder() {
     }))
     .expect("an entry");
     assert_eq!(jev.task.as_deref(), Some("decision"));
-    let caps = capabilities::for_catalog(&jev, Protocol::Openai, "openrouter")
+    let caps = capabilities::for_catalog(&jev, Protocol::OpenaiCompatible, "openrouter")
         .capabilities
         .expect("capabilities");
     assert_eq!(caps.task, "decision");
@@ -501,7 +621,7 @@ fn an_override_may_declare_a_decision_model() {
     let d = capabilities::apply_owner_override(
         derived,
         &json!({"capabilities": {"task": "decision", "output_modalities": ["decisions"]}}),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
     )
     .expect("decision and decisions are in the vocabulary");
     let caps = d.capabilities.expect("capabilities");
@@ -537,8 +657,7 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }
@@ -640,8 +759,9 @@ fn unknown_fields_are_omitted_entirely() {
         reasoning: None,
         tools: None,
         structured_output: None,
+        context_management: None,
     };
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "u")
+    let caps = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "u")
         .capabilities
         .unwrap();
     let v = serde_json::to_value(&caps).expect("serializes");
@@ -686,11 +806,12 @@ fn image(model_id: &str) -> ImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         peak_extra_bytes: None,
         peak_learned_at: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -778,7 +899,7 @@ fn an_image_rows_override_merges_over_the_derived_object() {
             "capabilities": {"output_modalities": ["image", "video"]},
             "notes": ["This box renders 512x512 in half a second."],
         }),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
     )
     .expect("a well-formed override applies");
     let caps = applied.capabilities.expect("capabilities");
@@ -808,7 +929,7 @@ fn a_cloud_catalog_image_model_publishes_no_route_until_the_owner_states_one() {
         });
         let info = parse_openai_entry(&entry).expect("parses");
         assert_eq!(info.task.as_deref(), Some(task));
-        let d = capabilities::for_catalog(&info, Protocol::Openai, "bfl");
+        let d = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "bfl");
         let caps = d.capabilities.clone().expect("capabilities");
         assert_eq!(caps.task, task);
         assert!(caps.endpoints.is_empty(), "{task}: {:?}", caps.endpoints);
@@ -824,7 +945,7 @@ fn a_cloud_catalog_image_model_publishes_no_route_until_the_owner_states_one() {
         let owned = capabilities::apply_owner_override(
             d,
             &json!({"capabilities": {"endpoints": ["/v1/images/generations"]}}),
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
         )
         .expect("an override may state the routes");
         let caps = owned.capabilities.expect("capabilities");
@@ -849,7 +970,7 @@ fn a_chat_model_that_also_outputs_images_stays_chat() {
     });
     let info = parse_openai_entry(&entry).expect("parses");
     assert_eq!(info.task.as_deref(), Some("chat"));
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
+    let caps = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo")
         .capabilities
         .expect("capabilities");
     assert_eq!(caps.task, "chat");
@@ -881,7 +1002,7 @@ fn a_silent_openai_catalog_entry_takes_its_task_from_its_name() {
     ] {
         let info = parse_openai_entry(&entry(id)).expect("parses");
         assert_eq!(info.task, None, "the catalog states none for {id}");
-        let d = capabilities::for_catalog(&info, Protocol::Openai, "openai");
+        let d = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "openai");
         let caps = d.capabilities.expect("capabilities");
         assert_eq!(caps.task, task, "{id}");
         assert_eq!(caps.endpoints, strings(&endpoints), "{id}");
@@ -896,7 +1017,7 @@ fn a_silent_openai_catalog_entry_takes_its_task_from_its_name() {
     // A catalog that states its modalities is not second-guessed.
     let stated = json!({"id": "vendor/some-tts", "architecture": {"output_modalities": ["text"]}});
     let info = parse_openai_entry(&stated).expect("parses");
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
+    let caps = capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo")
         .capabilities
         .unwrap();
     assert_eq!(caps.task, "chat");

@@ -32,6 +32,9 @@ mod qr_card;
 mod strip;
 /// New token…, the re-pair with its two choices.
 mod token_dialog;
+/// The transfers lmgw relays between devices (device transfers design
+/// §11.1).
+mod transfers;
 
 pub(super) use logic::parse_urls;
 use notes::PairingNotes;
@@ -39,6 +42,7 @@ use pair::PairDevice;
 use qr_card::{QrCard, QrSession};
 use strip::LinkStrip;
 use token_dialog::TokenDialog;
+use transfers::TransfersSection;
 
 /// The clock the card's relative words read (seconds since the epoch),
 /// moved on by the card itself.
@@ -347,6 +351,7 @@ pub(super) fn DevicesCard(
             </div>
             <LinkStrip keys=keys refresh=refresh/>
             {body}
+            <TransfersSection/>
         </div>
         <PairDevice
             open=pair_open
@@ -726,6 +731,21 @@ fn DeviceLine(
             }
         })
     };
+    // The app id its enrolment declared (device transfers design §2): what
+    // other devices of the same app offer files to.
+    let app_flag = move || {
+        row.get().and_then(|r| r.app_id).map(|app| {
+            view! {
+                " "
+                <span
+                    class="chip info key-kind mono-sm"
+                    title="the app this install declared when it paired: other devices of the same app offer it files"
+                >
+                    {format!("app {app}")}
+                </span>
+            }
+        })
+    };
     let bare_name = bare(&ident.name).to_string();
     view! {
         <tr class="dev-sum">
@@ -736,6 +756,7 @@ fn DeviceLine(
                 </span>
                 {(!ident.enabled)
                     .then(|| view! { " " <span class="chip off key-kind">"disabled"</span> })}
+                {app_flag}
                 {hosts}
                 {granted_chips}
                 {move || super::device_tools::needs_grant_chips(unmet())}

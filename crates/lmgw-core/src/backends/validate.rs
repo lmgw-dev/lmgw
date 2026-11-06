@@ -240,11 +240,11 @@ pub fn validate_repo_url(field: &str, url: &str) -> Result<(), String> {
                 if scheme != "ssh://" || userinfo.contains(':') {
                     return Err(format!(
                         "{field} '{}' carries credentials in the URL — remove them and add a \
-                         forge token for {} under Settings → Backends instead (lmgw sends it \
-                         only to that host and never stores it in the build, its images or \
-                         the run log)",
+                         forge token for {} under {} instead (lmgw sends it only to that host \
+                         and never stores it in the build, its images or the run log)",
                         redact_url(url),
-                        authority_host(rest).unwrap_or_else(|| "its host".into())
+                        authority_host(rest).unwrap_or_else(|| "its host".into()),
+                        lmgw_api_types::settings_labels::FORGE_TOKENS_AT
                     ));
                 }
             }
@@ -877,7 +877,7 @@ mod tests {
         ] {
             let e = validate_repo_url("repo_url", bad).unwrap_err();
             assert!(e.contains("credentials"), "{e}");
-            assert!(e.contains("Settings → Backends"), "{e}");
+            assert!(e.contains("Settings → Engines"), "{e}");
             assert!(!e.contains("secret") && !e.contains("hunter2"), "{e}");
         }
         // A user name alone is how ssh:// works — not a credential.

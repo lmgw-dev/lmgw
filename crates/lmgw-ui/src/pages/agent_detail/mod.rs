@@ -34,7 +34,7 @@
 //! [`review_row`] are the batch run surface (§6.2) a run opens into, and
 //! [`save_labelled`] its "Save as labelled set" on a finished apply run
 //! (labs-store design §4); [`app_tab`] is App; [`runs_tab`] is Runs/Threads; [`definition_tab`] is
-//! Definition.
+//! Definition, and [`manifest_editor`] its wrapped, fitted manifest box.
 
 mod shared;
 pub(crate) use shared::unbound_line;
@@ -70,6 +70,9 @@ use runs_tab::*;
 
 mod definition_tab;
 use definition_tab::*;
+
+mod manifest_editor;
+use manifest_editor::*;
 
 #[cfg(test)]
 mod tests;

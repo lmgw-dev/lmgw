@@ -450,6 +450,10 @@ fn KeptRun(lab: Lab, run: LabRunView, form: AudioLabForm) -> impl IntoView {
     }
     let rate_field = lab.form.timeline_rate;
     let error = error_of(&run);
+    // Its model could not start on the graphics card because of the
+    // computer (machine-check design D179, D188): the check's line, while
+    // the card is not ready, whatever "Not now" holds.
+    let gpu_setup = run.error_code.as_deref() == Some("gpu_setup");
     let stem = track_stem(&model);
     let unkept = run.id.is_none();
     let run_for_stats = run.clone();
@@ -476,6 +480,10 @@ fn KeptRun(lab: Lab, run: LabRunView, form: AudioLabForm) -> impl IntoView {
                     })
             })
         }}
+        {gpu_setup
+            .then(|| {
+                view! { <crate::widgets::machine_check::MachineInCard/> }
+            })}
         {unkept.then(|| view! { <div class="notice warn">"not kept"</div> })}
         <details class="lab-details">
             <summary>"The request as sent"</summary>

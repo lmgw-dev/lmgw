@@ -14,7 +14,7 @@
 //! arms (§4.7): a name not listed here is unreachable, and adding an op means
 //! adding it here, which is what forces it into the docs.
 
-/// The 57 arms of [`super::api::op`]'s own `match` — everything dispatched
+/// The 67 arms of [`super::api::op`]'s own `match` — everything dispatched
 /// there directly.
 pub const MAIN_OPS: &[&str] = &[
     "upstream_set",
@@ -39,14 +39,20 @@ pub const MAIN_OPS: &[&str] = &[
     "response_chain_delete",
     "responses_gc",
     "upstream_test",
+    "upstream_quota_clear",
     "hf_add",
     "hf_set",
     "container",
     "hold_set",
+    "machine_check",
+    "machine_settings_fit",
     "audio_catalog",
     "voice_transcribe",
+    "voice_generate",
+    "voice_sample_save",
     "image_recipes",
     "image_recipe_add",
+    "image_upscaler_add",
     "local_model_test",
     "builds",
     "build_get",
@@ -74,6 +80,10 @@ pub const MAIN_OPS: &[&str] = &[
     "bench_cancel",
     "bench_run_set",
     "bench_delete",
+    "model_find",
+    "model_get",
+    "model_fit_again",
+    "model_get_status",
 ];
 
 /// The agent catalog's ops (agent-catalog design §5), dispatched to
@@ -121,9 +131,13 @@ pub const KEY_OPS: &[&str] = &[
 pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 
 /// Every op name, in list order — `MAIN_OPS`, then `AGENT_OPS`, `KEY_OPS`,
-/// `SETTINGS_OPS`. 86 in total (§4.7, plus the benchmark design's seven,
-/// §8.1, `voice_transcribe`, audio-class gap 5, the realtime design's
-/// `realtime_budget`, §12, and the device link's four, §9.4).
+/// `SETTINGS_OPS`. 96 in total (§4.7, plus the benchmark design's seven,
+/// §8.1, `voice_transcribe`, audio-class gap 5, the Voices lab's two, the realtime design's
+/// `realtime_budget`, §12, the device link's four, §9.4, and
+/// `image_upscaler_add`, chat-media-tools §9, `upstream_quota_clear`,
+/// openai egress design §14.6, and `machine_check` and
+/// `machine_settings_fit`, machine-check design §4.2, and `model_find`,
+/// `model_get`, `model_fit_again` and `model_get_status`, find-a-model design §9.1).
 pub fn all() -> impl Iterator<Item = &'static str> {
     MAIN_OPS
         .iter()
@@ -133,7 +147,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Is `name` one of the 82? What `op()` checks before it looks at its own
+/// Is `name` one of the 96? What `op()` checks before it looks at its own
 /// arms (§4.7): unlisted means unreachable, whatever a `match` arm below it
 /// might otherwise have answered.
 pub fn is_op(name: &str) -> bool {
@@ -157,9 +171,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_four_lists_are_86_names_with_no_duplicate() {
+    fn the_four_lists_are_96_names_with_no_duplicate() {
         let all: Vec<&str> = all().collect();
-        assert_eq!(all.len(), 86, "{all:#?}");
+        assert_eq!(all.len(), 96, "{all:#?}");
         let set: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), all.len(), "a name appears in more than one list");
     }

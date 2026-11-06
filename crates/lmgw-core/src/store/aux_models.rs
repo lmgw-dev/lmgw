@@ -2,7 +2,7 @@
 
 use sqlx::{Row, SqlitePool};
 
-use crate::config::{AuxBackend, AuxKind, AuxModel, HoldFallbackMode};
+use crate::config::{AuxBackend, AuxKind, AuxModel};
 use crate::error::GatewayError;
 
 use super::*;
@@ -30,8 +30,7 @@ pub(super) fn aux_model_from_row(row: &sqlx::sqlite::SqliteRow) -> AuxModel {
         image: row.get("image"),
         extra_run_args: parse_json_opt(row.get::<Option<String>, _>("extra_run_args")),
         warm_start: row.get::<i64, _>("warm_start") != 0,
-        hold_fallback_mode: hold_fallback_mode_from_row(row),
-        hold_fallback: row.get("hold_fallback"),
+        fallback: fallback_from_row(row),
     }
 }
 
@@ -55,10 +54,8 @@ pub struct NewAuxModel {
     pub image: Option<String>,
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2).
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// Meaningful only when `hold_fallback_mode` is `Alias`.
-    pub hold_fallback: Option<String>,
+    /// The row's one fallback (openai egress design §14.2); `None` = none.
+    pub fallback: Option<String>,
 }
 
 pub async fn list_aux_models(pool: &SqlitePool) -> DbResult<Vec<AuxModel>> {
@@ -77,14 +74,22 @@ pub async fn get_aux_model(pool: &SqlitePool, id: i64) -> DbResult<Option<AuxMod
 }
 
 pub async fn insert_aux_model(pool: &SqlitePool, m: &NewAuxModel) -> DbResult<i64> {
+    insert_aux_model_in(&mut *pool.acquire().await?, m).await
+}
+
+/// [`insert_aux_model`] inside a caller's transaction: the fallback save checks
+/// write it in a dry run first (`ops::fallback::referrers`).
+pub async fn insert_aux_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    m: &NewAuxModel,
+) -> DbResult<i64> {
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     let res = sqlx::query(
         "INSERT INTO aux_models (model_id, gguf_path, kind, pooling, ctx_size, args, idle_seconds,
-                                  enabled, image, extra_run_args, warm_start, hold_fallback_mode,
-                                  hold_fallback, ubatch_size, batch_size, mmproj_path, backend,
-                                  threads)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                  enabled, image, extra_run_args, warm_start, fallback,
+                                  ubatch_size, batch_size, mmproj_path, backend, threads)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
     )
     .bind(&m.model_id)
     .bind(&m.gguf_path)
@@ -97,26 +102,35 @@ pub async fn insert_aux_model(pool: &SqlitePool, m: &NewAuxModel) -> DbResult<i6
     .bind(&m.image)
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(m.ubatch_size)
     .bind(m.batch_size)
     .bind(&m.mmproj_path)
     .bind(m.backend.map(|b| b.as_str()))
     .bind(m.threads)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(res.last_insert_rowid())
 }
 
 pub async fn update_aux_model(pool: &SqlitePool, id: i64, m: &NewAuxModel) -> DbResult<()> {
+    update_aux_model_in(&mut *pool.acquire().await?, id, m).await
+}
+
+/// [`update_aux_model`] inside a caller's transaction: a rename rewrites the
+/// fallbacks that name the row in the same one ([`rewrite_fallbacks_in`]).
+pub async fn update_aux_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    id: i64,
+    m: &NewAuxModel,
+) -> DbResult<()> {
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     sqlx::query(
         "UPDATE aux_models SET model_id=?2, gguf_path=?3, kind=?4, pooling=?5, ctx_size=?6, args=?7,
          idle_seconds=?8, enabled=?9, image=?10, extra_run_args=?11, warm_start=?12,
-         hold_fallback_mode=?13, hold_fallback=?14, ubatch_size=?15, batch_size=?16,
-         mmproj_path=?17, backend=?18, threads=?19,
+         fallback=?13, ubatch_size=?14, batch_size=?15,
+         mmproj_path=?16, backend=?17, threads=?18,
          updated_at=datetime('now') WHERE id=?1",
     )
     .bind(id)
@@ -131,14 +145,13 @@ pub async fn update_aux_model(pool: &SqlitePool, id: i64, m: &NewAuxModel) -> Db
     .bind(&m.image)
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(m.ubatch_size)
     .bind(m.batch_size)
     .bind(&m.mmproj_path)
     .bind(m.backend.map(|b| b.as_str()))
     .bind(m.threads)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

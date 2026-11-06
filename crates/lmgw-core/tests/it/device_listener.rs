@@ -570,3 +570,40 @@ async fn a_stop_during_the_wallet_s_prompt_neither_waits_nor_binds_after_it() {
     assert!(epoch > 0);
     assert_eq!(state.devices.listener.bound()[0].port(), port);
 }
+
+/// 2026-10-24: every accepted connection gets `SO_KEEPALIVE`, its first
+/// probe and each next one after `chat_feed_keepalive_s`, from the accept
+/// on: a connection that has sent nothing (no handshake, no certificate)
+/// carries it too. No `TCP_USER_TIMEOUT`: only a streamed chat answer sets
+/// that, while it runs (`client_hangup::device`). The test's own client
+/// socket sets none.
+#[tokio::test]
+async fn every_accepted_connection_gets_tcp_keepalive_from_the_feed_s() {
+    use crate::support::sockopts::{keepalives, KeepAlive};
+    let gw = device_link::gateway_with(|s| s.chat_feed_keepalive_s = 23).await;
+    let wanted = KeepAlive {
+        on: true,
+        idle_s: 23,
+        interval_s: 23,
+        user_timeout_ms: 0,
+    };
+    assert!(!keepalives().contains(&wanted), "{:?}", keepalives());
+    let _idle = gw.tcp_from([127, 0, 0, 1]).await;
+    gw.unauthenticated(1).await;
+    let set = tokio::time::timeout(Duration::from_secs(10), async {
+        while !keepalives().contains(&wanted) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        set.is_ok(),
+        "no socket carries {wanted:?}: {:?}",
+        keepalives()
+    );
+    assert_eq!(
+        keepalives().iter().filter(|k| **k == wanted).count(),
+        1,
+        "the accepted socket only"
+    );
+}

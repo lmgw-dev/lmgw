@@ -280,7 +280,11 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Read a pull job's progress or result",
         description: Some(
             "What a `container_image_pull` job is doing, or did — the Pull update panel's \
-             result and its \"recreate N running containers\" prompt.",
+             result and its \"recreate N running containers\" prompt. While it runs, \
+             `detail.done_bytes` of `detail.total_bytes` is the download so far \
+             (`size_note` says why the size is not known, when it is not). A model's first \
+             start pulls a missing image through the same job before its admission, so a \
+             start and this op's pull of one image are one download.",
         ),
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<dto::ContainerImagePullStatusArgs>()),

@@ -13,7 +13,16 @@ js-sys = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wasm-bindgen = "0.2"
+# The transport seam (http/transport.rs): boxed futures and byte streams, the
+# fetch promise, and a fetch body read as a stream.
+futures = "0.3"
+wasm-bindgen-futures = "0.4"
+wasm-streams = "0.5"
 web-sys = { version = "0.3", features = [
+  # The browser's fetch as a transport, its body whole, as a blob or a stream,
+  # and the abort a Stop button or a closing feed sends.
+  "Window", "Document", "Element", "Headers", "RequestInit", "Response",
+  "ReadableStream", "AbortSignal",
   "CustomEvent", "HtmlDialogElement", "Navigator", "Clipboard", "Storage",
   "MediaQueryList", "CssStyleDeclaration",
   # Element sizes (a chart or pane follows its card, not the window).
@@ -23,4 +32,8 @@ web-sys = { version = "0.3", features = [
   "HtmlCollection", "FocusOptions", "KeyboardEvent", "MouseEvent", "Url",
   # A spoken sample played from the bytes the gateway answered with.
   "Blob", "BlobPropertyBag",
+  # A stored file fetched back as a File (http::file_of).
+  "File", "FilePropertyBag",
+  # `/` focuses the first visible search box (widgets/slash.rs).
+  "NodeList", "HtmlInputElement",
 ] }

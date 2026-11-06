@@ -21,6 +21,16 @@ pub fn limit_text(value: u64, unit: &str, zero: &str) -> String {
     }
 }
 
+/// The memory limit the same way: `memory_mb` is MiB (Podman's `--memory
+/// <n>m`), said through the shared byte formatter ("2.0 GiB", D160).
+pub fn memory_text(mib: u64, zero: &str) -> String {
+    if mib == 0 {
+        zero.to_string()
+    } else {
+        crate::fmt::fmt_bytes(mib.saturating_mul(1024 * 1024))
+    }
+}
+
 /// Which phases have their `output` event checked against a declared schema,
 /// and which do not (§4.1, per-phase `run.output`).
 ///
@@ -55,7 +65,7 @@ pub fn bounds_line(r: &AgentRuntime) -> String {
     };
     format!(
         "Bounds: {}, {cpus}, {}.",
-        limit_text(r.memory_mb, "MB", "no memory limit"),
+        memory_text(r.memory_mb, "no memory limit"),
         limit_text(r.deadline_seconds, "s", "no deadline"),
     )
 }
@@ -105,7 +115,7 @@ pub fn runtime_summary(r: Option<&AgentRuntime>, p: Option<&AgentProvenance>) ->
             };
             let mut parts = vec![
                 r.image.clone(),
-                limit_text(r.memory_mb, "MB", "no memory limit"),
+                memory_text(r.memory_mb, "no memory limit"),
                 cpus,
                 limit_text(r.deadline_seconds, "s", "no deadline"),
                 if r.read_only { "read-only" } else { "writable" }.to_string(),
@@ -212,10 +222,7 @@ pub(super) fn RuntimeBlock(
                     ("image".to_string(), r.image.clone()),
                     ("pull".into(), r.pull.clone()),
                     ("phases".into(), r.phases.join(", ")),
-                    (
-                        "memory".into(),
-                        limit_text(r.memory_mb, "MB", "unlimited (0)"),
-                    ),
+                    ("memory".into(), memory_text(r.memory_mb, "unlimited (0)")),
                     (
                         "cpus".into(),
                         if r.cpus <= 0.0 {

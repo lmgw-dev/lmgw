@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::config::Snapshot;
 use crate::error::GatewayError;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use super::embed::{alias_for_identity, InProcessEmbedder};
@@ -27,7 +28,8 @@ use super::rerank::{rerank_alias, InProcessReranker};
 pub struct TiktokenCounter;
 
 /// tiktoken-rs's process-wide encoder, the one the gateway's own counter
-/// (`egress::openai`) uses too, so the 200k-entry table is built once.
+/// (`egress::openai_compatible`, which the platform egress shares) uses too,
+/// so the 200k-entry table is built once.
 fn o200k() -> Option<&'static tiktoken_rs::CoreBPE> {
     tiktoken_rs::bpe_for_tokenizer(tiktoken_rs::tokenizer::Tokenizer::O200kBase).ok()
 }
@@ -87,21 +89,25 @@ pub async fn open_retriever(
     state: &SharedState,
     corpus: &Corpus,
 ) -> Result<Retriever, GatewayError> {
-    open_retriever_as(state, corpus, None).await
+    open_retriever_as(state, corpus, None, Origin::Owner).await
 }
 
 /// [`open_retriever`] for `caller`'s request: its embedder and reranker
 /// calls are checked against the caller's key and charged to it
 /// (`InProcessEmbedder::charged_to`) — a device's Chat turn, client-apps
-/// design L4. `None` is [`open_retriever`].
+/// design L4 — and are `origin`'s traffic (`InProcessEmbedder::as_traffic_of`,
+/// per-request background design §7). `None` and the owner is
+/// [`open_retriever`].
 pub async fn open_retriever_as(
     state: &SharedState,
     corpus: &Corpus,
     caller: Option<&crate::proxy::RequestCtx>,
+    origin: Origin,
 ) -> Result<Retriever, GatewayError> {
     let embedder = InProcessEmbedder::for_corpus(state.clone(), corpus)
         .await?
         .charged_to(caller.cloned())
+        .as_traffic_of(origin)
         .into_arc();
     let retriever = Retriever::load(state.corpus.clone(), corpus.id, embedder)
         .await
@@ -111,7 +117,11 @@ pub async fn open_retriever_as(
     let snap = state.snapshot();
     Ok(match rerank_alias(&snap) {
         Ok(alias) => match InProcessReranker::for_alias(state.clone(), &alias) {
-            Ok(r) => retriever.with_reranker(r.charged_to(caller.cloned()).into_arc()),
+            Ok(r) => retriever.with_reranker(
+                r.charged_to(caller.cloned())
+                    .as_traffic_of(origin)
+                    .into_arc(),
+            ),
             Err(e) => retriever.with_rerank_unavailable(e.to_string()),
         },
         Err(reason) => retriever.with_rerank_unavailable(reason),

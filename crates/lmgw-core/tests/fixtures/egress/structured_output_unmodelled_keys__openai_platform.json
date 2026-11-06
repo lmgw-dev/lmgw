@@ -1,0 +1,54 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"text\":{\"format\":{\"name\":\"answer\",\"schema\":{\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"strict\":null,\"type\":\"json_schema\",\"x-vendor\":[1,2],\"x-vendor-hint\":{\"level\":2}}}}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "text": {
+        "format": {
+          "name": "answer",
+          "schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "strict": null,
+          "type": "json_schema",
+          "x-vendor": [
+            1,
+            2
+          ],
+          "x-vendor-hint": {
+            "level": 2
+          }
+        }
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

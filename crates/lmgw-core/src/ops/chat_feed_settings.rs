@@ -58,8 +58,9 @@ const LIVE_BUFFER_WHY: &str =
 const PAGE_SIZE_WHY: &str =
     "one catch-up query reads a whole page of records and holds them until each is rendered and sent";
 const KEEPALIVE_MAX_WHY: &str =
-    "a day: between events a feed sends only its keep-alive, so a feed whose device vanished \
-     silently could otherwise stay open longer than that";
+    "32 767 seconds, about nine hours, which is the longest Linux accepts for a TCP \
+     keep-alive timer; and between events a feed sends only its keep-alive, so a feed whose \
+     device vanished silently could otherwise stay open longer";
 /// Why `chat_feed_keepalive_s` stays within `chat_feed_keepalive_max_s`
 /// (review of WP5, N1).
 const KEEPALIVE_WITHIN_WHY: &str =

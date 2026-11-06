@@ -29,7 +29,7 @@
 use crate::config::{SelfAdmin, Snapshot};
 use crate::state::SharedState;
 
-use super::{docs, exec, kb, selfadmin};
+use super::{docs, exec, kb, media, selfadmin};
 
 /// Display name of the self-admin source, matching the `upstream_name` its
 /// calls already log under.
@@ -191,6 +191,45 @@ pub async fn list(state: &SharedState) -> Inventory {
         &kb_tools,
     ));
     tools.extend(kb_tools);
+
+    // ---- the image and audio toolsets (/mcp, and the `image` / `audio`
+    // labels), listed from the rows that serve them (chat-media-tools §3.2)
+    let offer = media::offer(state).await;
+    for label in [media::IMAGE_LABEL, media::AUDIO_LABEL] {
+        let name = if label == media::IMAGE_LABEL {
+            media::IMAGE_SERVER
+        } else {
+            media::AUDIO_SERVER
+        };
+        let media_tools: Vec<ToolEntry> = offer
+            .tools(label)
+            .iter()
+            .map(|entry| {
+                build(
+                    &snap,
+                    entry_name(entry),
+                    label,
+                    name,
+                    KIND_BUILTIN,
+                    None,
+                    "/mcp",
+                    entry_desc(entry),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        sources.push(source_of(
+            label,
+            name,
+            KIND_BUILTIN,
+            None,
+            "/mcp",
+            None,
+            &media_tools,
+        ));
+        tools.extend(media_tools);
+    }
 
     // ---- the registered southbound servers ----
     let agg = state.mcp.list_tools(&snap).await;

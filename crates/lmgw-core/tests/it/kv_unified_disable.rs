@@ -20,7 +20,7 @@
 //! exist on a row that predates the check, which is exactly what a direct
 //! insert simulates.
 
-use lmgw_core::config::{HoldFallbackMode, LlamaParams, Settings};
+use lmgw_core::config::{LlamaParams, Settings};
 use lmgw_core::gguf::synth;
 use lmgw_core::ops::{self, LocalModelPatch};
 use lmgw_core::state::{AppState, SharedState};
@@ -51,8 +51,7 @@ async fn insert_pre_existing(state: &SharedState, model_id: &str, params: LlamaP
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     };

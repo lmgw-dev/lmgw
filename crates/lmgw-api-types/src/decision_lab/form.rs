@@ -483,7 +483,7 @@ fn array(items: &[String], level: usize) -> String {
 }
 
 /// A data URL as the Request panel shows it: the head kept, the payload
-/// elided with its decoded size ("data:image/png;base64,… 1.4 MB"). Any
+/// elided with its decoded size ("data:image/png;base64,… 1.4 MiB"). Any
 /// other string comes back as it is.
 pub fn elide_data_url(url: &str) -> String {
     let Some((head, payload)) = url.split_once(',') else {
@@ -497,22 +497,7 @@ pub fn elide_data_url(url: &str) -> String {
     } else {
         payload.len()
     };
-    format!("{head},… {}", human_bytes(bytes as u64))
-}
-
-/// `1.4 MB`, `812 kB`, `96 B`: decimal units, one decimal from MB on.
-pub fn human_bytes(n: u64) -> String {
-    const KB: f64 = 1000.0;
-    let f = n as f64;
-    if f < KB {
-        format!("{n} B")
-    } else if f < KB * KB {
-        format!("{:.0} kB", f / KB)
-    } else if f < KB * KB * KB {
-        format!("{:.1} MB", f / (KB * KB))
-    } else {
-        format!("{:.1} GB", f / (KB * KB * KB))
-    }
+    format!("{head},… {}", crate::units::fmt_bytes(bytes as u64))
 }
 
 #[cfg(test)]

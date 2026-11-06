@@ -48,12 +48,16 @@ use crate::ir::{
 };
 
 pub mod approval;
+mod call_stop;
 mod cancel;
+pub(crate) mod claim;
 mod record;
 mod relay;
 #[cfg(test)]
 mod relay_tests;
+mod turn_order;
 
+pub use call_stop::take_call_stop;
 pub use cancel::{Cancel, CANCEL_POLL};
 pub use record::RunError;
 pub(crate) use record::{close_trailing_calls, ABANDONED_CALL, UNMADE_CALL};
@@ -258,8 +262,18 @@ pub enum LoopEvent {
     TurnStarted { turn: usize },
     /// Answer text from the model.
     Text(String),
+    /// The model's refusal, in its own words ([`ContentPart::Refusal`]): the
+    /// Responses ingress writes it as its `refusal` part; every consumer
+    /// without a refusal of its own reads it as text.
+    Refusal(String),
     /// Reasoning trace, kept apart from the answer.
     Reasoning(String),
+    /// The seal of the reasoning item just reasoned (openai egress design
+    /// §7.3.1, [`StreamDelta::ReasoningSeal`]): it closes that item. The
+    /// Responses ingress writes it as the reasoning item's
+    /// `encrypted_content`; every other consumer keeps the turn's IR, which
+    /// carries it, and shows nothing of it.
+    ReasoningSeal(crate::ir::Seal),
     /// A tool call started streaming. `index` is a run-global ordinal, not a
     /// per-turn one, so it can index the Responses `output` array directly.
     CallStarted {
@@ -302,6 +316,10 @@ pub enum LoopEvent {
         /// The result's MCP `content` blocks ([`ToolOutcome::mcp_content`]).
         content: Vec<Value>,
     },
+    /// The `service_tier` a turn's answer reported (openai egress design
+    /// §5.2), after the turn and before the next: only an `openai` row's
+    /// turn has one. A synthesized Responses object carries the last.
+    ServiceTier(String),
     /// Terminal event; exactly one is emitted per run.
     Done { reason: StopReason, usage: Usage },
 }
@@ -338,12 +356,28 @@ impl EventSink for CollectSink {
 #[derive(Debug, Default)]
 pub struct TurnAccumulator {
     text: String,
+    /// The refusal streamed (`StreamDelta::RefusalDelta`), its own part.
+    refusal: String,
     reasoning: String,
     calls: Vec<PartialCall>,
     /// IR tool-call ordinal → slot in `calls` (upstreams need not start at 0).
     slots: HashMap<usize, usize>,
     finish: Option<FinishReason>,
     usage: Usage,
+    /// The last `service_tier` the stream reported.
+    service_tier: Option<String>,
+    /// The upstream's record of the answer, when it sent one.
+    upstream_items: Option<crate::ir::UpstreamItems>,
+    /// The `context_management` an Anthropic stream reported.
+    context_management: Option<serde_json::Value>,
+    /// The compaction blocks an Anthropic stream carried, each built from
+    /// its start and its deltas; they lead the turn's content.
+    compactions: Vec<crate::ir::Compaction>,
+    /// The `usage.iterations` an Anthropic stream reported.
+    usage_iterations: Option<crate::ir::UsageIterations>,
+    /// The order of the turn's parts, which a turn with reasoning seals is
+    /// folded into ([`turn_order`]).
+    order: turn_order::TurnOrder,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -363,11 +397,28 @@ impl TurnAccumulator {
 
     pub fn on_delta(&mut self, d: &StreamDelta) {
         match d {
-            StreamDelta::TextDelta(t) => self.text.push_str(t),
-            StreamDelta::ReasoningDelta(r) => self.reasoning.push_str(r),
+            StreamDelta::TextDelta(t) => {
+                self.text.push_str(t);
+                self.order.text(t);
+            }
+            StreamDelta::RefusalDelta(t) => {
+                self.refusal.push_str(t);
+                self.order.refusal(t);
+            }
+            StreamDelta::ReasoningDelta(r) => {
+                self.reasoning.push_str(r);
+                self.order.reasoning(r);
+            }
+            StreamDelta::ReasoningSeal(s) => self.order.seal(s),
+            StreamDelta::ReasoningSignature { signature, scope } => {
+                self.order.signature(signature, scope)
+            }
+            StreamDelta::AnthropicBlock(ev) => self.order.block(ev),
+            StreamDelta::TextBlockEnd { citations, scope } => self.order.text_end(citations, scope),
             StreamDelta::ToolCallStart { index, id, name } => {
                 let slot = self.calls.len();
                 self.slots.insert(*index, slot);
+                self.order.call(slot);
                 self.calls.push(PartialCall {
                     id: id.clone(),
                     name: name.clone(),
@@ -381,6 +432,18 @@ impl TurnAccumulator {
             }
             StreamDelta::Usage(u) => self.usage.merge(u),
             StreamDelta::Stop(r) => self.finish = Some(r.clone()),
+            StreamDelta::ServiceTier(t) => self.service_tier = Some(t.clone()),
+            StreamDelta::UpstreamItems(i) => self.upstream_items = Some(i.clone()),
+            StreamDelta::ContextManagement(c) => self.context_management = Some(c.clone()),
+            StreamDelta::Compaction(crate::ir::CompactionEvent::Start(c)) => {
+                self.compactions.push(c.clone());
+            }
+            StreamDelta::Compaction(crate::ir::CompactionEvent::Delta(d)) => {
+                if let Some(c) = self.compactions.last_mut() {
+                    c.apply_delta(d);
+                }
+            }
+            StreamDelta::UsageIterations(i) => self.usage_iterations = Some(i.clone()),
             StreamDelta::Timings(_) | StreamDelta::Error(_) => {}
         }
     }
@@ -389,20 +452,36 @@ impl TurnAccumulator {
     /// JSON. Unparseable arguments become a JSON string rather than an error:
     /// the model, not the gateway, produced them, and the tool's own validation
     /// gives a far better message than a 500 here would.
+    ///
+    /// A turn whose reasoning items came sealed or signed keeps its parts in
+    /// the order they were answered, each reasoning item a part of its own
+    /// with its seal or signature ([`turn_order`]); `reasoning` is still the
+    /// whole trace.
     pub fn finish(self, model: String) -> Completion {
-        let mut content: Vec<ContentPart> = Vec::new();
-        if !self.text.is_empty() {
-            content.push(ContentPart::text(self.text));
-        }
-        for c in self.calls {
-            let args =
-                serde_json::from_str(&c.args_json).unwrap_or(Value::String(c.args_json.clone()));
-            content.push(ContentPart::ToolUse {
-                id: c.id,
-                name: c.name,
-                args,
-            });
-        }
+        let call = |c: &PartialCall| ContentPart::ToolUse {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            args: crate::ir::parse_call_args(&c.args_json),
+        };
+        let mut content: Vec<ContentPart> = match self.order.sealed_pieces() {
+            Some(pieces) => turn_order::parts(pieces, |slot| self.calls.get(slot).map(call)),
+            None => {
+                let mut content = Vec::new();
+                if !self.text.is_empty() {
+                    content.push(ContentPart::text(self.text));
+                }
+                if !self.refusal.is_empty() {
+                    content.push(ContentPart::Refusal { text: self.refusal });
+                }
+                content.extend(self.calls.iter().map(call));
+                content
+            }
+        };
+        // A compaction block leads the answer, where Anthropic puts it.
+        content.splice(
+            0..0,
+            self.compactions.into_iter().map(ContentPart::Compaction),
+        );
         let saw_tool = content
             .iter()
             .any(|p| matches!(p, ContentPart::ToolUse { .. }));
@@ -421,6 +500,10 @@ impl TurnAccumulator {
             // turn's timings to it would report the last turn's throughput as
             // the run's. The per-turn rows in Logs carry the real numbers.
             timings: None,
+            service_tier: self.service_tier,
+            upstream_items: self.upstream_items,
+            context_management: self.context_management,
+            usage_iterations: self.usage_iterations,
         }
     }
 }
@@ -601,11 +684,31 @@ pub async fn run(
     /// reads as "nothing happened" (§4.1). The record gets the same results,
     /// so every call in it still has its result and the conversation stays
     /// replayable (chat-voice design §7.3).
+    ///
+    /// The three-argument form also takes the results and reports of the
+    /// calls of the batch that did run to their end (a cancel that spares
+    /// calls, a sequential batch the cancel cut short): they lead the one
+    /// tool message that answers the batch, the closed calls after them.
     macro_rules! canceled {
-        ($closed:expr) => {{
+        ($closed:expr) => {
+            canceled!(Vec::new(), Vec::new(), $closed)
+        };
+        ($made:expr, $reports:expr, $closed:expr) => {{
+            let made: Vec<ContentPart> = $made;
+            let reports: Vec<LoopEvent> = $reports;
             let closed: Vec<record::Closed> = $closed;
+            let mut answers = made;
             if let Some(results) = record::results(&closed) {
-                ir.messages.push(results);
+                answers.extend(results.content);
+            }
+            if !answers.is_empty() {
+                ir.messages.push(Message {
+                    role: Role::Tool,
+                    content: answers,
+                });
+            }
+            for ev in reports {
+                sink.emit(ev).await;
             }
             for c in &closed {
                 sink.emit(c.event()).await;
@@ -683,27 +786,43 @@ pub async fn run(
         if cfg.cancel.is_raised() {
             canceled!(cut(UNMADE_CALL))
         }
-        let Some(outcomes) = cfg
-            .cancel
-            .guard(execute_approved(
-                exec,
-                &approved,
-                &approvers,
-                cfg.parallel_tool_calls,
-            ))
-            .await
+        let Some(outcomes) = execute_approved(
+            exec,
+            &approved,
+            &approvers,
+            cfg.parallel_tool_calls,
+            &cfg.cancel,
+        )
+        .await
         else {
             canceled!(cut(ABANDONED_CALL))
         };
+        // Fewer outcomes than approved calls: the cancel cut a sequential
+        // batch short, and the approved calls past them were never made.
+        let cut_short = outcomes.len() < approved.len();
         let mut outcomes = outcomes.into_iter();
 
         let mut results: Vec<ContentPart> = Vec::with_capacity(cfg.resume.len());
         let mut reports = Vec::with_capacity(cfg.resume.len());
         for (i, d) in cfg.resume.iter().enumerate() {
             let (outcome, ms) = if d.approved {
-                outcomes
-                    .next()
-                    .unwrap_or((ToolOutcome::error("not executed"), 0))
+                match outcomes.next() {
+                    Some(o) => o,
+                    // Closed in its place, so the results keep the model's
+                    // order.
+                    None => {
+                        let unmade = record::Closed {
+                            index: i,
+                            call_id: d.call.call_id.clone(),
+                            name: d.call.name.clone(),
+                            server_label: d.call.server_label.clone(),
+                            says: UNMADE_CALL.to_string(),
+                        };
+                        results.push(unmade.result());
+                        reports.push(unmade.event());
+                        continue;
+                    }
+                }
             } else {
                 (ToolOutcome::error(d.denial.clone()), 0)
             };
@@ -724,6 +843,13 @@ pub async fn run(
                 content: outcome.blocks,
                 is_error: outcome.is_error,
             });
+        }
+        // The cancel landed while the batch ran: what ran keeps its
+        // results, the rest is closed, and the run ends `canceled` — as it
+        // does when the cancel stops a model call — rather than at the next
+        // frame its gone client fails to take.
+        if cut_short || cfg.cancel.is_raised() {
+            canceled!(results, reports, Vec::new())
         }
         calls_made += approved.len() as u32;
         next_index += cfg.resume.len();
@@ -798,16 +924,37 @@ pub async fn run(
         } else {
             completion
         };
-        // Unary turns produced no deltas — surface their content now.
+        // Unary turns produced no deltas — surface their content now: in
+        // the order it was answered when its reasoning is in place, each
+        // item's trace then its seal (`Completion::reasoning_in_place`).
         if !streamed {
-            if !completion.reasoning.is_empty() {
+            if !completion.reasoning.is_empty() && !completion.reasoning_in_place() {
                 emit!(LoopEvent::Reasoning(completion.reasoning.clone()));
             }
             for p in &completion.content {
-                if let ContentPart::Text { text } = p {
-                    if !text.is_empty() {
+                match p {
+                    ContentPart::Text { text, .. } if !text.is_empty() => {
                         emit!(LoopEvent::Text(text.clone()));
                     }
+                    ContentPart::Refusal { text } if !text.is_empty() => {
+                        emit!(LoopEvent::Refusal(text.clone()));
+                    }
+                    // A compaction block's summary is text to the loop's
+                    // wires, which have no such block (`ir::compaction`).
+                    ContentPart::Compaction(c) => {
+                        if let Some(s) = c.summary.as_ref().filter(|s| !s.is_empty()) {
+                            emit!(LoopEvent::Text(s.clone()));
+                        }
+                    }
+                    ContentPart::Reasoning { text, sealed, .. } => {
+                        if !text.is_empty() {
+                            emit!(LoopEvent::Reasoning(text.clone()));
+                        }
+                        if let Some(seal) = sealed {
+                            emit!(LoopEvent::ReasoningSeal(seal.clone()));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -816,6 +963,11 @@ pub async fn run(
         // reported usage is its own total.
         usage.add(&completion.usage);
         turn += 1;
+        // Before the run's terminal event, so a Responses object finished by
+        // it carries the tier the last turn reported (openai egress §5.7).
+        if let Some(tier) = completion.service_tier.clone() {
+            emit!(LoopEvent::ServiceTier(tier));
+        }
 
         let calls: Vec<(String, String, Value)> = completion
             .content
@@ -833,15 +985,11 @@ pub async fn run(
         // reasoning leads it: a thinking model that called a tool expects to
         // see what it was thinking when the result comes back, and the
         // template (`--reasoning-preserve`) renders that only if the next
-        // request carries it.
-        let mut turn = Vec::with_capacity(completion.content.len() + 1);
-        if !completion.reasoning.is_empty() {
-            turn.push(ContentPart::reasoning(completion.reasoning.clone()));
-        }
-        turn.extend(completion.content.iter().cloned());
+        // request carries it. A turn whose reasoning came sealed keeps each
+        // item where it stood (`Completion::assistant_parts`).
         ir.messages.push(Message {
             role: Role::Assistant,
-            content: turn,
+            content: completion.assistant_parts(),
         });
 
         if calls.is_empty() {
@@ -944,10 +1092,7 @@ pub async fn run(
                 label_of
             ))
         }
-        let Some(outcomes) = cfg
-            .cancel
-            .guard(execute(exec, &calls, cfg.parallel_tool_calls))
-            .await
+        let Some(outcomes) = execute(exec, &calls, cfg.parallel_tool_calls, &cfg.cancel).await
         else {
             canceled!(record::Closed::all(
                 &calls,
@@ -957,6 +1102,8 @@ pub async fn run(
             ))
         };
 
+        // Fewer outcomes than calls: the cancel cut a sequential batch short.
+        let made = outcomes.len();
         let mut results: Vec<ContentPart> = Vec::with_capacity(calls.len());
         let mut reports = Vec::with_capacity(calls.len());
         for (i, ((id, name, _), (outcome, ms))) in calls.iter().zip(outcomes).enumerate() {
@@ -979,6 +1126,17 @@ pub async fn run(
             });
         }
 
+        // The cancel landed while the batch ran (a cancel that spares calls
+        // let them finish, or cut a sequential batch short): what ran keeps
+        // its results, the calls never made are closed, and the run ends
+        // `canceled`, as one whose model call the cancel stopped does.
+        if made < calls.len() || cfg.cancel.is_raised() {
+            canceled!(
+                results,
+                reports,
+                record::Closed::all(&calls[made..], next_index + made, UNMADE_CALL, label_of)
+            )
+        }
         calls_made += calls.len() as u32;
         next_index += calls.len();
         // Recorded before they are reported: a client gone mid-report leaves
@@ -1001,19 +1159,28 @@ async fn execute_approved(
     calls: &[(String, String, Value)],
     approvers: &[Option<approval::Approver>],
     parallel: bool,
-) -> Vec<(ToolOutcome, u64)> {
+    cancel: &Cancel,
+) -> Option<Vec<(ToolOutcome, u64)>> {
     // Each with its call id too, as [`execute`] runs one: an approved call
     // that becomes an MCP task records it (`_meta` then carries both
-    // `lmgw/approval` and `lmgw/task`).
+    // `lmgw/approval` and `lmgw/task`). Each raced against the cancel on
+    // its own: one that took the stop ends itself and is awaited, the rest
+    // are dropped (`call_stop`).
     let run_one = |id: &String, name: &String, args: &Value, by: Option<approval::Approver>| {
         let (id, name, args) = (id.clone(), name.clone(), args.clone());
         approval::scope(by, async move {
             let t0 = Instant::now();
-            let outcome = with_call_id(id, exec.call(&name, &args)).await;
-            (outcome, t0.elapsed().as_millis() as u64)
+            let outcome = call_stop::run(cancel, with_call_id(id, exec.call(&name, &args))).await?;
+            Some((outcome, t0.elapsed().as_millis() as u64))
         })
     };
     let by = |i: usize| approvers.get(i).cloned().flatten();
+    // `None` once a call was dropped; calls that all ended — on their own,
+    // or on the stop they took — are the batch's outcomes, and the loop
+    // meets the cancel after them. A sequential batch starts no call once
+    // the cancel is raised: a cancel that spares calls lets the one in
+    // flight finish, so it hands back the outcomes so far, shorter than
+    // `calls`, and the loop closes the rest as never made.
     if parallel {
         futures::future::join_all(
             calls
@@ -1022,17 +1189,25 @@ async fn execute_approved(
                 .map(|(i, (id, n, a))| run_one(id, n, a, by(i))),
         )
         .await
+        .into_iter()
+        .collect()
     } else {
         let mut seq = Vec::with_capacity(calls.len());
         for (i, (id, n, a)) in calls.iter().enumerate() {
-            seq.push(run_one(id, n, a, by(i)).await);
+            if cancel.is_raised() {
+                break;
+            }
+            seq.push(run_one(id, n, a, by(i)).await?);
         }
-        seq
+        Some(seq)
     }
 }
 
 /// Run a batch of `(call_id, name, args)` through the executor, returning each
-/// outcome with its latency **in call order**.
+/// outcome with its latency **in call order** — `None` when `cancel` landed
+/// and dropped a call (`call_stop`: a call that took its stop ends itself
+/// and is awaited instead), fewer outcomes than calls when it landed in a
+/// sequential batch whose calls so far had all ended ([`execute_approved`]).
 ///
 /// Concurrent when the caller allows it — a turn asking for three independent
 /// lookups should cost one lookup's latency — but the results are always
@@ -1046,8 +1221,9 @@ async fn execute(
     exec: &dyn ToolExecutor,
     calls: &[(String, String, Value)],
     parallel: bool,
-) -> Vec<(ToolOutcome, u64)> {
-    execute_approved(exec, calls, &[], parallel).await
+    cancel: &Cancel,
+) -> Option<Vec<(ToolOutcome, u64)>> {
+    execute_approved(exec, calls, &[], parallel, cancel).await
 }
 
 tokio::task_local! {
@@ -1080,6 +1256,7 @@ mod tests {
             name: name.into(),
             description: None,
             parameters: json!({"type": "object", "properties": {}}),
+            strict: None,
         }
     }
 
@@ -1099,8 +1276,12 @@ mod tests {
             tool_choice: None,
             stream: false,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         }
     }
 
@@ -1140,7 +1321,7 @@ mod tests {
                     let mut idx = 0;
                     for p in &c.content {
                         match p {
-                            ContentPart::Text { text } => {
+                            ContentPart::Text { text, .. } => {
                                 for ch in text.split_inclusive(' ') {
                                     sink.on_delta(&StreamDelta::TextDelta(ch.to_string()));
                                 }
@@ -1188,6 +1369,10 @@ mod tests {
             },
             model: "m".into(),
             timings: None,
+            service_tier: None,
+            upstream_items: None,
+            context_management: None,
+            usage_iterations: None,
         }
     }
 
@@ -1210,6 +1395,10 @@ mod tests {
             },
             model: "m".into(),
             timings: None,
+            service_tier: None,
+            upstream_items: None,
+            context_management: None,
+            usage_iterations: None,
         }
     }
 
@@ -1590,6 +1779,10 @@ mod tests {
             usage: Usage::default(),
             model: "m".into(),
             timings: None,
+            service_tier: None,
+            upstream_items: None,
+            context_management: None,
+            usage_iterations: None,
         };
 
         let trace_for = |parallel: bool| {
@@ -1672,6 +1865,32 @@ mod tests {
         ));
     }
 
+    /// A call with no arguments streams no fragment (Anthropic) or an empty
+    /// one: it is `{}`, not an empty string the next request would be refused
+    /// for.
+    #[test]
+    fn a_call_without_arguments_is_an_empty_object() {
+        for fragment in [None, Some(""), Some("  ")] {
+            let mut acc = TurnAccumulator::default();
+            acc.on_delta(&StreamDelta::ToolCallStart {
+                index: 0,
+                id: "c1".into(),
+                name: "page_text".into(),
+            });
+            if let Some(f) = fragment {
+                acc.on_delta(&StreamDelta::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: f.into(),
+                });
+            }
+            let c = acc.finish("m".into());
+            assert!(matches!(
+                &c.content[0],
+                ContentPart::ToolUse { args, .. } if args == &json!({})
+            ));
+        }
+    }
+
     /// Records who each call's approval scope names.
     struct ApproverExec(Mutex<Vec<(String, Option<approval::Approver>)>>);
 
@@ -1703,7 +1922,11 @@ mod tests {
         ];
         for parallel in [false, true] {
             let exec = ApproverExec(Mutex::new(Vec::new()));
-            approval::scope(Some(by("outer")), execute(&exec, &calls, parallel)).await;
+            approval::scope(
+                Some(by("outer")),
+                execute(&exec, &calls, parallel, &Cancel::none()),
+            )
+            .await;
             let mut seen = exec.0.into_inner().unwrap();
             seen.sort_by(|x, y| x.0.cmp(&y.0));
             assert_eq!(
@@ -1716,7 +1939,7 @@ mod tests {
             let approvers = [Some(by("phone")), None];
             approval::scope(
                 Some(by("outer")),
-                execute_approved(&exec, &calls, &approvers, parallel),
+                execute_approved(&exec, &calls, &approvers, parallel, &Cancel::none()),
             )
             .await;
             let mut seen = exec.0.into_inner().unwrap();

@@ -70,6 +70,30 @@ pub fn stamp_owner(mut argv: Vec<String>, owner: &str) -> Vec<String> {
     argv
 }
 
+/// `argv` (a [`podman_run_argv`]) with `--pull=never` right after its `run`
+/// verb (after any of Podman's global options before it):
+/// the registry's start of a model and a benchmark's container (machine-check
+/// design §5). Each downloaded a missing image first — admission before the
+/// gate, a benchmark before its GPU lease — so the start never fetches bytes
+/// while it holds a reservation or the card; an image gone in between fails
+/// the start with podman's own "image not known" instead of a download
+/// nobody can see. Not in [`podman_run_argv`] itself, which the rendered
+/// command line also uses: a line copied from it pulls what it needs.
+///
+/// # Panics
+///
+/// When `argv` has no `run` verb: every caller hands it a
+/// [`podman_run_argv`], and inserting the flag anywhere else would make it
+/// another command.
+pub fn never_pull(mut argv: Vec<String>) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|a| a == "run")
+        .unwrap_or_else(|| panic!("never_pull takes a podman run argv, with its verb: {argv:?}"));
+    argv.insert(at + 1, "--pull=never".into());
+    argv
+}
+
 /// A digest of `podman run` flags, for [`RUN_ARGS_LABEL`]: the first eight
 /// bytes of the SHA-256 of their JSON list, in hex.
 pub fn run_args_digest(args: &[String]) -> String {
@@ -282,6 +306,13 @@ pub struct RenderSpec {
     /// memory limits (§3.1). Resolved by the caller; this renderer only
     /// splices what it is given, it does not know the default.
     pub extra_run_args: Vec<String>,
+    /// Podman's global options, rendered before the `run` subcommand: lmgw's
+    /// own CDI spec dir for a container that names a GPU device
+    /// (machine-check design §3.6.4). Resolved by the caller from
+    /// [`crate::runtime::cdi::OwnSpec::globals`] over `extra_run_args` — the
+    /// one source of that option; empty where nothing needs one. The
+    /// renderers that make a spec leave it empty.
+    pub globals: Vec<String>,
     /// Run the container under podman's init process (`--init`).
     ///
     /// A field rather than a class check inside [`podman_run_argv`], because
@@ -313,6 +344,23 @@ pub struct RenderSpec {
     /// caller (`descriptor::render_spec`, from `class`) — the registry never
     /// guesses at it.
     pub health_path: &'static str,
+}
+
+impl RenderSpec {
+    /// Set the Podman global options this container is started with
+    /// ([`Self::globals`]) and apply what depends on them: a GPU container
+    /// that is pointed at lmgw's own spec dir loses its restart policy (D27,
+    /// [`crate::runtime::cdi::strip_gpu_restart`]). Returns the tokens taken
+    /// out of [`Self::extra_run_args`], for the note a start gives. Every
+    /// reader of the rendered run args (the start, the adoption compare, the
+    /// command-line preview) goes through this, so they agree.
+    pub fn set_globals(&mut self, globals: Vec<String>) -> Vec<String> {
+        let (kept, removed) =
+            crate::runtime::cdi::strip_gpu_restart(&self.extra_run_args, &globals);
+        self.extra_run_args = kept;
+        self.globals = globals;
+        removed
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,9 +886,11 @@ fn push_freeform_args(out: &mut Vec<String>, args: &[String], taken: &BTreeSet<S
 /// No `--rm`: a stopped container keeps its logs for post-mortem, and
 /// `--replace` collects it on the next start (§3.6). Everything after the
 /// image name is [`render_engine_args`]'s output, handed straight to the
-/// image's entrypoint.
+/// image's entrypoint. [`RenderSpec::globals`] come first, before `run`:
+/// Podman takes a global option only there.
 pub fn podman_run_argv(spec: &RenderSpec) -> Vec<String> {
-    let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--replace".into()];
+    let mut args: Vec<String> = spec.globals.clone();
+    args.extend(["run".into(), "-d".into(), "--replace".into()]);
     if spec.init {
         args.push("--init".into());
     }

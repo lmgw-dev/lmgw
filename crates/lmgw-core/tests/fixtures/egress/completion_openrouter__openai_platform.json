@@ -1,0 +1,19 @@
+{
+  "completion": {
+    "content": [
+      {
+        "text": "Blue light scatters.",
+        "type": "text"
+      }
+    ],
+    "finish_reason": "stop",
+    "model": "vendor/model",
+    "reasoning": "Weighing it.",
+    "usage": {
+      "cached_input_tokens": 10,
+      "completion_tokens": 40,
+      "prompt_tokens": 30,
+      "reasoning_tokens": 25
+    }
+  }
+}

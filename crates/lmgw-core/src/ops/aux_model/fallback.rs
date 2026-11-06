@@ -1,37 +1,44 @@
-//! A decision row's GPU-hold fallback must answer System One
-//! (decision-models design §2.4): checked when it is set, by the same
-//! predicate the gate runs on every request
-//! ([`crate::proxy::decision_route_guard`]), so a fallback that cannot answer
-//! is refused at the save rather than at the first held request.
+//! A decision row's fallback must answer System One (decision-models design
+//! §2.4): checked when it is set, by the same predicate the gate runs on
+//! every request ([`crate::proxy::decision_route_guard`]), so a fallback that
+//! cannot answer is refused at the save rather than at the first request it
+//! answers.
 
-use crate::config::{AuxKind, HoldFallbackMode, Snapshot};
+use crate::config::{AuxKind, Snapshot};
 use crate::state::SharedState;
 
 /// Refuse `fallback` for a row of `kind` when it is a decision row whose
-/// fallback (mode `alias`) resolves to a route `/v1/systemone` would refuse:
-/// above all a cloud model whose catalog states output modalities without
-/// `decisions`. A catalog that states none, or does not list the model,
-/// passes, as it does on a request. Every other row, and a row without an
-/// alias fallback, passes untouched.
+/// fallback resolves to a route `/v1/systemone` would refuse: above all a
+/// cloud model whose catalog states output modalities without `decisions`.
+/// A catalog that states none, or does not list the model, passes, as it
+/// does on a request. Every other row, and a row without a fallback, passes
+/// untouched.
 ///
-/// Runs after [`crate::ops::validate_fallback_alias`], which already refused
-/// a fallback that does not resolve or is itself local.
+/// Runs after [`crate::ops::fallback::validate`], which already refused a
+/// fallback that does not resolve or is not a decision model.
 pub(super) async fn check_decision_fallback(
     state: &SharedState,
     snap: &Snapshot,
     kind: AuxKind,
-    mode: HoldFallbackMode,
     fallback: Option<&str>,
 ) -> Result<(), String> {
-    let (AuxKind::Decision, HoldFallbackMode::Alias, Some(alias)) = (kind, mode, fallback) else {
+    let (AuxKind::Decision, Some(name)) = (kind, fallback) else {
         return Ok(());
     };
+    // A disabled target has no route now (openai egress design §14.3,
+    // decision 28): `validate` saved it with its note, and typed it from its
+    // row, so a decision row's disabled fallback is a decision row; the
+    // request that reaches it while it is disabled goes on to its own
+    // fallback, which the gate checks for System One then.
+    if snap.disabled_key(name).is_some() {
+        return Ok(());
+    }
     let route = snap
-        .usable_fallback(alias)
-        .map_err(|why| format!("hold_fallback: fallback alias '{alias}' {why}"))?;
-    crate::proxy::decision_route_guard(state, snap, &route, alias)
+        .resolve(name)
+        .map_err(|e| format!("fallback: '{name}' does not resolve ({e})"))?;
+    crate::proxy::decision_route_guard(state, snap, &route, name)
         .await
         .map_err(|e| {
-            format!("hold_fallback: a decision model's fallback must answer /v1/systemone, and {e}")
+            format!("fallback: a decision model's fallback must answer /v1/systemone, and {e}")
         })
 }

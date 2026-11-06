@@ -2,7 +2,7 @@
 //! `aux_models` rebuild that admits kind `decision` and adds the five row
 //! fields, each NULL on every existing row, with its CHECKs.
 
-use lmgw_core::config::{AuxKind, HoldFallbackMode};
+use lmgw_core::config::AuxKind;
 use sqlx::{AssertSqlSafe, SqlitePool};
 
 use super::db_at_version;
@@ -54,11 +54,11 @@ async fn migration_0079_keeps_every_aux_row_and_its_ids_and_adds_the_fields_as_n
     assert_eq!((e5.idle_seconds, e5.warm_start), (30, true));
     assert!(!e5.enabled);
     assert_eq!(e5.image.as_deref(), Some("localhost/llama:cpu"));
-    assert_eq!(e5.hold_fallback_mode, HoldFallbackMode::Alias);
-    assert_eq!(e5.hold_fallback.as_deref(), Some("cloud-embed"));
+    // Through 0095 as well: mode `alias` with a name is that name.
+    assert_eq!(e5.fallback.as_deref(), Some("cloud-embed"));
     let rr = rows.iter().find(|m| m.model_id == "bge-rr").unwrap();
     assert!(rr.enabled);
-    assert_eq!(rr.hold_fallback_mode, HoldFallbackMode::None);
+    assert_eq!(rr.fallback, None);
     let stamps: Vec<(String, String)> =
         sqlx::query_as("SELECT created_at, updated_at FROM aux_models ORDER BY id")
             .fetch_all(&pool)

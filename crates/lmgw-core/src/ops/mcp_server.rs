@@ -4,6 +4,7 @@ use lmgw_api_types as dto;
 use serde::Deserialize;
 
 use crate::config::McpTransport;
+use crate::detached::detached;
 use crate::runtime::argv;
 use crate::state::SharedState;
 use crate::store::{self, NewMcpServer};
@@ -216,16 +217,25 @@ pub async fn mcp_server_set(
                 // owner from creating one by hand (§3.3).
                 agent_id: None,
             };
-            let id = store::insert_mcp_server(&state.db, &new)
-                .await
-                .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::McpServerSaved {
-                ok: true,
-                id,
-                message: format!("MCP server '{name}' created"),
-                ..Default::default()
+            // The write and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped
+            // request would leave the snapshot without the new server and
+            // its connection unreconciled.
+            let st = state.clone();
+            detached("creating the MCP server", async move {
+                let id = store::insert_mcp_server(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot().await.map_err(|e| e.to_string())?;
+                Ok(dto::McpServerSaved {
+                    ok: true,
+                    id,
+                    message: format!("MCP server '{name}' created"),
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" | "enable" | "disable" => {
             let id = id_of()?;
@@ -275,7 +285,7 @@ pub async fn mcp_server_set(
                 None => cur.url.clone(),
             };
             // Whichever action this is, a move of the row's address checks
-            // the stored headers against the call's (V-1); `null` restates
+            // the stored headers against the call's; `null` restates
             // nothing, it keeps the stored ones (V-2).
             if let Some(why) = credential_move::mcp_server_refusal(
                 writer,
@@ -347,18 +357,29 @@ pub async fn mcp_server_set(
                 // Kept, not editable: an agent's row stays its agent's.
                 agent_id: cur.agent_id,
             };
-            store::update_mcp_server(&state.db, id, &new)
-                .await
-                .map_err(|e| e.to_string())?;
-            // Reconciles the live connection (start/stop/restart) as a side
-            // effect, and fires tools/list_changed to every /mcp subscriber.
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::McpServerSaved {
-                ok: true,
-                id,
-                message: format!("MCP server '{}' {}", new.name, saved_verb(&p.action)),
-                ..Default::default()
+            let message = format!("MCP server '{}' {}", new.name, saved_verb(&p.action));
+            // The write and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped
+            // request would leave the snapshot serving the old row and its
+            // connection on the old configuration.
+            let st = state.clone();
+            detached("updating the MCP server", async move {
+                store::update_mcp_server(&st.db, id, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Reconciles the live connection (start/stop/restart) as a
+                // side effect, and fires tools/list_changed to every /mcp
+                // subscriber.
+                st.reload_snapshot().await.map_err(|e| e.to_string())?;
+                Ok(dto::McpServerSaved {
+                    ok: true,
+                    id,
+                    message,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let id = id_of()?;
@@ -371,19 +392,29 @@ pub async fn mcp_server_set(
             if cur.is_device() {
                 return Err(device_row::delete_refusal(&cur));
             }
-            store::delete_mcp_server(&state.db, id)
-                .await
-                .map_err(|e| e.to_string())?;
-            // Its MCP tasks ended with the row: the results enter their
-            // threads (MCP Tasks design §1.6).
-            crate::web::chat_tasks::servers_gone(state).await;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::McpServerSaved {
-                ok: true,
-                id,
-                message: format!("MCP server '{}' deleted", cur.name),
-                ..Default::default()
+            // The delete and everything after it are a task of their own
+            // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+            // dropped request would leave its tasks' results outside their
+            // threads, the snapshot serving the deleted row and its
+            // connection open.
+            let st = state.clone();
+            detached("deleting the MCP server", async move {
+                store::delete_mcp_server(&st.db, id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Its MCP tasks ended with the row: the results enter their
+                // threads (MCP Tasks design §1.6).
+                crate::web::chat_tasks::servers_gone(&st).await;
+                st.reload_snapshot().await.map_err(|e| e.to_string())?;
+                Ok(dto::McpServerSaved {
+                    ok: true,
+                    id,
+                    message: format!("MCP server '{}' deleted", cur.name),
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "test" => {
             let id = id_of()?;

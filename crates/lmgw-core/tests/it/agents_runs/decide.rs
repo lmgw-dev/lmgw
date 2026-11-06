@@ -738,7 +738,7 @@ async fn without_a_set_the_model_call_is_byte_for_byte_what_it_was() {
         )
         .mount(&chat)
         .await;
-    let state = gateway(&chat.uri(), Protocol::Openai).await;
+    let state = gateway(&chat.uri(), Protocol::OpenaiCompatible).await;
     let (url, _calls) = mcp_stub().await;
     register_stub(&state, &url).await;
     let base = serve(state.clone()).await;

@@ -256,7 +256,9 @@ open, so `cancellable()` stays true while a call runs. These rules live in `outp
 - A call whose arguments do not parse to a JSON object fails at once with a
   `tool_execution_error` naming the parse error. The model reads it next turn.
 - A stream that fails after `Stop` (`ending.rs:169-183`) runs nothing; its calls close with
-  `UNMADE_CALL`.
+  `UNMADE_CALL`. *Changed 2026-11-05*: only an error the upstream reports there is such a
+  failure. A silence or a broken body after `Stop` ends a whole answer (openai egress design
+  §6, `drive_upstream_until`), so its calls run.
 - Everything else runs.
 
 ### 2.4 Running

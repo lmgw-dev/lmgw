@@ -1950,7 +1950,8 @@ taken as follows (*changed 2026-10-15*):
   So a long `instructions` goes rather than the `session`, a list of tools goes as `[]` rather than
   tool by tool, and `response.done` keeps its items and their ids while their text goes
   (`response.output[0].content[0].text`). The marker is `[omitted: <the field's size> over this
-  call's <limit> event limit]` (sizes in bytes, whole KiB or MiB to one decimal). An emptied event is
+  call's <limit> event limit]` (sizes through lmgw's shared binary formatter, find-a-model D160:
+`B` below 1 KiB, one decimal below 100 of a unit, whole from 100). An emptied event is
   written from a `serde_json::Value`, so its keys come sorted.
 - **The `event_too_large` error** is an `invalid_request_error`, `param` the field's path (keys
   joined by `.`, indexes as `[n]`), its message "<type> <event_id>: its field <path> (<size>) was

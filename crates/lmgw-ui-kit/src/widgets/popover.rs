@@ -7,7 +7,8 @@
 //! overflow. The top layer is above all of that, so a pop opened inside a
 //! scrolling table card or a `<dialog>` is never cut off. It is placed from
 //! the anchor's rectangle (CSS anchor positioning is not in WebKitGTK), below
-//! it, or above it when there is not room below and there is more above.
+//! it, or above it when there is not room below and there is more above —
+//! or, for a flyout off the sidebar's icon rail (`beside`), to its right.
 //!
 //! Conventions the pops built on it share:
 //! - `.pop-list` is the scrolling part; on open, its `[aria-selected="true"]`
@@ -41,9 +42,14 @@ pub fn Popover<E>(
     /// Extra classes on the `.pop` element.
     #[prop(optional)]
     class: &'static str,
-    /// A floor for the width in px; the anchor's own width is always one.
+    /// A floor for the width in px; below its anchor, the anchor's own width
+    /// is always one.
     #[prop(optional)]
     min_width: Option<u32>,
+    /// Beside the anchor instead of below it: to its right, top edges level,
+    /// moved up as far as it must to fit the window. The rail's flyouts.
+    #[prop(optional)]
+    beside: bool,
     /// Rendered only while open.
     children: ChildrenFn,
 ) -> impl IntoView
@@ -57,7 +63,12 @@ where
         let (Some(a), Some(p)) = (anchor.get_untracked(), pop.get_untracked()) else {
             return;
         };
-        place_at(a.unchecked_ref(), &p, min_width.unwrap_or(0) as f64);
+        let min_width = min_width.unwrap_or(0) as f64;
+        if beside {
+            place_beside(a.unchecked_ref(), &p, min_width);
+        } else {
+            place_at(a.unchecked_ref(), &p, min_width);
+        }
     };
 
     Effect::new(move |_| {
@@ -202,6 +213,43 @@ fn place_at(anchor: &web_sys::HtmlElement, pop: &web_sys::HtmlElement, min_width
     };
     let left = left.min(vw - EDGE - pw).max(EDGE);
     let _ = s.set_property("left", &format!("{left}px"));
+}
+
+/// Position `pop` to the right of `anchor`, its top level with the anchor's
+/// (less the pop's own padding, so its first row lines up with the anchor),
+/// and moved up when the window ends first.
+fn place_beside(anchor: &web_sys::HtmlElement, pop: &web_sys::HtmlElement, min_width: f64) {
+    let r = anchor.get_bounding_client_rect();
+    let w = window();
+    let vw = w
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1024.0);
+    let vh = w
+        .inner_height()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(768.0);
+    let s = pop.style();
+    let left = r.right() + GAP;
+    let room_w = (vw - left - EDGE).max(0.0);
+    let _ = s.set_property("max-width", &format!("{room_w}px"));
+    let _ = s.set_property("min-width", &format!("{}px", min_width.min(room_w)));
+    let _ = s.set_property("left", &format!("{left}px"));
+    let room_h = (vh - 2.0 * EDGE).max(80.0);
+    let _ = s.set_property("max-height", &format!("{room_h}px"));
+    let pad = window()
+        .get_computed_style(pop)
+        .ok()
+        .flatten()
+        .and_then(|cs| cs.get_property_value("padding-top").ok())
+        .and_then(|v| v.trim_end_matches("px").parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let needed = (pop.scroll_height() as f64).min(room_h);
+    let top = (r.top() - pad).min(vh - EDGE - needed).max(EDGE);
+    let _ = s.set_property("bottom", "auto");
+    let _ = s.set_property("top", &format!("{top}px"));
 }
 
 /// Focus the `data-autofocus` element and bring the selected row of the

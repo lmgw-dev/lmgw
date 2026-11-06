@@ -401,7 +401,7 @@ impl ErrorObject {
     pub fn from_gateway(e: &crate::error::GatewayError) -> Self {
         Self {
             kind: e.openai_type().into(),
-            code: Some(e.code().into()),
+            code: Some(e.kind().into()),
             message: e.to_string(),
             param: None,
             event_id: None,

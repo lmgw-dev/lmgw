@@ -1,0 +1,100 @@
+# Everything the lmgw RPM may install, and the scriptlets it may run as root (none).
+# ci/rpm_guard.py checks every RPM ci/build.sh bundles against this file and fails the build
+# on a path that is not listed here, on a listed path the RPM lacks, on any scriptlet whose
+# sha256 is not under `scriptlets`, and on a `pinned` file whose mode or content is not the
+# pinned one, besides its own mode checks (no group- or world-writable entry, no
+# setuid/setgid/sticky bit, no file capability, root:root only).
+#
+# The paths are what tauri-bundler (tauri-cli 2.12.0, src/bundle/linux/rpm.rs) makes of
+# src-tauri/tauri.conf.json: the main binary in /usr/bin, the .desktop file it generates, one
+# hicolor icon per PNG in `bundle.icon` (<width>x<height>, "@2" for a @2x file, named after
+# the binary), and the destinations of `bundle.linux.rpm.files`. The package owns no
+# directory: rpm creates the missing parents itself.
+#
+# Adding a path is a deliberate edit to this file, reviewed with the change that needs it.
+# ci/rpm_guard_test.py (run by ci/check.sh) fails when tauri.conf.json asks for a
+# destination that is missing here, so the edit shows up before a pipeline does.
+
+# Regular files.
+files = [
+  "/usr/bin/lmgw",
+  "/usr/libexec/lmgw/lmgw-machine-helper",
+  "/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.policy",
+  "/usr/share/applications/lmgw.desktop",
+  "/usr/share/icons/hicolor/32x32/apps/lmgw.png",
+  "/usr/share/icons/hicolor/128x128/apps/lmgw.png",
+  "/usr/share/icons/hicolor/256x256@2/apps/lmgw.png",
+  "/usr/share/icons/hicolor/512x512/apps/lmgw.png",
+  "/usr/share/licenses/lmgw/onnxruntime/LICENSE",
+  "/usr/share/licenses/lmgw/onnxruntime/ThirdPartyNotices.txt",
+  "/usr/share/licenses/lmgw/silero-vad/LICENSE",
+  "/usr/share/licenses/lmgw/smart-turn/LICENSE",
+  "/usr/share/licenses/lmgw/smart-turn/LICENSE-whisper",
+]
+
+# Directories the package owns.
+directories = []
+
+# Allowed scriptlets: the sha256 of the exact output of
+# `rpm -qp --scripts --triggers --filetriggers <rpm>`, which rpm_guard.py prints when it
+# refuses one. Empty: the RPM runs nothing at install, upgrade or removal.
+scriptlets = []
+
+# Files whose exact mode and content are pinned beyond the checks above (machine-check design
+# §3.8, WP6). polkit reads the policy to decide who may start the root helper, and root runs
+# the helper after a password: mode, owner and path checks alone would pass a policy whose
+# content says <allow_any>yes</allow_any>, or another program at the helper's path. Each
+# entry has `mode` and one of:
+#   sha256 — the content, for a file that is the same in every build. ci/rpm_guard_test.py
+#            compares it with the source tauri.conf.json packs, so changing the file means
+#            changing this pin, in review;
+#   built  — a file this job built (relative to the repository root), for one whose bytes
+#            change with every build: the package's copy must have that file's digest, and the
+#            file must be an ELF executable. ci/build.sh cleans and rebuilds it right before
+#            the bundle.
+# The guard reads the package's file digests from its header, which rpm checks every file it
+# installs against, and compares them only as sha256 (FILEDIGESTALGO 8): a package whose digests
+# are MD5 or SHA-1, which can be forged, or anything else, fails every pinned file. Every file listed above under /usr/libexec/ or /usr/share/polkit-1/ must
+# be pinned here; the guard refuses an allowlist where one is not.
+[pinned."/usr/libexec/lmgw/lmgw-machine-helper"]
+mode = "0755"
+built = "target/release/lmgw-machine-helper"
+
+[pinned."/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.policy"]
+mode = "0644"
+# crates/lmgw-machine-helper/polkit/io.github.lmgw-dev.lmgw.machine-setup.policy
+sha256 = "7ebb93accf7ab9a4649a5f2cc2e914b6149e836640a5ce9aa99449374502f531"
+
+# The dependency metadata, by name, as an exact set per tag (ci/rpm_guard.py compares them;
+# an extra or a missing entry fails the build). Why they matter to root: rpm 6 creates
+# users and groups at install from `user()`, `group()` and `groupmember()` Provides
+# (systemd-sysusers), and dnf removes the packages an Obsoletes or Conflicts names; the guard
+# refuses the first outright and the others unless listed. tauri.conf.json's
+# bundle.linux.rpm `depends`, `provides`, `obsoletes` and `conflicts` reach the package
+# unchanged, so a change there shows up here; ci/rpm_guard_test.py checks `requires` against
+# `depends`. The three sonames are what tauri-bundler adds for the GTK/WebKit/tray
+# libraries (read off an installed lmgw 0.5.0 package). A dependency is written `name`, then
+# ` (pre)` etc. for Requires(pre), then ` >= 1.2` for a version. `rpmlib(...)` Requires are
+# rpm's own feature checks and are not compared.
+[dependencies]
+requires = [
+  "git",
+  "podman",
+  "poppler-utils",
+  "opus",
+  # pkexec, which the updater's install and the root helper's start need (D19).
+  "polkit",
+  "libayatana-appindicator3.so.1()(64bit)",
+  "libwebkit2gtk-4.1.so.0()(64bit)",
+  "libgtk-3.so.0()(64bit)",
+]
+# Beyond the package's own name and NAME(ARCH), which are always allowed. A user(),
+# group() or groupmember() Provides is refused whatever this says.
+provides = []
+recommends = []
+suggests = []
+supplements = []
+enhances = []
+conflicts = []
+obsoletes = []
+orders = []

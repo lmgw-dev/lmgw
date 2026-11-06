@@ -9,7 +9,6 @@
 //! packages (`support::audiocpp_gguf`); nothing real is started.
 
 use lmgw_api_types::realtime::cue_hint_text;
-use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::store;
 use serde_json::{json, Value};
 
@@ -316,8 +315,7 @@ async fn held(
         let mut row = tts_row(id, family);
         row.task = (*task).into();
         row.default_request_options = defaults.as_object().cloned().unwrap();
-        row.hold_fallback_mode = HoldFallbackMode::Alias;
-        row.hold_fallback = Some("cloud-tts".into());
+        row.fallback = Some("cloud-tts".into());
         store::insert_audio_model(&state.db, &row).await.unwrap();
     }
     // The session's voice, as `gateway` has it: a library clip.

@@ -61,7 +61,7 @@ mod tests {
 
     fn text_of(p: ContentPart) -> String {
         match p {
-            ContentPart::Text { text } => text,
+            ContentPart::Text { text, .. } => text,
             _ => panic!("expected a text part"),
         }
     }

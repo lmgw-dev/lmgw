@@ -51,7 +51,10 @@ async fn cloud_bodies(cloud: &MockServer) -> Vec<Value> {
         .await
         .unwrap()
         .iter()
-        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .filter(|r| {
+            let p = r.url.path();
+            p.ends_with("/chat/completions") || p.ends_with("/responses")
+        })
         .map(|r| serde_json::from_slice(&r.body).unwrap())
         .collect()
 }
@@ -105,14 +108,19 @@ async fn a_continue_rerouted_to_a_cloud_fallback_is_refused() {
 }
 
 /// A fresh turn the climb hands to the cloud: the thread's `top_k` (which
-/// llama-server takes and an OpenAI cloud does not) is left out there and
-/// named in `reasoning_ignored`, and the saved reply records that the
+/// llama-server takes and the OpenAI platform does not) is left out there
+/// and named in `reasoning_ignored`, and the saved reply records that the
 /// fallback answered.
 #[tokio::test]
 async fn a_rerouted_tool_turn_is_split_for_the_route_that_answers() {
     let f = ladder_fixture(12 * GIB, 0).await;
     f.attribute(6 * GIB);
-    let cloud = cloud_chat(&f, "cloud-chat").await;
+    let cloud = super::outside_vram_fallback::cloud_chat_on(
+        &f,
+        "cloud-chat",
+        lmgw_core::config::Protocol::Openai,
+    )
+    .await;
     set_global_fallback(&f, "cloud-chat").await;
     let tid = admin_thread(&f).await;
     let r = f

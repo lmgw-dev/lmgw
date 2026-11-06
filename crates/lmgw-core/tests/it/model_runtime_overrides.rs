@@ -174,8 +174,7 @@ async fn local_model_round_trips_the_per_model_container_overrides() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     };
@@ -192,8 +191,7 @@ async fn local_model_round_trips_the_per_model_container_overrides() {
         image: Some("my/own-image".into()),
         extra_run_args: Some(vec!["--device".into(), "nvidia.com/gpu=all".into()]),
         warm_start: true,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         ..base
     };
     store::update_local_model(&pool, id, &overridden)
@@ -218,8 +216,7 @@ async fn local_model_round_trips_the_per_model_container_overrides() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         ..overridden
     };
     store::update_local_model(&pool, id, &cleared)
@@ -254,8 +251,7 @@ async fn aux_model_round_trips_the_per_model_container_overrides() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     };
     let id = store::insert_aux_model(&pool, &base).await.unwrap();
 
@@ -268,8 +264,7 @@ async fn aux_model_round_trips_the_per_model_container_overrides() {
         image: Some("my/own-aux-image".into()),
         extra_run_args: Some(vec!["--security-opt".into(), "label=disable".into()]),
         warm_start: true,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         ..base
     };
     store::update_aux_model(&pool, id, &overridden)
@@ -290,8 +285,7 @@ async fn aux_model_round_trips_the_per_model_container_overrides() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         ..overridden
     };
     store::update_aux_model(&pool, id, &cleared).await.unwrap();

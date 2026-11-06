@@ -110,15 +110,20 @@ async fn probe(
     log: &RunLog,
 ) -> Result<Probe, String> {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // The probe gets the GPU through lmgw's own CDI spec, as a start does
+    // (machine-check design §3.6.4); the logged line says so.
+    let globals = crate::runtime::cdi::podman_globals(state, run_args);
     log.line(&format!(
-        "$ podman run --rm {} --entrypoint {entrypoint} {} {}",
+        "$ podman {}run --rm {} --entrypoint {entrypoint} {} {}",
+        globals.iter().map(|g| format!("{g} ")).collect::<String>(),
         run_args.join(" "),
         short_id(image),
         args.join(" ")
     ));
+    let prefix = state.snapshot().settings.container_prefix.clone();
     let out = state
         .runtime()
-        .run_throwaway(name, image, entrypoint, run_args, &args)
+        .run_throwaway(&prefix, name, image, entrypoint, run_args, &args)
         .await?;
     log.lines(&out.stdout);
     log.lines(&out.stderr);

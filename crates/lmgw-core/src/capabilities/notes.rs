@@ -713,20 +713,47 @@ pub fn notes_for_catalog(
                 format!(" (levels: {})", r.levels.join("|"))
             };
             match protocol {
-                Protocol::Openai | Protocol::LlamaCpp => out.push(format!(
+                Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => out.push(format!(
                     "Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort{levels}; \
                      {off} The catalog does not state the default state."
                 )),
                 Protocol::Anthropic => {
-                    out.push(format!(
-                        "Reasoning: header x-lmgw-reasoning-effort{levels} becomes \
-                         output_config.effort with thinking type adaptive, and x-lmgw-reasoning: \
-                         on becomes thinking type adaptive. {off}"
-                    ));
+                    // The model's own thinking types, where its catalog
+                    // publishes them (`reasoning.thinking_types`).
+                    let known = !r.thinking_types.is_empty();
+                    let takes = |t: &str| r.thinking_types.iter().any(|x| x == t);
+                    out.push(if known && !takes("adaptive") {
+                        format!(
+                            "Reasoning: header x-lmgw-reasoning-effort{levels} and \
+                             x-lmgw-reasoning: on go out as thinking type adaptive, which this \
+                             model's catalog says it does not take, so the provider refuses \
+                             them. {off}"
+                        )
+                    } else {
+                        format!(
+                            "Reasoning: header x-lmgw-reasoning-effort{levels} becomes \
+                             output_config.effort with thinking type adaptive, and \
+                             x-lmgw-reasoning: on becomes thinking type adaptive. {off}"
+                        )
+                    });
                     out.push(
-                        "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, which \
-                         current Claude models reject — use an effort level instead."
-                            .to_string(),
+                        match (known, takes("enabled")) {
+                            (true, true) => {
+                                "x-lmgw-reasoning-budget is forwarded as thinking type enabled \
+                                 with budget_tokens, which this model's catalog says it takes."
+                            }
+                            (true, false) => {
+                                "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, \
+                                 which this model's catalog says it does not take — use an \
+                                 effort level instead."
+                            }
+                            (false, _) => {
+                                "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, \
+                                 which current Claude models reject — use an effort level \
+                                 instead."
+                            }
+                        }
+                        .to_string(),
                     );
                 }
                 Protocol::Gemini => out.push(format!(

@@ -73,9 +73,10 @@ pub fn endpoints(task: &str, protocol: Protocol) -> Vec<String> {
         "chat" => strings(&CHAT_ENDPOINTS_OTHER),
         "embedding" => strings(&["/v1/embeddings"]),
         "rerank" => strings(&["/v1/rerank"]),
-        // `/v1/systemone` forwards to `openai` and `llama_cpp` upstreams only
-        // (decision-models design §2.9, §4.1).
-        "decision" if openai => strings(&["/v1/systemone"]),
+        // `/v1/systemone` forwards to `openai_compatible` and `llama_cpp`
+        // upstreams only (decision-models design §2.9, §4.1); the OpenAI
+        // platform has no such route (openai egress design §1.1).
+        "decision" if openai && protocol != Protocol::Openai => strings(&["/v1/systemone"]),
         "decision" => Vec::new(),
         "image_generation" | "video_generation" => strings(&[IMAGE_GENERATIONS_ENDPOINT]),
         "image_edit" => strings(&[IMAGE_GENERATIONS_ENDPOINT, IMAGE_EDITS_ENDPOINT]),
@@ -172,18 +173,34 @@ mod tests {
 
     #[test]
     fn a_task_s_routes_follow_the_protocol() {
-        assert_eq!(endpoints("tts", Protocol::Openai), ["/v1/audio/speech"]);
         assert_eq!(
-            endpoints("asr", Protocol::Openai),
+            endpoints("tts", Protocol::OpenaiCompatible),
+            ["/v1/audio/speech"]
+        );
+        assert_eq!(
+            endpoints("asr", Protocol::OpenaiCompatible),
             ["/v1/audio/transcriptions"]
         );
         assert!(endpoints("tts", Protocol::Gemini).is_empty());
-        assert!(endpoints(REALTIME_TASK, Protocol::Openai).is_empty());
-        assert_eq!(endpoints("chat", Protocol::Openai).len(), 4);
+        assert!(endpoints(REALTIME_TASK, Protocol::OpenaiCompatible).is_empty());
+        assert_eq!(endpoints("chat", Protocol::OpenaiCompatible).len(), 4);
         assert_eq!(endpoints("chat", Protocol::Anthropic).len(), 3);
         assert_eq!(
-            endpoints("sep", Protocol::Openai),
+            endpoints("sep", Protocol::OpenaiCompatible),
             ["/v1/tasks/run", "/v1/tasks/stream"]
         );
+    }
+
+    /// `/v1/systemone` is a compatible provider's or llama.cpp's; the OpenAI
+    /// platform has no such route (openai egress design §1.1).
+    #[test]
+    fn a_decision_model_answers_systemone_off_the_openai_platform_only() {
+        for p in [Protocol::OpenaiCompatible, Protocol::LlamaCpp] {
+            assert_eq!(endpoints("decision", p), ["/v1/systemone"], "{p:?}");
+        }
+        for p in [Protocol::Openai, Protocol::Anthropic, Protocol::Gemini] {
+            assert!(endpoints("decision", p).is_empty(), "{p:?}");
+        }
+        assert_eq!(endpoints("chat", Protocol::Openai).len(), 4);
     }
 }

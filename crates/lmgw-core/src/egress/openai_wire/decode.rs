@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use crate::egress::call_ids::CallIds;
 use crate::egress::{finish_from_openai, EgressStreamDecoder};
 use crate::error::GatewayError;
 use crate::ir::{Completion, ContentPart, FinishReason, StreamDelta, Timings, Usage};
@@ -71,7 +72,30 @@ pub(crate) fn parse_timings(v: Option<&Value>) -> Option<Timings> {
     })
 }
 
+/// Whether a reader takes the answer's `service_tier` (openai egress design
+/// §5.2): the platform egress does, the compatible and llama.cpp ones never
+/// (§5.4: the dimension does not exist there, whatever a provider sends).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadTier {
+    #[default]
+    No,
+    Yes,
+}
+
+/// The answer's top-level `service_tier`, when `read` says to take it.
+fn service_tier(v: &Value, read: ReadTier) -> Option<String> {
+    (read == ReadTier::Yes)
+        .then(|| v.get("service_tier").and_then(Value::as_str))
+        .flatten()
+        .map(str::to_string)
+}
+
 pub fn parse_completion(body: &[u8]) -> Result<Completion, GatewayError> {
+    parse_completion_with(body, ReadTier::No)
+}
+
+/// [`parse_completion`], taking the `service_tier` when `read` says so.
+pub fn parse_completion_with(body: &[u8], read: ReadTier) -> Result<Completion, GatewayError> {
     let v: Value = serde_json::from_slice(body)
         .map_err(|e| GatewayError::Transport(format!("invalid upstream JSON: {e}")))?;
     let choice = v
@@ -87,23 +111,25 @@ pub fn parse_completion(body: &[u8]) -> Result<Completion, GatewayError> {
             content.push(ContentPart::text(text));
         }
     }
+    // OpenAI's own field for the model's refusal (`message.refusal`).
+    if let Some(text) = msg.get("refusal").and_then(Value::as_str) {
+        if !text.is_empty() {
+            content.push(ContentPart::Refusal { text: text.into() });
+        }
+    }
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
+        let mut ids = CallIds::default();
         for c in calls {
             let f = c.get("function").cloned().unwrap_or_default();
             let args_raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
             content.push(ContentPart::ToolUse {
-                id: c
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                id: upstream_id(c).unwrap_or_else(|| ids.mint()),
                 name: f
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                args: serde_json::from_str(args_raw)
-                    .unwrap_or_else(|_| Value::String(args_raw.into())),
+                args: crate::ir::parse_call_args(args_raw),
             });
         }
     }
@@ -127,6 +153,10 @@ pub fn parse_completion(body: &[u8]) -> Result<Completion, GatewayError> {
         // llama-server puts its timings block on the non-streamed response
         // too; before usage analytics nothing read it here.
         timings: parse_timings(v.get("timings")),
+        service_tier: service_tier(&v, read),
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     })
 }
 
@@ -134,6 +164,32 @@ pub fn parse_completion(body: &[u8]) -> Result<Completion, GatewayError> {
 pub struct OpenaiDecoder {
     /// Upstream tool-call indexes seen so far (to distinguish start vs args).
     started_tools: std::collections::HashSet<u64>,
+    /// The ids of calls the upstream sent without one: unique across the
+    /// tool loop's model calls, where a per-answer `call_{index}` repeated.
+    ids: CallIds,
+    /// Whether chunks' `service_tier` is read ([`ReadTier`]).
+    read_tier: ReadTier,
+    /// The last `service_tier` emitted, so it goes out once and again only
+    /// when it changes.
+    tier: Option<String>,
+}
+
+impl OpenaiDecoder {
+    /// A decoder that reads the chunks' `service_tier`: the platform's.
+    pub fn reading_tier() -> Self {
+        Self {
+            read_tier: ReadTier::Yes,
+            ..Self::default()
+        }
+    }
+}
+
+/// A call's own id, when the upstream sent a non-empty one.
+fn upstream_id(c: &Value) -> Option<String> {
+    c.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 impl EgressStreamDecoder for OpenaiDecoder {
@@ -155,6 +211,14 @@ impl EgressStreamDecoder for OpenaiDecoder {
         }
 
         let mut out = Vec::new();
+        // Every chunk of the platform's carries it; it leads the chunk's
+        // deltas, so an encoder that relays it has it before the text.
+        if let Some(tier) = service_tier(&v, self.read_tier) {
+            if self.tier.as_deref() != Some(tier.as_str()) {
+                self.tier = Some(tier.clone());
+                out.push(StreamDelta::ServiceTier(tier));
+            }
+        }
         if let Some(choice) = v
             .get("choices")
             .and_then(Value::as_array)
@@ -173,6 +237,11 @@ impl EgressStreamDecoder for OpenaiDecoder {
                     out.push(StreamDelta::TextDelta(t.to_string()));
                 }
             }
+            if let Some(t) = delta.get("refusal").and_then(Value::as_str) {
+                if !t.is_empty() {
+                    out.push(StreamDelta::RefusalDelta(t.to_string()));
+                }
+            }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
                     let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -186,11 +255,7 @@ impl EgressStreamDecoder for OpenaiDecoder {
                         self.started_tools.insert(idx);
                         out.push(StreamDelta::ToolCallStart {
                             index: idx as usize,
-                            id: c
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&format!("call_{idx}"))
-                                .to_string(),
+                            id: upstream_id(c).unwrap_or_else(|| self.ids.mint()),
                             name: name.to_string(),
                         });
                     }
@@ -202,7 +267,10 @@ impl EgressStreamDecoder for OpenaiDecoder {
                     }
                 }
             }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            // An empty one is none: a provider that sends `""` on every
+            // chunk has not finished (the silence clock reads it so too).
+            let reason = choice.get("finish_reason").and_then(Value::as_str);
+            if let Some(reason) = reason.filter(|r| !r.is_empty()) {
                 out.push(StreamDelta::Stop(finish_from_openai(reason)));
             }
         }

@@ -54,12 +54,17 @@ fn sample_ir() -> ChatRequest {
             name: "get_weather".into(),
             description: Some("weather".into()),
             parameters: json!({"type":"object","properties":{"city":{"type":"string"}},"$schema":"x"}),
+            strict: None,
         }],
         tool_choice: Some(ToolChoice::Auto),
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -84,8 +89,8 @@ fn params() -> Params {
 #[test]
 fn openai_build_request() {
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h:1/v1/");
-    let req = for_protocol(Protocol::Openai)
+    let up = upstream(Protocol::OpenaiCompatible, "http://h:1/v1/");
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "real-model", &sample_ir(), &params(), true)
         .unwrap()
         .build()
@@ -111,7 +116,7 @@ fn openai_build_request() {
 #[test]
 fn openai_body_carries_input_audio_verbatim() {
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h:1/v1/");
+    let up = upstream(Protocol::OpenaiCompatible, "http://h:1/v1/");
     let mut ir = sample_ir();
     ir.messages.push(Message {
         role: Role::User,
@@ -120,7 +125,7 @@ fn openai_body_carries_input_audio_verbatim() {
             data: "QUFB".into(),
         }],
     });
-    let req = for_protocol(Protocol::Openai)
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "m", &ir, &Params::default(), false)
         .unwrap()
         .build()
@@ -136,7 +141,7 @@ fn openai_body_carries_input_audio_verbatim() {
 #[test]
 fn openai_emits_passthrough_fields_verbatim() {
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h:1/v1/");
+    let up = upstream(Protocol::OpenaiCompatible, "http://h:1/v1/");
     let mut ir = sample_ir();
     ir.passthrough = json!({
         "response_format": {"type": "json_schema",
@@ -149,7 +154,7 @@ fn openai_emits_passthrough_fields_verbatim() {
     .as_object()
     .unwrap()
     .clone();
-    let req = for_protocol(Protocol::Openai)
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "real-model", &ir, &params(), false)
         .unwrap()
         .build()
@@ -164,7 +169,7 @@ fn openai_emits_passthrough_fields_verbatim() {
 
 #[test]
 fn openai_parse_completion_and_errors() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let resp = json!({
         "model": "gpt-x",
         "choices": [{"message": {"role": "assistant", "content": "hi",
@@ -178,7 +183,7 @@ fn openai_parse_completion_and_errors() {
     assert_eq!(c.model, "gpt-x");
     assert_eq!(c.finish_reason, FinishReason::ToolUse);
     assert_eq!(c.usage.completion_tokens, Some(9));
-    assert!(matches!(&c.content[0], ContentPart::Text { text } if text == "hi"));
+    assert!(matches!(&c.content[0], ContentPart::Text { text, .. } if text == "hi"));
     assert!(matches!(&c.content[1], ContentPart::ToolUse { args, .. } if args["a"] == 1));
 
     let err = egress.map_error(
@@ -204,7 +209,7 @@ fn openai_parse_completion_and_errors() {
 /// sees the stable `context_length_exceeded` code.
 #[test]
 fn llama_exceed_context_size_maps_to_context_exceeded() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let body = br#"{"error":{"code":400,"message":"request (8010 tokens) exceeds the available context size (4096 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":8010,"n_ctx":4096}}"#;
     let err = egress.map_error(400, body);
     let lmgw_core::error::GatewayError::ContextExceeded {
@@ -226,7 +231,7 @@ fn llama_exceed_context_size_maps_to_context_exceeded() {
 /// `Upstream` mapping — this backstop only fires on the one shape it knows.
 #[test]
 fn a_different_400_body_is_not_mistaken_for_context_exceeded() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let err = egress.map_error(
         400,
         br#"{"error": {"message": "bad request", "type": "invalid_request_error"}}"#,
@@ -261,12 +266,12 @@ fn parse_exceed_context_ignores_the_shared_pool_overflow_shape() {
 /// to build — no observable change from the rename.
 #[test]
 fn chat_body_matches_what_build_chat_posts() {
-    use lmgw_core::egress::openai::chat_body;
+    use lmgw_core::egress::openai_compatible::chat_body;
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h:1/v1/");
+    let up = upstream(Protocol::OpenaiCompatible, "http://h:1/v1/");
     let ir = sample_ir();
     let p = params();
-    let req = for_protocol(Protocol::Openai)
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "real-model", &ir, &p, true)
         .unwrap()
         .build()
@@ -276,7 +281,7 @@ fn chat_body_matches_what_build_chat_posts() {
 
 #[test]
 fn openai_stream_decode() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let mut dec = egress.new_decoder();
     let chunks = [
         json!({"choices":[{"delta":{"role":"assistant","content":""}}]}),
@@ -470,6 +475,11 @@ fn anthropic_stream_decode() {
                 ..Default::default()
             }),
             StreamDelta::TextDelta("Hi".into()),
+            // The text block's stop, with no citations.
+            StreamDelta::TextBlockEnd {
+                citations: vec![],
+                scope: lmgw_core::ir::Signer::default(),
+            },
             StreamDelta::ToolCallStart {
                 index: 0,
                 id: "tu_9".into(),
@@ -536,6 +546,52 @@ fn gemini_build_request() {
     // $schema must be sanitized away
     assert!(decl["parameters"].get("$schema").is_none());
     assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+}
+
+/// A call without arguments stored as `""` or null (threads from before
+/// `parse_call_args`) goes to an object-only wire as `{}`; a string holding
+/// an object goes as that object; other non-objects are left as they are.
+#[test]
+fn stored_blank_call_arguments_replay_as_an_empty_object() {
+    let http = reqwest::Client::new();
+    let cases = [
+        (json!(""), json!({})),
+        (json!("  \n"), json!({})),
+        (Value::Null, json!({})),
+        (json!("{\"a\":1}"), json!({"a": 1})),
+        (json!("{not json"), json!("{not json")),
+    ];
+    for (stored, sent) in cases {
+        let mut ir = sample_ir();
+        ir.messages[2].content = vec![ContentPart::ToolUse {
+            id: "call_1".into(),
+            name: "page_text".into(),
+            args: stored.clone(),
+        }];
+        let up = upstream(Protocol::Anthropic, "https://api.anthropic.com/v1");
+        let req = for_protocol(Protocol::Anthropic)
+            .build_chat(&http, &up, "claude-x", &ir, &params(), false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let body = body_of(&req);
+        assert_eq!(body["messages"][1]["content"][0]["input"], sent, "{stored}");
+
+        let up = upstream(
+            Protocol::Gemini,
+            "https://generativelanguage.googleapis.com",
+        );
+        let req = for_protocol(Protocol::Gemini)
+            .build_chat(&http, &up, "gemini-pro", &ir, &params(), false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let body = body_of(&req);
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionCall"]["args"], sent,
+            "{stored}"
+        );
+    }
 }
 
 #[test]
@@ -686,8 +742,8 @@ fn openai_llama_count_tokens_is_native_tokenize() {
 fn openai_generic_count_tokens_uses_tiktoken_locally() {
     let http = reqwest::Client::new();
     // kind defaults to Generic → real-OpenAI path (no /tokenize endpoint).
-    let up = upstream(Protocol::Openai, "https://api.openai.com/v1");
-    let plan = for_protocol(Protocol::Openai)
+    let up = upstream(Protocol::OpenaiCompatible, "https://api.openai.com/v1");
+    let plan = for_protocol(Protocol::OpenaiCompatible)
         .build_count_tokens(&http, &up, "gpt-4o", "hello world")
         .unwrap();
     match plan {
@@ -697,7 +753,7 @@ fn openai_generic_count_tokens_uses_tiktoken_locally() {
     }
     // An unknown / future model name still counts (o200k_base fallback), and
     // says the tokenizer was a guess (api-docs design §5.1).
-    let plan = for_protocol(Protocol::Openai)
+    let plan = for_protocol(Protocol::OpenaiCompatible)
         .build_count_tokens(&http, &up, "gpt-9-something", "hello world")
         .unwrap();
     assert!(matches!(plan, CountPlan::Guessed(n) if n >= 2));
@@ -794,8 +850,8 @@ fn anthropic_in_openai_out_roundtrip() {
     });
     let ir = lmgw_core::ingress::anthropic::parse_messages_request(&body).unwrap();
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h/v1");
-    let req = for_protocol(Protocol::Openai)
+    let up = upstream(Protocol::OpenaiCompatible, "http://h/v1");
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "gpt", &ir, &ir.params, false)
         .unwrap()
         .build()
@@ -813,7 +869,7 @@ fn anthropic_in_openai_out_roundtrip() {
 
 #[test]
 fn openai_reasoning_content_decoded_and_parsed() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let mut dec = egress.new_decoder();
     let chunks = [
         json!({"choices":[{"delta":{"role":"assistant","reasoning_content":"Th","content":null}}]}),
@@ -843,7 +899,7 @@ fn openai_reasoning_content_decoded_and_parsed() {
         .parse_completion(resp.to_string().as_bytes())
         .unwrap();
     assert_eq!(c.reasoning, "Think");
-    assert!(matches!(&c.content[0], ContentPart::Text { text } if text == "42"));
+    assert!(matches!(&c.content[0], ContentPart::Text { text, .. } if text == "42"));
 }
 
 #[test]
@@ -888,6 +944,11 @@ fn anthropic_thinking_decoded_and_parsed() {
         vec![
             StreamDelta::ReasoningDelta("pon".into()),
             StreamDelta::ReasoningDelta("der".into()),
+            // The block's signature closes it (`anthropic_thinking_blocks`).
+            StreamDelta::ReasoningSignature {
+                signature: "xyz".into(),
+                scope: Default::default(),
+            },
             StreamDelta::TextDelta("hi".into()),
         ]
     );
@@ -898,7 +959,7 @@ fn anthropic_thinking_decoded_and_parsed() {
         .parse_completion(resp.to_string().as_bytes())
         .unwrap();
     assert_eq!(c.reasoning, "pondering");
-    assert!(matches!(&c.content[0], ContentPart::Text { text } if text == "hi"));
+    assert!(matches!(&c.content[0], ContentPart::Text { text, .. } if text == "hi"));
 }
 
 #[test]
@@ -930,7 +991,7 @@ fn gemini_thought_split_from_answer() {
         .unwrap();
     assert_eq!(c.reasoning, "thinking...");
     assert_eq!(c.content.len(), 1);
-    assert!(matches!(&c.content[0], ContentPart::Text { text } if text == "final"));
+    assert!(matches!(&c.content[0], ContentPart::Text { text, .. } if text == "final"));
 }
 
 // ---------------------------------------------------------------------------
@@ -966,8 +1027,12 @@ fn ir_with_tool_result(blocks: Vec<ToolResultBlock>) -> ChatRequest {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -989,7 +1054,7 @@ fn built(proto: Protocol, ir: &ChatRequest) -> Value {
 fn a_lone_text_block_renders_exactly_as_a_bare_string_did() {
     let ir = ir_with_tool_result(ToolResultBlock::one("12°C"));
 
-    let oa = built(Protocol::Openai, &ir);
+    let oa = built(Protocol::OpenaiCompatible, &ir);
     assert_eq!(oa["messages"][2]["role"], "tool");
     assert_eq!(oa["messages"][2]["content"], "12°C");
 
@@ -1040,7 +1105,7 @@ fn openai_replaces_a_binary_tool_result_with_a_named_placeholder() {
             data: payload.clone(),
         },
     ]);
-    let body = built(Protocol::Openai, &ir);
+    let body = built(Protocol::OpenaiCompatible, &ir);
     let text = body["messages"][2]["content"].as_str().unwrap();
     assert!(text.starts_with("here is the screenshot\n"));
     assert!(text.contains("image/png image, 4096 base64 bytes"));
@@ -1142,6 +1207,8 @@ fn ir_with_reasoning(signature: Option<&str>) -> ChatRequest {
                     ContentPart::Reasoning {
                         text: "teal is unusual".into(),
                         signature: signature.map(String::from),
+                        sealed: None,
+                        signature_scope: None,
                     },
                     ContentPart::text("Teal"),
                 ],
@@ -1153,16 +1220,20 @@ fn ir_with_reasoning(signature: Option<&str>) -> ChatRequest {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
 #[test]
 fn openai_replays_reasoning_as_reasoning_content() {
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h/v1");
-    let req = for_protocol(Protocol::Openai)
+    let up = upstream(Protocol::OpenaiCompatible, "http://h/v1");
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(
             &http,
             &up,
@@ -1190,7 +1261,7 @@ fn openai_replays_reasoning_as_reasoning_content() {
         name: "search".into(),
         args: json!({"q": "teal"}),
     };
-    let req = for_protocol(Protocol::Openai)
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "m", &ir, &Params::default(), false)
         .unwrap()
         .build()
@@ -1249,6 +1320,55 @@ fn gemini_drops_reasoning_it_cannot_replay() {
     assert_eq!(b["contents"][1]["parts"], json!([{"text": "Teal"}]));
 }
 
+/// An OpenAI reasoning seal goes to no egress but the platform's, and there
+/// only to the row that made it (openai egress design §7.3.1): Anthropic
+/// drops the unsigned part, Gemini every trace, and the Chat wire (llama.cpp,
+/// OpenAI-compatible) replays its text as `reasoning_content`, never the
+/// seal.
+#[test]
+fn no_other_egress_sends_an_openai_seal() {
+    let http = reqwest::Client::new();
+    let mut ir = ir_with_reasoning(None);
+    ir.messages[1].content[0] = ContentPart::sealed_reasoning(
+        "teal is unusual",
+        lmgw_core::ir::Seal::openai(
+            &lmgw_core::ir::SealScope::new(1, "cfg"),
+            "rs_secret",
+            "ENCRYPTED-SEAL",
+        ),
+    );
+    for (proto, base) in [
+        (Protocol::Anthropic, "https://api.anthropic.com"),
+        (Protocol::Gemini, "https://g/v1beta"),
+        (Protocol::OpenaiCompatible, "http://h/v1"),
+        (Protocol::LlamaCpp, "http://127.0.0.1:9/v1"),
+    ] {
+        let mut up = upstream(proto, base);
+        // The row the seal names: still not sent on any of these wires.
+        up.id = 1;
+        let req = for_protocol(proto)
+            .build_chat(&http, &up, "m", &ir, &Params::default(), false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let text = body_of(&req).to_string();
+        assert!(
+            !text.contains("ENCRYPTED-SEAL") && !text.contains("rs_secret"),
+            "{proto:?}: {text}"
+        );
+    }
+    let up = upstream(Protocol::Anthropic, "https://api.anthropic.com");
+    let req = for_protocol(Protocol::Anthropic)
+        .build_chat(&http, &up, "claude", &ir, &Params::default(), false)
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        body_of(&req)["messages"][1]["content"],
+        json!([{"type": "text", "text": "Teal"}])
+    );
+}
+
 #[test]
 fn anthropic_in_openai_out_replays_thinking_as_reasoning_content() {
     // What an Anthropic-SDK client sends back after this gateway answered it
@@ -1267,8 +1387,8 @@ fn anthropic_in_openai_out_replays_thinking_as_reasoning_content() {
     });
     let ir = lmgw_core::ingress::anthropic::parse_messages_request(&body).unwrap();
     let http = reqwest::Client::new();
-    let up = upstream(Protocol::Openai, "http://h/v1");
-    let req = for_protocol(Protocol::Openai)
+    let up = upstream(Protocol::OpenaiCompatible, "http://h/v1");
+    let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "gpt", &ir, &ir.params, false)
         .unwrap()
         .build()
@@ -1339,7 +1459,7 @@ fn llama_body(c: ReasoningControl) -> Value {
 
 fn openai_body(c: ReasoningControl) -> Value {
     reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::Generic),
+        &kinded(Protocol::OpenaiCompatible, UpstreamKind::Generic),
         &sample_ir(),
         &reasoning_params(c),
     )
@@ -1471,7 +1591,7 @@ fn openai_rewrites_a_passthrough_reasoning_object() {
         .unwrap()
         .clone();
     let b = reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::Generic),
+        &kinded(Protocol::OpenaiCompatible, UpstreamKind::Generic),
         &ir,
         &reasoning_params(effort("high")),
     );
@@ -1488,7 +1608,7 @@ fn openai_rewrites_a_passthrough_reasoning_object() {
 
     // Switched off, the object says so too rather than carrying a stale level.
     let b = reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::Generic),
+        &kinded(Protocol::OpenaiCompatible, UpstreamKind::Generic),
         &ir,
         &reasoning_params(enabled(false)),
     );
@@ -1521,7 +1641,7 @@ fn a_llama_route_still_gets_the_scalar_beside_an_openrouter_object() {
 /// was before the control plane existed: one scalar, nothing else added.
 #[test]
 fn a_plain_effort_on_a_generic_upstream_adds_exactly_one_key() {
-    let up = kinded(Protocol::Openai, UpstreamKind::Generic);
+    let up = kinded(Protocol::OpenaiCompatible, UpstreamKind::Generic);
     let before = reasoning_body(&up, &sample_ir(), &params());
     let after = reasoning_body(&up, &sample_ir(), &reasoning_params(effort("high")));
 
@@ -1602,7 +1722,7 @@ fn gemini_maps_effort_and_budget() {
 fn an_empty_control_changes_no_body() {
     for (proto, kind) in [
         (Protocol::LlamaCpp, UpstreamKind::LlamaServer),
-        (Protocol::Openai, UpstreamKind::Generic),
+        (Protocol::OpenaiCompatible, UpstreamKind::Generic),
         (Protocol::Anthropic, UpstreamKind::Generic),
         (Protocol::Gemini, UpstreamKind::Generic),
     ] {
@@ -1635,24 +1755,47 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
         enabled: Some(true),
         effort: None,
         budget_tokens: Some(100),
+        ..Default::default()
     };
 
     // llama-server speaks all three.
     assert!(ignored(Protocol::LlamaCpp, &both).is_empty());
     // A generic OpenAI provider knows `reasoning_effort` and nothing else.
-    assert_eq!(ignored(Protocol::Openai, &both), vec!["enabled", "budget"]);
+    assert_eq!(
+        ignored(Protocol::OpenaiCompatible, &both),
+        vec!["enabled", "budget"]
+    );
     // An effort expresses "on", so `enabled` is no longer dropped.
     assert_eq!(
-        ignored(Protocol::Openai, &effort("high")),
+        ignored(Protocol::OpenaiCompatible, &effort("high")),
         Vec::<&str>::new()
     );
-    assert_eq!(ignored(Protocol::Openai, &enabled(true)), vec!["enabled"]);
+    assert_eq!(
+        ignored(Protocol::OpenaiCompatible, &enabled(true)),
+        vec!["enabled"]
+    );
     // …but when the client brought OpenRouter's own object, the egress writes
     // `enabled` into it, so claiming it was dropped would be a lie.
     assert_eq!(
-        lmgw_core::proxy::reasoning_ignored(Protocol::Openai, &enabled(true), true,),
+        lmgw_core::proxy::reasoning_ignored(Protocol::OpenaiCompatible, &enabled(true), true,),
         Vec::<&str>::new()
     );
+    // The OpenAI platform translates that object into `reasoning_effort`
+    // and sends no object (openai egress design P3), so it rescues nothing.
+    for object in [false, true] {
+        assert_eq!(
+            lmgw_core::proxy::reasoning_ignored(Protocol::Openai, &both, object),
+            vec!["enabled", "budget"]
+        );
+        assert_eq!(
+            lmgw_core::proxy::reasoning_ignored(Protocol::Openai, &enabled(true), object),
+            vec!["enabled"]
+        );
+        assert_eq!(
+            lmgw_core::proxy::reasoning_ignored(Protocol::Openai, &effort("high"), object),
+            Vec::<&str>::new()
+        );
+    }
     // Anthropic expresses everything — but not a level *and* a budget at once.
     assert!(ignored(Protocol::Anthropic, &both).is_empty());
     assert_eq!(
@@ -1662,6 +1805,7 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
                 enabled: Some(true),
                 effort: Some("high".into()),
                 budget_tokens: Some(8000),
+                ..Default::default()
             }
         ),
         vec!["effort"]
@@ -1676,6 +1820,7 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
                 enabled: Some(true),
                 effort: Some("high".into()),
                 budget_tokens: Some(4096),
+                ..Default::default()
             }
         ),
         vec!["effort"]
@@ -1730,6 +1875,7 @@ fn anthropic_never_sends_output_config_beside_a_budget() {
         enabled: Some(true),
         effort: Some("high".into()),
         budget_tokens: Some(8000),
+        ..Default::default()
     });
     assert_eq!(b["thinking"]["type"], "enabled");
     assert_eq!(b["thinking"]["budget_tokens"], 8000);
@@ -1761,6 +1907,7 @@ fn gemini_never_sends_both_level_and_budget() {
         enabled: Some(true),
         effort: Some("high".into()),
         budget_tokens: Some(4096),
+        ..Default::default()
     });
     let cfg = &b["generationConfig"]["thinkingConfig"];
     assert_eq!(
@@ -1817,7 +1964,7 @@ fn llama_server_reconciles_the_other_budget_spelling() {
 
 #[test]
 fn openai_usage_details_are_subsets_of_the_total() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let resp = json!({
         "model": "gpt-x",
         "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
@@ -1950,7 +2097,7 @@ fn usage_merge_is_latest_wins_and_add_sums_the_subsets_too() {
 fn llama_timings_land_on_a_non_streamed_completion() {
     // llama-server puts its timings block on the non-streamed response too;
     // before usage analytics there was no field to receive it.
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let resp = json!({
         "model": "qwen",
         "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
@@ -1971,7 +2118,7 @@ fn llama_timings_land_on_a_non_streamed_completion() {
 
 #[test]
 fn a_cloud_completion_has_no_timings() {
-    let egress = for_protocol(Protocol::Openai);
+    let egress = for_protocol(Protocol::OpenaiCompatible);
     let resp = json!({
         "model": "gpt-x",
         "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],

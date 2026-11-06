@@ -310,7 +310,7 @@ pub(super) fn WebRtcPanel(page: Page, id: String, hidden: Signal<bool>) -> impl 
                                 view! {
                                     <div class="set-line">
                                         <span class="set-line-label">{label}</span>
-                                        <span class="chip" class:ok=tone == "ok" class:warn=tone == "warn"
+                                        <span class="chip chip-line" class:ok=tone == "ok" class:warn=tone == "warn"
                                             class:off=tone == "off">
                                             <span class="dot"></span>
                                             {line}

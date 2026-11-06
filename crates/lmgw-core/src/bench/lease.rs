@@ -240,7 +240,7 @@ mod tests {
         let b = snap.gpu_block().unwrap();
         assert!(matches!(&b, GpuBlock::Benchmark(l) if l.run_id == 7));
         let e = b.refusal("other", "");
-        assert_eq!(e.code(), "gpu_benchmark");
+        assert_eq!(e.kind(), "gpu_benchmark");
         assert_eq!(e.http_status().as_u16(), 503);
         assert!(e.to_string().contains("run 7"), "{e}");
         assert_eq!(b.fallback_reason().as_str(), "benchmark");
@@ -248,7 +248,7 @@ mod tests {
         snap.settings.hold.active = true;
         let b = snap.gpu_block().unwrap();
         assert_eq!(b, GpuBlock::Hold);
-        assert_eq!(b.refusal("other", "").code(), "gpu_hold");
+        assert_eq!(b.refusal("other", "").kind(), "gpu_hold");
     }
 
     /// A model on the CPU is blocked by a benchmark's lease, never by the

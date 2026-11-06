@@ -19,6 +19,7 @@ use crate::config::{AuxKind, Snapshot};
 use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::proxy::{self, RequestCtx};
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry;
 
@@ -36,6 +37,9 @@ pub struct InProcessReranker {
     /// Whose request it ranks for, as the embedder's
     /// ([`super::embed::InProcessEmbedder::charged_to`]).
     caller: Option<RequestCtx>,
+    /// Whose traffic its calls are, as the embedder's
+    /// ([`super::embed::InProcessEmbedder::as_traffic_of`]).
+    origin: Origin,
 }
 
 impl std::fmt::Debug for InProcessReranker {
@@ -75,6 +79,7 @@ impl InProcessReranker {
             alias: alias.to_string(),
             resolved,
             caller: None,
+            origin: Origin::Owner,
         })
     }
 
@@ -82,6 +87,13 @@ impl InProcessReranker {
     /// against its key, its row the key's. `None` keeps the gateway's own.
     pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
         self.caller = caller;
+        self
+    }
+
+    /// Rank as `origin`'s traffic, as
+    /// [`super::embed::InProcessEmbedder::as_traffic_of`].
+    pub fn as_traffic_of(mut self, origin: Origin) -> Self {
+        self.origin = origin;
         self
     }
 
@@ -130,17 +142,20 @@ impl Reranker for InProcessReranker {
                 documents.to_vec(),
                 None,
                 telemetry::RERANK_PROTO,
-                key,
+                (key, self.origin),
             )
             .await
             .map_err(|(_, _, e)| QuickdocError::Reranker(format!("{}: {e}", self.alias)))?;
-            if let Some(fb) = headers.fallback() {
+            if let Some((fb, reason)) = super::embed::answered_instead(&headers) {
                 return Err(QuickdocError::Reranker(format!(
-                "'{}' was answered by the GPU-hold fallback '{fb}' — quickdoc will not rank with \
-                 a model other than the {} its trace names. Release the hold, or clear the docs \
-                 rerank model to run retrieval without the stage.",
-                self.alias, self.resolved
-            )));
+                    "'{}' was answered by its fallback '{fb}' because {} — quickdoc will not rank \
+                     with a model other than the {} its trace names. {} Or clear the docs rerank \
+                     model to run retrieval without the stage.",
+                    self.alias,
+                    reason.because(),
+                    self.resolved,
+                    super::embed::remedy(&self.alias, reason)
+                )));
             }
             resp.in_request_order(documents.len())
                 .ok_or(QuickdocError::RerankCount {

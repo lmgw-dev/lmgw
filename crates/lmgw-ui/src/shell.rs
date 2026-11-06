@@ -7,8 +7,15 @@ use leptos::html;
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::fmt::{age, human_bytes};
+use crate::fmt::{age, fmt_bytes};
 use crate::widgets::{use_toasts, Popover};
+
+/// The desktop shell's moves: the tray sends the window to a page without
+/// a reload.
+mod moves;
+mod nav;
+pub use moves::{provide_shell_moves, ShellMoves, ShellNavigate};
+use nav::{Badge, Branch, Leaf, NavBranch, NavItem};
 
 /// Below this window width the sidebar is a rail whatever the choice says:
 /// 216px of labels would leave a 900px window a page too narrow for its own
@@ -227,15 +234,20 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "GPU".to_string());
             let free = match (v.free_bytes, v.capacity_bytes) {
-                (Some(f), c) if c > 0 => format!("{} free of {}", human_bytes(f), human_bytes(c)),
-                (Some(f), _) => format!("{} free", human_bytes(f)),
+                (Some(f), c) if c > 0 => format!("{} free of {}", fmt_bytes(f), fmt_bytes(c)),
+                (Some(f), _) => format!("{} free", fmt_bytes(f)),
                 (None, _) => "free memory not measured".to_string(),
             };
             (name, free)
         })
     };
+    // What the free figure leaves out on top of the memory in use: the
+    // ledger keeps it free for memory the driver cannot show yet. Without
+    // this line the panel's figures do not add up to the card.
+    let kept = move || vram().as_ref().and_then(crate::gpu_figures::kept_free_line);
     // Every local container, whatever its class: they all share the card.
-    // The ledger's estimate is added where it has one.
+    // The ledger's estimate is added where it has one, with what of it is
+    // not loaded yet and the ledger's note on how it got there.
     let rows = move || {
         let est = |class: &str, model: &str| {
             live.vram.with(|v| {
@@ -243,7 +255,7 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                     v.resident
                         .iter()
                         .find(|r| r.container == class && r.model == model)
-                        .map(|r| r.estimated_bytes)
+                        .map(|r| (r.estimated_bytes, r.pending_bytes, r.note.clone()))
                 })
             })
         };
@@ -257,23 +269,21 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
             })
             .collect::<Vec<_>>()
     };
-    let fallback = move || vram().and_then(|v| v.hold_fallback_alias);
     let draining = move || vram().map(|v| v.draining).unwrap_or_default();
+    // `(class, model, alias)` of each start that waits for its download.
+    let downloads = Memo::new(move |_| {
+        live.vram.with(|v| {
+            v.as_ref()
+                .map(crate::gpu_download::waiting)
+                .unwrap_or_default()
+        })
+    });
     // The two shares (candidate-aliases design §4.7, §12.26): what lmgw's own
     // containers hold versus everything else on the card — games, the
-    // desktop, other apps. `None` on either is a dash, never 0: an
-    // unmeasured share is not the same as an empty one.
-    let dash_bytes = |b: Option<u64>| b.map(human_bytes).unwrap_or_else(|| "—".to_string());
-    let shares = move || {
-        vram()
-            .map(|v| {
-                (
-                    dash_bytes(v.lmgw_share_bytes),
-                    dash_bytes(v.outside_share_bytes),
-                )
-            })
-            .unwrap_or_else(|| ("—".to_string(), "—".to_string()))
-    };
+    // desktop, other apps — then the memory the probe reports as neither
+    // used nor free, which closes the sum to the card, and the used memory
+    // where the shares are not measured (`gpu_figures::holders_line`).
+    let shares = move || crate::gpu_figures::holders_line(vram().as_ref());
     let trigger_armed = move || vram().is_some_and(|v| v.external_trigger_active);
     let trigger_label = move || match vram() {
         Some(v) if v.external_trigger_active => "External fallback: armed".to_string(),
@@ -297,12 +307,8 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                     None => view! { <span class="dim">"GPU status not reported yet"</span> }.into_any(),
                 }}
             </div>
-            <div class="gpu-row dim">
-                {move || {
-                    let (lmgw, outside) = shares();
-                    format!("lmgw {lmgw} · outside {outside}")
-                }}
-            </div>
+            {move || kept().map(|k| view! { <div class="gpu-row dim">{k}</div> })}
+            <div class="gpu-row dim">{shares}</div>
             <div class="gpu-row">
                 <span class="chip" class:ok=trigger_armed class:off=move || !trigger_armed()>
                     <span class="dot"></span>
@@ -311,6 +317,20 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
             </div>
             <crate::pages::benchmarks::GpuBenchRow open=open/>
             <div class="gpu-k">"Running local models"</div>
+            // The draining mark is global (per-request background design
+            // §10): said once, not on every resident.
+            {move || {
+                rows()
+                    .iter()
+                    .any(|(r, _)| r.draining_for_owner)
+                    .then(|| {
+                        view! {
+                            <div class="gpu-row dim">
+                                "A request of yours is waiting for room: background work is not taken."
+                            </div>
+                        }
+                    })
+            }}
             <div class="pop-list gpu-list">
                 {move || {
                     let rows = rows();
@@ -321,7 +341,11 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                             .into_any();
                     }
                     rows.into_iter()
-                        .map(|(r, bytes)| {
+                        .map(|(r, est)| {
+                            let (bytes, pending, note) = match est {
+                                Some((b, p, n)) => (Some(b), p, n),
+                                None => (None, None, None),
+                            };
                             let state = if r.state == "ready" {
                                 format!("up {}", age(r.started_at_age_seconds))
                             } else {
@@ -343,23 +367,32 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                             // resident.
                             let owner = (r.owner.as_deref() == Some("background"))
                                 .then(|| "background".to_string());
-                            let draining =
-                                r.draining_for_owner.then(|| "draining for owner".to_string());
                             view! {
                                 <div class="gpu-row">
                                     <span class="mono-sm gpu-model" title=r.container_name.clone()>
                                         {r.model_id.clone()}
                                     </span>
                                     <span class="type-badge">{r.class.clone()}</span>
-                                    <span class="dim gpu-meta">
+                                    <span class="dim gpu-meta" title=note>
                                         {[
                                             Some(state),
                                             busy_now,
-                                            bytes.map(|b| format!("~{}", human_bytes(b))),
+                                            bytes.map(|b| match pending {
+                                                // The ledger keeps it free
+                                                // until the model loads.
+                                                Some(p) if p >= b => {
+                                                    format!("~{} not loaded yet", fmt_bytes(b))
+                                                }
+                                                Some(p) => format!(
+                                                    "~{}, {} of it not loaded yet",
+                                                    fmt_bytes(b),
+                                                    fmt_bytes(p),
+                                                ),
+                                                None => format!("~{}", fmt_bytes(b)),
+                                            }),
                                             rung,
                                             climbing,
                                             owner,
-                                            draining,
                                         ]
                                             .into_iter()
                                             .flatten()
@@ -373,6 +406,31 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                         .into_any()
                 }}
             </div>
+            // Starts that wait for their download before they take anything
+            // from the card (machine-check design §5): no place in any
+            // queue, and nothing reserved yet.
+            <Show when=move || downloads.with(|d| !d.is_empty())>
+                <div class="gpu-k">"Downloading before they start"</div>
+                <div class="pop-list gpu-list">
+                    <For each=move || downloads.get() key=|d| (d.0.clone(), d.1.clone()) let:d>
+                        {
+                            let (class, model, alias) = d;
+                            let dl = crate::gpu_download::live_for(class.clone(), model.clone());
+                            view! {
+                                <div class="gpu-row gpu-dl" title=format!("requested as {alias}")>
+                                    <span class="mono-sm gpu-model">{model}</span>
+                                    <span class="type-badge">{class}</span>
+                                </div>
+                                <div class="gpu-row gpu-dl-line">
+                                    <crate::gpu_download::DlLine dl=Signal::derive(move || {
+                                        dl.get().unwrap_or_default()
+                                    })/>
+                                </div>
+                            }
+                        }
+                    </For>
+                </div>
+            </Show>
             <div class="gpu-k">"Hold"</div>
             <div class="gpu-row">
                 <span class="chip" class:warn=held class:off=move || !held()>
@@ -392,19 +450,10 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                     })
             }}
             <div class="gpu-row dim">
-                {move || match fallback() {
-                    Some(a) => view! {
-                        "Held chat requests go to "
-                        <code class="mono-sm">{a}</code>
-                    }
-                    .into_any(),
-                    None => view! { "No fallback: held chat requests are refused" }.into_any(),
-                }}
+                "Held models answer with their own fallback, where one is set"
                 " · "
                 <span on:click=close>
-                    <A href=crate::pages::settings_href("hold.fallback_alias")>
-                        "Settings → GPU → Hold"
-                    </A>
+                    <A href="/models">"Models"</A>
                 </span>
             </div>
             <div class="gpu-row gpu-act">
@@ -433,73 +482,6 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
     }
 }
 
-/// One sidebar entry. `icon` is the inner path/shape markup of a 16×16
-/// stroke-based SVG (see app.css `.nav-item svg`). `<A>` does not prepend the
-/// router base to hrefs, so it is done here — otherwise links escape the SPA
-/// into the old UI's routes.
-#[component]
-fn NavItem(
-    href: &'static str,
-    label: &'static str,
-    icon: AnyView,
-    /// Exact-match active state; needed for the root link, which would
-    /// otherwise be marked active on every page.
-    #[prop(default = false)]
-    exact: bool,
-    /// Count to show on the right of the entry; rendered only when non-zero.
-    /// A queue nobody sees is a queue nobody works: Docs' pending agent
-    /// doc-requests, running downloads, MCP servers in error.
-    #[prop(optional, into)]
-    badge: Option<Signal<u64>>,
-    /// What the count is, for its tooltip (the only place a rail shows it).
-    #[prop(optional, into)]
-    badge_title: Option<Signal<String>>,
-    /// Red, for something broken; amber (waiting on you) otherwise.
-    #[prop(optional)]
-    bad: bool,
-    /// A second count of another kind, after the first: Backends' updates
-    /// available next to its live runs. Blue and marked "↑", so the two
-    /// numbers are not read as one; rendered only when non-zero.
-    #[prop(optional, into)]
-    news: Option<Signal<u64>>,
-    #[prop(optional, into)] news_title: Option<Signal<String>>,
-) -> impl IntoView {
-    // The title is the only label a rail has.
-    view! {
-        <A href=href exact=exact attr:class="nav-item" attr:title=label>
-            <svg viewBox="0 0 16 16">{icon}</svg>
-            <span class="nav-label">{label}</span>
-            {badge
-                .map(|b| {
-                    view! {
-                        <Show when=move || { b.get() > 0 }>
-                            <span
-                                class="nav-badge"
-                                class:bad=bad
-                                title=move || badge_title.map(|t| t.get()).unwrap_or_default()
-                            >
-                                {move || b.get()}
-                            </span>
-                        </Show>
-                    }
-                })}
-            {news
-                .map(|n| {
-                    view! {
-                        <Show when=move || { n.get() > 0 }>
-                            <span
-                                class="nav-badge news"
-                                title=move || news_title.map(|t| t.get()).unwrap_or_default()
-                            >
-                                {move || format!("\u{2191}{}", n.get())}
-                            </span>
-                        </Show>
-                    }
-                })}
-        </A>
-    }
-}
-
 #[component]
 pub fn Sidebar() -> impl IntoView {
     // The sidebar lives as long as the app, inside the router: the place to
@@ -509,11 +491,13 @@ pub fn Sidebar() -> impl IntoView {
     let docs_badge = Signal::derive(move || pending.0.get());
     let docs_title = Signal::derive(move || format!("{} pending doc requests", pending.0.get()));
     let live = crate::live::use_live();
+    // Model files and the downloads for the graphics card alike: the
+    // Downloads page lists both.
     let downloads = Signal::derive(move || {
         live.jobs.with(|j| {
             j.iter()
                 .flatten()
-                .filter(|j| j.kind == "hf_download")
+                .filter(|j| j.kind == "hf_download" || j.kind == "image_pull")
                 .count() as u64
         })
     });
@@ -568,6 +552,115 @@ pub fn Sidebar() -> impl IntoView {
             n => format!("{n} MCP servers in error: {}", names.join(", ")),
         })
     });
+    // The two entries with pages under them (`Branch`). A new lab is one
+    // more `Leaf` in `labs`.
+    let labs = Branch {
+        key: "labs",
+        label: "Labs",
+        icon: || {
+            view! {
+                <path d="M6 2.5h4M6.75 2.5v4.25L3.2 12.4a1 1 0 00.85 1.6h7.9a1 1 0 00.85-1.6L9.25 6.75V2.5"/>
+                <path d="M4.6 10.25h6.8"/>
+            }
+            .into_any()
+        },
+        href: None,
+        kids: vec![
+            Leaf {
+                href: "/audio-lab",
+                label: "Audio",
+                name: "Audio lab",
+                icon: || view! { <path d="M2 8h2M5 4v8M8 6v4M11 3v10M14 7v2"/> }.into_any(),
+                badge: None,
+            },
+            Leaf {
+                href: "/image-lab",
+                label: "Image",
+                name: "Image lab",
+                icon: || {
+                    view! {
+                        <rect x="2.5" y="3" width="11" height="10" rx="1.5"/>
+                        <circle cx="6" cy="6.5" r="1.1"/>
+                        <path d="M3 11.5l3-3 2.5 2.5 2-1.5 3 2.5"/>
+                    }
+                    .into_any()
+                },
+                badge: None,
+            },
+            Leaf {
+                href: "/decision-lab",
+                label: "Decision",
+                name: "Decision lab",
+                icon: || {
+                    view! {
+                        <path d="M8 2.5v4"/>
+                        <path d="M8 6.5L4 10.5M8 6.5l4 4"/>
+                        <circle cx="4" cy="12" r="1.5"/>
+                        <circle cx="12" cy="12" r="1.5"/>
+                        <circle cx="8" cy="2.5" r="1"/>
+                    }
+                    .into_any()
+                },
+                badge: None,
+            },
+            Leaf {
+                href: "/voice-lab",
+                label: "Voices",
+                name: "Voices lab",
+                // A head and its voice: the samples the cloning models speak with.
+                icon: || {
+                    view! {
+                        <circle cx="6" cy="5.5" r="2.5"/>
+                        <path d="M1.75 13.5c0-2.6 1.9-4.25 4.25-4.25s4.25 1.65 4.25 4.25"/>
+                        <path d="M11.5 4a2.75 2.75 0 0 1 0 3.5M13.25 2.5a5 5 0 0 1 0 6.5"/>
+                    }
+                    .into_any()
+                },
+                badge: None,
+            },
+            Leaf {
+                href: "/benchmarks",
+                label: "Benchmarks",
+                name: "Benchmarks",
+                icon: || {
+                    view! {
+                        <path d="M2.5 11.5a5.5 5.5 0 0 1 11 0"/>
+                        <path d="M8 11.5l2.6-3.4"/>
+                        <path d="M2 13.5h12"/>
+                    }
+                    .into_any()
+                },
+                badge: Some(Badge {
+                    n: bench_badge,
+                    title: bench_title,
+                    bad: false,
+                }),
+            },
+        ],
+    };
+    let models = Branch {
+        key: "models",
+        label: "Models",
+        icon: || {
+            view! {
+                <rect x="2.5" y="2.5" width="11" height="4.5" rx="1.5"/>
+                <rect x="2.5" y="9" width="11" height="4.5" rx="1.5"/>
+            }
+            .into_any()
+        },
+        href: Some("/models"),
+        kids: vec![Leaf {
+            href: "/downloads",
+            label: "Downloads",
+            name: "Downloads",
+            icon: || view! { <path d="M8 2v5m0 0l-3.5 3.5M8 7l3.5 3.5M2.5 13.5h11"/> }.into_any(),
+            badge: Some(Badge {
+                n: downloads,
+                title: downloads_title,
+                bad: false,
+            }),
+        }],
+    };
     let state = expect_context::<SidebarState>();
     let toggle_title = move || {
         if state.narrow.get() {
@@ -604,33 +697,7 @@ pub fn Sidebar() -> impl IntoView {
                         label="Chat"
                         icon=view! { <path d="M2.5 3.5h11v7h-6l-3 3v-3h-2z"/> }.into_any()
                     />
-                    <NavItem
-                        href="/audio-lab"
-                        label="Audio lab"
-                        icon=view! { <path d="M2 8h2M5 4v8M8 6v4M11 3v10M14 7v2"/> }.into_any()
-                    />
-                    <NavItem
-                        href="/image-lab"
-                        label="Image lab"
-                        icon=view! {
-                            <rect x="2.5" y="3" width="11" height="10" rx="1.5"/>
-                            <circle cx="6" cy="6.5" r="1.1"/>
-                            <path d="M3 11.5l3-3 2.5 2.5 2-1.5 3 2.5"/>
-                        }
-                            .into_any()
-                    />
-                    <NavItem
-                        href="/decision-lab"
-                        label="Decision lab"
-                        icon=view! {
-                            <path d="M8 2.5v4"/>
-                            <path d="M8 6.5L4 10.5M8 6.5l4 4"/>
-                            <circle cx="4" cy="12" r="1.5"/>
-                            <circle cx="12" cy="12" r="1.5"/>
-                            <circle cx="8" cy="2.5" r="1"/>
-                        }
-                            .into_any()
-                    />
+                    <NavBranch branch=labs/>
                     <NavItem
                         href="/agents"
                         label="Agents"
@@ -645,28 +712,11 @@ pub fn Sidebar() -> impl IntoView {
                 </div>
                 <div class="nav-group">
                     <div class="nav-eyebrow">"Serve"</div>
-                    <NavItem
-                        href="/models"
-                        label="Models"
-                        icon=view! {
-                            <rect x="2.5" y="2.5" width="11" height="4.5" rx="1.5"/>
-                            <rect x="2.5" y="9" width="11" height="4.5" rx="1.5"/>
-                        }
-                            .into_any()
-                    />
-                    <NavItem
-                        href="/downloads"
-                        label="Downloads"
-                        badge=downloads
-                        badge_title=downloads_title
-                        icon=view! { <path d="M8 2v5m0 0l-3.5 3.5M8 7l3.5 3.5M2.5 13.5h11"/> }
-                            .into_any()
-                    />
+                    <NavBranch branch=models/>
                     <NavItem
                         href="/backends"
-                        label="Backends"
-                        badge=builds
-                        badge_title=builds_title
+                        label="Engines"
+                        badge=Some(Badge { n: builds, title: builds_title, bad: false })
                         news=updates
                         news_title=updates_title
                         icon=view! {
@@ -677,22 +727,9 @@ pub fn Sidebar() -> impl IntoView {
                             .into_any()
                     />
                     <NavItem
-                        href="/benchmarks"
-                        label="Benchmarks"
-                        badge=bench_badge
-                        badge_title=bench_title
-                        icon=view! {
-                            <path d="M2.5 11.5a5.5 5.5 0 0 1 11 0"/>
-                            <path d="M8 11.5l2.6-3.4"/>
-                            <path d="M2 13.5h12"/>
-                        }
-                            .into_any()
-                    />
-                    <NavItem
                         href="/docs"
                         label="Docs"
-                        badge=docs_badge
-                        badge_title=docs_title
+                        badge=Some(Badge { n: docs_badge, title: docs_title, bad: false })
                         icon=view! {
                             <path d="M3 2.5h5.5a2 2 0 012 2v9a1.6 1.6 0 00-1.6-1.6H3z"/>
                             <path d="M13 2.5H9.9a1.6 1.6 0 00-1.4.9"/>
@@ -721,9 +758,7 @@ pub fn Sidebar() -> impl IntoView {
                     <NavItem
                         href="/mcp-servers"
                         label="MCP servers"
-                        badge=mcp_badge
-                        badge_title=mcp_title
-                        bad=true
+                        badge=Some(Badge { n: mcp_badge, title: mcp_title, bad: true })
                         icon=view! {
                             <circle cx="4" cy="8" r="1.7"/>
                             <circle cx="12" cy="4" r="1.7"/>

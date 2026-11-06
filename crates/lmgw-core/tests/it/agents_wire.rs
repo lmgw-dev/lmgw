@@ -219,7 +219,7 @@ async fn a_delete_answers_the_threads_it_kept_and_how_to_bring_the_agent_back() 
 
 #[tokio::test]
 async fn a_run_start_answers_the_job_and_reports_one_already_in_flight() {
-    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::Openai).await;
+    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let (source, release) = held_source().await;
     register_held(&state, &source).await;
     let gw = serve(state.clone()).await;

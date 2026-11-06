@@ -30,7 +30,7 @@ pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<(
     // `output_modalities=all` fails its Test with the option named.
     let asked_all = crate::catalog::request::asks_all_modalities(&state.snapshot(), u);
     let rb = match u.protocol {
-        Protocol::Openai | Protocol::LlamaCpp => {
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
             let mut rb = state
                 .http
                 .get(crate::catalog::request::openai_models_url(base, asked_all));
@@ -59,8 +59,9 @@ pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<(
             rb
         }
     };
-    let resp = rb
-        .timeout(std::time::Duration::from_secs(10))
+    // Bounded by the row's own `timeout_ms` like every catalog read (none
+    // at 0; the owner's answer of 2026-10-25, openai egress design §14.2).
+    let resp = crate::egress::with_timeout(rb, u.request_timeout())
         .send()
         .await
         .map_err(|e| e.to_string())?;

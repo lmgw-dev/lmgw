@@ -12,6 +12,7 @@
 //! under other"), §4.11 wins — it is the section that actually specifies
 //! `lmgw_endpoints()`'s output.
 
+use lmgw_api_types::audio_alignment::AudioAlignment;
 use lmgw_api_types::openapi_ext::{endpoint_group, model_task};
 
 use super::super::registry::{Dialect, DocRoute, Req, Resp};
@@ -89,9 +90,12 @@ fn own() -> Vec<DocRoute> {
         // -- Responses --------------------------------------------------------
         DocRoute {
             description: "lmgw's own Responses API implementation; llama-server has none. MCP tools run server-side on lmgw's registered MCP \
-                servers; background:true, truncation:\"auto\" and hosted tools are refused \
-                rather than approximated. An anthropic-beta header is forwarded when the route \
-                is an Anthropic upstream.",
+                servers. An upstream that implements the Responses API itself (the OpenAI \
+                platform, a compatible row flagged for it) gets the body as sent, hosted \
+                tools, item references and truncation:\"auto\" included, unless only lmgw's \
+                loop can serve the request; the loop refuses those rather than approximating \
+                them. background:true is refused on every path. An anthropic-beta header is \
+                forwarded when the route is an Anthropic upstream.",
             request: Req::Json(responses::request),
             response: Resp::JsonOrSse {
                 json: responses::response,
@@ -106,18 +110,23 @@ fn own() -> Vec<DocRoute> {
         DocRoute {
             description: "A stored response, exactly as it was served. It is present only \
                 when lmgw stored it — the creating call left store on (the default) while \
-                the gateway's response store was on, and it did not go to an upstream that \
-                implements the Responses API itself — and only until retention evicts its \
+                the gateway's response store was on — and only until retention evicts its \
                 conversation as a whole: by default 168 hours after the conversation's last \
                 activity, or once it falls outside the 500 most recently active \
-                conversations. 404 otherwise.",
+                conversations. A response an upstream that implements the Responses API \
+                made itself (created with store left on) is fetched from that upstream, \
+                query string included, and relayed as it answers, for as long as the same \
+                retention keeps lmgw's record of it. A client key reads only the responses \
+                it made, an owner key every one; another key's response is a 404 like an \
+                unknown id. 404 otherwise.",
             response: Resp::Json(responses::response),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
             ..base("GET", "/v1/responses/{id}", "openai", "Retrieve a response")
         },
         DocRoute {
-            description: "Deletes a stored response.",
+            description: "Deletes a stored response, or has the upstream that made a \
+                native one delete it. Read as GET is: another key's response is a 404.",
             response: Resp::Json(responses::deletion),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
@@ -129,7 +138,9 @@ fn own() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "This turn's `input` array as it was sent, for a stored response.",
+            description: "This turn's `input` array as it was sent, for a stored response; \
+                for a native one, the upstream's answer with the query string forwarded. \
+                Read as GET is.",
             response: Resp::Json(responses::input_items),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
@@ -138,6 +149,31 @@ fn own() -> Vec<DocRoute> {
                 "/v1/responses/{id}/input_items",
                 "openai",
                 "List a response's input items",
+            )
+        },
+        DocRoute {
+            description: "The OpenAI SDKs' responses.input_tokens.count(): the body a \
+                Responses create would send (input, instructions, function tools, a \
+                previous_response_id's stored conversation in front), counted on the route \
+                the model resolves to as the other counters count — exact on an Anthropic \
+                upstream (the Messages body the send would render, on Anthropic's own \
+                counter), a Gemini upstream and a local llama.cpp chat row; otherwise \
+                flattened, which x-lmgw-count-approximate says. mcp tools' definitions are \
+                not counted yet (tools_omitted), and what only an upstream's own Responses \
+                API serves is refused by name. Enforces the key's alias scope like every \
+                other counter; no budget applies.",
+            request: Req::Json(responses::request),
+            response: Resp::Json(responses::input_tokens),
+            dialect: Dialect::OpenAi,
+            endpoints: &[endpoint_group::OPENAI],
+            model_task: Some(model_task::CHAT),
+            writes: Some(false),
+            example: Some(responses::example),
+            ..base(
+                "POST",
+                "/v1/responses/input_tokens",
+                "openai",
+                "Count a response's input tokens",
             )
         },
         // -- Legacy completions -----------------------------------------------
@@ -199,7 +235,8 @@ fn own() -> Vec<DocRoute> {
                 its model included: the id that answered upstream, not the name asked for \
                 (x-lmgw-fallback names a fallback alias). The body is read as JSON whatever \
                 its Content-Type. Routes to a local decision model (an aux row of kind \
-                decision) or to an openai or llama_cpp upstream whose catalog does not rule \
+                decision) or to an openai_compatible or llama_cpp upstream whose catalog \
+                does not rule \
                 the model out; any other model is 501 not_supported_error before a \
                 container starts. A local row whose image predates the route is a 501 \
                 too, once its container is up and answers the route 404. The upstream's \
@@ -227,10 +264,27 @@ fn own() -> Vec<DocRoute> {
         // -- Anthropic messages -------------------------------------------------
         DocRoute {
             description: "The Anthropic Messages API. A server tool (no input_schema) is refused with \
-                400; redacted_thinking is accepted and dropped. A missing max_tokens is \
+                400. A content block lmgw does not model (redacted_thinking, the provider's own \
+                tool blocks, a type newer than lmgw) goes between client and an Anthropic \
+                upstream as written, whole and streamed, where it stood; any other upstream is \
+                sent none of it (x-lmgw-params-ignored: content.<type>), and a Chat \
+                Completions or Responses client is given none (a whole answer's \
+                x-lmgw-params-ignored: answer.<type>). Thinking blocks keep their signature. \
+                A block without a type is refused with 400. A missing max_tokens is \
                 filled in rather than refused (x-lmgw-max-tokens-defaulted). anthropic-beta \
                 reaches an Anthropic upstream as one header, merged with the upstream row's \
-                own; other protocols have no equivalent and are sent none.",
+                own; other protocols have no equivalent and are sent none. context_management \
+                and the top-level compaction go to an Anthropic upstream as written and its \
+                answer's context_management comes back; any other upstream is sent neither, \
+                and x-lmgw-params-ignored names them. A compaction block (in the answer, \
+                streamed, or sent back in messages) goes between client and an Anthropic \
+                upstream as Anthropic wrote it, with stop_reason compaction and \
+                usage.iterations; any other upstream is sent the summary as text where the \
+                block stood and nothing before it, as Anthropic itself drops that history. \
+                thinking: {type: between_tools} and thinking.display go to an Anthropic \
+                upstream as written; elsewhere the off is that provider's own \
+                (x-lmgw-reasoning-ignored: between_tools) and display is named in \
+                x-lmgw-params-ignored. An unknown thinking type is refused with 400.",
             request: Req::Json(anthropic::messages_request),
             response: Resp::JsonOrSse {
                 json: anthropic::messages_response,
@@ -247,7 +301,8 @@ fn own() -> Vec<DocRoute> {
             description: "The Anthropic SDKs' messages.count_tokens(): on an \
                 Anthropic-protocol upstream, the client body is sent through verbatim (only \
                 model replaced, and a Gemini thought signature in a tool id dropped), with its anthropic-beta flags, so server tools and new fields \
-                count exactly. \
+                count exactly; Anthropic's context_management answer \
+                (original_input_tokens) comes back beside input_tokens. \
                 x-lmgw-count-approximate explains any other route's approximation. \
                 Enforces the key's alias scope like every other counter (a refusal is a \
                 logged 403 key_scope, a success is not logged); no budget applies, the key's \
@@ -357,9 +412,12 @@ fn own() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Forced alignment against a task: \"align\" row — lmgw's own route, \
-                multipart/form-data only.",
+                multipart/form-data only. Every family answers the same shape: the words \
+                with their seconds, samples where known, and their character span in the \
+                submitted text; a model whose answer has no word timings lmgw can read is \
+                a 502 naming its family.",
             request: Req::Multipart(media::alignments_request),
-            response: Resp::Untyped("audio.cpp's own alignment JSON, relayed verbatim"),
+            response: Resp::Json(|g| g.root_schema_for::<AudioAlignment>()),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI],
             writes: Some(false),
@@ -552,7 +610,10 @@ fn own() -> Vec<DocRoute> {
                 own name. A device binds as its key: the thread's \
                 chat, speech-to-text and text-to-speech aliases pass its scope and budget \
                 before the upgrade (refused as an unbound session's aliases are, 403 \
-                key_scope or key_budget), every model call of the session is checked and \
+                key_scope or key_budget; the speech aliases' missing price, budget_unpriced, \
+                too), while the chat alias's price check comes at the first turn, as an \
+                error event, not before the upgrade; every model call of the session is \
+                checked and \
                 counted against it as an unbound session's, and each refusal writes its \
                 request row. session.created then names the thread in \
                 session.lmgw.resolved.chat_thread ({id, title, temporary, admin_tools}) and its \

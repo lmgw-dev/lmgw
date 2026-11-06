@@ -108,5 +108,7 @@ pub fn spec_of(t: &McpTool) -> Result<McpToolSpec, (&'static str, String)> {
         require_approval: spec::parse_require_approval(t.require_approval.as_ref(), label)
             .map_err(|e| ("require_approval", e))?,
         server_label: t.server_label.clone(),
+        server_url: t.server_url.clone(),
+        connector_id: t.connector_id.clone(),
     })
 }

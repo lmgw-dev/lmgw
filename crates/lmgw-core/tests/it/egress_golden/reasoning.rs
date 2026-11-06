@@ -62,6 +62,28 @@ pub(super) fn cases() -> Vec<Case> {
                 )
             },
         },
+        // Every other canonical level (`high` is the case above), each as
+        // the upstream gets it (openai egress design §10.1).
+        Case {
+            name: "reasoning_effort_minimal",
+            run: |up| reasoning(up, json!({"effort": "minimal"}), json!({}), false),
+        },
+        Case {
+            name: "reasoning_effort_low",
+            run: |up| reasoning(up, json!({"effort": "low"}), json!({}), false),
+        },
+        Case {
+            name: "reasoning_effort_medium",
+            run: |up| reasoning(up, json!({"effort": "medium"}), json!({}), false),
+        },
+        Case {
+            name: "reasoning_effort_xhigh",
+            run: |up| reasoning(up, json!({"effort": "xhigh"}), json!({}), false),
+        },
+        Case {
+            name: "reasoning_effort_max",
+            run: |up| reasoning(up, json!({"effort": "max"}), json!({}), false),
+        },
         Case {
             name: "reasoning_effort_none_is_off",
             run: |up| reasoning(up, json!({"effort": "none"}), json!({}), false),

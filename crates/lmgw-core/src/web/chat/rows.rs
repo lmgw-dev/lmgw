@@ -1,10 +1,11 @@
-//! `GET /chat/api/threads/rows?ids=3,7`: some of the thread list's rows,
-//! for the owner (review CL-11, 2026-10-08).
+//! `GET /chat/api/threads/rows?ids=3,7`: some of the thread list's rows
+//! (review CL-11, 2026-10-08).
 //!
-//! The Chat page follows other writers through `/api/events`' `chat` frame
-//! (client-apps design §3.6). A frame that names only messages moved those
-//! threads' `updated_at` and `last_message_at` and nothing else the list
-//! shows, so the page reads only the named rows here and sorts its list
+//! The Chat page follows other writers through the live updates its host
+//! hands it (chat-plane design D1): the dashboard's `/api/events` `chat`
+//! frames, or the change feed (`/chat/api/feed`) elsewhere. A change that
+//! names only messages moved those threads' `updated_at` and
+//! `last_message_at` and nothing else the list shows, so the page reads only the named rows here and sorts its list
 //! again itself, rather than the whole list with every thread's settings
 //! once per turn of a device's voice session.
 //!
@@ -18,8 +19,9 @@
 //!   414, and the page then reads the whole list instead, as after any
 //!   failed rows read (`chat_sync/rows.rs` in lmgw-ui): slower, nothing
 //!   lost.
-//! - **The owner's** (`Cap::Admin`): a device's own feed carries whole rows
-//!   already. In the admin API document only (`openapi/planes/chat_threads.rs`).
+//! - **Every Chat client's** (`Cap::Chat` since chat-plane design D2; the
+//!   owner's alone before): the rows are the caller's, through the same
+//!   reach as the list, so a device is answered no thread L3 hides from it.
 
 use axum::extract::State;
 use axum::http::StatusCode;

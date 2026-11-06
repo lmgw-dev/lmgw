@@ -44,6 +44,13 @@
 //!   `x-lmgw-fallback` (the lease's [`crate::gate::TurnLease::images_omitted`]);
 //!   the Chat says it on the reply, and stores it (`images_note`).
 //!
+//! - **A Files API image** (an `image` block with a `file` source, which only
+//!   Anthropic can fetch, [`crate::ir::AnthropicBlock`]) is an image only on
+//!   an Anthropic-protocol fallback, which is sent it: there it becomes the
+//!   placeholder too. Every other fallback is sent none of it (the egress
+//!   names it `content.image`), so to it the block is no image and gets no
+//!   placeholder (changed 2026-11-06; [`crate::ir::AnthropicBlock::image_sent_to`]).
+//!
 //! What a fallback is asked costs nothing on a request without images, and
 //! nothing on a route the client named: the capability lookup runs only when
 //! both hold.
@@ -51,7 +58,7 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use crate::config::Route;
+use crate::config::{Route, Upstream};
 use crate::ir::{
     image_note, image_placeholder, tool_image_note, tool_image_placeholder, ChatRequest,
     ContentPart, ToolResultBlock,
@@ -94,22 +101,28 @@ pub(crate) struct Omitted {
     pub(crate) marker: String,
 }
 
-/// Whether `ir` carries an image anywhere: a message's image part, or an
-/// image block of a tool result.
-pub fn carries_images(ir: &ChatRequest) -> bool {
-    count_images(ir) > 0
+/// Whether `ir` carries an image anywhere the row on `up` is sent it: a
+/// message's image part, or an image block of a tool result, a Files API
+/// image's where `up` is sent it (module doc).
+pub fn carries_images(ir: &ChatRequest, up: &Upstream) -> bool {
+    count_images(ir, up) > 0
 }
 
-/// How many images `ir` carries ([`carries_images`]).
-pub fn count_images(ir: &ChatRequest) -> usize {
+/// How many images `ir` carries for the row on `up` ([`carries_images`]).
+pub fn count_images(ir: &ChatRequest, up: &Upstream) -> usize {
     ir.messages
         .iter()
         .flat_map(|m| &m.content)
         .map(|p| match p {
             ContentPart::Image { .. } => 1,
+            ContentPart::AnthropicBlock(b) if b.image_sent_to(up) => 1,
             ContentPart::ToolResult { content, .. } => content
                 .iter()
-                .filter(|b| matches!(b, ToolResultBlock::Image { .. }))
+                .filter(|b| match b {
+                    ToolResultBlock::Image { .. } => true,
+                    ToolResultBlock::AnthropicBlock(b) => b.image_sent_to(up),
+                    _ => false,
+                })
                 .count(),
             _ => 0,
         })
@@ -139,15 +152,16 @@ pub(crate) async fn blind_fallback(
 /// [`blind_fallback`] for a request that carries images ([`carries_images`]);
 /// `None` without one, and then nothing is looked up.
 pub(crate) async fn decide(state: &SharedState, route: &Route, ir: &ChatRequest) -> Option<Unseen> {
-    if !carries_images(ir) {
+    if !carries_images(ir, &route.upstream) {
         return None;
     }
     blind_fallback(state, route, &ir.model_alias).await
 }
 
-/// `ir` with every image replaced by its placeholder (module doc), and what
-/// each placeholder stands for, in request order, for the WARN ([`warn`]).
-pub(crate) fn without_images(ir: &ChatRequest) -> (ChatRequest, Vec<String>) {
+/// `ir` with every image the row on `up` is sent replaced by its
+/// placeholder (module doc), and what each placeholder stands for, in
+/// request order, for the WARN ([`warn`]).
+pub(crate) fn without_images(ir: &ChatRequest, up: &Upstream) -> (ChatRequest, Vec<String>) {
     let mut dropped = Vec::new();
     let mut out = ir.clone();
     for part in out.messages.iter_mut().flat_map(|m| &mut m.content) {
@@ -156,15 +170,32 @@ pub(crate) fn without_images(ir: &ChatRequest) -> (ChatRequest, Vec<String>) {
                 dropped.push(image_note(mime, source));
                 *part = ContentPart::text(image_placeholder(mime, source, PLACEHOLDER_REASON));
             }
+            // A Files API image the row is sent, as [`image_placeholder`]
+            // words one.
+            ContentPart::AnthropicBlock(b) if b.image_sent_to(up) => {
+                let note = file_image_note(b);
+                *part = ContentPart::text(format!("[{note} — omitted: {PLACEHOLDER_REASON}]"));
+                dropped.push(note);
+            }
             ContentPart::ToolResult { content, .. } => {
                 for block in content.iter_mut() {
-                    if let ToolResultBlock::Image { mime, data } = block {
-                        dropped.push(tool_image_note(mime, data));
-                        *block = ToolResultBlock::text(tool_image_placeholder(
-                            mime,
-                            data,
-                            PLACEHOLDER_REASON,
-                        ));
+                    match block {
+                        ToolResultBlock::Image { mime, data } => {
+                            dropped.push(tool_image_note(mime, data));
+                            *block = ToolResultBlock::text(tool_image_placeholder(
+                                mime,
+                                data,
+                                PLACEHOLDER_REASON,
+                            ));
+                        }
+                        ToolResultBlock::AnthropicBlock(b) if b.image_sent_to(up) => {
+                            let note = file_image_note(b);
+                            *block = ToolResultBlock::text(format!(
+                                "[{note} — omitted: {PLACEHOLDER_REASON}]"
+                            ));
+                            dropped.push(note);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -172,6 +203,12 @@ pub(crate) fn without_images(ir: &ChatRequest) -> (ChatRequest, Vec<String>) {
         }
     }
     (out, dropped)
+}
+
+/// What a Files API image's placeholder names it
+/// ([`crate::ir::AnthropicBlock::image_note`]).
+fn file_image_note(b: &crate::ir::AnthropicBlock) -> String {
+    b.image_note().unwrap_or_else(|| "image".into())
 }
 
 /// The WARN a send to a fallback that cannot see logs: the fallback, the
@@ -197,7 +234,7 @@ pub(crate) async fn fit<'a>(
 ) -> (Cow<'a, ChatRequest>, Option<Omitted>) {
     match decide(state, route, ir).await {
         Some(unseen) => {
-            let (out, dropped) = without_images(ir);
+            let (out, dropped) = without_images(ir, &route.upstream);
             warn(&unseen, &dropped);
             let omitted = Omitted {
                 count: dropped.len(),
@@ -216,7 +253,7 @@ pub(crate) async fn counted<'a>(
     ir: &'a ChatRequest,
 ) -> Cow<'a, ChatRequest> {
     match decide(state, route, ir).await {
-        Some(_) => Cow::Owned(without_images(ir).0),
+        Some(_) => Cow::Owned(without_images(ir, &route.upstream).0),
         None => Cow::Borrowed(ir),
     }
 }
@@ -230,10 +267,16 @@ pub(crate) async fn counted<'a>(
 pub(crate) struct Announced(Mutex<usize>);
 
 impl Announced {
-    /// `ir` with every image as its placeholder, for `unseen`, and how many
-    /// it left out; the WARN names those past the ones named before.
-    pub(crate) fn without_images(&self, ir: &ChatRequest, unseen: &Unseen) -> (ChatRequest, usize) {
-        let (out, dropped) = without_images(ir);
+    /// `ir` with every image the row on `up` is sent as its placeholder,
+    /// for `unseen`, and how many it left out; the WARN names those past the
+    /// ones named before.
+    pub(crate) fn without_images(
+        &self,
+        ir: &ChatRequest,
+        up: &Upstream,
+        unseen: &Unseen,
+    ) -> (ChatRequest, usize) {
+        let (out, dropped) = without_images(ir, up);
         let mut named = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if dropped.len() > *named {
             warn(unseen, &dropped[*named..]);

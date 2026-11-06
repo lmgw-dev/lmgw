@@ -85,6 +85,8 @@ pub use scorer::ScoreHook;
 #[doc(hidden)]
 pub use thread::turn::audio::{heard_response_for_tests, HeardForTests};
 pub use tts::is_tts_alias;
+#[doc(hidden)]
+pub use warm::background_warm_for_tests;
 
 /// The route's full path — what `principal_mw` scopes the subprotocol
 /// credential to (§10.1).

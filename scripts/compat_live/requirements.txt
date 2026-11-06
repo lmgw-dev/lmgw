@@ -1,0 +1,4 @@
+openai==3.45.0
+anthropic==2.4.0
+httpx2==2.16.0
+pydantic==2.14.2

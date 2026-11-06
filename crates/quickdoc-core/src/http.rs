@@ -39,7 +39,10 @@ impl HttpEmbedder {
         model: impl Into<String>,
     ) -> Result<Self> {
         let mut e = Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_gzip()
+                .build()
+                .map_err(|e| QuickdocError::Embedder(format!("building the HTTP client: {e}")))?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.filter(|k| !k.is_empty()),
             model: model.into(),

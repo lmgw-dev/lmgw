@@ -11,7 +11,7 @@ use lmgw_api_types::systemone::Ordered;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
-use super::claims::CellClaims;
+use super::claims::LiveGroups;
 use crate::store::{self, DbResult, LabArtifactRow, LabGroupRow, LabRunRow};
 
 /// Where the API serves an artifact's bytes.
@@ -132,9 +132,9 @@ pub fn group_view(
 }
 
 /// Mark the groups of `views` a cell of which is being answered now.
-pub fn mark_in_flight(views: &mut [LabGroupView], claims: &CellClaims) {
+pub fn mark_in_flight(views: &mut [LabGroupView], live: &LiveGroups) {
     for g in views {
-        g.in_flight = claims.live(g.id);
+        g.in_flight = live.has(g.id);
     }
 }
 

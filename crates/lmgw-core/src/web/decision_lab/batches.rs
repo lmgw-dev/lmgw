@@ -269,6 +269,8 @@ pub async fn items(
         Err(e) => return store_failed("reading the set run", e),
     }
     let after = q.after.map(|a| i64::try_from(a).unwrap_or(i64::MAX));
+    // Before the reads: see `LiveGroups`.
+    let live = state.lab_cells.snapshot();
     let read = async {
         let rows = store::lab_batch_items(&state.db, id, after, q.limit).await?;
         let total = store::count_lab_batch_items(&state.db, id).await?;
@@ -279,7 +281,7 @@ pub async fn items(
             _ => None,
         };
         let mut items = views::groups(&state.db, rows, &|a| views::api_href(a.id)).await?;
-        views::mark_in_flight(&mut items, &state.lab_cells);
+        views::mark_in_flight(&mut items, &live);
         Ok::<_, crate::error::GatewayError>(BatchItemPage {
             items,
             total,

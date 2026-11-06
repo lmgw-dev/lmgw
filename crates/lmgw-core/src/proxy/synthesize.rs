@@ -101,8 +101,8 @@ pub(crate) struct Synthesis {
     /// cannot say them, logged once when the response ends ([`chars`]).
     chars: CharsSeen,
     /// The claim was let go while the client did not read, and the next
-    /// clause takes it again (`claim`).
-    regain: bool,
+    /// clause takes it again (`claim`) — as the origin it was held as.
+    regain: Option<crate::runtime::registry::Origin>,
     /// The row was written (and the in-flight gauge closed).
     finished: bool,
 }
@@ -133,6 +133,18 @@ pub(crate) struct ClauseSpeech<'a> {
     pub cue: Option<&'a str>,
     /// The session's seed, for a row that reads one ([`sends_seed`]).
     pub seed: Option<SessionSeed>,
+}
+
+/// One clause [`Synthesis::speak`] had answered.
+#[derive(Debug, Clone)]
+pub(crate) struct Spoken {
+    /// The upstream's WAV.
+    pub audio: Bytes,
+    /// What shaping changed in the request.
+    pub shaped: ShapeReport,
+    /// The text the engine was sent: the clause's, after its cue and
+    /// shaping took what they take — what the audio says.
+    pub input: String,
 }
 
 /// A realtime session's TTS seed (WP10 D6).
@@ -216,7 +228,7 @@ pub(crate) async fn open(
     let opened = tokio::select! {
         biased;
         () = stopped(stop) => Err(None),
-        o = open_checked(state, alias, instructions, voice) => o.map_err(Some),
+        o = open_checked(state, alias, instructions, voice, ctx.origin()) => o.map_err(Some),
     };
     match opened {
         Ok(o) => Ok(Synthesis {
@@ -233,7 +245,7 @@ pub(crate) async fn open(
             ttfb_ms: None,
             tally: Tally::new(),
             chars: CharsSeen::default(),
-            regain: false,
+            regain: None,
             finished: false,
         }),
         Err(f) => {
@@ -259,7 +271,7 @@ pub(crate) async fn open(
                 super::stop::row_status(&e),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
             )
             .await;
             Err(e)
@@ -277,13 +289,17 @@ pub(crate) async fn open(
 /// `instructions_required` after the model was admitted. So is `voice`:
 /// an untranscribed clip its engine cannot clone is refused
 /// `voice_needs_transcript` here, not by the engine after a start.
+///
+/// `origin` is the caller's request's (per-request background design §7):
+/// the speech of a background run's tool call is a guest too.
 async fn open_checked(
     state: &SharedState,
     alias: &str,
     instructions: Option<&str>,
     voice: Option<&str>,
+    origin: crate::runtime::registry::Origin,
 ) -> Result<crate::gate::Opened, crate::gate::OpenFailed> {
-    let routed = crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio).await?;
+    let routed = crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio, origin).await?;
     if let Err(error) = refuse_route(state, routed.resolved(), instructions, voice).await {
         return Err(crate::gate::OpenFailed {
             route: Some(Box::new(routed.resolved().clone())),
@@ -398,6 +414,22 @@ impl Synthesis {
         self.headers.fallback()
     }
 
+    /// Why [`Self::fallback`] answers (`hold`, `external_vram`, …).
+    pub fn fallback_reason(&self) -> Option<crate::gate::FallbackReason> {
+        self.headers.fallback_reason()
+    }
+
+    /// The route this response holds: the fallback's, when one answers.
+    pub fn answering_route(&self) -> &Route {
+        &self.route
+    }
+
+    /// The lmgw audio row the route lands on and what it speaks; `None`
+    /// for any other route.
+    pub fn speech(&self) -> Option<&(AudioModel, RowSpeech)> {
+        self.speech.as_ref()
+    }
+
     /// Where the local model this response holds runs, if it holds one — a
     /// claim that keeps its container from being stopped. On the GPU that
     /// also keeps it from being evicted or stopped by the GPU hold's sweep;
@@ -464,12 +496,13 @@ impl Synthesis {
     /// [`Self::finish`] logs for the whole response.
     /// `language` goes only to an lmgw audio row that takes it
     /// ([`SpeechLanguage::for_row`]), and `seed` only to one that reads it
-    /// ([`sends_seed`]): a remote route never gets either.
+    /// ([`sends_seed`]): a remote route never gets either. The answer
+    /// carries the `input` the clause was sent as ([`Spoken::input`]).
     pub async fn speak(
         &mut self,
         clause: &ClauseSpeech<'_>,
         stop: Option<&StopSignal>,
-    ) -> Result<(Bytes, ShapeReport), GatewayError> {
+    ) -> Result<Spoken, GatewayError> {
         let answering = self.headers.fallback().unwrap_or(&self.alias);
         let (body, shaped) = clause_body(
             &self.state,
@@ -483,6 +516,7 @@ impl Synthesis {
         // A clause shaping left nothing to say (a lone emoji): `empty_input`,
         // which the speaker skips, its characters noted above.
         let text = body.get("input").and_then(Value::as_str);
+        let input = text.unwrap_or_default().to_string();
         let vocab = self
             .speech
             .as_ref()
@@ -497,7 +531,7 @@ impl Synthesis {
         let went_out = AtomicBool::new(false);
         let send = async {
             went_out.store(true, Ordering::Relaxed);
-            audio_send(hold, route, |r| {
+            audio_send(state, hold, route, |r| {
                 let url = format!("{}/audio/speech", r.upstream.base());
                 Ok(apply_bearer_auth(
                     state.http.post(url).json(&body),
@@ -551,7 +585,11 @@ impl Synthesis {
         if let Some(hold) = self.hold.as_ref() {
             hold.note_inference();
         }
-        Ok((wav, shaped))
+        Ok(Spoken {
+            audio: wav,
+            shaped,
+            input,
+        })
     }
 
     /// The last clause is in hand: the model is free for others now, not
@@ -601,6 +639,7 @@ impl Synthesis {
         }
         let params = LogParams {
             quantities: self.tally.quantities(),
+            service_tier: Default::default(),
             ..log(
                 &self.state,
                 &self.ctx,
@@ -616,7 +655,7 @@ impl Synthesis {
             status,
             self.ttfb_ms,
             Usage::default(),
-            error.map(|e| (e.kind(), e.to_string())),
+            error.map(|e| (e.kind(), e.log_text())),
         )
         .await;
         self.finished = true;
@@ -661,6 +700,7 @@ fn log<'a>(
         rung: None,
         degraded: None,
         quantities: Default::default(),
+        service_tier: Default::default(),
     }
 }
 

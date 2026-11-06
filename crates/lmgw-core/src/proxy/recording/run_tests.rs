@@ -40,7 +40,7 @@ async fn a_stamped_row_folds_into_its_run_by_the_rollups_rule() {
     let state = AppState::init_for_tests().await.unwrap();
     // Open, as the run's job going live opens it.
     state.agent_meters.open(RUN);
-    let fold = |r: NewRequestLog| note_on_run(&state, Some(RUN), &r, &usage(&r));
+    let fold = |r: NewRequestLog| note_on_run(&state, Some(RUN), &r, &usage(&r), None);
 
     fold(row(200, None, Some(10), Some(100)));
     fold(row(200, Some("canceled"), Some(6), Some(40)));
@@ -61,6 +61,7 @@ async fn a_stamped_row_folds_into_its_run_by_the_rollups_rule() {
         None,
         &row(200, None, Some(1), None),
         &Usage::default(),
+        None,
     );
     let t = state.agent_meters.read(RUN);
     assert_eq!(t.cost_micro(), Some(145), "{t:?}");

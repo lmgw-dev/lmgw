@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Usage: scripts/ui-matrix.py [--routes all|/a,/b] [--sizes all|1440x900,...] [--shots DIR] [--json OUT]
-#                            [--chat-drawer open|closed]
+#                            [--chat-drawer open|closed] [--side PERSIST=open|closed ...]
+#                            [--dsf 1.25] [--tauri] [--init-script JS ...]
 """Layout matrix for the dashboard: every route at every window size, measured.
 
 The dashboard is used in a window that is resized all day, so "does this page
@@ -21,7 +22,15 @@ screenshot only hints at:
   composer_input     the Chat composer's text box is under half of the
                      composer's width (its buttons squeeze it; a narrow
                      textarea wraps and never overflows, so nothing else
-                     sees it)
+                     sees it), or is wider inside than it is (it would
+                     scroll sideways: a classic scrollbar shows a bar)
+  under_panel        a card in a split's main pane reaches past that pane's
+                     right edge, or under the split's open side panel (a
+                     results grid that did not reflow beside the panel)
+  hbars              (--tauri only) an element that scrolls sideways: its
+                     overflow-x is auto or scroll and its content is more
+                     than 1px wider than it (a fractional box reads 1px
+                     over), so the app's classic scrollbar shows a bar
 
 Reported but never failing: screens (the main scroller's height in
 viewports), clipped_inputs (text inputs whose value is wider than the box),
@@ -31,6 +40,17 @@ rail (sidebar collapsed) and nav_scroll (the sidebar itself scrolls).
 split's stored `lmgw.ui.side.chat.settings`) before the first route loads,
 so the composer is measured beside it, or without it, whatever the profile
 held (WP11 UI review m7: the drawer-open run needed a hand-set state).
+--side does the same for any split (`lmgw.ui.side.<PERSIST>`), repeatable:
+`--side voice-lab.library=open` measures the Voices lab beside its library.
+
+--tauri measures the page the way the app window shows it: `html.tauri`
+switches on the classic ::-webkit-scrollbar bars of app.css, which take
+layout room and show for any overflow, where headless Chrome's own bars
+would hide a pixel of it. The class is set after every navigation and the
+page laid out afresh once, so every scroller is built with the classic bar.
+--dsf is the device pixel ratio, as in ui-drive.py: sizes stay CSS pixels
+(1536x864 at 1.25 is a 1080p screen at 125%), and borders and fractional
+widths snap the way the app's 125% interface scale snaps them.
 
 A route loads once at the first size and is then *resized* through the rest,
 the way a window is dragged; --reload navigates afresh per size instead.
@@ -60,8 +80,9 @@ SIZES = ["1024x700", "1280x800", "1440x900", "1920x1080", "2560x1400", "1440x600
 # `{agent}`, `{agent_tab}`, `{local}`, `{kb}` and `{batch}` are filled from the instance's own data.
 ROUTES = [
     "/", "/chat", "/audio-lab", "/image-lab", "/decision-lab", "/decision-lab/batches/{batch}",
+    "/voice-lab",
     "/agents", "/agents/{agent}", "/agents/{agent_tab}",
-    "/models", "/models/catalog", "/models/local/{local}", "/downloads", "/backends",
+    "/models", "/models/catalog", "/models/find", "/models/local/{local}", "/downloads", "/backends",
     "/backends/images", "/benchmarks", "/docs", "/docs/requests",
     "/docs/playground", "/docs/eval", "/knowledge", "/knowledge/{kb}",
     "/knowledge/{kb}/search", "/knowledge/{kb}/settings", "/upstreams", "/mcp-servers", "/traffic",
@@ -70,7 +91,17 @@ ROUTES = [
     "/no-such-page",
 ]
 FAILING = ["content_scroll", "nested_v", "page_hscroll", "gutter", "wrapped_btns",
-           "primary_offscreen", "composer_input"]
+           "primary_offscreen", "composer_input", "under_panel", "hbars"]
+
+# html.tauri, then one fresh layout: a scroller built before the class keeps
+# the bar it was built with.
+TAURI = r"""(() => {
+  const h = document.documentElement;
+  h.classList.add('tauri');
+  h.style.display = 'none'; void h.offsetHeight;
+  h.style.display = ''; void h.offsetHeight;
+  return true;
+})()"""
 
 MEASURE = r"""(() => {
   const vw = innerWidth, vh = innerHeight;
@@ -121,17 +152,19 @@ MEASURE = r"""(() => {
     for (const x of r.getClientRects()) if (x.width > 0 && x.height > 0 &&
         !tops.some(t => Math.abs(t - x.top) < 6)) tops.push(x.top);
     return tops.length; };
+  // An icon button (the composer's Send) is named by its aria-label.
+  const btnName = b => (b.getAttribute('aria-label') || b.textContent).trim().slice(0, 30);
   const wrapped = [...content.querySelectorAll('.btn')].filter(shown)
     .filter(b => lines(b) > 1 || b.scrollHeight > b.clientHeight + 2 || b.scrollWidth > b.clientWidth + 1);
   out.wrapped_btns = wrapped.length;
-  out.offenders.wrapped_btns = wrapped.slice(0, 6).map(b => b.textContent.trim().slice(0, 30));
+  out.offenders.wrapped_btns = wrapped.slice(0, 6).map(btnName);
 
   const prim = [...document.querySelectorAll(
       '.page-foot .btn.primary, .page-head .btn.primary, .action-bar .btn.primary, .composer .btn')]
     .filter(shown).filter(b => { const r = b.getBoundingClientRect();
       return r.left < -0.5 || r.top < -0.5 || r.right > vw + 0.5 || r.bottom > vh + 0.5; });
   out.primary_offscreen = prim.length;
-  out.offenders.primary_offscreen = prim.map(b => b.textContent.trim().slice(0, 30));
+  out.offenders.primary_offscreen = prim.map(btnName);
 
   // The Chat composer: the text box's share of the composer's content width.
   const comp = content.querySelector('.composer');
@@ -140,8 +173,37 @@ MEASURE = r"""(() => {
     const cs = getComputedStyle(comp);
     const inner = comp.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
     const w = cta.getBoundingClientRect().width;
-    out.composer_input = { px: Math.round(w), of: Math.round(inner), share: +(w / inner).toFixed(2) };
+    out.composer_input = { px: Math.round(w), of: Math.round(inner), share: +(w / inner).toFixed(2),
+      hscroll: cta.scrollWidth > cta.clientWidth + 1 };
   } else out.composer_input = null;
+
+  // Cards in a split's main pane: inside it, and clear of its open panel.
+  const under = [];
+  for (const dock of document.querySelectorAll('.dock')) {
+    const pane = dock.querySelector(':scope > .dock-main');
+    if (!pane || !shown(pane)) continue;
+    const pr = pane.getBoundingClientRect();
+    const side = dock.querySelector(':scope > .dock-side');
+    const sr = side && shown(side) ? side.getBoundingClientRect() : null;
+    for (const c of pane.querySelectorAll('.card, .vl-cand')) {
+      if (!shown(c)) continue;
+      const r = c.getBoundingClientRect();
+      const past = r.right > pr.right + 1;
+      const covered = sr && r.right > sr.left + 1 && r.left < sr.right - 1 &&
+        r.bottom > sr.top && r.top < sr.bottom;
+      if (past || covered) under.push(name(c) + ' right ' + Math.round(r.right));
+    }
+  }
+  out.under_panel = under.length; out.offenders.under_panel = under.slice(0, 4);
+
+  // Sideways scrollers: a classic bar shows for every one of them.
+  const hb = [];
+  for (const el of document.querySelectorAll('body *')) {
+    const s = getComputedStyle(el);
+    if ((s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1
+        && shown(el)) hb.push(name(el) + ' +' + (el.scrollWidth - el.clientWidth));
+  }
+  out.hbars = hb.length; out.offenders.hbars = hb.slice(0, 6);
 
   let main = null;
   for (const sel of ['.page-body', '.fill-pane', '.chat-scroll', '.lab-scroll', 'main.content']) {
@@ -165,7 +227,7 @@ MEASURE = r"""(() => {
 })()"""
 
 
-def fails(m: dict) -> list:
+def fails(m: dict, tauri: bool = False) -> list:
     bad = []
     if m.get("content_scroll", 0) > 1:
         bad.append("content_scroll")
@@ -179,9 +241,22 @@ def fails(m: dict) -> list:
         bad.append("wrapped_btns")
     if m.get("primary_offscreen", 0) > 0:
         bad.append("primary_offscreen")
-    if m.get("composer_input") and m["composer_input"]["share"] < 0.5:
+    if m.get("composer_input") and (m["composer_input"]["share"] < 0.5
+                                    or m["composer_input"].get("hscroll")):
         bad.append("composer_input")
+    if m.get("under_panel", 0) > 0:
+        bad.append("under_panel")
+    if tauri and m.get("hbars", 0) > 0:
+        bad.append("hbars")
     return bad
+
+
+def side_arg(spec: str):
+    """`voice-lab.library=open` -> ("voice-lab.library", "true")."""
+    persist, _, state = spec.partition("=")
+    if not persist or state not in ("open", "closed"):
+        raise argparse.ArgumentTypeError(f"--side wants PERSIST=open|closed, not {spec!r}")
+    return persist, "true" if state == "open" else "false"
 
 
 def podman_names(prefix: str):
@@ -316,10 +391,13 @@ async def run(args, routes, sizes, token) -> list:
             async def resize(size):
                 w, h = map(int, size.split("x"))
                 await call("Emulation.setDeviceMetricsOverride", width=w, height=h,
-                           deviceScaleFactor=1, mobile=False)
+                           deviceScaleFactor=args.dsf, mobile=False)
 
             await call("Page.enable")
             await call("Network.enable")
+            for path in args.init_script:
+                await call("Page.addScriptToEvaluateOnNewDocument",
+                           source=Path(path).read_text())
             await call("Page.navigate", url=f"{args.base}/api/session/login?token={token}")
             await settle(1.5)
             if args.chat_drawer:
@@ -327,6 +405,8 @@ async def run(args, routes, sizes, token) -> list:
                 # before the first route loads.
                 flag = "true" if args.chat_drawer == "open" else "false"
                 await ev(f"localStorage.setItem('lmgw.ui.side.chat.settings', '{flag}')")
+            for persist, flag in args.side:
+                await ev(f"localStorage.setItem('lmgw.ui.side.{persist}', '{flag}')")
             for route in routes:
                 for i, size in enumerate(sizes):
                     await resize(size)
@@ -334,13 +414,16 @@ async def run(args, routes, sizes, token) -> list:
                         pending.clear()
                         await call("Page.navigate", url=f"{args.base}{route}")
                         await settle(1.0)
+                        if args.tauri:
+                            await ev(TAURI)
+                            await asyncio.sleep(0.2)
                         if args.js:
                             await ev(args.js)
                             await asyncio.sleep(args.settle)
                     else:
                         await asyncio.sleep(args.settle)
                     m = await ev(MEASURE) or {"error": "no result"}
-                    m.update(route=route, size=size, fails=fails(m))
+                    m.update(route=route, size=size, fails=fails(m, args.tauri))
                     results.append(m)
                     report(m, args.verbose)
                     if args.shots:
@@ -366,6 +449,7 @@ def report(m: dict, verbose: bool) -> None:
           f"nav={m['nav_scroll']}"
           + (f" composer={m['composer_input']['px']}/{m['composer_input']['of']}px"
              if m.get("composer_input") else "")
+          + f" hb={m['hbars']}"
           + f"  {status}")
     if verbose or m["fails"]:
         for k in m["fails"]:
@@ -384,12 +468,22 @@ def main() -> int:
     ap.add_argument("--shots", metavar="DIR", help="write a viewport PNG per route and size")
     ap.add_argument("--json", metavar="OUT", help="write every measurement as JSON")
     ap.add_argument("--js", help="JavaScript evaluated after each navigation")
+    ap.add_argument("--init-script", action="append", default=[], metavar="JS",
+                    help="evaluate JS in every new document before the page's own scripts "
+                         "(repeatable), as in ui-drive.py: an in-page fake")
     ap.add_argument("--wait", type=float, default=15.0,
                     help="most seconds to wait for a route to go quiet after navigating")
     ap.add_argument("--settle", type=float, default=0.8, help="seconds after a resize")
     ap.add_argument("--reload", action="store_true", help="navigate afresh for every size")
     ap.add_argument("--chat-drawer", choices=["open", "closed"],
                     help="the Chat's thread settings panel open or closed before the run")
+    ap.add_argument("--side", action="append", default=[], metavar="PERSIST=open|closed",
+                    type=side_arg,
+                    help="a split's stored panel state before the run (repeatable)")
+    ap.add_argument("--dsf", type=float, default=1.0, metavar="SCALE",
+                    help="device pixel ratio; sizes stay CSS pixels (1.25: the app's 125%%)")
+    ap.add_argument("--tauri", action="store_true",
+                    help="set html.tauri (the app's classic scrollbars) and FAIL sideways scrollers")
     ap.add_argument("--podman-guard", default="lmgw-dev", metavar="PREFIX",
                     help="container names to compare before/after ('' disables)")
     ap.add_argument("-v", "--verbose", action="store_true", help="list offenders for every row")

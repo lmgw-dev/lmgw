@@ -39,7 +39,8 @@ use crate::store::{self, AdminThreads};
 ///
 /// `reader`: the device key the stream reads for (`None`: the owner) — a
 /// `device.revoked` record also reaches the hosts it names
-/// ([`super::devices`]).
+/// ([`super::devices`]), and a `transfer.updated` record only its parties
+/// ([`super::transfers`]).
 pub(super) async fn render(
     state: &AppState,
     r: &Record,
@@ -54,6 +55,13 @@ pub(super) async fn render(
     }
     if r.kind == kind::DEVICE_REVOKED {
         return Ok(super::devices::render(r, admin, reader).map(|data| (event, data)));
+    }
+    // A transfer between devices names no thread or folder: who hears it is
+    // its parties' and the owner's (device transfers design §6).
+    if r.kind == kind::TRANSFER_UPDATED {
+        return Ok(super::transfers::render(state, r, reader)
+            .await?
+            .map(|data| (event, data)));
     }
     if device {
         let seen_before = r.admin_was().map(|was| admin.sees(was));

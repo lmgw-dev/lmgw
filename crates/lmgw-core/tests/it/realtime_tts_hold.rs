@@ -50,8 +50,7 @@ async fn local_tts(g: &Gpu) {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await

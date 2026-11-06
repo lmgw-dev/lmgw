@@ -173,9 +173,22 @@ pub fn pairing_view(
             ended_at: t.ended_at.clone(),
             alive: t.alive(now),
         }),
-        enrolled_at: link.enrolled_at.clone(),
-        enrolled_from: link.enrolled_from.clone(),
-        client: link.client_info.clone(),
+        // The waiting key's own while one waits, the row's key's otherwise,
+        // as `confirm_code` below; the kept key's name and client beside it.
+        enrolled_at: waiting
+            .map_or(&link.enrolled_at, |w| &w.enrolled_at)
+            .clone(),
+        enrolled_from: waiting
+            .map_or(&link.enrolled_from, |w| &w.enrolled_from)
+            .clone(),
+        client: waiting
+            .map_or(&link.client_info, |w| &w.client_info)
+            .clone(),
+        device_name: waiting
+            .map_or(&link.device_name, |w| &w.device_name)
+            .clone(),
+        kept_device_name: waiting.and(link.device_name.clone()),
+        kept_client: waiting.and(link.client_info.clone()),
         confirm_code: match waiting {
             Some(w) => DeviceLink::confirm_code(&w.key_hash),
             None => DeviceLink::confirm_code(&key.key_hash),

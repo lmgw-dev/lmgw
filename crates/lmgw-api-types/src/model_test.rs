@@ -19,8 +19,9 @@ pub enum ModelTest {
     ImagePassed(ImageTestPassed),
     /// A chat, aux or image model that did not load or did not answer.
     Failed(ModelTestFailed),
-    /// A chat model that loaded and answered.
-    ChatPassed(ChatTestPassed),
+    /// A chat model that loaded and answered. Boxed: its two capability
+    /// objects make it far the largest arm.
+    ChatPassed(Box<ChatTestPassed>),
     /// An aux model that loaded and answered.
     Passed(ModelTestPassed),
 }
@@ -169,6 +170,14 @@ pub struct ModelTestFailed {
     pub latency_ms: u64,
     /// What went wrong.
     pub error: String,
+    /// The gateway's error code, when the model's start or the probe failed
+    /// with one of lmgw's own errors (`gpu_setup` when the model could not
+    /// start on the graphics card because of the computer,
+    /// `vram_queue_timeout`, …), as the `/v1` routes answer it; absent when
+    /// the model answered with an error of its own, or with nothing usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub code: Option<String>,
     /// The lines of the model's container log that look like the reason.
     pub container_log: Vec<String>,
     /// What to try.

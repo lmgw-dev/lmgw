@@ -143,6 +143,7 @@ async fn a_thinking_gemini_answer_is_priced_and_reported_on_all_its_output() {
         PriceScope::Alias,
         "my-model",
         lmgw_core::config::PriceUnit::PerMtok,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             price_in: Some(1.0),
             price_out: Some(10.0),

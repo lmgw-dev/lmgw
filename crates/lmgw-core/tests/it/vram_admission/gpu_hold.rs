@@ -12,6 +12,15 @@ use super::*;
 /// alias in these tests really is unknown — with `expose_all` every typo would
 /// resolve and the refusal paths could not be told apart from the served ones.
 pub(super) async fn cloud_upstream(f: &Fixture, alias: &str) -> MockServer {
+    cloud_upstream_on(f, alias, lmgw_core::config::Protocol::OpenaiCompatible).await
+}
+
+/// [`cloud_upstream`] on a row of `protocol`, one of the OpenAI-shaped ones.
+pub(super) async fn cloud_upstream_on(
+    f: &Fixture,
+    alias: &str,
+    protocol: lmgw_core::config::Protocol,
+) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -48,7 +57,7 @@ pub(super) async fn cloud_upstream(f: &Fixture, alias: &str) -> MockServer {
         &f.state.db,
         &store::NewUpstream {
             name: "cloud".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", server.uri()),
             api_key: None,
@@ -72,6 +81,7 @@ pub(super) async fn cloud_upstream(f: &Fixture, alias: &str) -> MockServer {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -125,7 +135,8 @@ async fn a_held_chat_request_without_a_fallback_is_refused_and_starts_nothing() 
     );
 }
 
-/// Hold on with a global fallback: the same request is served by the cloud
+/// Hold on, the chat row falling back to a cloud alias (what migration 0095
+/// wrote for every row that followed the global): the same request is served by the cloud
 /// upstream, the response says so in `x-lmgw-fallback`, and the body still
 /// echoes the alias the client asked for — a client matching the echoed name
 /// against its own request must not break because lmgw re-routed.
@@ -134,10 +145,7 @@ async fn a_held_chat_request_falls_back_to_the_cloud_alias_and_says_so() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     let _cloud = cloud_upstream(&f, "cloud-chat").await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
     engage_hold(&f).await;
 
     let resp = chat(&f.gateway).await;
@@ -230,10 +238,7 @@ async fn a_held_embed_request_does_not_inherit_the_global_fallback() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     let _cloud = cloud_upstream(&f, "cloud-chat").await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
     engage_hold(&f).await;
 
     let resp = embed(&f.gateway).await;
@@ -276,8 +281,7 @@ async fn a_held_embed_request_falls_back_through_its_own_row_override() {
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: aux.warm_start,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-embed".into()),
+            fallback: Some("cloud-embed".into()),
         },
     )
     .await
@@ -298,17 +302,14 @@ async fn a_held_embed_request_falls_back_through_its_own_row_override() {
     assert!(f.runs().is_empty(), "{:?}", f.runs());
 }
 
-/// A row explicitly set to `none` wins over a global fallback that would
-/// otherwise apply — the row is asking to be refused, not routed.
+/// A row without a fallback, among rows that have one, is refused under the
+/// hold — it is asking to be refused, not routed.
 #[tokio::test]
 async fn a_chat_row_with_mode_none_refuses_the_global_fallback() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     let _cloud = cloud_upstream(&f, "cloud-chat").await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
 
     let chat_row = f.state.snapshot().local_models[0].clone();
     store::update_local_model(
@@ -325,8 +326,7 @@ async fn a_chat_row_with_mode_none_refuses_the_global_fallback() {
             image: chat_row.image.clone(),
             extra_run_args: chat_row.extra_run_args.clone(),
             warm_start: chat_row.warm_start,
-            hold_fallback_mode: HoldFallbackMode::None,
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: chat_row.capabilities_override.clone(),
             ladder: chat_row.ladder.clone(),
         },
@@ -347,21 +347,19 @@ async fn a_chat_row_with_mode_none_refuses_the_global_fallback() {
     assert!(f.runs().is_empty(), "{:?}", f.runs());
 }
 
-/// The set-time validator (`ops::validate_fallback_alias`) is bypassed here on
-/// purpose — writing `hold.fallback_alias` straight through `save_settings`,
-/// not through `ops::settings_set` — because rows and aliases change after
-/// they are validated (§2). This is the request-time re-check:
-/// `resolve_for_request` re-resolves the fallback on every held request and
-/// refuses by name rather than silently starting the container the hold
-/// exists to prevent.
+/// The save check (a fallback of another model type is refused, openai
+/// egress design §14.2) is bypassed here on purpose — the fallback is written
+/// straight into the rows — because a hand edit can leave one. A local
+/// fallback is a hop of the chain now (§14.3), so this one is judged like any
+/// other: an embedding model cannot answer a chat turn, the walk ends there,
+/// and the refusal names it — never its container started for a turn it
+/// cannot answer.
 #[tokio::test]
-async fn a_global_fallback_naming_a_local_model_is_refused_at_request_time() {
+async fn a_fallback_of_another_type_is_refused_at_request_time() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("embed/embed-model".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("embed/embed-model"))
+        .await;
     engage_hold(&f).await;
 
     let resp = chat(&f.gateway).await;
@@ -372,7 +370,7 @@ async fn a_global_fallback_naming_a_local_model_is_refused_at_request_time() {
         body["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("is itself a local model"),
+            .contains("(fallback 'embed/embed-model' cannot serve this endpoint: "),
         "the misconfiguration is named, not silently downgraded to a bare refusal: {body}"
     );
     assert!(f.runs().is_empty(), "{:?}", f.runs());
@@ -385,10 +383,8 @@ async fn a_global_fallback_naming_a_local_model_is_refused_at_request_time() {
 async fn a_global_fallback_that_does_not_resolve_is_refused_at_request_time() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("no-such-alias".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("no-such-alias"))
+        .await;
     engage_hold(&f).await;
 
     let resp = chat(&f.gateway).await;
@@ -623,16 +619,14 @@ async fn releasing_the_hold_lets_the_same_request_start_a_container() {
     assert_eq!(f.runs(), vec!["chat-model".to_string()]);
 }
 
-/// The resolve-time swap (§4) means every downstream check sees the fallback's
-/// *real* route — legacy `/v1/completions` requires an openai-protocol
-/// upstream, checked against the route the bytes would actually go to. An
-/// Anthropic-protocol fallback therefore fails with this handler's own
-/// protocol error, exactly as it would if the client had named that alias
-/// directly, never a silent misroute to a cloud mock that cannot speak the
-/// dialect the handler is about to use.
+/// Legacy `/v1/completions` requires an openai-protocol upstream. The chain
+/// walk judges every hop by the endpoint's check (openai egress design
+/// §14.3), so an Anthropic-protocol fallback is a hop that cannot serve this
+/// endpoint: the walk ends and the hold's refusal names it — never a silent
+/// misroute to a cloud mock that cannot speak the dialect the handler is
+/// about to use.
 #[tokio::test]
-async fn legacy_completions_under_hold_with_an_anthropic_fallback_is_the_handlers_own_protocol_error(
-) {
+async fn legacy_completions_under_hold_with_an_anthropic_fallback_ends_the_walk() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     let claude = MockServer::start().await;
     let up_id = store::insert_upstream(
@@ -663,15 +657,14 @@ async fn legacy_completions_under_hold_with_an_anthropic_fallback_is_the_handler
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
     .unwrap();
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("claude-fallback".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("claude-fallback"))
+        .await;
     engage_hold(&f).await;
 
     let resp = f
@@ -685,16 +678,16 @@ async fn legacy_completions_under_hold_with_an_anthropic_fallback_is_the_handler
 
     assert_eq!(
         resp.status(),
-        400,
-        "the handler's own protocol refusal, not a 200 and not a misroute"
+        503,
+        "the hold's refusal, not a 200 and not a misroute"
     );
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "unsupported", "{body}");
+    assert_eq!(body["error"]["code"], "gpu_hold", "{body}");
     assert!(
         body["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("openai-protocol"),
+            .contains("(fallback 'claude-fallback' cannot serve this endpoint: "),
         "{body}"
     );
     assert_eq!(
@@ -731,10 +724,7 @@ async fn a_held_streaming_chat_request_carries_the_fallback_header() {
         .mount(&cloud)
         .await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
     engage_hold(&f).await;
 
     let resp = f
@@ -769,10 +759,7 @@ async fn a_held_count_tokens_request_is_served_by_the_fallback_and_says_so() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     let _cloud = cloud_upstream(&f, "cloud-chat").await;
 
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
     engage_hold(&f).await;
 
     let resp = f
@@ -886,8 +873,7 @@ async fn a_fallback_served_request_that_fails_upstream_still_names_the_fallback(
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: aux.warm_start,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-embed".into()),
+            fallback: Some("cloud-embed".into()),
         },
     )
     .await
@@ -1011,8 +997,7 @@ async fn quickdoc_refuses_to_embed_through_a_hold_fallback_and_never_calls_it() 
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: aux.warm_start,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-embed".into()),
+            fallback: Some("cloud-embed".into()),
         },
     )
     .await

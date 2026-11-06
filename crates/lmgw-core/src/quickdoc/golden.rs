@@ -300,8 +300,12 @@ async fn one_chunk(
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     // One admission for this chunk's whole tool loop (§9b). Per chunk rather
     // than per job: a generation run is background work, and a release point at
@@ -445,6 +449,7 @@ impl GenerationPlan {
                         .into(),
                 ),
                 parameters: golden::emit_schema(self.per_chunk),
+                strict: None,
             },
         )
     }

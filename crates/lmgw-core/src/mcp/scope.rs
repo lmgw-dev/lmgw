@@ -75,6 +75,10 @@ pub struct ToolScope {
     /// list denies any of them ([`ToolScope::admits`]). Empty for every
     /// other list.
     spellings: HashMap<String, Vec<String>>,
+    /// The client key the request presented, whose alias scope narrows the
+    /// models the image and audio tools offer (chat-media-tools §3.7):
+    /// `None` for the gateway's own runs and for a caller with no key.
+    key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +108,7 @@ impl ToolScope {
             list: List::All,
             hosted: Hosted::every(),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -115,6 +120,7 @@ impl ToolScope {
             list: List::Nothing { who: who.into() },
             hosted: Hosted::default(),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -161,6 +167,7 @@ impl ToolScope {
             list,
             hosted,
             spellings,
+            key: ctx.client_key.clone(),
         }
     }
 
@@ -175,9 +182,16 @@ impl ToolScope {
                 list: agent_list(state, agent_id).await,
                 hosted: self.hosted.clone(),
                 spellings: HashMap::new(),
+                key: self.key.clone(),
             },
             _ => self.clone(),
         }
+    }
+
+    /// The client key whose alias scope narrows the media tools' models
+    /// ([`crate::mcp::media::Offer::within`]); `None`: nothing narrows them.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
     /// Is `name` within this caller's reach? Says nothing about whether the
@@ -830,6 +844,7 @@ mod tests {
             list: principal_list(&p, snap),
             hosted: hosted_of(&p, snap, Default::default()),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -1062,6 +1077,7 @@ mod tests {
             list: principal_list(&Principal::Anonymous, &snap),
             hosted: hosted_of(&Principal::Anonymous, &snap, Default::default()),
             spellings: HashMap::new(),
+            key: None,
         };
         assert!(s.admits("github__search"));
         assert!(!s.admits("lmgw__status"));

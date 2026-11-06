@@ -13,7 +13,8 @@ use super::*;
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub upstreams: HashMap<i64, Upstream>,
-    /// alias (lowercased) -> ModelAlias
+    /// alias, as written (case-sensitive) -> ModelAlias. Every stored row,
+    /// enabled or not; [`Snapshot::resolve`] routes the enabled ones.
     pub aliases: HashMap<String, ModelAlias>,
     /// alias (lowercased) -> CandidateAlias (candidate-aliases design §4.1).
     /// Every stored row, enabled or not — same convention as `aliases` —
@@ -93,6 +94,9 @@ fn strip_prefix<'a>(prefix: &str, name: &'a str) -> Option<&'a str> {
     }
 }
 
+mod disabled;
+mod hops;
+pub use hops::*;
 mod sheet;
 
 impl Snapshot {
@@ -145,7 +149,7 @@ impl Snapshot {
     /// the candidates up directly and builds their route with
     /// [`Self::chat_local_route`]). Every caller here that needs one fixed
     /// model instead — quickdoc's ingest/golden plans, corpus creation, the
-    /// dashboard chat's model picker, [`Self::usable_fallback`] — gets a
+    /// dashboard chat's model picker, [`Self::hop`] — gets a
     /// named refusal instead of `UnknownAlias`, so "this name exists but
     /// picks a model per request" reads differently from "no such name".
     pub fn resolve(&self, alias: &str) -> Result<Route, GatewayError> {
@@ -179,114 +183,108 @@ impl Snapshot {
             .ok_or_else(|| GatewayError::UnknownAlias(alias.to_string()))
     }
 
-    /// [`Snapshot::resolve`] plus the GPU-hold rule (gpu-hold design §4): a
-    /// route that lands on a local container while `hold.active` becomes its
-    /// fallback's route, or [`GatewayError::GpuHold`] when it has no usable
-    /// one. Cloud routes and an inactive hold return exactly what `resolve`
-    /// returned. A benchmark's lease ([`Self::gpu_block`], benchmark design
-    /// §3.2) is answered the same way, refusing with
-    /// [`GatewayError::GpuBenchmark`].
+    /// [`Snapshot::resolve`] plus the GPU-hold rule (gpu-hold design §4),
+    /// along the chain (openai egress design §14.3): a route that lands on a
+    /// local container while the hold is on (or a benchmark holds the card,
+    /// [`Self::gpu_block`]) goes on to that model's own fallback, hop by hop,
+    /// until a hop can answer — a cloud model, a row on the CPU — or one has
+    /// none that can, which refuses with [`GatewayError::GpuHold`] /
+    /// [`GatewayError::GpuBenchmark`] naming that hop and the chain. A
+    /// disabled model or alias, asked for or met as a fallback, goes on to
+    /// its own fallback the same way ([`Self::disabled_key`],
+    /// [`Self::past_disabled`]).
     ///
-    /// **Why the swap lives here and not inside
+    /// The static part of the gate's walk ([`crate::gate::resolve`] runs the
+    /// same steps with each hop's route check): for the readers that only
+    /// show what a request would get — a realtime warm-up, the Chat's
+    /// attachment and voice checks. It starts nothing and asks no upstream.
+    ///
+    /// **Why the swap is at resolve and not inside
     /// [`vram::admit`](crate::vram::admit).** Four call sites read the route
     /// *before* they admit: legacy `/v1/completions` and the audio handlers
     /// refuse a non-`openai` upstream protocol, the dashboard chat injects a
     /// llama.cpp-only passthrough field keyed on `upstream.kind`, and the two
     /// quickdoc plans capture the route into an immutable plan struct.
     /// Swapping the route inside `admit` would leave every one of those
-    /// decisions made against the *local* route while the bytes went to a
-    /// cloud one — a llama.cpp-only field posted to Anthropic, a protocol
-    /// check that passed for the wrong upstream. Swapping at the moment the
-    /// route is born means everything downstream sees a cloud route exactly as
-    /// if the client had asked for the fallback alias by name.
-    ///
-    /// The fallback is re-validated here, not trusted from set time
-    /// ([`crate::ops::validate_fallback_alias`]): rows and aliases change
-    /// between the two, and a fallback that has since become local or been
-    /// deleted must surface as a named refusal rather than silently start the
-    /// container the hold exists to prevent.
+    /// decisions made against the held route while the bytes went to another
+    /// one. Swapping at the moment the route is born means everything
+    /// downstream sees the hop that answers exactly as if the client had
+    /// asked for it by name.
     pub fn resolve_for_request(&self, alias: &str) -> Result<Resolved, GatewayError> {
-        let route = self.resolve(alias)?;
-        let Some(target) = crate::vram::classify(&route) else {
-            // A cloud route is untouched by the hold — it costs no VRAM.
-            return Ok(Resolved {
-                route,
-                fallback: None,
-            });
-        };
-        // Per model: an audio row on the CPU is not held, and its fallback
-        // goes unused (`gpu_block_for`).
-        let Some(block) = self.gpu_block_for(target.class, &target.model_id) else {
-            return Ok(Resolved {
-                route,
-                fallback: None,
-            });
-        };
-        match self.fallback_route(&target) {
-            // Named as `alias`, the name the client asked for, not
-            // `target.model_id`: for aux, audio and image those differ by the
-            // class's public prefix (`embed/`, …), and a refusal naming the
-            // bare row id reads as if it named a different model than the one
-            // the request actually used.
-            FallbackRoute::None => Err(block.refusal(alias, "")),
-            // Named rather than downgraded to a bare refusal, because it is a
-            // misconfiguration the owner can fix. A local fallback in
-            // particular would put the GPU straight back to work, which is the
-            // one thing the hold is for.
-            FallbackRoute::Unusable { alias: fb, why } => {
-                Err(block.refusal(alias, format!(" (fallback '{fb}' {why})")))
+        let mut chain: Vec<String> = Vec::new();
+        let mut seen: Vec<HopKey> = Vec::new();
+        let (mut route, mut name) = match self.resolve(alias) {
+            Ok(route) => (route, alias.to_string()),
+            Err(e) => {
+                let Some(key) = self.disabled_key(alias) else {
+                    return Err(e);
+                };
+                seen.push(key.clone());
+                let (passed, next) = self.past_disabled(self.next_hop(&key), |k| *k == key);
+                for (n, k) in passed {
+                    chain.push(n);
+                    seen.push(k);
+                }
+                match next {
+                    FallbackRoute::Usable {
+                        alias: fb,
+                        key: next,
+                        route,
+                    } if !seen.contains(&next) => {
+                        seen.push(next);
+                        chain.push(fb.clone());
+                        (route, fb)
+                    }
+                    _ => return Err(e),
+                }
             }
-            FallbackRoute::Usable { alias: fb, route } => Ok(Resolved {
-                route,
-                fallback: Some(fb),
-            }),
-        }
-    }
-
-    /// The fallback of the local model `target`, as far as it can stand in
-    /// for it (gpu-hold design §2, "usable fallback"): the row's lookup
-    /// ([`Self::hold_fallback_for`]), then [`Self::usable_fallback`].
-    ///
-    /// The one lookup every fallback goes through — the hold's swap here in
-    /// [`Self::resolve_for_request`], the outside-VRAM swap at admission
-    /// (candidate-aliases design §4.7, `gate::open::usable_fallback`) — so
-    /// "which alias answers for this model, and can it" has one answer.
-    /// Re-validated per call, never trusted from set time: rows and aliases
-    /// change in between.
-    pub fn fallback_route(&self, target: &crate::vram::Target) -> FallbackRoute {
-        let Some(alias) = self.hold_fallback_for(target.class, &target.model_id) else {
-            return FallbackRoute::None;
         };
-        match self.usable_fallback(&alias) {
-            Ok(route) => FallbackRoute::Usable { alias, route },
-            Err(why) => FallbackRoute::Unusable { alias, why },
+        while let Some((block, key)) = self.blocked_at_resolve(&route) {
+            seen.push(key.clone());
+            let (passed, next) = self.past_disabled(self.next_hop(&key), |k| seen.contains(k));
+            for (n, k) in passed {
+                chain.push(n);
+                seen.push(k);
+            }
+            let tried = tried_clause(alias, &chain);
+            match next {
+                FallbackRoute::None => return Err(block.refusal(&name, tried)),
+                FallbackRoute::Unusable { alias: fb, why, .. } => {
+                    return Err(block.refusal(&name, format!(" (fallback '{fb}' {why}){tried}")))
+                }
+                FallbackRoute::Usable {
+                    alias: fb,
+                    key: next,
+                    route: next_route,
+                } => {
+                    if seen.contains(&next) {
+                        return Err(block.refusal(&name, already_tried(&fb, alias, &chain)));
+                    }
+                    chain.push(fb.clone());
+                    name = fb;
+                    route = next_route;
+                }
+            }
         }
+        Ok(Resolved {
+            route,
+            fallback: chain.last().cloned(),
+            chain,
+        })
     }
 
-    /// Whether the alias `fallback` can answer for a local model: it resolves,
-    /// to a route that is not itself local, and is not itself another
-    /// candidate alias (candidate-aliases design §4.1 — a candidate alias has
-    /// no static route [`resolve`](Self::resolve) could return anyway, since
-    /// which of its candidates answers is decided per request; naming the
-    /// clause here rather than letting it fall through to "does not resolve"
-    /// gives the owner the actual reason). `Err` is why not, as the clause a
-    /// refusal names it with.
-    ///
-    /// The route comes back marked as the fallback it is ([`Route::fallback`]):
-    /// this is where every fallback's route is born.
-    pub fn usable_fallback(&self, fallback: &str) -> Result<Route, &'static str> {
-        if self
-            .candidate_aliases
-            .contains_key(&fallback.to_lowercase())
-        {
-            return Err("is itself a candidate alias");
-        }
-        let mut route = self.resolve(fallback).map_err(|_| "does not resolve")?;
-        if crate::vram::classify(&route).is_some() {
-            return Err("is itself a local model");
-        }
-        route.fallback = Some(fallback.into());
-        Ok(route)
+    /// Whether the hop `route` lands on cannot answer now for a reason the
+    /// snapshot decides alone (§14.3): a local model on the GPU while the
+    /// hold is on or a benchmark holds the card. `None` for every hop that
+    /// can be tried — a cloud route, a row on the CPU (the hold has no claim
+    /// on it), anything with no block.
+    pub fn blocked_at_resolve(
+        &self,
+        route: &Route,
+    ) -> Option<(crate::bench::lease::GpuBlock, HopKey)> {
+        let target = crate::vram::classify(route)?;
+        let block = self.gpu_block_for(target.class, &target.model_id)?;
+        Some((block, HopKey::Local(target.class, target.model_id)))
     }
 
     /// The enabled candidate alias named `name` (case-insensitive) —
@@ -301,62 +299,16 @@ impl Snapshot {
             .filter(|c| c.enabled)
     }
 
-    /// Whether any enabled candidate alias has `background` set — the
-    /// runtime worker's (C1) gate for arming draining/ownership machinery at
-    /// all: with none, background traffic cannot exist, so there is nothing
-    /// to drain for (candidate-aliases design §4.4–§4.5).
-    pub fn any_background_alias(&self) -> bool {
-        self.candidate_aliases
-            .values()
-            .any(|c| c.enabled && c.background)
-    }
-
-    /// The alias fallback of one candidate alias (design §4.1–§4.3): the
-    /// single fallback that answers for the **whole** alias — a candidate's
-    /// own row fallback is never consulted through it. Same three modes as a
-    /// row's GPU-hold fallback: `inherit` reads `settings.hold.fallback_alias`
-    /// unconditionally (a candidate alias's candidates are chat-class rows
-    /// only, so there is exactly one global to inherit — unlike
-    /// [`Self::hold_fallback_for`]'s per-class table, which only chat
-    /// inherits), `none` never leaves the machine, `alias` is the row's own
-    /// named fallback. Re-validated per call through [`Self::usable_fallback`],
-    /// never trusted from save time — rows and aliases change in between.
-    pub fn alias_fallback(&self, alias: &CandidateAlias) -> FallbackRoute {
-        let name = match alias.fallback_mode {
-            HoldFallbackMode::None => None,
-            HoldFallbackMode::Alias => alias.fallback.clone().filter(|a| !a.trim().is_empty()),
-            HoldFallbackMode::Inherit => self
-                .settings
-                .hold
-                .fallback_alias
-                .clone()
-                .filter(|a| !a.trim().is_empty()),
-        };
-        let Some(name) = name else {
-            return FallbackRoute::None;
-        };
-        match self.usable_fallback(&name) {
-            Ok(route) => FallbackRoute::Usable { alias: name, route },
-            Err(why) => FallbackRoute::Unusable { alias: name, why },
-        }
-    }
-
-    /// The one fallback lookup a request against `requested` takes, wherever
-    /// one is needed (design §5's ordered gate): the hold swap, the
-    /// outside-VRAM swap (§4.7), and the ladder's climb hook all call this
-    /// instead of [`Self::fallback_route`] directly, so a candidate alias's
-    /// row fallback is never consulted through it (§4.1) no matter which of
-    /// the three triggered the fallback.
-    ///
-    /// `requested` naming an **enabled** candidate alias reads that alias's
-    /// own fallback ([`Self::alias_fallback`]); anything else — a direct
-    /// model name, a plain alias, a disabled candidate alias name (which
-    /// [`Self::candidate_alias`] treats as unknown) — reads exactly
-    /// [`Self::fallback_route`] as before phase 4.
+    /// The fallback the request for `requested` takes from the local model
+    /// `target` it holds (design §5's ordered gate): a candidate alias's own
+    /// when `requested` names an enabled one — a candidate's own row
+    /// fallback is never consulted through it (candidate-aliases §4.1) —
+    /// else the row's. The ladder's climb hook and the Chat's voice checks
+    /// read it.
     pub fn request_fallback(&self, requested: &str, target: &crate::vram::Target) -> FallbackRoute {
         match self.candidate_alias(requested) {
-            Some(ca) => self.alias_fallback(ca),
-            None => self.fallback_route(target),
+            Some(ca) => self.fallback_named(ca.fallback.as_deref()),
+            None => self.next_hop(&HopKey::Local(target.class, target.model_id.clone())),
         }
     }
 
@@ -388,7 +340,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             AUDIO_UPSTREAM_ID,
             AUDIO_UPSTREAM_NAME,
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
             UpstreamKind::AudioCpp,
             self.settings.audio.request_timeout_seconds,
         )
@@ -399,7 +351,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             IMAGE_UPSTREAM_ID,
             IMAGE_UPSTREAM_NAME,
-            Protocol::Openai,
+            Protocol::OpenaiCompatible,
             UpstreamKind::SdCpp,
             self.settings.image.request_timeout_seconds,
         )
@@ -408,8 +360,9 @@ impl Snapshot {
     /// One of the four per-class synthetic upstreams (§5). Never persisted,
     /// never `expose_all` (the classes enumerate their own tables — see
     /// [`Snapshot::exposed_models`]). `protocol` is the caller's:
-    /// `llama_cpp` for the two llama.cpp classes, `openai` for audio.cpp and
-    /// sd-server (llama.cpp egress design §5).
+    /// `llama_cpp` for the two llama.cpp classes, `openai_compatible` for
+    /// audio.cpp and sd-server (llama.cpp egress design §5, openai egress
+    /// design decision 9).
     ///
     /// `timeout_seconds` is the caller's class setting, not a constant: the
     /// four classes used to share one 600 s ceiling, which was right for none
@@ -772,59 +725,5 @@ impl Snapshot {
         self.api_keys
             .iter()
             .find(|k| k.enabled && k.key_hash == hash)
-    }
-
-    /// The GPU-hold fallback lookup for a held model (gpu-hold design §2): the
-    /// row's own `hold_fallback_mode` first (`none` refuses outright, `alias`
-    /// is the row's own `hold_fallback`), and only an `inherit`ing **chat**
-    /// row falls through to `settings.hold.fallback_alias` — aux, audio and
-    /// image never inherit the global, because a different embedding model
-    /// silently corrupts a vector index (owner's decision, 2026-09-04) and the
-    /// global fallback is a chat alias, which cannot draw a picture.
-    ///
-    /// `None` means "refuse this held request": no fallback configured, an
-    /// explicit `none`, an `alias` row with nothing set, or a model id this
-    /// snapshot does not know about at all (a row that vanished between
-    /// resolve and this lookup should refuse, not silently inherit).
-    pub fn hold_fallback_for(
-        &self,
-        class: crate::runtime::Class,
-        model_id: &str,
-    ) -> Option<String> {
-        use crate::runtime::Class;
-
-        let (mode, own_fallback) = match class {
-            Class::Chat => self
-                .local_models
-                .iter()
-                .find(|m| m.model_id == model_id)
-                .map(|m| (m.hold_fallback_mode, m.hold_fallback.clone()))?,
-            Class::Aux => self
-                .aux_models
-                .iter()
-                .find(|m| m.model_id == model_id)
-                .map(|m| (m.hold_fallback_mode, m.hold_fallback.clone()))?,
-            Class::Audio => self
-                .audio_models
-                .iter()
-                .find(|m| m.model_id == model_id)
-                .map(|m| (m.hold_fallback_mode, m.hold_fallback.clone()))?,
-            Class::Image => self
-                .image_models
-                .iter()
-                .find(|m| m.model_id == model_id)
-                .map(|m| (m.hold_fallback_mode, m.hold_fallback.clone()))?,
-        };
-        match mode {
-            HoldFallbackMode::None => None,
-            HoldFallbackMode::Alias => own_fallback.filter(|a| !a.trim().is_empty()),
-            HoldFallbackMode::Inherit if class == Class::Chat => self
-                .settings
-                .hold
-                .fallback_alias
-                .clone()
-                .filter(|a| !a.trim().is_empty()),
-            HoldFallbackMode::Inherit => None,
-        }
     }
 }

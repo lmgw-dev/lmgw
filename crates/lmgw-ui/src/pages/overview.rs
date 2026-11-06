@@ -3,7 +3,7 @@
 //! then everything moves on the shared SSE bus.
 //!
 //! The glance is what is running and what just happened, so those two own the
-//! screen: the backends that are up, and the live feed filling whatever height
+//! screen: the running models, and the live feed filling whatever height
 //! is left. Everything that is merely *configured* (the stopped models, how to
 //! connect) folds to one line with its count.
 
@@ -16,7 +16,7 @@ use crate::fmt::{age, grouped, hue_for, log_time};
 use crate::live::use_live;
 use crate::model_ops::{LogsButton, ModelRunButtons};
 use crate::widgets::{filter_words, matches_word, CopyBtn, Facet, FacetSet, FilterBar, PageFrame};
-use crate::widgets::{PageMode, Section};
+use crate::widgets::{MachineCard, PageMode, Section};
 
 const FEED_LIMIT: usize = 25;
 
@@ -112,10 +112,20 @@ pub fn Overview() -> impl IntoView {
                 .collect::<Vec<_>>()
         })
     });
+    // Starts waiting for their download (machine-check design §5, D39):
+    // nothing runs for them yet, so they are not counted as running.
+    let fetching = Memo::new(move |_| {
+        rows.with(|r| {
+            r.iter()
+                .filter(|m| m.rt.is_none() && m.download)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
     let stopped = Memo::new(move |_| {
         rows.with(|r| {
             r.iter()
-                .filter(|m| m.rt.is_none())
+                .filter(|m| m.rt.is_none() && !m.download)
                 .cloned()
                 .collect::<Vec<_>>()
         })
@@ -173,14 +183,29 @@ pub fn Overview() -> impl IntoView {
 
             <div class="ov-split">
                 <div class="ov-state">
+                    // The machine check, while it wants something done and
+                    // local models are involved (machine-check design §2.1,
+                    // D172, D184): the first block of the column that gives
+                    // way, so it never pushes the live feed off the screen.
+                    <MachineCard class="ov-machine"/>
+                    <Show when=move || fetching.with(|f| !f.is_empty())>
+                        <Section
+                            title="Downloading before they start"
+                            count=Signal::derive(move || grouped(fetching.with(Vec::len) as u64))
+                            persist="overview.fetching"
+                        >
+                            <WaitingTable rows=fetching/>
+                        </Section>
+                    </Show>
                     <Section
-                        title="Backends"
+                        title="Running models"
                         count=Signal::derive(move || grouped(running.with(Vec::len) as u64))
                         persist="overview.backends"
                     >
                         <RunningTable
                             rows=running
                             stopped=stopped
+                            fetching=fetching
                             ready=models_ready
                             err=models_err
                             retry=retry_models
@@ -278,6 +303,9 @@ struct ModelRow {
     name: String,
     warm_start: bool,
     rt: Option<lmgw_api_types::RuntimeStatus>,
+    /// No container yet: its start waits for the download for the graphics
+    /// card (machine-check design §5), listed under its own heading.
+    download: bool,
 }
 
 fn class_lit(s: &str) -> &'static str {
@@ -366,6 +394,7 @@ fn model_rows(
                     name: name_of(class, &r.model_id),
                     warm_start: false,
                     rt: Some(r.clone()),
+                    download: false,
                 }
             })
             .collect();
@@ -380,6 +409,7 @@ fn model_rows(
                         name: name_of(class, id),
                         warm_start: warm,
                         rt: None,
+                        download: false,
                     });
                 }
             };
@@ -416,6 +446,32 @@ fn model_rows(
                 );
             }
         }
+        // A start waiting for its download has no registry entry yet: the
+        // row it would have is marked, or made when the list lacks it.
+        let waiting = live.vram.with(|v| {
+            v.as_ref()
+                .map(crate::gpu_download::waiting)
+                .unwrap_or_default()
+        });
+        for (class, model, _) in waiting {
+            let class = class_lit(&class);
+            let at = out
+                .iter()
+                .position(|r| r.class == class && r.model_id == model);
+            match at {
+                Some(i) if out[i].rt.is_none() => out[i].download = true,
+                // A container is there already: the registry's word wins.
+                Some(_) => {}
+                None => out.push(ModelRow {
+                    class,
+                    name: name_of(class, &model),
+                    model_id: model,
+                    warm_start: false,
+                    rt: None,
+                    download: true,
+                }),
+            }
+        }
         out.sort_by(|a, b| {
             class_rank(a.class)
                 .cmp(&class_rank(b.class))
@@ -430,6 +486,8 @@ fn model_rows(
 fn RunningTable(
     rows: Memo<Vec<ModelRow>>,
     stopped: Memo<Vec<ModelRow>>,
+    /// The starts waiting for their download: configured models too.
+    fetching: Memo<Vec<ModelRow>>,
     /// The models list is in: only then can "nothing configured" be said.
     ready: Signal<bool>,
     err: Signal<Option<String>>,
@@ -445,11 +503,16 @@ fn RunningTable(
                     }
                     let line = if !ready.get() {
                         "Loading…".into_any()
-                    } else if stopped.with(Vec::is_empty) {
+                    } else if stopped.with(Vec::is_empty) && fetching.with(Vec::is_empty) {
+                        // Until part B's checklist (find-a-model design §8.2).
                         view! {
                             "No models configured yet — add one from "
                             <a href="/models">"Models"</a>
                             "."
+                            <span class="ov-find">
+                                "Run a model on your graphics card · "
+                                <a href="/models/find">"Find a model by its name"</a>
+                            </span>
                         }
                             .into_any()
                     } else {
@@ -549,21 +612,19 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
             .map(|rt| rt.warnings.clone())
             .unwrap_or_default();
     // Direct-endpoint link: llama-server (chat/aux) serves its own web UI on
-    // its published port, and so does sd-server (image-generation §2.2);
-    // audio.cpp does not (§8: "mark audio rows link-less"). BackendInfo (the
+    // its published port, and so do sd-server (image-generation §2.2) and
+    // audio.cpp (its embedded WebUI, on by default when started with a
+    // config). BackendInfo (the
     // pre-per-model-containers host/port lookup) is gone (WP7) — derive the
     // host the same way it did: the browser's own hostname, since the
     // container publishes on all interfaces (§3.5).
-    let link =
-        r.rt.as_ref()
-            .filter(|rt| rt.state == "ready" && class != "audio")
-            .map(|rt| {
-                let host = window()
-                    .location()
-                    .hostname()
-                    .unwrap_or_else(|_| "127.0.0.1".into());
-                format!("http://{host}:{}/", rt.port)
-            });
+    let link = r.rt.as_ref().filter(|rt| rt.state == "ready").map(|rt| {
+        let host = window()
+            .location()
+            .hostname()
+            .unwrap_or_else(|_| "127.0.0.1".into());
+        format!("http://{host}:{}/", rt.port)
+    });
     view! {
         <tr>
             <td>
@@ -632,7 +693,7 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
                         view! {
                             <span
                                 class="type-badge"
-                                title="Started by a background candidate alias request; the owner has not claimed it since"
+                                title="Started by background traffic (a background candidate alias, or a request sent with x-lmgw-background: on); no ordinary request has claimed it since"
                             >
                                 "background"
                             </span>
@@ -645,9 +706,9 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
                         view! {
                             <span
                                 class="chip warn"
-                                title="An owner request is waiting for room on this GPU; background traffic skips this model until it is idle"
+                                title="An ordinary request is waiting for GPU room, so no model takes new background work until it is served"
                             >
-                                "draining for owner"
+                                "owner waiting for room"
                             </span>
                         }
                     })}
@@ -680,6 +741,64 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
                 </div>
             </td>
         </tr>
+    }
+}
+
+/// The starts waiting for their download (D39): the model, and the
+/// download's line with its bytes and bar. No Logs, Start or Stop: there
+/// is no container yet. Keyed by the model, so a row keeps its bar while
+/// the bytes move.
+#[component]
+fn WaitingTable(rows: Memo<Vec<ModelRow>>) -> impl IntoView {
+    view! {
+        <div class="card pad0">
+            <table class="data">
+                <thead>
+                    <tr>
+                        <th>"Class"</th>
+                        <th>"Model"</th>
+                        <th class="ov-dl-col">"Download"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <For
+                        each=move || rows.get()
+                        key=|r| (r.class, r.model_id.clone(), r.name.clone())
+                        let:r
+                    >
+                        {
+                            let dl = crate::gpu_download::live_for(r.class.to_string(), r.model_id.clone());
+                            let hue = hue_for(&r.name);
+                            let tip = if r.name == r.model_id {
+                                r.name.clone()
+                            } else {
+                                format!("{} · model id {}", r.name, r.model_id)
+                            };
+                            view! {
+                                <tr>
+                                    <td>
+                                        <span class="type-badge" title=class_title(r.class)>
+                                            {r.class}
+                                        </span>
+                                    </td>
+                                    <td title=tip>
+                                        <span class="model-chip" style=format!("--hue:{hue}")>
+                                            <i></i>
+                                            {r.name.clone()}
+                                        </span>
+                                    </td>
+                                    <td class="ov-dl-cell">
+                                        <crate::gpu_download::DlLine dl=Signal::derive(move || {
+                                            dl.get().unwrap_or_default()
+                                        })/>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </For>
+                </tbody>
+            </table>
+        </div>
     }
 }
 

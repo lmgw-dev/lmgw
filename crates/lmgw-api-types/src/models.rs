@@ -59,6 +59,9 @@ pub struct AliasView {
     /// override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
+    /// The alias's one fallback, as written; `None` = no fallback.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 /// Per-request reasoning control: on/off, effort level, thinking-token budget.
@@ -90,10 +93,10 @@ pub struct Params {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub top_k: Option<u32>,
-    /// llama.cpp `min_p`; only the OpenAI egress emits it.
+    /// llama.cpp `min_p`; the llama.cpp and OpenAI-compatible egresses send it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_p: Option<f64>,
-    /// llama.cpp `repeat_penalty`; only the OpenAI egress emits it.
+    /// llama.cpp `repeat_penalty`; the llama.cpp and OpenAI-compatible egresses send it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,6 +127,11 @@ pub struct LocalModelView {
     /// or the file cannot be read.
     #[serde(default)]
     pub licence: Option<crate::ModelLicence>,
+    /// How many requests for `public_name` were deferred (`gpu_deferred`) in
+    /// the last 24 hours: background requests (`x-lmgw-background: on`) the
+    /// model declined rather than disturb other work on the GPU.
+    #[serde(default)]
+    pub deferrals_24h: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,13 +159,11 @@ pub struct LocalModel {
     /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode: `inherit` | `none` | `alias`.
-    #[serde(default = "default_hold_fallback_mode")]
-    pub hold_fallback_mode: String,
-    /// The alias to route to while the GPU is held, meaningful only when
-    /// `hold_fallback_mode` is `alias`.
+    /// The model or alias that answers whenever this one cannot (the GPU
+    /// hold, VRAM outside lmgw, background traffic deferred, a disabled
+    /// row), as written. `None` = no fallback.
     #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
     /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
     /// override.
@@ -176,12 +182,6 @@ pub struct LocalModel {
 pub struct Rung {
     pub gguf_path: String,
     pub ctx_size: i64,
-}
-
-/// `config::HoldFallbackMode`'s `Default` (`Inherit`), as the wire spelling.
-/// `pub(crate)`: `wiring.rs` names it in a `#[serde(default = "…")]` too.
-pub(crate) fn default_hold_fallback_mode() -> String {
-    "inherit".into()
 }
 
 /// The full llama-server parameter surface of a local model row.
@@ -256,6 +256,9 @@ pub struct AuxModelView {
     pub threads_in_effect: Option<i64>,
     /// Where `threads_in_effect` comes from.
     pub threads_source: crate::aux_engine::AuxThreadsSource,
+    /// [`LocalModelView::deferrals_24h`], for this row's `public_name`.
+    #[serde(default)]
+    pub deferrals_24h: u64,
 }
 
 /// An aux container model row — embedders, rerankers and decision models
@@ -307,15 +310,11 @@ pub struct AuxModel {
     /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode: `inherit` | `none` |
-    /// `alias`. `inherit` means "no fallback" for this class — aux models
-    /// never inherit the global chat alias.
-    #[serde(default = "default_hold_fallback_mode")]
-    pub hold_fallback_mode: String,
-    /// The alias to route to while the GPU is held, meaningful only when
-    /// `hold_fallback_mode` is `alias`.
+    /// The model or alias that answers whenever this one cannot (the GPU
+    /// hold, VRAM outside lmgw, background traffic deferred, a disabled
+    /// row), as written. `None` = no fallback.
     #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -350,6 +349,9 @@ pub struct AudioModelView {
     /// be read and the figure is the logical CPU count).
     #[serde(default)]
     pub threads_source: String,
+    /// [`LocalModelView::deferrals_24h`], for this row's `public_name`.
+    #[serde(default)]
+    pub deferrals_24h: u64,
 }
 
 /// An audio model row (JSON-map fields stay dynamic).
@@ -411,15 +413,11 @@ pub struct AudioModel {
     /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode: `inherit` | `none` |
-    /// `alias`. `inherit` means "no fallback" for this class — audio models
-    /// never inherit the global chat alias.
-    #[serde(default = "default_hold_fallback_mode")]
-    pub hold_fallback_mode: String,
-    /// The alias to route to while the GPU is held, meaningful only when
-    /// `hold_fallback_mode` is `alias`.
+    /// The model or alias that answers whenever this one cannot (the GPU
+    /// hold, VRAM outside lmgw, background traffic deferred, a disabled
+    /// row), as written. `None` = no fallback.
     #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// What this model's container was measured to hold on the GPU once it
     /// had served a request. Learned by the gateway,
     /// never by the editor; `audio_model_set`'s `clear: "residency"` resets
@@ -445,6 +443,14 @@ pub struct LearnedResidency {
 pub struct ImageModelView {
     pub public_name: String,
     pub model: ImageModel,
+    /// The prompt style the shipped recipe matching this row's weights
+    /// gives it (chat-media-tools design §3.4): what applies while the
+    /// row's own `prompt_style` is unset. `null` when no recipe matches.
+    #[serde(default)]
+    pub derived_prompt_style: Option<crate::chat_media::PromptStyle>,
+    /// [`LocalModelView::deferrals_24h`], for this row's `public_name`.
+    #[serde(default)]
+    pub deferrals_24h: u64,
 }
 
 /// An image model row — one stable-diffusion.cpp pipeline.
@@ -486,12 +492,11 @@ pub struct ImageModel {
     /// Seconds idle before the container is stopped; `0` never reaps.
     #[serde(default)]
     pub idle_seconds: i64,
-    /// `inherit` | `none` | `alias`. `inherit` means "no fallback" for this
-    /// class — an image row never inherits the global chat alias.
-    #[serde(default = "default_hold_fallback_mode")]
-    pub hold_fallback_mode: String,
+    /// The model or alias that answers whenever this one cannot (the GPU
+    /// hold, VRAM outside lmgw, background traffic deferred, a disabled
+    /// row), as written. `None` = no fallback.
     #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// An alias's capabilities override for the derived `/v1/models` capability facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
@@ -504,6 +509,14 @@ pub struct ImageModel {
     /// When that figure was observed; `None` whenever the peak is.
     #[serde(default)]
     pub peak_learned_at: Option<String>,
+    /// How the chat model writes this row's prompts (chat-media-tools
+    /// design §3.4); `None` derives it from the matching recipe.
+    #[serde(default)]
+    pub prompt_style: Option<crate::chat_media::PromptStyle>,
+    /// How a running generation's preview is drawn (design §5.2); `None`
+    /// is the default: a quick sketch where the build offers it, else off.
+    #[serde(default)]
+    pub preview_mode: Option<crate::chat_media::PreviewMode>,
 }
 
 /// The dashboard's generic reader of a mutating `/api/op/{name}` answer: the
@@ -517,4 +530,8 @@ pub struct OpOutcome {
     pub ok: bool,
     pub message: Option<String>,
     pub id: Option<i64>,
+    /// What a model's or alias's save or delete says about fallbacks (openai
+    /// egress design §14.2): a delete names the rows it leaves without a
+    /// working fallback; empty when it says nothing.
+    pub fallback_notes: Vec<String>,
 }

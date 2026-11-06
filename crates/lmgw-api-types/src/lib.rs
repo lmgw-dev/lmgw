@@ -20,6 +20,9 @@
 //! [`builds`] is shared rather than mirrored: the server stores exactly those
 //! shapes, so there is no server-side struct for a mirror to drift from.
 
+/// The answer of `POST /v1/audio/alignments`: one shape for every
+/// forced-alignment family.
+pub mod audio_alignment;
 /// The audio CPU switch's run-args rule ([`audio_engine::strip_gpu_devices`],
 /// [`audio_engine::cpu_run_args`]), shared so the gateway and the audio
 /// editor strip the same flags and warn about the same ones.
@@ -62,6 +65,10 @@ pub mod chat_approvals;
 pub mod chat_attachments;
 /// The Chat export: its query and the `lmgw.chat.v1` JSON file.
 pub mod chat_export;
+// The chat-media-tools design record, §3.4, §5.2 and §9.
+/// The Chat's image and audio tools: an image row's prompt style and
+/// preview mode with their labels, and a produced file's facts.
+pub mod chat_media;
 // The client-apps design record, §2.
 /// The Chat change feed's events and cursor: what `GET /chat/api/feed`
 /// sends, a namespace of its own like [`chat_voice`].
@@ -72,6 +79,10 @@ pub mod chat_feed;
 pub mod chat_folders;
 /// The frames of the Chat API's event streams, one type per event name.
 pub mod chat_frames;
+// The chat-plane design record, §2.
+/// The Chat's reads beside its threads and folders: the settings it uses,
+/// the toolsets a thread may attach, the knowledge bases.
+pub mod chat_reads;
 // The personality-profiles design record, §1 and §3.1.
 /// The Audio lab's shapes: its model list, the voice library of reference
 /// clips and the transcripts written for them.
@@ -106,18 +117,31 @@ pub mod knowledge;
 /// The lab store: groups, runs and artifacts the three labs keep, and the
 /// answers of `/labs/api/{lab}/*`.
 pub mod lab_store;
+/// The Voices lab: candidate rounds rendered by a text-to-speech model, the
+/// sentence per language, and the samples saved to the voice library with
+/// how each was made.
+pub mod voice_lab;
 /// What a Chat thread's voice resolves to (chat-voice design §2.3): the
 /// thread answers' `voice_resolved`, each value with the level it came from.
 /// A namespace of its own, like [`chat_voice`], because its names (`Stage`,
 /// `Fallback`, `Sourced`) only make sense inside it.
 pub mod voice_resolved;
 // The client-apps design record, §5.
+/// The machine check (machine-check design §4.1): whether this computer
+/// can run local models, what is missing, and the plan that fixes it.
+pub mod machine;
 /// MCP Apps on `/mcp` (§7): the revision followed, its identifiers, and
 /// the Chat `tool` result frame's fields a host reads.
 pub mod mcp_apps;
 /// The device MCP host link (`GET /mcp/host`): its refusals, its close
 /// codes, and the `_meta` lmgw stamps on the calls it forwards over it.
 pub mod mcp_host;
+/// The fit of a file on the card, the recommended file and the download's time
+/// (find-a-model design §3, §9.2).
+pub mod model_find;
+/// Get it: the `model_get` op's answer, its job's progress and result, and
+/// the model editor's "Fit again" (find-a-model design §6, WP5).
+pub mod model_get;
 /// OpenAPI extension-key names (api-docs design §4.4), read by both the
 /// document builder (lmgw-core) and the page that renders it (lmgw-ui).
 pub mod openapi_ext;
@@ -131,10 +155,23 @@ pub mod scope;
 /// The answers only the self-admin tools (`lmgw__*`) give, one module per tool
 /// group; they are not in the OpenAPI document.
 pub mod self_admin;
+/// The Settings page's names and the paths to a setting
+/// ([`settings_labels::SettingPath`]): the dashboard's table is built from
+/// them, and the gateway's messages name a setting by them, never by its
+/// config key.
+pub mod settings_labels;
 /// TypeSafe's System One wire, `POST /v1/systemone` (decision-models design
 /// §2.8): the one `/v1` protocol whose schema is generated from types,
 /// because lmgw is itself a client of it.
 pub mod systemone;
+/// Byte figures in words, binary units only (the owner's 2026-11-04
+/// ruling): the one formatter lmgw-core, the dashboard, the Chat and the
+/// client say a size through.
+pub mod units;
+// The device transfers design record, §9.
+/// Device-to-device transfers: `/transfers/api`'s bodies, answers and
+/// refusal codes, the app id's rule and the content routes' header forms.
+pub mod transfer;
 
 pub use candidate_alias::{
     AddableCandidate, CandidateAliasAnswer, CandidateAliasPreview, CandidateAliasSaved,

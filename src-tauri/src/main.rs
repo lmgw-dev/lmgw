@@ -12,6 +12,11 @@ mod dev_guard;
 /// Every download of the window asks where to save it (Save As).
 mod downloads;
 mod gateway;
+/// The machine check's fix: the root helper behind the shell's own
+/// confirmation and one password (machine-check design §4.3, WP7).
+mod machine;
+/// The tray's word on the graphics card (machine-check design §2.4).
+mod machine_tray;
 #[cfg(target_os = "linux")]
 mod media;
 /// A device's `lmgw-pair:` link, handed to the desktop (client-apps §1.4).
@@ -21,6 +26,7 @@ mod portal;
 #[cfg(target_os = "linux")]
 mod reveal;
 mod updater;
+mod window_size;
 
 use std::net::SocketAddr;
 
@@ -92,13 +98,28 @@ fn show_main_window(app: &tauri::AppHandle) {
     let webview_dir = dev_guard::webview_data_dir(&state.data_dir, cfg!(debug_assertions));
     // The colour scheme's title-bar shade, which the sidebar takes up.
     let desktop = desktop_palette::Desktop::read();
+    // Where the window will open is the compositor's call, not known before
+    // it exists: the primary monitor, else the first (GTK on Wayland names
+    // no primary).
+    let monitor = app.primary_monitor().ok().flatten().or_else(|| {
+        app.available_monitors()
+            .ok()
+            .and_then(|m| m.into_iter().next())
+    });
+    // The size it was left at, in this instance's own data dir.
+    if app.try_state::<window_size::Tracker>().is_none() {
+        app.manage(window_size::Tracker::new(&state.data_dir));
+    }
+    let saved = app.state::<window_size::Tracker>().saved();
+    let ((width, height), maximized) = window_size::initial(monitor.as_ref(), saved.as_ref());
     let mut builder = WebviewWindowBuilder::new(
         app,
         "main",
         WebviewUrl::External(url.parse().expect("valid local url")),
     )
     .title("lmgw")
-    .inner_size(1440.0, 960.0)
+    .inner_size(width, height)
+    .maximized(maximized)
     // The UI links out to the backend containers' own web UIs
     // (target="_blank"). Inside the shell those must go to the system
     // browser — the window has no browser chrome, so a navigation away from
@@ -285,6 +306,66 @@ fn new_window_may_open(url: &tauri::Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "mailto")
 }
 
+/// Show the window on `route` (a path and an optional anchor on the gateway's
+/// own origin). A window that exists is raised and sent there: it holds the
+/// session cookie, so no login is needed, and the dashboard moves inside the
+/// page, so what it holds (a setup's progress, a draft) stays (machine-check
+/// D162, [`move_js`]). A window that has to be built opens at the
+/// dashboard's front page, because the login hands back to `/` only (not
+/// yet: the route after a fresh login).
+fn show_main_window_at(app: &tauri::AppHandle, route: &str) {
+    let existing = app.get_webview_window("main");
+    show_main_window(app);
+    let (Some(window), Ok(addr)) = (existing, app.state::<Gateway>().status()) else {
+        return;
+    };
+    match format!("{}{route}", gateway::base_url(addr)).parse::<tauri::Url>() {
+        Ok(url) => {
+            if let Err(e) = window.eval(move_js(route, &url)) {
+                tracing::warn!("the window could not be asked to go to {route}: {e}");
+                if let Err(e) = window.navigate(url) {
+                    tracing::warn!("the window could not go to {route}: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("{route} is not a URL: {e}"),
+    }
+}
+
+/// The script that sends the window's page to `route`, at `url` (D162): a
+/// cancelable `lmgw-navigate` event with `{to}` that the dashboard's router
+/// takes (lmgw-ui's `shell::moves`), cancelling it; when no page took it (the
+/// login page, a page still loading, an agent's app, which is never asked
+/// since it is another origin), the route is loaded as the window's new
+/// document, as `navigate` did.
+fn move_js(route: &str, url: &tauri::Url) -> String {
+    let json = |s: &str| serde_json::Value::String(s.to_string()).to_string();
+    format!(
+        "(function(){{var to={to},url={url};\
+         if(location.origin==={origin}){{\
+         var e=new CustomEvent(\"lmgw-navigate\",{{detail:{{to:to}},cancelable:true}});\
+         if(!window.dispatchEvent(e))return;}}\
+         location.assign(url);}})();",
+        to = json(route),
+        url = json(url.as_str()),
+        origin = json(&url.origin().ascii_serialization()),
+    )
+}
+
+/// What the tray shows of the machine check (`machine_tray`): the decision,
+/// and the menu item it adds and removes.
+struct MachineTray {
+    watch: std::sync::Mutex<machine_tray::Watch>,
+}
+
+impl MachineTray {
+    /// The plain sentence while the graphics card needs attention.
+    fn sentence(&self) -> Option<String> {
+        let watch = self.watch.lock().unwrap_or_else(|e| e.into_inner());
+        watch.sentence().map(str::to_string)
+    }
+}
+
 /// The tray's Quit item, said "Quitting…" while the quit runs.
 struct QuitItem(MenuItem<tauri::Wry>);
 
@@ -321,7 +402,6 @@ fn sync_hold(app: &tauri::AppHandle, hold_item: &CheckMenuItem<tauri::Wry>, acti
     let Some(tray) = app.tray_by_id("lmgw-tray") else {
         return;
     };
-    let state: tauri::State<SharedState> = app.state();
     let icon_bytes: &[u8] = if active {
         include_bytes!("../icons/tray-hold.png").as_slice()
     } else {
@@ -333,7 +413,23 @@ fn sync_hold(app: &tauri::AppHandle, hold_item: &CheckMenuItem<tauri::Wry>, acti
         }
         Err(e) => tracing::error!("tray icon decode: {e}"),
     }
-    let tooltip = dev_guard::tray_tooltip(&state.data_dir, cfg!(debug_assertions), active);
+    refresh_tooltip(app, active);
+}
+
+/// The tray's tooltip from what it has to say now: the hold and the machine
+/// check's sentence. Called when either changes.
+fn refresh_tooltip(app: &tauri::AppHandle, hold: bool) {
+    let Some(tray) = app.tray_by_id("lmgw-tray") else {
+        return;
+    };
+    let state: tauri::State<SharedState> = app.state();
+    let attention = app.try_state::<MachineTray>().and_then(|m| m.sentence());
+    let tooltip = dev_guard::tray_tooltip(
+        &state.data_dir,
+        cfg!(debug_assertions),
+        hold,
+        attention.as_deref(),
+    );
     let _ = tray.set_tooltip(Some(tooltip));
 }
 
@@ -384,10 +480,21 @@ fn render_workaround() -> Option<&'static str> {
 /// The shell's own commands (chat-voice §13.2), behind the origin check in
 /// `main`'s invoke handler.
 fn shell_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![audio_out::audio_outputs, audio_out::audio_output_set]
+    tauri::generate_handler![
+        audio_out::audio_outputs,
+        audio_out::audio_output_set,
+        machine::machine_apply
+    ]
 }
 
 fn main() {
+    // `lmgw --machine-probe nvml` (machine-check design §1.1): the machine
+    // check's NVML probe in a process of its own, answered before anything
+    // of the app starts — the single-instance plugin would otherwise hand
+    // it to the running window.
+    if let Some(code) = lmgw_core::machine::probe::run_if_asked() {
+        std::process::exit(code);
+    }
     // Must happen before GTK/WebKit initializes, so before anything else —
     // including the logger, which is why the decision is only reported below.
     let workaround = render_workaround();
@@ -534,6 +641,19 @@ fn main() {
                 hold_active,
                 None::<&str>,
             )?;
+            // Not in the menu until the verdict leaves `ready`
+            // (`machine_tray`, machine-check design §2.4): the tick below
+            // adds it above "Open Dashboard" and takes it out again.
+            let machine_item = MenuItem::with_id(
+                app,
+                "machine-attention",
+                machine_tray::ITEM_LABEL,
+                true,
+                None::<&str>,
+            )?;
+            app.manage(MachineTray {
+                watch: Default::default(),
+            });
             let models_stop =
                 MenuItem::with_id(app, "models-stop", "Stop all models", true, None::<&str>)?;
             let restart = MenuItem::with_id(app, "restart", "Restart gateway", true, None::<&str>)?;
@@ -588,6 +708,7 @@ fn main() {
                     &state.data_dir,
                     debug_build,
                     hold_active,
+                    None,
                 ))
                 .menu(&menu)
                 .show_menu_on_left_click(true)
@@ -595,6 +716,7 @@ fn main() {
                     let state: tauri::State<SharedState> = app.state();
                     match event.id.as_ref() {
                         "open" => show_main_window(app),
+                        "machine-attention" => show_main_window_at(app, machine_tray::ITEM_ROUTE),
                         "browser" => match app.state::<Gateway>().status() {
                             // Minted here rather than at menu build time: a
                             // nonce lives 60 s and is single-use (§3.4), so a
@@ -655,7 +777,9 @@ fn main() {
                             let hold_item = hold_item_for_menu.clone();
                             tauri::async_runtime::spawn(async move {
                                 match lmgw_core::ops::backends::to_json(
-                                    lmgw_core::ops::hold_set(&st, next).await,
+                                    lmgw_core::ops::hold_set(&st, next)
+                                        .await
+                                        .map_err(|r| r.message),
                                 ) {
                                     Ok(v) => {
                                         tracing::info!("hold_set: {v}");
@@ -678,6 +802,7 @@ fn main() {
             // Keep tray status lines fresh.
             let state_for_status = state.clone();
             let app_for_status = app.handle().clone();
+            let menu_for_status = menu.clone();
             tauri::async_runtime::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
                 // `None` so the first tick always syncs once — that is what
@@ -695,13 +820,44 @@ fn main() {
                         let _ = status_item.set_text(format!("{tray_label} · {QUITTING}"));
                         continue;
                     }
-                    let _ = status_item.set_text(match gateway.status() {
-                        Ok(addr) => format!(
-                            "{tray_label} · {addr} · {} req/min · {} active",
-                            stats.req_last_minute, stats.active_requests
-                        ),
-                        Err(_) => format!("{tray_label} · not serving"),
-                    });
+                    // The machine check (§2.4): "Graphics card needs
+                    // attention…" joins the menu when the verdict leaves
+                    // `ready` and goes when it is back. The icon stays: the
+                    // hold owns its second state.
+                    let machine: tauri::State<MachineTray> = app_for_status.state();
+                    let change = machine
+                        .watch
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .observe(state_for_status.machine.summary().as_ref());
+                    match &change {
+                        machine_tray::Change::Show(_) => {
+                            // Below the status lines and their separator.
+                            if let Err(e) = menu_for_status.insert(&machine_item, 3) {
+                                tracing::warn!("the tray's graphics card item: {e}");
+                            }
+                        }
+                        machine_tray::Change::Hide => {
+                            if let Err(e) = menu_for_status.remove(&machine_item) {
+                                tracing::warn!("the tray's graphics card item: {e}");
+                            }
+                        }
+                        machine_tray::Change::Reword(_) | machine_tray::Change::None => {}
+                    }
+                    if change != machine_tray::Change::None {
+                        refresh_tooltip(&app_for_status, snap.settings.hold.active);
+                    }
+                    let attention = machine.sentence();
+                    let _ = status_item.set_text(machine_tray::status_line(
+                        &match gateway.status() {
+                            Ok(addr) => format!(
+                                "{tray_label} · {addr} · {} req/min · {} active",
+                                stats.req_last_minute, stats.active_requests
+                            ),
+                            Err(_) => format!("{tray_label} · not serving"),
+                        },
+                        attention.as_deref(),
+                    ));
                     // One line for N containers (§3.2): the count, and how many
                     // of them are serving something right now.
                     let busy = runtime.iter().filter(|v| v.in_flight > 0).count();
@@ -739,6 +895,8 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Its size is written before a close hides it.
+            window_size::on_event(window, event);
             // Closing the window hides to tray; the gateway keeps running.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -762,6 +920,9 @@ fn main() {
             // and is waited for, then the containers stop; the exit is asked
             // for again once that has run.
             tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // While the window still exists (a Quit from the tray with it
+                // open: no close came first).
+                window_size::on_exit(app);
                 if gateway::exit_requested(app, code) {
                     api.prevent_exit();
                 }
@@ -836,6 +997,22 @@ mod tests {
         assert!(!ok("mailto:a@b.c"));
         assert!(!ok("lmgw-evil://x/y"));
         assert!(!ok("ms-msdt:/id"));
+    }
+
+    #[test]
+    fn the_tray_moves_the_page_and_loads_it_only_when_no_page_took_it() {
+        let url = "http://127.0.0.1:8001/settings/gpu#machine"
+            .parse::<tauri::Url>()
+            .unwrap();
+        let js = move_js("/settings/gpu#machine", &url);
+        assert!(js.contains(r#"var to="/settings/gpu#machine""#), "{js}");
+        assert!(js.contains(r#"if(location.origin==="http://127.0.0.1:8001")"#));
+        assert!(js.contains(r#"new CustomEvent("lmgw-navigate",{detail:{to:to},cancelable:true})"#));
+        assert!(js.contains("if(!window.dispatchEvent(e))return;"));
+        assert!(js.ends_with("location.assign(url);})();"));
+        // A route is a JSON string in the script, whatever it holds.
+        let odd = move_js("/x\"</script>", &url);
+        assert!(odd.contains(r#"var to="/x\"</script>""#), "{odd}");
     }
 
     #[test]

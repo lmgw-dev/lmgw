@@ -147,8 +147,7 @@ mod tests {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
                 capabilities_override: None,
                 ladder: Vec::new(),
             },
@@ -265,7 +264,7 @@ mod tests {
             &state.db,
             &store::NewUpstream {
                 name: "cloud".into(),
-                protocol: Protocol::Openai,
+                protocol: Protocol::OpenaiCompatible,
                 kind: UpstreamKind::Generic,
                 base_url: "https://example.invalid/v1".into(),
                 api_key: None,
@@ -289,6 +288,7 @@ mod tests {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await

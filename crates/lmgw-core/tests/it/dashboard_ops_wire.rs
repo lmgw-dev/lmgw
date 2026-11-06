@@ -81,6 +81,7 @@ async fn seed(state: &SharedState, prefix: &str, n: usize, created: &str) {
                 input_tokens: Some(1),
                 output_tokens: Some(2),
                 created_at: String::new(),
+                key_id: None,
             },
         )
         .await
@@ -99,7 +100,7 @@ async fn upstream(state: &SharedState, name: &str, base_url: String) -> i64 {
         &state.db,
         &NewUpstream {
             name: name.into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url,
             api_key: None,
@@ -161,8 +162,10 @@ async fn the_response_ops_answer_a_message() {
     );
 }
 
-/// A connection that works answers `{ok}`; one that
-/// does not is the usual refusal, with the upstream's own words.
+/// A connection that works answers `{ok, note}`, the note set only on an
+/// `openai` row whose host is not OpenAI's (openai egress design, decision
+/// 13); one that does not is the usual refusal, with the upstream's own
+/// words.
 #[tokio::test]
 async fn an_upstream_test_answers_that_it_connected() {
     let (state, gw) = gateway().await;
@@ -176,8 +179,24 @@ async fn an_upstream_test_answers_that_it_connected() {
 
     let live = op(&gw, "upstream_test", json!({"id": id})).await;
     let tested = common::round_trips::<dto::UpstreamTested>("upstream_test", &live);
-    assert_eq!(live, json!({"ok": true}));
+    assert_eq!(live, json!({"ok": true, "note": null}));
     assert!(tested.ok);
+
+    // The same server behind a row that says it is the OpenAI platform: it
+    // answers, and the Test says the host is not OpenAI's.
+    let platform = upstream(&state, "not-the-platform", up.uri()).await;
+    sqlx::query("UPDATE upstreams SET protocol = 'openai' WHERE id = ?1")
+        .bind(platform)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let live = op(&gw, "upstream_test", json!({"id": platform})).await;
+    let tested = common::round_trips::<dto::UpstreamTested>("upstream_test, openai", &live);
+    let note = tested
+        .note
+        .expect("an openai row off OpenAI's host is noted");
+    assert!(note.contains("is not api.openai.com"), "{note}");
 
     let down = MockServer::start().await;
     Mock::given(method("GET"))
@@ -383,6 +402,6 @@ async fn the_document_names_the_answer_of_each_op() {
         r.sort();
         r
     };
-    assert_eq!(required("UpstreamTested"), ["ok"]);
+    assert_eq!(required("UpstreamTested"), ["note", "ok"]);
     assert_eq!(required("ModelVisibilitySaved"), ["count", "message", "ok"]);
 }

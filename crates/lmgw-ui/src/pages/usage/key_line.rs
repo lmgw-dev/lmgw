@@ -89,7 +89,7 @@ pub(super) fn KeyLine(
             view! {
                 <span
                     class="dim"
-                    title="These requests spent money the gateway could not price, so they are missing from the figure beside them — unknown, not zero."
+                    title="These requests spent money the gateway could not price, so their cost is missing from the figure beside them — unknown, not zero. Some count in it with a lower bound: one unpriced only for a hosted tool's fee with what its tokens cost, an OpenAI answer at a tier above Standard with no price for it at the standard price, and a stream cut before its usage came with a local count of its text."
                 >
                     {format!(" · {n}")}
                 </span>
@@ -284,7 +284,7 @@ pub(super) fn KeyLine(
             <td class="clip key-scope mono-sm dim" title=scope>
                 {scope}
             </td>
-            <td class="clip key-spend" title=spend_tip>
+            <td class="clip key-spend col-spend" title=spend_tip>
                 {spend}
             </td>
             <td class="num col-p2">

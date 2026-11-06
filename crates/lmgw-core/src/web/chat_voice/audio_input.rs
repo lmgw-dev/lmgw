@@ -49,6 +49,7 @@ use serde::Serialize;
 use crate::capabilities::hears::{self, Hears};
 use crate::config::{FallbackRoute, Route, Snapshot};
 use crate::gate::{self, FallbackReason, RouteCheck};
+use crate::runtime::registry::Origin;
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store::{AudioInputMode, ChatThread, InputPath, KbMode};
@@ -186,7 +187,7 @@ pub(crate) async fn verdict(state: &SharedState, thread: &ChatThread) -> AudioIn
     if let Some(why) = no_asr(&snap, thread) {
         return AudioInput::transcript(alias, why);
     }
-    let routed = match gate::resolve(state, alias, RouteCheck::None).await {
+    let routed = match gate::resolve(state, alias, RouteCheck::None, Origin::Owner).await {
         Ok(r) => r,
         Err(e) => return AudioInput::transcript(alias, e.error.to_string()),
     };
@@ -350,11 +351,15 @@ async fn blocked(
 ) -> Option<AudioInput> {
     let target = crate::vram::classify(route).filter(|t| t.class == Class::Chat)?;
     let refused = |why: String| Some(AudioInput::transcript(alias, why));
-    let (fallback, route) = match snap.request_fallback(alias, &target) {
+    // Past a disabled hop to its own fallback, as a request goes.
+    let (fallback, route) = match snap
+        .past_disabled(snap.request_fallback(alias, &target), |_| false)
+        .1
+    {
         FallbackRoute::None => {
             return refused(format!("{alias} has no fallback, so the turn is refused"))
         }
-        FallbackRoute::Unusable { alias: fb, why } => {
+        FallbackRoute::Unusable { alias: fb, why, .. } => {
             return refused(format!(
                 "{alias}'s fallback {fb} {why}, so the turn is refused"
             ))
@@ -368,7 +373,9 @@ async fn blocked(
                 "{alias}'s fallback {fb} cannot be used, so the turn is refused"
             ))
         }
-        FallbackRoute::Usable { alias: fb, route } => (fb, route),
+        FallbackRoute::Usable {
+            alias: fb, route, ..
+        } => (fb, route),
     };
     Some(judge(state, snap, &fallback, &route, None, Said::Forecast).await)
 }

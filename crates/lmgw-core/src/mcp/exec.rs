@@ -52,19 +52,23 @@ use crate::state::SharedState;
 use super::kb::KbAccess;
 use super::scope::ToolScope;
 use super::spec::McpToolSpec;
-use super::{docs, kb, selfadmin};
+use super::{docs, kb, media, selfadmin};
 
 pub(crate) mod content;
 mod effective;
 mod labels;
+mod media_exec;
 mod served_by;
 mod target;
 
 pub use effective::ApprovalFloor;
 use labels::shown_to;
 pub use labels::{
-    label_entry, labels, list_label, LabelEntry, LabelError, LabelKind, LabelTool, LabelTools,
+    builtin_toolsets, label_entry, labels, list_label, list_label_unstarted, LabelEntry,
+    LabelError, LabelKind, LabelTool, LabelTools,
 };
+pub use media_exec::MediaExecutor;
+pub(crate) use media_exec::{LiveCall, LiveCalls};
 pub(crate) use served_by::server_of;
 pub(crate) use target::{label_target, label_target_in, LabelTarget, Target};
 
@@ -134,6 +138,18 @@ enum Origin {
     Attached,
 }
 
+/// Whether a resolution may start a service agent a label names
+/// (container-runtime §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Agents {
+    /// A run's: naming the label is the explicit ask that starts it.
+    Start,
+    /// A reader that runs nothing (the Chat's tool picker, chat-plane design
+    /// D16): an agent whose app is not running is said to be asleep, and its
+    /// tools are listed only while it runs.
+    AsTheyAre,
+}
+
 /// Tools resolved for one run, plus what to report per server.
 pub struct Resolved {
     pub tools: Vec<ResolvedTool>,
@@ -158,6 +174,12 @@ pub struct Resolved {
     /// For each offered tool a collision gave its server's prefix
     /// ([`super::names`]), the tool's own name — its wire name.
     pub moved: HashMap<String, String>,
+    /// The image and audio tools' default models the listed tools name
+    /// (chat-media-tools design §3.8), resolved once with the list: the
+    /// run's media executor takes them (`MediaExecutor::with_defaults`),
+    /// so a call that leaves out `model` runs on what the description
+    /// promised.
+    pub media_defaults: lmgw_api_types::chat_media::MediaDefaults,
 }
 
 /// Resolve the `{"type":"mcp"}` entries of a request against the registered
@@ -173,7 +195,14 @@ pub struct Resolved {
 /// its folder or an agent's manifest attached go through
 /// [`resolve_attached`].
 pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolScope) -> Resolved {
-    resolve_as(state, specs, scope, Origin::Supplied).await
+    resolve_as(
+        state,
+        specs,
+        scope,
+        (Origin::Supplied, Agents::Start),
+        &media::MediaLayers::default(),
+    )
+    .await
 }
 
 /// [`resolve`] for entries a Chat thread or its folder attached, or an
@@ -191,14 +220,41 @@ pub async fn resolve_attached(
     specs: &[McpToolSpec],
     scope: &ToolScope,
 ) -> Resolved {
-    resolve_as(state, specs, scope, Origin::Attached).await
+    resolve_as(
+        state,
+        specs,
+        scope,
+        (Origin::Attached, Agents::Start),
+        &media::MediaLayers::default(),
+    )
+    .await
+}
+
+/// [`resolve_attached`] for a Chat thread: the image and audio tools are
+/// listed with the default models of the thread and its folder laid over
+/// Settings → Chat's (chat-media-tools design §3.8).
+pub async fn resolve_attached_in_thread(
+    state: &SharedState,
+    specs: &[McpToolSpec],
+    scope: &ToolScope,
+    layers: &media::MediaLayers,
+) -> Resolved {
+    resolve_as(
+        state,
+        specs,
+        scope,
+        (Origin::Attached, Agents::Start),
+        layers,
+    )
+    .await
 }
 
 async fn resolve_as(
     state: &SharedState,
     specs: &[McpToolSpec],
     scope: &ToolScope,
-    origin: Origin,
+    (origin, agents): (Origin, Agents),
+    layers: &media::MediaLayers,
 ) -> Resolved {
     let mut out = Resolved {
         tools: Vec::new(),
@@ -208,11 +264,20 @@ async fn resolve_as(
         servers: HashMap::new(),
         ui_resources: HashMap::new(),
         moved: HashMap::new(),
+        media_defaults: Default::default(),
     };
     if specs.is_empty() {
         return out;
     }
     let snap = state.snapshot();
+    // What the image and audio toolsets offer, read once: their tools are
+    // listed from the rows, and a failed label names them among what may be
+    // attached.
+    let offer = media::offer(state)
+        .await
+        .within(&snap, scope.key())
+        .layered(layers);
+    out.media_defaults = offer.resolved_defaults();
     // A label naming a **service agent** is the explicit ask that starts its
     // container (container-runtime §3.3). The aggregate never starts one on its
     // own — listing every server's tools must not `podman run` every service on
@@ -221,9 +286,12 @@ async fn resolve_as(
     // by the loop below, like any other server that could not be reached.
     //
     // Only for a caller who could use it: naming a label is not a reason to
-    // start a container whose tools the caller's scope keeps out anyway.
+    // start a container whose tools the caller's scope keeps out anyway. And
+    // only for a run (`Agents::Start`): a reader that runs nothing lists
+    // what is up.
     let mut woke = false;
-    for spec in specs.iter().filter(|s| !leaves_nothing(s)) {
+    let starts = if agents == Agents::Start { specs } else { &[] };
+    for spec in starts.iter().filter(|s| !leaves_nothing(s)) {
         let Some(server) = find_server(&snap, &spec.server_label) else {
             continue;
         };
@@ -244,14 +312,10 @@ async fn resolve_as(
     // Only the servers named here are connected and listed (§1.2 of the
     // realtime-server-tools design): a built-in label needs none, and a label
     // the caller cannot reach is answered without one.
-    let named: Vec<i64> = specs
-        .iter()
-        .filter(|s| builtin_label(&s.server_label).is_none() && !leaves_nothing(s))
-        .filter_map(|s| find_server(&snap, &s.server_label))
-        .filter(|s| scope.may_reach(s))
-        .map(|s| s.id)
-        .collect();
-    let agg = state.mcp.list_tools_of(&snap, &named).await;
+    let agg = state
+        .mcp
+        .list_tools_of(&snap, &listed_for(&snap, specs, scope))
+        .await;
     // An agent's list names a label's *current* tools, and a service agent
     // that was asleep a moment ago had none; read it again now it is up.
     let refreshed = if woke {
@@ -266,7 +330,7 @@ async fn resolve_as(
         // registered servers are searched — `ops` refuses those labels for a
         // user-created server, so there is nothing here to shadow.
         if let Some(label) = builtin_label(&spec.server_label) {
-            match resolve_builtin(&snap, label, spec, scope) {
+            match resolve_builtin(&snap, &offer, label, spec, scope) {
                 Ok(defs) => {
                     out.builtin.extend(defs.iter().map(|d| d.name.clone()));
                     out.tools.extend(defs.iter().map(|d| {
@@ -282,17 +346,11 @@ async fn resolve_as(
         }
         // A server this caller can never use is answered like one that does
         // not exist when the caller named it, so a scoped key cannot map the
-        // inventory by probing; a label the thread attached says why. A bare
-        // server has no namespace for `may_reach` to read — it was only
-        // worth connecting — so it is known now, by what it lists: one that
-        // offers this caller nothing is not there for it either.
+        // inventory by probing; a label the thread attached says why.
         let found = find_server(&snap, &spec.server_label);
-        let Some(server) = found
-            .filter(|s| scope.may_reach(s))
-            .filter(|s| !s.tool_prefix.trim().is_empty() || shown_to(s, &agg, scope))
-        else {
+        let Some(server) = found.filter(|s| reaches(s, &agg, scope)) else {
             out.failed
-                .push(unreached(&snap, &agg, scope, spec, found, origin));
+                .push(unreached((&snap, &offer), &agg, scope, spec, found, origin));
             continue;
         };
         if !server.enabled {
@@ -382,6 +440,7 @@ async fn resolve_as(
                 description: t.description.as_ref().map(|d| d.to_string()),
                 parameters: serde_json::to_value(&t.input_schema)
                     .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
+                strict: None,
             });
         }
 
@@ -399,12 +458,26 @@ async fn resolve_as(
                 );
                 continue;
             }
+            // A service agent this resolution may not start, its app not
+            // running: asleep, as the MCP page says, not a server that
+            // exposes nothing.
+            let asleep = (agents == Agents::AsTheyAre)
+                .then_some(server.agent_id.as_deref())
+                .flatten()
+                .filter(|agent| state.agent_services.get(agent).is_none());
             // Prefer the connection's own error — "container image not found"
             // is a far better answer than "the server exposed no tools".
-            let (code, detail) = match state.mcp.status_view(server.id, &snap).await {
-                Some(v) if v.detail.as_ref().is_some_and(|d| !d.is_empty()) => {
+            let (code, detail) = match (state.mcp.status_view(server.id, &snap).await, asleep) {
+                (Some(v), _) if v.detail.as_ref().is_some_and(|d| !d.is_empty()) => {
                     (LabelCode::Failed, v.detail.unwrap_or_default())
                 }
+                (_, Some(agent)) => (
+                    LabelCode::Failed,
+                    format!(
+                        "the service agent '{agent}' is not running: its tools are listed once \
+                         it runs, and a turn that attaches it starts it"
+                    ),
+                ),
                 _ if scoped_out > 0 => (
                     LabelCode::Unreachable,
                     format!(
@@ -447,6 +520,74 @@ async fn resolve_as(
     out
 }
 
+/// The servers [`resolve`] connects and lists for `specs`: those the entries
+/// name, bar a built-in label and an entry whose `allowed_tools` leaves
+/// nothing, that `scope` may reach.
+fn listed_for(snap: &Snapshot, specs: &[McpToolSpec], scope: &ToolScope) -> Vec<i64> {
+    specs
+        .iter()
+        .filter(|s| builtin_label(&s.server_label).is_none() && !leaves_nothing(s))
+        .filter_map(|s| find_server(snap, &s.server_label))
+        .filter(|s| scope.may_reach(s))
+        .map(|s| s.id)
+        .collect()
+}
+
+/// Whether a registered server is there for this caller at all, given
+/// `agg`, the list [`listed_for`] took: one `scope` may reach and, for a
+/// bare server, one that lists the caller something. A bare server has no
+/// namespace for `may_reach` to read (it is only worth connecting), so it is
+/// known by what it lists: one that offers this caller nothing is not there
+/// for it either.
+fn reaches(server: &crate::config::McpServer, agg: &super::Aggregate, scope: &ToolScope) -> bool {
+    scope.may_reach(server)
+        && (!server.tool_prefix.trim().is_empty() || shown_to(server, agg, scope))
+}
+
+/// Per entry of `specs`, whether lmgw itself serves its label to this
+/// caller: a built-in toolset's reserved label, or a registered server
+/// [`resolve`] would find there for it ([`reaches`]). A `/v1/responses`
+/// request naming such a label stays in lmgw's own loop on an upstream that
+/// would otherwise get the request natively, since that upstream would try
+/// to reach the server itself (openai egress design §6, decision 12).
+///
+/// The answer is `resolve`'s, so the path a request takes tells a scoped key
+/// no more than `resolve`'s answer would: a server it may not reach, and a
+/// bare one that lists it nothing, are not served, like a label nothing
+/// registers. Only a bare server under a narrowing scope needs its list for
+/// that; the servers are listed then, the same set `resolve` lists, and not
+/// otherwise. A service agent's server that is asleep is not woken for the
+/// question (`resolve` wakes it): asleep and bare, it lists nothing yet, and
+/// counts as not served.
+pub(crate) async fn serves(
+    state: &SharedState,
+    specs: &[McpToolSpec],
+    scope: &ToolScope,
+) -> Vec<bool> {
+    let snap = state.snapshot();
+    let needs_list = specs.iter().any(|spec| {
+        builtin_label(&spec.server_label).is_none()
+            && find_server(&snap, &spec.server_label).is_some_and(|s| {
+                s.tool_prefix.trim().is_empty() && scope.may_reach(s) && scope.narrows_for(s)
+            })
+    });
+    let agg = if needs_list {
+        state
+            .mcp
+            .list_tools_of(&snap, &listed_for(&snap, specs, scope))
+            .await
+    } else {
+        super::Aggregate::default()
+    };
+    specs
+        .iter()
+        .map(|spec| {
+            builtin_label(&spec.server_label).is_some()
+                || find_server(&snap, &spec.server_label).is_some_and(|s| reaches(s, &agg, scope))
+        })
+        .collect()
+}
+
 fn find_server<'a>(snap: &'a Snapshot, label: &str) -> Option<&'a crate::config::McpServer> {
     snap.mcp_servers
         .values()
@@ -465,7 +606,7 @@ fn find_server<'a>(snap: &'a Snapshot, label: &str) -> Option<&'a crate::config:
 /// a paired device's hosted tools its key is not granted, a server its tool
 /// scope keeps whole out, or a label nothing registers.
 fn unreached(
-    snap: &Snapshot,
+    (snap, offer): (&Snapshot, &media::Offer),
     agg: &super::Aggregate,
     scope: &ToolScope,
     spec: &McpToolSpec,
@@ -476,7 +617,7 @@ fn unreached(
     let unknown = || {
         format!(
             "no MCP server with label '{label}' is registered on this gateway (available: {})",
-            available_labels(snap, agg, scope)
+            available_labels(snap, offer, agg, scope)
         )
     };
     match (origin, found) {
@@ -517,7 +658,12 @@ fn unreached(
 /// server none of whose tools it may use, or it would learn the gateway's
 /// inventory from its own typos. An unscoped caller still hears about a server
 /// that offers nothing right now — its failure is reported where it is named.
-fn available_labels(snap: &Snapshot, agg: &super::Aggregate, scope: &ToolScope) -> String {
+fn available_labels(
+    snap: &Snapshot,
+    offer: &media::Offer,
+    agg: &super::Aggregate,
+    scope: &ToolScope,
+) -> String {
     let mut labels: Vec<String> = snap
         .mcp_servers
         .values()
@@ -532,6 +678,11 @@ fn available_labels(snap: &Snapshot, agg: &super::Aggregate, scope: &ToolScope) 
                 .is_some_and(|n| scope.admits(n))
         })
     };
+    for label in [media::AUDIO_LABEL, media::IMAGE_LABEL] {
+        if admits_any(offer.tools(label)) {
+            labels.insert(0, label.to_string());
+        }
+    }
     if admits_any(kb::list()) {
         labels.insert(0, KB_LABEL.to_string());
     }
@@ -568,6 +719,8 @@ fn builtin_label(label: &str) -> Option<&'static str> {
         SELF_ADMIN_LABEL => Some(SELF_ADMIN_LABEL),
         DOCS_LABEL => Some(DOCS_LABEL),
         KB_LABEL => Some(KB_LABEL),
+        media::IMAGE_LABEL => Some(media::IMAGE_LABEL),
+        media::AUDIO_LABEL => Some(media::AUDIO_LABEL),
         _ => None,
     }
 }
@@ -607,6 +760,7 @@ fn tool_def(entry: &Value) -> ToolDef {
             .get("inputSchema")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+        strict: None,
     }
 }
 
@@ -616,6 +770,7 @@ fn tool_def(entry: &Value) -> ToolDef {
 /// that resolved to nothing must say why rather than quietly not being there.
 fn resolve_builtin(
     snap: &Snapshot,
+    offer: &media::Offer,
     label: &'static str,
     spec: &McpToolSpec,
     scope: &ToolScope,
@@ -637,15 +792,19 @@ fn resolve_builtin(
         // At the caller's level: a device's own, capped by the gateway's.
         SELF_ADMIN_LABEL => selfadmin::list(scope.admin_level(snap.settings.self_admin)),
         KB_LABEL => kb::list(),
+        media::IMAGE_LABEL | media::AUDIO_LABEL => offer.tools(label),
         _ => docs::list(),
     };
     if entries.is_empty() {
+        let why = match label {
+            media::IMAGE_LABEL | media::AUDIO_LABEL => media::Offer::nothing_offered(label),
+            _ => "the self-admin tools are switched off (Self-admin tools, under Settings → \
+                  Network & access)"
+                .to_string(),
+        };
         return Err((
             LabelCode::Disabled,
-            format!(
-                "the '{label}' toolset offers nothing right now: the self-admin tools are \
-                 switched off (Self-admin tools, under Settings → Network & access)"
-            ),
+            format!("the '{label}' toolset offers nothing right now: {why}"),
         ));
     }
     let offered: Vec<ToolDef> = entries.iter().map(tool_def).collect();
@@ -1033,13 +1192,15 @@ impl ToolExecutor for DocsExecutor {
             let call = if self.state.snapshot().tool_disabled(name) {
                 Ok(selfadmin::err_result(&super::disabled_message(name)))
             } else {
+                // The run's own traffic (per-request background design §7):
+                // a `/v1/responses` guest's query embeds as a guest.
                 let charged = self.charged.as_ref();
                 docs::call(
                     &self.state,
                     name,
                     arguments,
                     self.client.as_deref(),
-                    charged,
+                    (charged, self.ctx.origin()),
                 )
                 .await
             };
@@ -1149,7 +1310,11 @@ impl ToolExecutor for KbExecutor {
                     name,
                     arguments,
                     &self.access,
-                    (self.default_budget, self.charged.as_ref()),
+                    (
+                        self.default_budget,
+                        self.charged.as_ref(),
+                        self.ctx.origin(),
+                    ),
                 )
                 .await
             };
@@ -1210,6 +1375,7 @@ pub struct SplitExecutor {
     admin: SelfAdminExecutor,
     docs: DocsExecutor,
     kb: KbExecutor,
+    media: MediaExecutor,
     builtin_names: HashSet<String>,
     mcp: McpExecutor,
 }
@@ -1229,13 +1395,48 @@ impl SplitExecutor {
         let kb = KbExecutor::new(docs.state.clone(), docs.ctx.clone())
             .with_proto(docs.proto)
             .charged_to(docs.charged.clone());
+        // Thread-less (chat-media-tools design §3.6): `att:N` names nothing
+        // here, and the files come back in the result. The Chat replaces it
+        // with its thread's ([`Self::with_media`]).
+        let media = MediaExecutor::new(docs.state.clone(), docs.ctx.clone())
+            .with_proto(docs.proto)
+            .charged_to(docs.charged.clone());
         Self {
             admin,
             docs,
             kb,
+            media,
             builtin_names: builtin_names.into_iter().collect(),
             mcp,
         }
+    }
+
+    /// The image and audio half this run uses — a Chat thread's, which
+    /// stores the files ([`MediaExecutor::for_thread`]).
+    pub fn with_media(mut self, media: MediaExecutor) -> Self {
+        self.media = media;
+        self
+    }
+
+    /// The media defaults the run's tool block named
+    /// ([`Resolved::media_defaults`]).
+    pub fn with_media_defaults(
+        mut self,
+        defaults: lmgw_api_types::chat_media::MediaDefaults,
+    ) -> Self {
+        self.media = self.media.with_defaults(defaults);
+        self
+    }
+
+    /// The image and audio half lets the run's GPU claim go before a call
+    /// that needs the GPU ([`MediaExecutor::with_hooks`],
+    /// `agent::claim::media`).
+    pub(crate) fn with_media_hooks(
+        mut self,
+        hooks: std::sync::Arc<dyn crate::proxy::image_call::Hooks>,
+    ) -> Self {
+        self.media = self.media.with_hooks(hooks);
+        self
     }
 
     /// The knowledge-base half this run uses — a Chat thread's, restricted
@@ -1256,6 +1457,8 @@ impl ToolExecutor for SplitExecutor {
                 self.admin.call(name, args).await
             } else if kb::owns(name) {
                 self.kb.call(name, args).await
+            } else if media::owns(name) {
+                self.media.call(name, args).await
             } else {
                 self.docs.call(name, args).await
             }

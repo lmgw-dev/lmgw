@@ -10,6 +10,13 @@
 //! So what such a container is still to take is its expected residency
 //! minus what it holds at rest ([`super::pending`]). Nothing is stored: the
 //! figure belongs to this container, not to the row.
+//!
+//! One reading per container goes stale: a build that creates its CUDA
+//! context only at its first load reads 0 B here and keeps the context
+//! after an idle unload, and a load lmgw did not route is not seen at all.
+//! The ledger's own reading of what the container holds now
+//! ([`super::now`]) covers both; this one stays the figure where that one
+//! is not taken.
 
 use std::time::Instant;
 

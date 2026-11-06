@@ -928,6 +928,10 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
     let mut keys = Vec::with_capacity(snap.api_keys.len());
     for k in &snap.api_keys {
         let period_start = k.policy.budget_period.start_hour_key(now);
+        // What the budget counts: an unpriced request with a budget floor
+        // (a hosted tool's fee, a tier above Standard with no price, a cut
+        // stream's local count) is in it with that floor, and in the
+        // unknown counts below too (`KeyRow::spent_micro`).
         let spent_micro = store::key_spend_micro(&st.db, k.id, &period_start)
             .await
             .map_err(|e| e.to_string())?;
@@ -994,10 +998,12 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
                 .collect(),
             open_links: open_links(st, k.id),
             pairing: device.then(|| crate::devices::pairing_view(k, tokens.get(&k.id), now)),
+            app_id: k.link.app_id.clone().filter(|_| device),
         });
     }
 
     let global_period_start = snap.settings.global_budget_period.start_hour_key(now);
+    // Budget floors included, as each key's (`KeysResponse::global_spent_micro`).
     let global_spent_micro = store::total_spend_micro(&st.db, &global_period_start)
         .await
         .map_err(|e| e.to_string())?;
@@ -1047,11 +1053,19 @@ async fn prices_inner(st: &SharedState) -> Result<dto::PricesResponse, String> {
         .into_iter()
         .map(|(name, requests)| dto::UnpricedModel { name, requests })
         .collect();
+    // What answered at an OpenAI service tier with no row (openai egress
+    // design §5.6): counted toward no budget until one is entered.
+    let unpriced_tiers = crate::ops::unpriced_tiers(st).await?;
+    // What a hosted tool's fees left unpriced (openai egress design §6.1):
+    // no price unit covers them yet.
+    let unpriced_hosted_tools = crate::ops::unpriced_hosted_tools(st).await?;
 
     Ok(dto::PricesResponse {
         prices,
         currency: snap.settings.currency.clone(),
         unpriced_models,
+        unpriced_tiers,
+        unpriced_hosted_tools,
     })
 }
 

@@ -1,5 +1,16 @@
 # The lab store and the Decision lab
 
+*Change note, 2026-10-24 (owner rulings, built in WP10 on 2026-10-25):* one fallback setting per model and per
+alias, used for every reason it cannot answer (the hold, a benchmark, VRAM outside lmgw, a
+deferred background request, an unavailable candidate, an exhausted upstream quota, an unreachable
+upstream, a disabled model, alias or upstream); the reason is recorded, never configured. The
+global `settings.hold.fallback_alias` and the `inherit` mode are removed, and a fallback may be a
+local model, with each hop of a chain checked on its own. A fallback is a model of the same type
+(decision 29): a save that would give any row's fallback another type, a candidate alias or a
+loop is refused, naming the row. The Decision
+lab's `hold_fallback` field becomes `fallback`, the row's one fallback. See
+[2026-10-24-openai-egress-design.md](2026-10-24-openai-egress-design.md) §14.11.
+
 The owner asked on 2026-10-16 for a dashboard surface for decision models (`POST /v1/systemone`,
 aux kind `decision`, prefix `decide/`; decision-models design 2026-10-12), and approved an
 outline the same day. The dashboard's labs exist first to test models and routes; productive use

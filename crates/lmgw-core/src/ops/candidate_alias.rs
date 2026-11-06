@@ -8,8 +8,8 @@
 //! A child module of [`crate::ops`] (like [`super::backends`]) so the parent
 //! file only carries the `mod` line and the re-export; everything below
 //! freely reaches the parent's private helpers (`opt`, `clear_names`,
-//! `clear_has`, `require_all`, `validate_fallback_alias`,
-//! `candidate_alias_name_taken`) through `super::`, exactly as if this code
+//! `clear_has`, `require_all`, `candidate_alias_name_taken`, the fallback
+//! save checks in [`super::fallback`]) through `super::`, exactly as if this code
 //! still lived there.
 
 use serde::Deserialize;
@@ -18,7 +18,8 @@ use lmgw_api_types as dto;
 
 use crate::candidates::{self, FacetSet};
 use crate::capabilities::exposed;
-use crate::config::{CandidateAlias, FallbackRoute, HoldFallbackMode, Snapshot};
+use crate::config::{CandidateAlias, FallbackRoute, HopKey, Snapshot};
+use crate::detached::detached;
 use crate::state::SharedState;
 use crate::store::{self, NewCandidateAlias};
 
@@ -36,11 +37,11 @@ pub struct CandidateAliasPatch {
     /// empty list, so emptying it means `delete`.
     pub candidates: Option<String>,
     pub background: Option<bool>,
-    pub fallback_mode: Option<HoldFallbackMode>,
-    /// The alias `fallback_mode = alias` routes to. Required (here or
-    /// already on the row) when that mode is set; validated like every
-    /// other fallback (must resolve, must not be local, must not be another
-    /// candidate alias).
+    /// The model or alias that answers for the whole alias when it cannot:
+    /// the GPU hold, VRAM outside lmgw, background traffic deferred, or no
+    /// usable candidate (openai egress design §14.2). A chat model: a local
+    /// model id, a passthrough id or a plain alias; not a candidate alias.
+    /// Chains are allowed; a loop is refused. `clear: "fallback"` removes it.
     pub fallback: Option<String>,
     /// Facet wire names switched off (`vision`, `audio`, `tool_calls`,
     /// `reasoning`, `structured_output`) — the **full** desired list, not a
@@ -52,7 +53,7 @@ pub struct CandidateAliasPatch {
     pub enabled: Option<bool>,
     pub notes: Option<String>,
     /// Field names to reset to unset, comma/space-separated. Only
-    /// `capabilities_disabled` and `notes` are clearable here.
+    /// `capabilities_disabled`, `fallback` and `notes` are clearable here.
     pub clear: Option<String>,
 }
 
@@ -75,31 +76,29 @@ fn find(
         .ok_or_else(|| format!("no candidate alias named '{alias}'"))
 }
 
-/// `fallback_mode`/`fallback` resolution, the candidate-alias twin of
-/// `super::resolve_hold_fallback_text` — not reused directly because that
-/// one's `clear` name is `"hold_fallback"` and this column has no `hold_`
-/// prefix (§4.1's own naming).
-fn resolve_fallback(
-    snap: &Snapshot,
+/// The save's fallback (openai egress design §14.2): the patch field over
+/// `current`, checked when it changes — and the notes the save answers
+/// with. `owner` is the alias after this save, `key` its identity now.
+async fn settle_fallback(
+    state: &SharedState,
     p: &CandidateAliasPatch,
-    current: (HoldFallbackMode, Option<String>),
-) -> Result<(HoldFallbackMode, Option<String>), String> {
-    if super::clear_has(p.clear.as_deref(), "fallback") {
-        return Ok((HoldFallbackMode::Inherit, None));
+    key: Option<HopKey>,
+    name: &str,
+    old_name: Option<String>,
+    current: Option<String>,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let fallback = super::fallback::patched(p.clear.as_deref(), &p.fallback, current.clone())?;
+    let mut notes = Vec::new();
+    if let (Some(f), true) = (&fallback, fallback != current) {
+        let owner = super::fallback::Owner::typed(
+            key,
+            name.to_string(),
+            super::fallback::ModelType::chat(),
+        )
+        .renamed_from(old_name);
+        notes = super::fallback::validate(state, &owner, f).await?;
     }
-    let (cur_mode, cur_alias) = current;
-    let mode = p.fallback_mode.unwrap_or(cur_mode);
-    match mode {
-        HoldFallbackMode::Alias => {
-            let alias = super::opt(&p.fallback).or(cur_alias).ok_or(
-                "fallback_mode 'alias' requires fallback (the alias this candidate alias falls \
-                 back to)",
-            )?;
-            super::validate_fallback_alias(snap, &alias).map_err(|e| format!("fallback: {e}"))?;
-            Ok((mode, Some(alias)))
-        }
-        HoldFallbackMode::Inherit | HoldFallbackMode::None => Ok((mode, None)),
-    }
+    Ok((fallback, notes))
 }
 
 /// Every save-time refusal of §4.1/§4.6 in one place, and the resulting row
@@ -130,7 +129,6 @@ async fn build_and_validate(
     alias: String,
     candidates_list: Vec<String>,
     background: bool,
-    fallback_mode: HoldFallbackMode,
     fallback: Option<String>,
     disabled: FacetSet,
     previously_saved: Option<(FacetSet, FacetSet)>,
@@ -154,7 +152,6 @@ async fn build_and_validate(
         alias: alias.clone(),
         candidates: candidates_list,
         background,
-        fallback_mode,
         fallback,
         capabilities_disabled: Vec::new(),
         capabilities_enabled: Vec::new(),
@@ -186,7 +183,6 @@ fn to_new(row: &CandidateAlias) -> NewCandidateAlias {
         alias: row.alias.clone(),
         candidates: row.candidates.clone(),
         background: row.background,
-        fallback_mode: row.fallback_mode,
         fallback: row.fallback.clone(),
         capabilities_disabled: row.capabilities_disabled.clone(),
         capabilities_enabled: row.capabilities_enabled.clone(),
@@ -205,6 +201,7 @@ async fn saved_view(
     id: i64,
     alias: &str,
     message: String,
+    mut fallback_notes: Vec<String>,
 ) -> Result<dto::CandidateAliasSaved, String> {
     let snap = state.reload_snapshot().await.map_err(|e| e.to_string())?;
     let Some(row) = snap.candidate_aliases.get(&alias.to_lowercase()) else {
@@ -215,9 +212,13 @@ async fn saved_view(
             ok: true,
             id,
             message,
+            fallback_notes,
             ..Default::default()
         });
     };
+    if let Some(f) = row.fallback.as_deref() {
+        fallback_notes.extend(super::fallback::facet_notes(state, &row.alias, f).await);
+    }
     let derived = candidates::derive::derive(state, &snap, row).await;
     Ok(dto::CandidateAliasSaved {
         ok: true,
@@ -231,6 +232,7 @@ async fn saved_view(
         context_length: Some(derived.context_length),
         max_output_tokens: Some(derived.max_output_tokens),
         message,
+        fallback_notes,
     })
 }
 
@@ -294,15 +296,23 @@ async fn preview(
     let background = p
         .background
         .unwrap_or_else(|| current.as_ref().is_some_and(|c| c.background));
-    let base_fallback = current
-        .as_ref()
-        .map(|c| (c.fallback_mode, c.fallback.clone()))
-        .unwrap_or((HoldFallbackMode::Inherit, None));
-    let (fallback_mode, fallback) = match resolve_fallback(snap, p, base_fallback) {
-        Ok(v) => v,
+    let preview_name = super::opt(&p.alias)
+        .or_else(|| current.as_ref().map(|c| c.alias.clone()))
+        .unwrap_or_default();
+    let fallback = match settle_fallback(
+        state,
+        p,
+        current.as_ref().map(|c| HopKey::Candidate(c.id)),
+        &preview_name,
+        current.as_ref().map(|c| c.alias.clone()),
+        current.as_ref().and_then(|c| c.fallback.clone()),
+    )
+    .await
+    {
+        Ok((v, _)) => v,
         Err(e) => {
             error.get_or_insert(e);
-            (HoldFallbackMode::Inherit, None)
+            None
         }
     };
 
@@ -365,7 +375,6 @@ async fn preview(
         alias: alias_name,
         candidates: candidates_list.clone(),
         background,
-        fallback_mode,
         fallback,
         capabilities_disabled: Vec::new(),
         capabilities_enabled: Vec::new(),
@@ -384,7 +393,10 @@ async fn preview(
         Ok((enabled, _disabled)) => {
             // One that lacks an enabled facet is usable all the same
             // (changed 2026-10-06); `derive`'s advisories name what it lacks.
-            let usable = matches!(snap.alias_fallback(&probe), FallbackRoute::Usable { .. });
+            let usable = matches!(
+                snap.fallback_named(probe.fallback.as_deref()),
+                FallbackRoute::Usable { .. }
+            );
             (enabled, usable)
         }
         Err(e) => {
@@ -437,6 +449,8 @@ pub async fn candidate_alias_set(
     state: &SharedState,
     p: CandidateAliasPatch,
 ) -> Result<dto::CandidateAliasAnswer, String> {
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = state.routing_write().await;
     let snap = state.snapshot();
 
     match p.action.as_str() {
@@ -458,8 +472,8 @@ pub async fn candidate_alias_set(
                 .map(String::from)
                 .collect();
             let background = p.background.unwrap_or(false);
-            let (fallback_mode, fallback) =
-                resolve_fallback(&snap, &p, (HoldFallbackMode::Inherit, None))?;
+            let (fallback, fallback_notes) =
+                settle_fallback(state, &p, None, &alias, None, None).await?;
             // Nothing stored before: a patch that never mentioned the field
             // disables nothing, and `build_and_validate`'s `previously_saved
             // : None` below means none of it can be refused either
@@ -476,7 +490,6 @@ pub async fn candidate_alias_set(
                 alias.clone(),
                 candidates_list,
                 background,
-                fallback_mode,
                 fallback,
                 disabled,
                 None,
@@ -484,17 +497,45 @@ pub async fn candidate_alias_set(
                 p.enabled.unwrap_or(true),
             )
             .await?;
-            let id = store::insert_candidate_alias(&state.db, &to_new(&row))
+            // A fallback that holds the new name reaches this alias from now
+            // on, and a candidate alias cannot be one: a dry run (§14.2).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            saved_view(
+            let dry = store::insert_candidate_alias_in(&mut tx, &to_new(&row))
+                .await
+                .map_err(|e| e.to_string())?;
+            let own = (store::FallbackTable::CandidateAliases, dry);
+            super::fallback::dry_run(
                 state,
-                id,
-                &alias,
-                format!("candidate alias '{alias}' created"),
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(own.0, dry)],
+                Some(own),
             )
+            .await?;
+            // The write and the reload after it are a task of their own
+            // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot without the new alias.
+            let st = state.clone();
+            detached("creating the candidate alias", async move {
+                // Until the view below has reloaded the snapshot.
+                let _routing = routing;
+                let id = store::insert_candidate_alias(&st.db, &to_new(&row))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                saved_view(
+                    &st,
+                    id,
+                    &alias,
+                    format!("candidate alias '{alias}' created"),
+                    fallback_notes,
+                )
+                .await
+                .map(dto::CandidateAliasAnswer::Saved)
+            })
             .await
-            .map(dto::CandidateAliasAnswer::Saved)
+            .map_err(|r| r.message)?
         }
         "update" | "enable" | "disable" => {
             let all = store::list_candidate_aliases(&state.db)
@@ -534,8 +575,26 @@ pub async fn candidate_alias_set(
                 None => cur.candidates.clone(),
             };
             let background = p.background.unwrap_or(cur.background);
-            let (fallback_mode, fallback) =
-                resolve_fallback(&snap, &p, (cur.fallback_mode, cur.fallback.clone()))?;
+            let key = HopKey::Candidate(cur.id);
+            let (fallback, mut fallback_notes) = settle_fallback(
+                state,
+                &p,
+                Some(key.clone()),
+                &new_alias,
+                Some(cur.alias.clone()),
+                cur.fallback.clone(),
+            )
+            .await?;
+            // A rename never breaks a chain (decision 27).
+            let rewrites = match new_alias != cur.alias {
+                true => super::fallback::rename_rewrites(
+                    &snap,
+                    &[(key.clone(), new_alias.clone())],
+                    Some(&key),
+                ),
+                false => super::fallback::Rewrites::default(),
+            };
+            fallback_notes.extend(rewrites.notes.iter().cloned());
             // The row's own stored (enabled, disabled) — `previously_saved`
             // below, held to account (`resolve_enabled`'s own doc comment):
             // an untouched field carries `disabled` forward unchanged, but
@@ -563,7 +622,6 @@ pub async fn candidate_alias_set(
                 new_alias.clone(),
                 candidates_list,
                 background,
-                fallback_mode,
                 fallback,
                 disabled,
                 Some((prev_enabled, prev_disabled)),
@@ -572,36 +630,82 @@ pub async fn candidate_alias_set(
             )
             .await?;
             row.id = cur.id;
-            store::update_candidate_alias(&state.db, cur.id, &to_new(&row))
+            // What a rename, an enable or a disable does to the fallbacks
+            // naming this alias, in a dry run (§14.2).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            saved_view(
+            store::update_candidate_alias_in(&mut tx, cur.id, &to_new(&row))
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let own = (store::FallbackTable::CandidateAliases, cur.id);
+            super::fallback::dry_run(
                 state,
-                cur.id,
-                &new_alias,
-                format!(
-                    "candidate alias '{new_alias}' {}",
-                    super::saved_verb(&p.action)
-                ),
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(own.0, own.1)],
+                (row.fallback.is_some() && row.fallback != cur.fallback).then_some(own),
             )
+            .await?;
+            let message = format!(
+                "candidate alias '{new_alias}' {}",
+                super::saved_verb(&p.action)
+            );
+            // The write and the reload after it are a task of their own
+            // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot serving the old alias.
+            let st = state.clone();
+            let id = cur.id;
+            detached("updating the candidate alias", async move {
+                // Until the view below has reloaded the snapshot.
+                let _routing = routing;
+                let mut tx = store::begin_write(&st.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_candidate_alias_in(&mut tx, id, &to_new(&row))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                saved_view(&st, id, &new_alias, message, fallback_notes)
+                    .await
+                    .map(dto::CandidateAliasAnswer::Saved)
+            })
             .await
-            .map(dto::CandidateAliasAnswer::Saved)
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let all = store::list_candidate_aliases(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
             let cur = find(p.id, super::opt(&p.alias), all)?;
-            store::delete_candidate_alias(&state.db, cur.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::CandidateAliasAnswer::Saved(dto::CandidateAliasSaved {
-                ok: true,
-                id: cur.id,
-                message: format!("candidate alias '{}' deleted", cur.alias),
-                ..Default::default()
-            }))
+            let fallback_notes = super::fallback::delete_notes(&snap, &HopKey::Candidate(cur.id));
+            // The delete and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped
+            // request would leave the snapshot serving the deleted alias.
+            let st = state.clone();
+            detached("deleting the candidate alias", async move {
+                store::delete_candidate_alias(&st.db, cur.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(dto::CandidateAliasAnswer::Saved(dto::CandidateAliasSaved {
+                    ok: true,
+                    id: cur.id,
+                    message: format!("candidate alias '{}' deleted", cur.alias),
+                    fallback_notes,
+                    ..Default::default()
+                }))
+            })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable|preview)"
@@ -620,9 +724,15 @@ mod tests {
     #[tokio::test]
     async fn a_row_that_vanished_before_the_read_back_answers_the_write_alone() {
         let state = AppState::init_for_tests().await.unwrap();
-        let answer = saved_view(&state, 7, "ghost", "candidate alias 'ghost' created".into())
-            .await
-            .unwrap();
+        let answer = saved_view(
+            &state,
+            7,
+            "ghost",
+            "candidate alias 'ghost' created".into(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             crate::ops::backends::to_json(Ok(answer)).unwrap(),
             serde_json::json!({

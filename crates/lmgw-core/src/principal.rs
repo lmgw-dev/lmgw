@@ -44,7 +44,7 @@ pub enum Principal {
     },
 }
 
-/// What a route needs (§3.2). Six words, and every route declares exactly
+/// What a route needs (§3.2). Seven words, and every route declares exactly
 /// one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cap {
@@ -53,6 +53,13 @@ pub enum Cap {
     /// The Chat API (client-apps design §1.2): threads, folders, the voice
     /// binding. Held by an owner and by a paired device, and by nobody else.
     Chat,
+    /// Transfers between devices (device transfers design §10, I1):
+    /// `/transfers/api`. Held by an owner and by a paired device, nobody
+    /// else; one without it is refused 403 `transfer_device_only` (an
+    /// anonymous request 401 `session_required`). Not `Inference`: no
+    /// request slot, no rate window, and **Require API key** off admits
+    /// nobody.
+    Transfer,
     Ledger,
     AgentSelf,
     Admin,
@@ -65,6 +72,7 @@ impl Cap {
             Self::Public => "public",
             Self::Inference => "inference",
             Self::Chat => "chat",
+            Self::Transfer => "transfer",
             Self::Ledger => "ledger",
             Self::AgentSelf => "agent-self",
             Self::Admin => "admin",
@@ -97,6 +105,17 @@ impl Principal {
             self,
             Self::Key {
                 kind: ApiKeyKind::Device,
+                ..
+            }
+        )
+    }
+
+    /// Whether it is an owner credential (principals §3.1).
+    pub fn is_owner(&self) -> bool {
+        matches!(
+            self,
+            Self::Key {
+                kind: ApiKeyKind::Owner,
                 ..
             }
         )
@@ -140,7 +159,7 @@ impl Principal {
             Self::Anonymous => match cap {
                 Cap::Public => true,
                 Cap::Inference => !snap.settings.auth_enabled,
-                Cap::Chat | Cap::Ledger | Cap::AgentSelf | Cap::Admin => false,
+                Cap::Chat | Cap::Transfer | Cap::Ledger | Cap::AgentSelf | Cap::Admin => false,
             },
             Self::Key { kind, .. } => match kind {
                 // Every enabled owner row holds everything an owner holds, and
@@ -154,7 +173,12 @@ impl Principal {
                 // a run that happened to exist.
                 ApiKeyKind::Owner => matches!(
                     cap,
-                    Cap::Public | Cap::Inference | Cap::Chat | Cap::AgentSelf | Cap::Admin
+                    Cap::Public
+                        | Cap::Inference
+                        | Cap::Chat
+                        | Cap::Transfer
+                        | Cap::AgentSelf
+                        | Cap::Admin
                 ),
                 // Scoped and allow-listed as today on `Inference`; `Ledger`
                 // and `AgentSelf` are narrowed to its own runs and its own id
@@ -169,8 +193,12 @@ impl Principal {
                 }
                 ApiKeyKind::Key => matches!(cap, Cap::Public | Cap::Inference),
                 // A paired client app (client-apps design §1.2): a client key
-                // that also holds the Chat API, and nothing of the admin plane.
-                ApiKeyKind::Device => matches!(cap, Cap::Public | Cap::Inference | Cap::Chat),
+                // that also holds the Chat API and its transfers (device
+                // transfers design §10), and nothing of the admin plane.
+                ApiKeyKind::Device => matches!(
+                    cap,
+                    Cap::Public | Cap::Inference | Cap::Chat | Cap::Transfer
+                ),
                 // `internal` rows are attribution identities, not credentials.
                 // [`resolve`] never produces one, so this arm is the second
                 // backstop `policy::admit`'s refusal already is (§3.1).
@@ -372,8 +400,20 @@ impl Refusal {
 
     /// `403` — a principal that does not hold the capability. Names both
     /// halves, because "forbidden" alone leaves the owner guessing which
-    /// credential the request actually carried.
+    /// credential the request actually carried. On `Transfer` it is the code
+    /// the transfers API promises (device transfers design §9.4, I2):
+    /// `transfer_device_only`.
     pub fn forbidden(cap: Cap, who: &Principal) -> Self {
+        if cap == Cap::Transfer {
+            return Self {
+                status: StatusCode::FORBIDDEN,
+                code: lmgw_api_types::transfer::code::TRANSFER_DEVICE_ONLY,
+                message: format!(
+                    "only paired devices send and receive transfers; the request presented {}",
+                    who.describe()
+                ),
+            };
+        }
         Self {
             status: StatusCode::FORBIDDEN,
             code: "forbidden",
@@ -393,6 +433,12 @@ impl Refusal {
 /// refusals carries a code of its own — does not have to restate every other
 /// error it already had. `?` on a `Result<_, String>` inside such a handler
 /// lands here, and the body is the one it was before.
+impl From<&str> for Refusal {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
 impl From<String> for Refusal {
     fn from(message: String) -> Self {
         Self {
@@ -917,6 +963,7 @@ mod tests {
             Cap::Public,
             Cap::Inference,
             Cap::Chat,
+            Cap::Transfer,
             Cap::Ledger,
             Cap::AgentSelf,
             Cap::Admin,
@@ -945,20 +992,32 @@ mod tests {
         // written here, so a capability added later fails this test until
         // each principal's answer for it is decided (R16).
         use Cap::*;
-        let table: [(&str, &Principal, [bool; 6]); 5] = [
-            //                Public Infer  Chat   Ledger AgentS Admin
-            ("owner", &owner, [true, true, true, false, true, true]),
-            ("device", &device, [true, true, true, false, false, false]),
-            ("agent", &agent, [true, true, false, true, true, false]),
-            ("client", &client, [true, true, false, false, false, false]),
+        let table: [(&str, &Principal, [bool; 7]); 5] = [
+            //                Public Infer  Chat   Transf Ledger AgentS Admin
+            ("owner", &owner, [true, true, true, true, false, true, true]),
+            (
+                "device",
+                &device,
+                [true, true, true, true, false, false, false],
+            ),
+            (
+                "agent",
+                &agent,
+                [true, true, false, false, true, true, false],
+            ),
+            (
+                "client",
+                &client,
+                [true, true, false, false, false, false, false],
+            ),
             (
                 "internal",
                 &internal,
-                [true, false, false, false, false, false],
+                [true, false, false, false, false, false, false],
             ),
         ];
         for (who, p, row) in table {
-            for (cap, want) in [Public, Inference, Chat, Ledger, AgentSelf, Admin]
+            for (cap, want) in [Public, Inference, Chat, Transfer, Ledger, AgentSelf, Admin]
                 .into_iter()
                 .zip(row)
             {
@@ -976,6 +1035,15 @@ mod tests {
         assert_eq!(
             Refusal::forbidden(Cap::Admin, &device).message,
             "this route needs admin; the request presented a device key ('phone')"
+        );
+        // The transfers API's own code (device transfers design §9.4).
+        let client = Principal::from_key(&key(1, "laptop", ApiKeyKind::Key, "c", true));
+        let r = Refusal::forbidden(Cap::Transfer, &client);
+        assert_eq!((r.status.as_u16(), r.code), (403, "transfer_device_only"));
+        assert!(
+            r.message.ends_with("a client API key ('laptop')"),
+            "{}",
+            r.message
         );
     }
 

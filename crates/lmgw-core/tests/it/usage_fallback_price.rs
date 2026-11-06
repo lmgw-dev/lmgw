@@ -38,6 +38,7 @@ async fn price(g: &Gpu, scope: PriceScope, key: &str, p: Prices) {
         scope,
         key,
         lmgw_core::config::PriceUnit::PerMtok,
+        lmgw_core::config::PriceTier::Standard,
         &p,
         None,
         None,
@@ -53,10 +54,7 @@ async fn world(fallback: &str) -> Gpu {
     let g = Gpu::new(8 * GIB, 2, 5).await;
     g.model(LOCAL, GIB).await;
     g.cloud("cloud-chat", None).await;
-    let mut s = g.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some(fallback.into());
-    store::save_settings(&g.state.db, &s).await.unwrap();
-    g.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&g.state, Some(fallback)).await;
     g
 }
 
@@ -149,7 +147,7 @@ async fn a_fallback_to_a_passthrough_name_takes_its_upstream_model_price() {
         &g.state.db,
         &NewUpstream {
             name: "passthrough".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,

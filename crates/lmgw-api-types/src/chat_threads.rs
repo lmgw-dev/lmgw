@@ -47,6 +47,16 @@ pub struct PinRequest {
     pub pinned: bool,
 }
 
+/// `POST /chat/api/threads/{id}/title`'s body.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TitleRequest {
+    /// The new title. Trimmed; empty after that is a 400. A thread named
+    /// this way is never named again by its first send.
+    pub title: String,
+}
+
 /// `POST /chat/api/threads/{id}/archive`'s body.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -71,7 +81,7 @@ type VoicePatch = Option<Option<ThreadVoice>>;
 /// `POST /chat/api/threads/{id}/settings`'s body: a **patch**. An absent
 /// field leaves that setting alone; for the settings that can be unset,
 /// `null` clears it back to the route's default. The thread's title is not
-/// here: it names itself on the first send.
+/// here: it names itself on the first send, and `POST …/title` renames it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -134,6 +144,13 @@ pub struct SettingsPatch {
     /// for none. An unknown id is a 400 `unknown_profile`.
     #[serde(deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<Option<i64>>,
+    /// The image and audio tools' default models, as a whole object (`{}`
+    /// inherits everything): a field names a model of the tool's `model`
+    /// enum (`""` for none), or the voice. A name the tool cannot use for
+    /// this caller is a 400 `bad_request`; one the thread already holds
+    /// passes, so a model switched off since does not block other changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_defaults: Option<crate::chat_media::MediaDefaults>,
 }
 
 /// `POST /chat/api/threads/{id}/settings`'s answer.
@@ -195,6 +212,11 @@ pub struct MessageEdit {
     /// is not answered again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub speak: bool,
+    /// A user message's new origin (`origin` of a send): where the user
+    /// writes the edit from. Absent, or blank, keeps the one it had.
+    /// Ignored for a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// `POST /chat/api/threads/{id}/messages/{mid}/edit`'s JSON answer, for a
@@ -265,6 +287,11 @@ pub struct Message {
     pub images_note: Option<String>,
     /// How the turn was spoken; `null` for a typed turn.
     pub voice: Option<MessageVoice>,
+    /// A user message's origin: the sentence its client sent with it about
+    /// where the user wrote it (`origin` of the send or the edit), which
+    /// the model reads before the message's text. `null` when its client
+    /// sent none, and on every other role.
+    pub origin: Option<String>,
     /// On a late MCP task result (role `tool`): the task's facts. Absent
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,6 +347,10 @@ pub struct AttachmentFacts {
     /// Why an audio clip's transcription failed, until a retry succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_error: Option<String>,
+    /// A file an image or audio tool made: the model, its parameters and
+    /// times (chat-media-tools design §9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<crate::chat_media::MediaFacts>,
     /// Any other key.
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
@@ -346,6 +377,24 @@ pub struct AttachmentMeta {
     pub meta: serde_json::Value,
     /// The extracted text's token estimate; `null` when there is none.
     pub extracted_tokens: Option<i64>,
+    /// Where the file came from: `upload` (the user sent it), `tool` (an
+    /// image or audio tool of a turn made it) or `action` (an image card's
+    /// action made it).
+    #[cfg_attr(
+        feature = "schema",
+        schemars(extend("enum" = ["upload", "tool", "action"]))
+    )]
+    #[serde(default = "upload_source")]
+    pub source: String,
+    /// The tool call that made a `tool` file, or the card action that made
+    /// an `action` file (its `act-<boot>-<n>` id, the one its stream's
+    /// frames carried); absent for an upload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub call_id: Option<String>,
     /// For a draft: why it cannot be sent to the thread's current model.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
@@ -362,6 +411,10 @@ pub struct AttachmentMeta {
         schemars(transform = crate::openapi_ext::non_null)
     )]
     pub hints: Option<Vec<String>>,
+}
+
+fn upload_source() -> String {
+    crate::chat_media::SOURCE_UPLOAD.to_string()
 }
 
 /// The retrieval that ran for one user message. Excerpt `n` in the

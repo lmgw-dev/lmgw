@@ -38,17 +38,23 @@ pub(super) fn counter_row(
 /// [`crate::gate::open_pinned`]), telling `row` what it learns: the route it
 /// settled on, and whether the count's admission had to bring the model up
 /// ([`would_start`], asked before admission — a swap to a fallback is no
-/// start).
+/// start). `origin` is whose traffic the count is (per-request background
+/// design §3): a guest's count on a cold model starts it only into room that
+/// disturbs nobody.
 pub(super) async fn admit_counter(
     state: &SharedState,
     alias: &str,
     check: crate::gate::RouteCheck,
     pinned: bool,
+    origin: crate::runtime::registry::Origin,
     row: Option<&mut Unanswered>,
 ) -> Result<crate::gate::Opened, (GateHeaders, GatewayError)> {
-    let routed = crate::gate::resolve(state, alias, check)
-        .await
-        .map_err(|f| (f.headers, f.error))?;
+    let routed = if pinned {
+        crate::gate::resolve_pinned(state, alias, check, origin).await
+    } else {
+        crate::gate::resolve(state, alias, check, origin).await
+    }
+    .map_err(|f| (f.headers, f.error))?;
     admit_routed(state, routed, pinned, row).await
 }
 

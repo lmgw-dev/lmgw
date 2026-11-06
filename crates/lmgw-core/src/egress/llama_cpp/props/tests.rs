@@ -147,7 +147,7 @@ fn upstream(base_url: String, api_key: Option<&str>) -> Upstream {
         id: 7,
         name: "llama".into(),
         // The request is the same on every row that reaches a llama-server.
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind: UpstreamKind::Generic,
         base_url,
         api_key: api_key.map(str::to_string),

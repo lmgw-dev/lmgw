@@ -1,9 +1,10 @@
 //! Background traffic on the GPU — the admission half (candidate-aliases
 //! design §4.1–§4.5, §9; §12 entries 45–48).
 //!
-//! A candidate alias with the `background` flag is a **guest**: it may use
-//! what the owner is not using, and it never evicts, waits on or climbs
-//! anything of theirs. The registry half — who owns a container, the claim that
+//! A candidate alias with the `background` flag is a **guest**, and so is a
+//! request sent with `x-lmgw-background: on` (per-request background design
+//! §4): it may use what the owner is not using, and it never evicts, waits on
+//! or climbs anything of theirs. The registry half — who owns a container, the claim that
 //! never starts one, the draining mark — is
 //! [`crate::runtime::registry::Origin`] and its module; this is what the
 //! request gate calls, and what decides whether a guest may start or climb.
@@ -37,8 +38,8 @@
 //!   Denied, it is [`super::Climbed::Denied`], and the gate picks again
 //!   (entry 45).
 //! - **Draining** is taken by owner admissions ([`owner_drain`]): `decide`'s
-//!   make-room wait and a climb's, but only on an install that has a
-//!   background alias at all, so nothing changes where none exists.
+//!   make-room wait and a climb's, on every install — any request may be a
+//!   guest (`x-lmgw-background`, per-request background design §10).
 //!
 //! **No deadlock by construction.** Nothing here ever waits for the admission
 //! gate, for the draining mark or for an owner's admission: the gate is only
@@ -65,9 +66,12 @@ use crate::runtime::registry::{
 use crate::runtime::Class;
 use crate::state::SharedState;
 
-use super::{
-    classify, lifecycle_spec, upstream_error, Ledger, LocalHold, Target, VramScheduler, MIB,
-};
+mod words;
+
+use words::in_use;
+
+use super::attribution::Fill;
+use super::{classify, lifecycle_spec, LocalHold, Target, VramScheduler, MIB};
 
 /// How a hold's model may be brought back when its container is gone under
 /// the hold — [`LocalHold::recover`]'s dead container, or a
@@ -157,6 +161,9 @@ pub async fn join(
 ///   queued for it;
 /// - another guest's start of the same model did not decide within
 ///   `vram.queue_timeout_seconds`;
+/// - its engine image is not on this machine: its download is begun (or
+///   joined) and goes on, and a guest does not wait for it (machine-check
+///   design §5);
 /// - lmgw cannot measure the card (VRAM admission off, or no telemetry and no
 ///   `vram.budget_mb`): a guest cannot promise not to disturb the owner on a
 ///   card nothing measures, so it only uses models that are already loaded
@@ -166,7 +173,9 @@ pub async fn join(
 ///
 /// Errors: `gpu_hold` under the GPU hold; `vram_too_large` for a model that
 /// cannot fit on an empty card (a configuration error, never a deferral —
-/// §4.7's rule); a start that fails (502).
+/// §4.7's rule — and judged before every reason above but the download, so a
+/// card in use never turns it into one); a start that fails, or an engine
+/// image no registry can give (502).
 pub async fn start_background(
     state: &SharedState,
     route: &Route,
@@ -194,15 +203,19 @@ pub async fn start_background(
 
 /// Mark every resident model draining for the owner (§4.5, entry 47), for
 /// as long as the returned value lives — an owner admission's make-room wait.
-/// `None` on an install without a background alias: there is no guest to
-/// drain for, and the runtime frame stays exactly what it was.
+///
+/// On every install (*changed 2026-10-21*, per-request background design
+/// §10): any request may be a guest (`x-lmgw-background: on`), so a guest can
+/// always exist and every such wait marks the residents. It used to be armed
+/// only while a background candidate alias existed, which would have let a
+/// foreground wait evict and wait for models that per-request guests kept
+/// busy, without telling them to stop taking new work.
 ///
 /// A guest's in-process run — an agent run, a `/v1/responses` tool loop —
 /// holds one claim for the whole run, so a wait for its model lasts the run:
 /// a request that has started always finishes (§4.5).
-pub(super) fn owner_drain(state: &SharedState, snap: &Snapshot) -> Option<OwnerDrain> {
-    snap.any_background_alias()
-        .then(|| state.runtime().drain_for_owner())
+pub(super) fn owner_drain(state: &SharedState) -> OwnerDrain {
+    state.runtime().drain_for_owner()
 }
 
 /// Which residents an eviction may stop ([`VramScheduler::evict_one`]).
@@ -239,9 +252,9 @@ impl VramScheduler {
         }
         // No row: nothing a hold could ever restart, and nothing this
         // gateway treats as its model.
-        if model_runtime(snap, target.class, &target.model_id).is_none() {
+        let Some(runtime) = model_runtime(snap, target.class, &target.model_id) else {
             return Ok(None);
-        }
+        };
         match state
             .runtime()
             .join(target.class, &target.model_id, origin)
@@ -274,7 +287,10 @@ impl VramScheduler {
                 )))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(upstream_error(e)),
+            // A start in flight that this join waited on failed: the
+            // machine check runs again for it, as for the start's own
+            // request (machine-check design §2.5).
+            Err(e) => Err(super::start_error(state, &runtime, e).await),
         }
     }
 
@@ -299,6 +315,18 @@ impl VramScheduler {
         alias: &str,
     ) -> Result<BackgroundStart, GatewayError> {
         let label = format!("{}/{}", target.class.as_str(), target.model_id);
+        // The engine image first (machine-check design §5) — but a guest
+        // never waits for a download: background traffic does not wait in
+        // ways that disturb others. A missing image's download is begun (or
+        // joined) and the start is blocked at once, so the gate's background
+        // answer — the loaded alternates, the fallback, `gpu_deferred` —
+        // answers; a later guest starts the model once the image is here.
+        // Not under the hold, which the loop refuses first.
+        if state.snapshot().gpu_block().is_none() && !self.is_up(state, target) {
+            if let Some(why) = self.engine_for_guest(state, target, runtime).await? {
+                return Ok(BackgroundStart::Blocked(why));
+            }
+        }
         let queue_seconds = snap.settings.vram.queue_timeout_seconds;
         let deadline =
             (queue_seconds > 0).then(|| Instant::now() + Duration::from_secs(queue_seconds));
@@ -324,14 +352,6 @@ impl VramScheduler {
             {
                 return Ok(BackgroundStart::Started(Box::new(hold)));
             }
-            if let Some(why) = self.owner_waiting(state) {
-                return Ok(BackgroundStart::Blocked(why));
-            }
-            if !snap.settings.vram.enabled {
-                return Ok(BackgroundStart::Blocked(unmeasured(
-                    "VRAM admission is off (vram.enabled)",
-                )));
-            }
             let Some(fp) = self.footprint(snap, target.class, &target.model_id).await else {
                 return Ok(BackgroundStart::Blocked(format!(
                     "nothing lmgw can start — no row describes {label}"
@@ -339,6 +359,35 @@ impl VramScheduler {
             };
             let headroom = snap.settings.vram.headroom_mb.saturating_mul(MIB);
             let needs = fp.total_bytes.saturating_add(headroom);
+            // A model no card can hold is the configuration error it is
+            // (§4.7's rule), not a deferral: wherever a busy card would
+            // answer this start before it reads the card itself — the owner
+            // waiting, another guest's turn, the gate held — the card's last
+            // known total judges its size first (*changed 2026-10-22*,
+            // per-request background design §11.14). That total is as old as
+            // the last ledger read, and whoever keeps this start from reading
+            // reads the card itself — the owner's wait on every pass, the
+            // other guest and the gate's holder under the gate — so a total
+            // that went stale is corrected by the very contention it answers
+            // for. A start that holds the gate is judged on its own reading
+            // below, never on the cached total. No device read here: the one
+            // this start makes is under the gate, where a benchmark's drain
+            // waits for it. With VRAM admission off no estimate is trusted —
+            // the owner's start of this model would not be checked either —
+            // and a total not known yet is judged nowhere before the gate:
+            // both defer as before.
+            let blocked = |why: String| match self.known_total(snap) {
+                Some(total) if snap.settings.vram.enabled && needs > total => {
+                    Err(too_large(target, fp.total_bytes, headroom, total))
+                }
+                _ => Ok(BackgroundStart::Blocked(why)),
+            };
+            if let Some(why) = self.owner_waiting(state) {
+                return blocked(why);
+            }
+            if !snap.settings.vram.enabled {
+                return Ok(BackgroundStart::Blocked(unmeasured(&admission_off())));
+            }
 
             // Another guest deciding a start of this very model is waited
             // for, not raced for the gate (§12 entry 91): the gate it holds
@@ -346,10 +395,11 @@ impl VramScheduler {
             // one this request wants. After it, the gate is tried as ever,
             // and a start it made is up or reserved — the next look joins it.
             let Some(turn) = self.guest_turns.take(target, deadline).await else {
-                return Ok(BackgroundStart::Blocked(format!(
-                    "another background start of {label}, which had not decided within \
-                     vram.queue_timeout_seconds ({queue_seconds}s)"
-                )));
+                return blocked(format!(
+                    "another background start of {label}, which had not decided within the \
+                     queue timeout ({queue_seconds}s, {})",
+                    crate::config::QUEUE_TIMEOUT_LABEL
+                ));
             };
             // Never waited for: a gate somebody holds is an admission in
             // progress — the owner's, perhaps, waiting for room — and a guest
@@ -357,15 +407,15 @@ impl VramScheduler {
             // released gate to whoever is queued for it, so this fails while
             // anyone is.
             let Ok(gate) = self.gate.try_lock() else {
-                return Ok(BackgroundStart::Blocked(
+                return blocked(
                     "another admission, which holds the admission gate right now".into(),
-                ));
+                );
             };
             // `Some(reservation)` = start it; `None` = it came up meanwhile,
             // join it on the next pass.
             let decided = loop {
                 if let Some(why) = self.owner_waiting(state) {
-                    return Ok(BackgroundStart::Blocked(why));
+                    return blocked(why);
                 }
                 if self.is_up(state, target) {
                     break None;
@@ -385,13 +435,9 @@ impl VramScheduler {
                             .unwrap_or("no capacity to measure against"),
                     )));
                 };
+                // Again on this reading: a declared budget can shrink.
                 if needs > cap.total {
-                    return Err(GatewayError::VramTooLarge {
-                        model: target.model_id.clone(),
-                        need: fmt_bytes(fp.total_bytes),
-                        headroom: fmt_bytes(headroom),
-                        capacity: fmt_bytes(cap.total),
-                    });
+                    return Err(too_large(target, fp.total_bytes, headroom, cap.total));
                 }
                 // A start already decided for it (another admission's
                 // reservation) accounts for its memory; the `acquire` below
@@ -406,11 +452,23 @@ impl VramScheduler {
                     break Some(Some(self.reserve(state, target, fp.total_bytes)));
                 }
                 if !self
-                    .evict_one(state, target, &l, Victims::IdleBackground)
+                    .evict_one(state, target, &l, Victims::IdleBackground, None)
                     .await
                 {
+                    // The scheduler's per-process measurement, as admission's
+                    // external shortfall reads it (waiting for a PID read in flight); none
+                    // taken, no figure.
+                    let outside = self
+                        .measure(state, snap, &l, Fill::Verdict)
+                        .await
+                        .ok()
+                        .map(|m| m.shares.outside);
                     return Ok(BackgroundStart::Blocked(in_use(
-                        &l, &label, needs, cap.free,
+                        &l.residents,
+                        outside,
+                        &label,
+                        needs,
+                        cap.free,
                     )));
                 }
             };
@@ -427,6 +485,7 @@ impl VramScheduler {
             match guard {
                 Ok(guard) => {
                     self.cache_pids(state);
+                    crate::machine::after_start(state, runtime);
                     tracing::info!(
                         alias = %alias,
                         "{label} is up for background traffic ('{alias}')"
@@ -443,7 +502,7 @@ impl VramScheduler {
                 // It parked on a climb that could not start its rung, and the
                 // model is gone: look again from the top.
                 Err(RuntimeError::ClimbFailed { .. }) => continue,
-                Err(e) => return Err(upstream_error(e)),
+                Err(e) => return Err(super::start_error(state, runtime, e).await),
             }
         }
     }
@@ -474,6 +533,17 @@ impl VramScheduler {
             )),
             (false, None) => None,
         }
+    }
+}
+
+/// `vram_too_large` for `target`, whose `need` (plus `headroom`) is above the
+/// card's `capacity`.
+fn too_large(target: &Target, need: u64, headroom: u64, capacity: u64) -> GatewayError {
+    GatewayError::VramTooLarge {
+        model: target.model_id.clone(),
+        need: fmt_bytes(need),
+        headroom: fmt_bytes(headroom),
+        capacity: fmt_bytes(capacity),
     }
 }
 
@@ -560,6 +630,7 @@ impl LocalHold {
             policy: None,
             origin,
             restart,
+            turns: Default::default(),
         }
     }
 
@@ -798,7 +869,7 @@ async fn free_for_climb(state: &SharedState, snap: &Snapshot, running: u64) -> R
     if !snap.settings.vram.enabled {
         return Err(format!(
             "the GPU is in use by {}",
-            unmeasured("VRAM admission is off (vram.enabled)")
+            unmeasured(&admission_off())
         ));
     }
     let l = state.vram.ledger(state, snap).await;
@@ -834,41 +905,13 @@ fn unmeasured(reason: &str) -> String {
     format!(
         "whatever runs on it — lmgw cannot measure this card ({reason}), so background traffic \
          cannot promise to leave the owner's models alone and only uses models that are already \
-         loaded; declare vram.budget_mb, or turn vram.enabled on"
+         loaded; declare a GPU memory budget ({}), or turn on {}",
+        crate::config::BUDGET_LABEL,
+        crate::config::ADMISSION_LABEL
     )
 }
 
-/// What holds the memory a guest's start could not get, to read after "GPU
-/// in use by ": every resident (none of them an idle guest any more — those
-/// were evicted), or the applications outside lmgw when nothing of lmgw's is
-/// on the card.
-fn in_use(l: &Ledger, label: &str, needs: u64, free: u64) -> String {
-    let who = if l.residents.is_empty() {
-        "applications outside lmgw".to_string()
-    } else {
-        let mut parts: Vec<String> = l
-            .residents
-            .iter()
-            .map(|r| {
-                format!(
-                    "{}/{} ({}{})",
-                    r.container.as_str(),
-                    r.model,
-                    fmt_bytes(r.estimated_bytes),
-                    if r.in_flight > 0 {
-                        format!(", {} in flight", r.in_flight)
-                    } else {
-                        String::new()
-                    }
-                )
-            })
-            .collect();
-        parts.sort();
-        parts.join(", ")
-    };
-    format!(
-        "{who} — {label} needs {} and {} is free",
-        fmt_bytes(needs),
-        fmt_bytes(free)
-    )
+/// Why a guest cannot measure the card while admission is off.
+fn admission_off() -> String {
+    format!("VRAM admission is off ({})", crate::config::ADMISSION_LABEL)
 }

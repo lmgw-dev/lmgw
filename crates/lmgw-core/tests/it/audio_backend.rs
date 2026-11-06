@@ -43,8 +43,7 @@ fn model(id: &str, family: &str, path: &str, task: &str, enabled: bool) -> Audio
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }
@@ -425,8 +424,7 @@ async fn audio_model_crud_round_trips_json_options() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     };
     let id = store::insert_audio_model(&db, &new).await.unwrap();
     let m = store::get_audio_model(&db, id).await.unwrap().unwrap();
@@ -454,8 +452,7 @@ async fn audio_model_crud_round_trips_json_options() {
         image: Some("my/own-audio-image".into()),
         extra_run_args: Some(vec!["--device".into(), "cpu".into()]),
         warm_start: true,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         ..new
     };
     store::update_audio_model(&db, id, &updated).await.unwrap();
@@ -579,13 +576,13 @@ async fn audio_settings_and_model_ops_validate_and_persist() {
 // /v1/audio/* passthrough proxy
 // ---------------------------------------------------------------------------
 
-async fn setup_audio_proxy(upstream_base: &str) -> (lmgw_core::state::SharedState, Gw) {
+pub(crate) async fn setup_audio_proxy(upstream_base: &str) -> (lmgw_core::state::SharedState, Gw) {
     let state = AppState::init_for_tests().await.unwrap();
     let up_id = store::insert_upstream(
         &state.db,
         &store::NewUpstream {
             name: "audiocpp".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::AudioCpp,
             base_url: format!("{}/v1", upstream_base.trim_end_matches('/')),
             api_key: Some("sk-up".into()),
@@ -609,6 +606,7 @@ async fn setup_audio_proxy(upstream_base: &str) -> (lmgw_core::state::SharedStat
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -622,6 +620,7 @@ async fn setup_audio_proxy(upstream_base: &str) -> (lmgw_core::state::SharedStat
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -979,6 +978,7 @@ async fn audio_speech_rejects_non_openai_upstream() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -995,7 +995,10 @@ async fn audio_speech_rejects_non_openai_upstream() {
     assert_eq!(resp.status().as_u16(), 400);
     let v: Value = resp.json().await.unwrap();
     let msg = v["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("openai-protocol"), "unexpected message: {msg}");
+    assert!(
+        msg.contains("an OpenAI-shaped upstream"),
+        "unexpected message: {msg}"
+    );
     assert_eq!(mock.received_requests().await.unwrap().len(), 0);
 
     let logs = store::query_logs(&state.db, &store::LogFilter::default())
@@ -1659,8 +1662,7 @@ async fn audio_voices_admits_the_local_model_and_reads_its_container() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -1775,8 +1777,7 @@ async fn lab_with_one_audio_model(
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -1939,8 +1940,7 @@ async fn a_chat_model_asked_for_voices_is_refused_and_starts_nothing() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -2051,8 +2051,7 @@ async fn a_chat_completion_against_an_audio_model_is_refused_before_admission() 
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await

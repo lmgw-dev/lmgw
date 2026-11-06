@@ -1,0 +1,62 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"Weather in Berlin?\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\",\"name\":\"get_weather\"},\"id\":\"call_1\",\"type\":\"function\"}]},{\"content\":\"12°C\",\"role\":\"tool\",\"tool_call_id\":\"call_1\"}],\"model\":\"chat-gguf\",\"tool_choice\":\"auto\",\"tools\":[{\"function\":{\"description\":\"The weather in a city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "Weather in Berlin?",
+            "role": "user"
+          },
+          {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"city\":\"Berlin\"}",
+                  "name": "get_weather"
+                },
+                "id": "call_1",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "12°C",
+            "role": "tool",
+            "tool_call_id": "call_1"
+          }
+        ],
+        "model": "chat-gguf",
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "function": {
+              "description": "The weather in a city.",
+              "name": "get_weather",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

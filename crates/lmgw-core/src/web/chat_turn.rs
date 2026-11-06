@@ -41,6 +41,8 @@ mod blind;
 pub(super) use blind::Blind;
 mod merge;
 mod out;
+mod replay_seals;
+use replay_seals::replayed_reasoning;
 pub(crate) mod resume;
 mod spoken;
 pub(crate) use out::{refuse, refuse_sent, SentAs, TurnFrame, TurnLanguage, TurnOpts, VoiceTurn};
@@ -146,11 +148,13 @@ enum Persist {
     /// Appended to a reply whose calls were decided ([`resume`]).
     Resume(Box<resume::Prior>),
     /// Appended to the row being continued: `content` is its text as the
-    /// model was shown it (trailing whitespace trimmed), `reasoning` its trace.
+    /// model was shown it (trailing whitespace trimmed), `reasoning` its trace
+    /// and `reasoning_seals` that trace's seals.
     Append {
         message_id: i64,
         content: String,
         reasoning: String,
+        reasoning_seals: Vec<crate::store::ReplySeal>,
     },
 }
 
@@ -158,6 +162,11 @@ enum Persist {
 pub(super) struct Reply<'a> {
     pub text: &'a str,
     pub reasoning: &'a str,
+    /// The seals of a plain reply's reasoning items, in order, each placed
+    /// in `text` (openai egress design §7.3.2, [`crate::store::ReplySeal`]):
+    /// saved beside `reasoning`. Empty for a tool turn, whose record keeps
+    /// them in place.
+    pub reasoning_seals: Vec<crate::store::ReplySeal>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     /// The tool loop's record of the turn, `None` for a plain reply.
@@ -176,6 +185,10 @@ pub(super) struct Reply<'a> {
     /// The calls the turn stopped on for an approval (client-apps design
     /// §6.2), `None` when it did not.
     pub pending: Option<crate::store::PendingApprovals>,
+    /// The files the turn's image and audio tools stored (chat-media-tools
+    /// design §6.3): bound to the reply when it is saved, deleted when it
+    /// is not.
+    pub tool_files: Vec<i64>,
 }
 
 /// What [`Turn::persist`] came to: the saved row's id (`0`: nothing was
@@ -379,7 +392,23 @@ impl Turn {
     /// - a stopped or failed fresh reply that produced nothing;
     /// - the write failed (the thread is gone, or the DB refused), logged.
     pub(super) async fn persist(&self, state: &AppState, r: Reply<'_>) -> Persisted {
+        let files = r.tool_files.clone();
         let p = self.persist_reply(state, r).await;
+        // A reply not saved takes its turn's tool files with it: nothing
+        // names them (chat-media-tools design §6.3). A continue or a resume
+        // that added nothing keeps its row, and its turn made no file.
+        if p.id == 0 && !files.is_empty() {
+            if let Err(e) = self
+                .repo
+                .drop_tool_files(state, self.thread_id, &files)
+                .await
+            {
+                tracing::warn!(
+                    thread = self.thread_id,
+                    "chat: the tool files of a reply that was not saved stay behind: {e}"
+                );
+            }
+        }
         self.feed.persisted(p.id);
         p
     }
@@ -421,6 +450,7 @@ impl Turn {
         let mut reply = ChatReply {
             content: r.text.to_string(),
             reasoning: r.reasoning.to_string(),
+            reasoning_seals: r.reasoning_seals,
             prompt_tokens: r.prompt_tokens,
             completion_tokens: r.completion_tokens,
             ir_messages: r.ir_messages.map(str::to_string),
@@ -431,6 +461,7 @@ impl Turn {
             images_note: self.blind.note(),
             voice: None,
             pending_approvals: r.pending.clone(),
+            tool_files: r.tool_files,
         };
         let res = match &self.persist {
             Persist::Insert => {
@@ -456,9 +487,17 @@ impl Turn {
                 message_id,
                 content,
                 reasoning,
+                reasoning_seals,
             } => {
                 reply.content = format!("{content}{}", r.text);
                 reply.reasoning = format!("{reasoning}{}", r.reasoning);
+                // The continued row's items, then the continuation's, which
+                // follow the row's text.
+                let added = std::mem::take(&mut reply.reasoning_seals);
+                reply.reasoning_seals = reasoning_seals.clone();
+                reply
+                    .reasoning_seals
+                    .extend(crate::store::ReplySeal::shifted(added, content.len()));
                 self.repo
                     .save_continue(
                         state,
@@ -613,7 +652,7 @@ pub(super) async fn start_turn_as(
             .await
         {
             Ok(slot) => slot,
-            Err(e) => return err_json(e.http_status(), e.code(), e.to_string()),
+            Err(e) => return err_json(e.http_status(), e.kind(), e.to_string()),
         },
     };
     let opts = TurnOpts {
@@ -674,11 +713,19 @@ pub(crate) async fn start_turn_into(
 
 /// `thread`'s approval floor as its turn reads it
 /// ([`crate::mcp::exec::ApprovalFloor`]): its own, and in a folder the
-/// folder's floor and defaults. A folder gone since is none.
+/// folder's floor and defaults. A folder gone since is none. With it, the
+/// media tools' default models of the thread and its folder
+/// (chat-media-tools design §3.8), which a turn reads live too.
 async fn approval_floor(
     state: &SharedState,
     thread: &ChatThread,
-) -> Result<crate::mcp::exec::ApprovalFloor, Response> {
+) -> Result<
+    (
+        crate::mcp::exec::ApprovalFloor,
+        crate::mcp::media::MediaLayers,
+    ),
+    Response,
+> {
     let folder = match thread.folder_id {
         Some(id) => crate::store::get_chat_folder(&state.db, id)
             .await
@@ -688,19 +735,29 @@ async fn approval_floor(
                     "internal",
                     format!("the folder's approval rules could not be read: {e}"),
                 )
-            })?
-            .map(|f| {
-                let mut rules = f.approval_floor;
-                rules.extend(f.defaults.mcp_tools.unwrap_or_default());
-                rules
-            })
-            .unwrap_or_default(),
-        None => Vec::new(),
+            })?,
+        None => None,
     };
-    Ok(crate::mcp::exec::ApprovalFloor {
-        thread: thread.approval_floor.clone(),
-        folder,
-    })
+    let media = crate::mcp::media::MediaLayers::of_thread(
+        folder
+            .as_ref()
+            .and_then(|f| f.defaults.media_defaults.as_ref()),
+        &thread.media_defaults,
+    );
+    let folder = folder
+        .map(|f| {
+            let mut rules = f.approval_floor;
+            rules.extend(f.defaults.mcp_tools.unwrap_or_default());
+            rules
+        })
+        .unwrap_or_default();
+    Ok((
+        crate::mcp::exec::ApprovalFloor {
+            thread: thread.approval_floor.clone(),
+            folder,
+        },
+        media,
+    ))
 }
 
 async fn start_turn_inner(
@@ -737,7 +794,7 @@ async fn start_turn_inner(
     // The owner's approval floor the turn's tools run under (client-apps
     // design §6.6), read before the turn takes the thread: a read that
     // fails refuses the turn rather than running it ungated.
-    let floor = approval_floor(state, thread).await?;
+    let (floor, media) = approval_floor(state, thread).await?;
     // Room for the opening `turn` frame, before the turn takes the thread: a
     // refused call cancels no live turn and wakes no archived thread (WP11
     // server review n6). This caller is the channel's only writer so far.
@@ -865,10 +922,17 @@ async fn start_turn_inner(
             // break better when it writes it itself. The row is saved as the
             // model was shown it, plus what it wrote.
             last.content.truncate(last.content.trim_end().len());
+            // An item answered in the trimmed whitespace stands at the end,
+            // ahead of the continuation, not inside it (WP8 verify V-F2).
+            last.reasoning_seals = crate::store::ReplySeal::clamped(
+                std::mem::take(&mut last.reasoning_seals),
+                last.content.len(),
+            );
             let persist = Persist::Append {
                 message_id,
                 content: last.content.clone(),
                 reasoning: last.reasoning.clone(),
+                reasoning_seals: last.reasoning_seals.clone(),
             };
             (None, persist)
         }
@@ -903,6 +967,7 @@ async fn start_turn_inner(
         mcp: thread.mcp_tools.clone(),
         kb: kb.tools,
         floor,
+        media,
     };
     // Live in the change feed from here (client-apps design §2.2): who
     // started it, and whether it is a bound session's voice turn.
@@ -936,7 +1001,7 @@ async fn start_turn_inner(
                 parts
                     .iter()
                     .filter_map(|p| match p {
-                        ContentPart::Text { text } => Some(text.clone()),
+                        ContentPart::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .collect()
@@ -1022,13 +1087,21 @@ async fn start_turn_inner(
                 return;
             }
         };
-        let (ir, text_form) = request(
+        let (mut ir, mut text_form) = request(
             &state,
             &thread,
             (&history, spoken.as_deref()),
             &rendered,
             (voice.as_ref(), language.as_ref()),
         );
+        // The pictures earlier turns' tools made, which their records name
+        // by ref (chat-media-tools design §6.4): read once for the turn, also
+        // where this thread's tools are switched off since.
+        let media = super::chat_media::Hydrator::new(state.clone(), repo, thread.id);
+        media.hydrate(&mut ir.messages).await;
+        if let Some(t) = text_form.as_mut() {
+            media.hydrate(t).await;
+        }
         let lacked = chat_attach::lacked_marker(&thread.model_alias, rendered.values().flatten());
         let turn = turn.with_request(text_form, lacked);
         // The request holds the spoken parts now; the turn keeps no copy
@@ -1101,8 +1174,12 @@ fn request(
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     (ir, text_form)
 }
@@ -1183,7 +1260,14 @@ pub(super) async fn model_caps(state: &SharedState, alias: &str) -> Caps {
             .and_then(|c| c.input_modalities)
             .map(|m| m.iter().any(|x| x == "audio")),
     };
-    Caps { vision, audio }
+    let flac = route
+        .as_ref()
+        .is_some_and(|r| r.upstream.protocol == crate::config::Protocol::Gemini);
+    Caps {
+        vision,
+        audio,
+        flac,
+    }
 }
 
 /// The alias that will answer a turn sent to `alias`: its GPU-hold fallback
@@ -1291,7 +1375,7 @@ pub(super) fn prefill_refusal(route: &Route, control: &ReasoningControl) -> Opti
                 .into(),
         ),
         Protocol::Anthropic | Protocol::LlamaCpp => None,
-        Protocol::Openai => Some(format!(
+        Protocol::Openai | Protocol::OpenaiCompatible => Some(format!(
             "the route answering this thread (upstream '{name}') is an OpenAI-compatible API, \
              which cannot continue a reply — Continue needs an Anthropic or llama-server route"
         )),
@@ -1471,10 +1555,14 @@ pub(in crate::web) fn build_messages(
             "system" => Role::System,
             _ => Role::User,
         };
-        // A message's parts: its attachments in the order they were sent in,
-        // then its reasoning trace (assistant only), then its typed text
-        // (design §2).
-        let mut content = Vec::with_capacity(2);
+        // A message's parts: where its client says it was written (a user
+        // message's origin, chat-plane design §9.10), its attachments in the
+        // order they were sent in, then its reasoning trace (assistant
+        // only), then its typed text (design §2).
+        let mut content = Vec::with_capacity(3);
+        if role == Role::User {
+            content.extend(m.origin.as_deref().map(super::chat_origin::part));
+        }
         let mut had_attachment_parts = false;
         if let Some(atts) = attachments.get(&m.id) {
             for r in atts {
@@ -1489,9 +1577,13 @@ pub(in crate::web) fn build_messages(
         // A plain assistant turn keeps its trace in its own column; replay it
         // ahead of the answer so a reasoning model behind
         // `--reasoning-preserve` sees its earlier thinking here too, not only
-        // through the API.
-        if role == Role::Assistant && !m.reasoning.is_empty() {
-            content.push(ContentPart::reasoning(m.reasoning.clone()));
+        // through the API. Its sealed items stand where they were answered,
+        // the text before each ahead of it (`replay_seals`).
+        let mut text = spoken::row_text(m);
+        if role == Role::Assistant {
+            let (lead, rest) = replayed_reasoning(&m.reasoning, &m.reasoning_seals, text);
+            content.extend(lead);
+            text = rest;
         }
         // A user message's knowledge retrieval (chat-complete design §9.3):
         // its `<context>` block ahead of the typed text, rendered from the
@@ -1506,7 +1598,6 @@ pub(in crate::web) fn build_messages(
         // attachments are present", design §2). Every other empty-content
         // case (a reasoning-only turn, say) keeps its always-present text
         // part exactly as before attachments existed.
-        let text = spoken::row_text(m);
         if !text.is_empty() || !had_attachment_parts {
             content.push(ContentPart::text(text));
         }
@@ -1544,10 +1635,7 @@ pub(super) fn record_said(record: &[Message]) -> String {
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .flat_map(|m| &m.content)
-        .filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
+        .filter_map(ContentPart::answer_text)
         .collect()
 }
 
@@ -1572,6 +1660,57 @@ mod tests {
         ))));
         // Unreadable: kept out of reach of a prefill rather than guessed at.
         assert!(has_tool_record(&row(Some("not json"))));
+    }
+
+    fn texts(m: &Message) -> Vec<&str> {
+        m.content
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text { text, .. } => text.as_str(),
+                _ => "<other>",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_user_messages_origin_leads_its_parts_on_every_replay() {
+        // chat-plane design §9.10.
+        let user = |id: i64, text: &str, origin: Option<&str>| ChatMessageRow {
+            id,
+            role: "user".into(),
+            content: text.into(),
+            origin: origin.map(str::to_string),
+            ..Default::default()
+        };
+        let block = |o: &str| match super::super::chat_origin::part(o) {
+            ContentPart::Text { text, .. } => text,
+            _ => unreachable!(),
+        };
+        let reply = ChatMessageRow {
+            id: 2,
+            role: "assistant".into(),
+            content: "Hi.".into(),
+            // Never on a reply; ignored should one carry it.
+            origin: Some("nowhere".into()),
+            ..Default::default()
+        };
+        let history = [
+            user(1, "hello", Some("Typed in the sidebar.")),
+            reply,
+            user(3, "and you?", None),
+            // A send that saved no reply, then another: one user turn.
+            user(4, "still there?", Some("Typed on the phone.")),
+        ];
+        let out = build_messages("", (&history, None), (&HashMap::new(), false));
+        assert_eq!(out.len(), 3);
+        let sidebar = block("Typed in the sidebar.");
+        assert_eq!(texts(&out[0]), vec![sidebar.as_str(), "hello"]);
+        assert_eq!(texts(&out[1]), vec!["Hi."]);
+        let phone = block("Typed on the phone.");
+        assert_eq!(
+            texts(&out[2]),
+            vec![format!("and you?\n\n{phone}").as_str(), "still there?"]
+        );
     }
 
     #[test]

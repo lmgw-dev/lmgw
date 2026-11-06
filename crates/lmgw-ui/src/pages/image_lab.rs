@@ -264,6 +264,21 @@ impl Lab {
         m.state
     }
 
+    /// The download the selected model's start waits for, while it has no
+    /// container: tracked by whether there is one, so the chip is drawn
+    /// once and its bytes move inside it.
+    fn download(&self) -> Option<crate::gpu_download::Dl> {
+        if self.state().is_some() {
+            return None;
+        }
+        let model_id = self.model()?.model_id?;
+        let live = crate::live::use_live();
+        live.vram.with(|v| {
+            v.as_ref()
+                .and_then(|v| crate::gpu_download::for_model(v, "image", &model_id))
+        })
+    }
+
     fn warnings(&self) -> Vec<String> {
         let Some(m) = self.model() else {
             return Vec::new();
@@ -446,6 +461,11 @@ pub fn ImageLab() -> impl IntoView {
         toasts: crate::widgets::use_toasts(),
         scope,
     };
+    // A start waiting for its download (machine-check design §5): the flag
+    // alone redraws the state chip, the bytes move inside it, so its bar
+    // is not drawn anew with every `vram` frame.
+    let download = Memo::new(move |_| lab.download());
+    let downloading = Memo::new(move |_| download.with(Option::is_some));
 
     let load_models = move || {
         lab.scope.spawn(async move {
@@ -685,6 +705,16 @@ pub fn ImageLab() -> impl IntoView {
                     }}
                     <span class="spacer"></span>
                     {move || {
+                        // A start waiting for its download (machine-check
+                        // design §5): no container yet, so that is its state.
+                        if downloading.get() {
+                            return view! {
+                                <crate::gpu_download::DlChip dl=Signal::derive(move || {
+                                    download.get().unwrap_or_default()
+                                })/>
+                            }
+                            .into_any();
+                        }
                         let (cls, label) = match lab.state().as_deref() {
                             Some("ready") => ("chip ok", "container ready"),
                             Some("starting") => ("chip live", "starting…"),
@@ -705,6 +735,7 @@ pub fn ImageLab() -> impl IntoView {
                                 {label}
                             </span>
                         }
+                        .into_any()
                     }}
                     <button
                         class="btn ghost"

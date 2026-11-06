@@ -110,7 +110,7 @@ pub(crate) async fn setup(mock: &MockServer) -> SharedState {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -135,6 +135,7 @@ pub(crate) async fn setup(mock: &MockServer) -> SharedState {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -466,6 +467,8 @@ async fn a_base_ingests_uploads_and_skips_what_it_already_has() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
+    // An upload of any type is stored content (WP13).
+    crate::support::stored::assert_sandboxed(r.headers(), "knowledge original");
     assert!(r.headers()["content-disposition"]
         .to_str()
         .unwrap()
@@ -548,8 +551,7 @@ async fn a_gpu_hold_stops_the_ingest_and_leaves_files_pending() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -713,6 +715,7 @@ async fn search_returns_citations_with_file_and_page_within_the_budget() {
             budget_tokens: Some(3),
             params: None,
             caller: None,
+            origin: Default::default(),
         },
     )
     .await;
@@ -726,6 +729,7 @@ async fn search_returns_citations_with_file_and_page_within_the_budget() {
             budget_tokens: Some(60),
             params: None,
             caller: None,
+            origin: Default::default(),
         },
     )
     .await;
@@ -1059,6 +1063,8 @@ async fn the_kb_label_attaches_like_a_server() {
         server_label: "kb".to_string(),
         allowed_tools: None,
         require_approval: Default::default(),
+        server_url: None,
+        connector_id: None,
     }];
     let r =
         lmgw_core::mcp::exec::resolve(&state, &specs, &lmgw_core::mcp::scope::ToolScope::gateway())
@@ -1170,6 +1176,7 @@ async fn a_model_change_reembeds_and_keeps_chunk_ids() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

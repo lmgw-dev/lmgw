@@ -1,0 +1,394 @@
+{
+ "build": "stable-diffusion.cpp version b982, commit 0518b34",
+ "pipeline": "Z-Image-Turbo Q4_K, Qwen3-4B-Instruct-2507 Q4_K_M encoder, FLUX ae VAE, 512x512",
+ "note": "each b64_json replaced by a description of the PNG it held; the job polled every 250 ms",
+ "runs": {
+  "gen1-proj": {
+   "request": {
+    "prompt": "a red bicycle leaning on a white wall",
+    "width": 512,
+    "height": 512,
+    "seed": 1234,
+    "output_format": "png",
+    "batch_count": 1,
+    "preview": "proj",
+    "preview_interval": 1
+   },
+   "submit": {
+    "status": 202,
+    "body": {
+     "created": 1792540692352,
+     "id": "job_1a15bc04f80_00000000",
+     "kind": "img_gen",
+     "poll_url": "/sdcpp/v1/jobs/job_1a15bc04f80_00000000",
+     "status": "queued"
+    },
+    "t": 0.004
+   },
+   "polls": [
+    {
+     "t": 0.004,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540692352,
+      "error": null,
+      "id": "job_1a15bc04f80_00000000",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540692352,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 0.506,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540692352,
+      "error": null,
+      "id": "job_1a15bc04f80_00000000",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<9876 b64 chars, png [64, 64]>",
+       "pass": 1,
+       "step": 3,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540692352,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 0.757,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540692352,
+      "error": null,
+      "id": "job_1a15bc04f80_00000000",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<8920 b64 chars, png [64, 64]>",
+       "pass": 1,
+       "step": 6,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540692352,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.008,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540692352,
+      "error": null,
+      "id": "job_1a15bc04f80_00000000",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<8976 b64 chars, png [64, 64]>",
+       "pass": 1,
+       "step": 8,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540692352,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.262,
+     "status": 200,
+     "body": {
+      "completed": 1792540693398,
+      "created": 1792540692352,
+      "error": null,
+      "id": "job_1a15bc04f80_00000000",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": {
+       "images": [
+        {
+         "b64_json": "<607580 b64 chars, png [512, 512]>",
+         "index": 0
+        }
+       ],
+       "output_format": "png"
+      },
+      "started": 1792540692352,
+      "status": "completed"
+     }
+    }
+   ],
+   "wall": 1.264
+  },
+  "gen2-cancel": {
+   "request": {
+    "prompt": "a red bicycle leaning on a white wall",
+    "width": 512,
+    "height": 512,
+    "seed": 1234,
+    "output_format": "png",
+    "batch_count": 1
+   },
+   "submit": {
+    "status": 202,
+    "body": {
+     "created": 1792540702917,
+     "id": "job_1a15bc078c5_00000001",
+     "kind": "img_gen",
+     "poll_url": "/sdcpp/v1/jobs/job_1a15bc078c5_00000001",
+     "status": "queued"
+    },
+    "t": 0.003
+   },
+   "polls": [
+    {
+     "t": 0.003,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540702917,
+      "error": null,
+      "id": "job_1a15bc078c5_00000001",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540702917,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.011,
+     "status": 200,
+     "body": {
+      "completed": 1792540703738,
+      "created": 1792540702917,
+      "error": null,
+      "id": "job_1a15bc078c5_00000001",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": {
+       "images": [
+        {
+         "b64_json": "<607580 b64 chars, png [512, 512]>",
+         "index": 0
+        }
+       ],
+       "output_format": "png"
+      },
+      "started": 1792540702917,
+      "status": "completed"
+     }
+    }
+   ],
+   "cancel": {
+    "t": 0.506,
+    "status": 409,
+    "body": {
+     "error": "job is currently generating and cannot be interrupted yet"
+    },
+    "job_status_at_cancel": "generating"
+   },
+   "wall": 1.013
+  },
+  "gen3-vae": {
+   "request": {
+    "prompt": "a red bicycle leaning on a white wall",
+    "width": 512,
+    "height": 512,
+    "seed": 1234,
+    "output_format": "png",
+    "batch_count": 1,
+    "preview": "vae",
+    "preview_interval": 1
+   },
+   "submit": {
+    "status": 202,
+    "body": {
+     "created": 1792540707686,
+     "id": "job_1a15bc08b66_00000002",
+     "kind": "img_gen",
+     "poll_url": "/sdcpp/v1/jobs/job_1a15bc08b66_00000002",
+     "status": "queued"
+    },
+    "t": 0.003
+   },
+   "polls": [
+    {
+     "t": 0.004,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 0.259,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<623432 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 1,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 0.515,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<568116 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 2,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 0.77,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<618772 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 4,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.026,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<619944 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 5,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.281,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<608860 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 6,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.536,
+     "status": 200,
+     "body": {
+      "completed": null,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "preview": {
+       "b64_json": "<606072 b64 chars, png [512, 512]>",
+       "pass": 1,
+       "step": 8,
+       "total_steps": 8
+      },
+      "queue_position": 0,
+      "result": null,
+      "started": 1792540707686,
+      "status": "generating"
+     }
+    },
+    {
+     "t": 1.791,
+     "status": 200,
+     "body": {
+      "completed": 1792540709256,
+      "created": 1792540707686,
+      "error": null,
+      "id": "job_1a15bc08b66_00000002",
+      "kind": "img_gen",
+      "queue_position": 0,
+      "result": {
+       "images": [
+        {
+         "b64_json": "<607580 b64 chars, png [512, 512]>",
+         "index": 0
+        }
+       ],
+       "output_format": "png"
+      },
+      "started": 1792540707686,
+      "status": "completed"
+     }
+    }
+   ],
+   "wall": 1.794
+  }
+ }
+}

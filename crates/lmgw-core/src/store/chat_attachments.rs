@@ -28,6 +28,12 @@ pub struct ChatAttachmentMeta {
     pub meta: serde_json::Value,
     /// `meta.tokens`, the chips' estimate ("~12k tokens").
     pub extracted_tokens: Option<i64>,
+    /// `upload`, `tool` or `action` (chat-media-tools design §6.3).
+    pub source: String,
+    /// The tool call that made a `tool` file, the card action (`act-<boot>-<n>`)
+    /// that made an `action` file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     /// Why this draft cannot be sent to the thread's current model; filled in
     /// by the handlers for drafts, absent on the store's own rows.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,6 +62,11 @@ pub struct ChatAttachmentFull {
     pub extracted: Option<String>,
     pub meta: serde_json::Value,
     pub mode: Option<String>,
+    /// `upload`, `tool` or `action` (chat-media-tools design §6.3).
+    pub source: String,
+    /// The tool call that made a `tool` file, the card action (`act-<boot>-<n>`)
+    /// that made an `action` file.
+    pub call_id: Option<String>,
 }
 
 /// The `meta` column as JSON (`{}` when empty or unreadable).
@@ -86,10 +97,12 @@ pub(super) fn chat_attachment_meta_from_row(row: &sqlx::sqlite::SqliteRow) -> Ch
         name: row.get("name"),
         mime: row.get("mime"),
         size: row.get("size"),
+        source: row.get("source"),
+        call_id: row.get("call_id"),
     }
 }
 
-fn chat_attachment_full_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmentFull {
+pub(super) fn chat_attachment_full_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmentFull {
     ChatAttachmentFull {
         id: row.get("id"),
         thread_id: row.get("thread_id"),
@@ -101,6 +114,8 @@ fn chat_attachment_full_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmen
         extracted: row.get("extracted"),
         meta: parse_attachment_meta(row.get::<Option<String>, _>("meta").as_deref()),
         mode: row.get("mode"),
+        source: row.get("source"),
+        call_id: row.get("call_id"),
     }
 }
 
@@ -133,14 +148,18 @@ pub async fn insert_chat_attachment(
 /// Every attachment on a thread, metadata only — sent ones in the order their
 /// message listed them, drafts in upload order. Both the draft chips and the
 /// per-message chips on `GET /chat/api/threads/{id}` come out of one query,
-/// split by `message_id` in the handler.
+/// split by `message_id` in the handler. A tool's file waiting for its reply
+/// (`message_id` still NULL, chat-media-tools design §6.3) is no draft, and
+/// is not listed until its reply is saved.
 pub async fn list_chat_attachments_meta(
     pool: &SqlitePool,
     thread_id: i64,
 ) -> DbResult<Vec<ChatAttachmentMeta>> {
     let rows = sqlx::query(
-        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta
-         FROM chat_attachments WHERE thread_id = ?1 ORDER BY ord, id",
+        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta, source, call_id
+         FROM chat_attachments
+         WHERE thread_id = ?1 AND (message_id IS NOT NULL OR source = 'upload')
+         ORDER BY ord, id",
     )
     .bind(thread_id)
     .fetch_all(pool)
@@ -188,11 +207,15 @@ pub async fn list_sent_chat_attachments(
     vision: Option<bool>,
 ) -> DbResult<Vec<ChatAttachmentFull>> {
     let skip_image_bytes = vision == Some(false);
+    // Uploads only: a tool's or a card action's file reaches the model
+    // through the turn record that names it (chat-media-tools design §6.4),
+    // or as an upload once it is attached.
     let rows = sqlx::query(
         "SELECT id, thread_id, message_id, kind, name, mime, size, extracted, meta, mode,
+                source, call_id,
                 CASE WHEN kind = 'image' AND ?2 THEN X'' ELSE data END AS data
          FROM chat_attachments
-         WHERE thread_id = ?1 AND message_id IS NOT NULL
+         WHERE thread_id = ?1 AND message_id IS NOT NULL AND source = 'upload'
          ORDER BY ord, id",
     )
     .bind(thread_id)
@@ -253,11 +276,11 @@ pub async fn list_draft_chat_attachments_by_ids(
         return Ok(Vec::new());
     }
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta FROM chat_attachments \
-         WHERE thread_id = ",
+        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta, source, call_id \
+         FROM chat_attachments WHERE thread_id = ",
     );
     qb.push_bind(thread_id);
-    qb.push(" AND message_id IS NULL AND id IN (");
+    qb.push(" AND message_id IS NULL AND source = 'upload' AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
         sep.push_bind(*id);
@@ -278,6 +301,30 @@ pub enum SendMessageOutcome {
     /// is rolled back: no half-sent message quietly missing the files it
     /// claimed to carry.
     AttachmentNotDraft,
+}
+
+/// A user message's parts, as one send writes them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserMessage<'a> {
+    pub content: &'a str,
+    /// Its draft attachments, in the order the model reads them.
+    pub attachment_ids: &'a [i64],
+    /// The knowledge bases picked for it alone (chat-complete design §9.3).
+    pub kb_refs: &'a [i64],
+    /// How a spoken turn was spoken (chat-voice design §3).
+    pub voice: Option<&'a MessageVoice>,
+    /// Where its client says the user wrote it ([`ChatMessageRow::origin`]).
+    pub origin: Option<&'a str>,
+}
+
+impl<'a> UserMessage<'a> {
+    /// A message of `content` alone.
+    pub fn text(content: &'a str) -> Self {
+        Self {
+            content,
+            ..Default::default()
+        }
+    }
 }
 
 /// Persist a user turn and bind its draft attachments to it **in one
@@ -330,7 +377,13 @@ pub async fn append_user_message_with_voice(
     append_user_message_by(
         pool,
         thread_id,
-        (content, attachment_ids, kb_refs, voice),
+        UserMessage {
+            content,
+            attachment_ids,
+            kb_refs,
+            voice,
+            origin: None,
+        },
         &super::Decider::gateway(),
     )
     .await
@@ -343,7 +396,7 @@ pub async fn append_user_message_with_voice(
 pub async fn append_user_message_by(
     pool: &SqlitePool,
     thread_id: i64,
-    message: (&str, &[i64], &[i64], Option<&MessageVoice>),
+    message: UserMessage<'_>,
     by: &super::Decider,
 ) -> DbResult<SendMessageOutcome> {
     Ok(send_user_message_by(pool, thread_id, message, by, None)
@@ -363,7 +416,13 @@ pub async fn append_user_message_by(
 pub async fn send_user_message_by(
     pool: &SqlitePool,
     thread_id: i64,
-    (content, attachment_ids, kb_refs, voice): (&str, &[i64], &[i64], Option<&MessageVoice>),
+    UserMessage {
+        content,
+        attachment_ids,
+        kb_refs,
+        voice,
+        origin,
+    }: UserMessage<'_>,
     by: &super::Decider,
     results: Option<&(dyn Fn(&super::mcp_tasks::McpTaskRow) -> super::mcp_tasks::ResultRow + Sync)>,
 ) -> DbResult<(SendMessageOutcome, Vec<super::mcp_tasks::Delivered>)> {
@@ -377,13 +436,14 @@ pub async fn send_user_message_by(
     };
 
     let res = sqlx::query(
-        "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs, voice) \
-         VALUES (?1, 'user', ?2, '', ?3, ?4)",
+        "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs, voice, origin) \
+         VALUES (?1, 'user', ?2, '', ?3, ?4, ?5)",
     )
     .bind(thread_id)
     .bind(content)
     .bind(super::chat_knowledge::id_list_json(kb_refs))
     .bind(super::chat_voice::message_voice_json(voice))
+    .bind(origin)
     .execute(&mut *tx)
     .await?;
     let msg_id = res.last_insert_rowid();
@@ -396,7 +456,7 @@ pub async fn send_user_message_by(
     for (ord, id) in attachment_ids.iter().enumerate() {
         bound += sqlx::query(
             "UPDATE chat_attachments SET message_id = ?1, ord = ?2 \
-             WHERE id = ?3 AND thread_id = ?4 AND message_id IS NULL",
+             WHERE id = ?3 AND thread_id = ?4 AND message_id IS NULL AND source = 'upload'",
         )
         .bind(msg_id)
         .bind(ord as i64)
@@ -441,19 +501,25 @@ pub async fn delete_draft_chat_attachment(
     pool: &SqlitePool,
     id: i64,
 ) -> DbResult<DeleteAttachmentOutcome> {
-    let row = sqlx::query("SELECT message_id FROM chat_attachments WHERE id = ?1")
+    let row = sqlx::query("SELECT message_id, source FROM chat_attachments WHERE id = ?1")
         .bind(id)
         .fetch_optional(pool)
         .await?;
-    let Some(row) = row else {
+    // A tool's file waiting for its reply is nobody's draft to delete.
+    let Some(row) = row.filter(|r| {
+        r.get::<Option<i64>, _>("message_id").is_some()
+            || r.get::<String, _>("source") == lmgw_api_types::chat_media::SOURCE_UPLOAD
+    }) else {
         return Ok(DeleteAttachmentOutcome::NotFound);
     };
     if row.get::<Option<i64>, _>("message_id").is_some() {
         return Ok(DeleteAttachmentOutcome::AlreadySent);
     }
-    sqlx::query("DELETE FROM chat_attachments WHERE id = ?1 AND message_id IS NULL")
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM chat_attachments WHERE id = ?1 AND message_id IS NULL AND source = 'upload'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(DeleteAttachmentOutcome::Deleted)
 }

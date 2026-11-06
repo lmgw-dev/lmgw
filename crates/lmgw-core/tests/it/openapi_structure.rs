@@ -145,7 +145,7 @@ fn both_documents_stay_small() {
 async fn served_documents_carry_a_validator_and_compress() {
     let state = AppState::init_for_tests().await.unwrap();
     let gw = common::serve(state).await;
-    let client = gw.client();
+    let client = gw.client_raw();
 
     for (url, doc) in [
         (format!("{gw}/api/openapi.json"), admin_doc()),

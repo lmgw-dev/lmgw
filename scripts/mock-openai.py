@@ -51,13 +51,18 @@ Environment:
                      (scripts/knowledge-setup.sh, scripts/drive/knowledge.json)
   TOOL_SCRIPT=<json> scripted tool calls: a JSON list of turns, each a list of
                      {"name": <tool>, "arguments": <object>} (an optional "id"
-                     is honoured). Example, one call then one with two:
+                     is honoured; "id": false sends the call without one, as
+                     upstreams that number their calls leave it to the client).
+                     Example, one call then one with two:
                      [[{"name":"echo","arguments":{"text":"hi"}}],
                       [{"name":"a","arguments":{}},{"name":"b","arguments":{}}]]
                      A turn is consumed by the next request that carries `tools`
                      and does not end in a tool result; the tool result then
-                     comes back echoed as text. TOOL_SCRIPT=@<path> reads the
-                     JSON from a file
+                     comes back echoed as text. A turn may instead be
+                     {"rounds": [<calls>, <calls>, ...]}: a tool loop, each
+                     request that ends in tool results answered with the next
+                     round's calls until the rounds are used up, then the echo.
+                     TOOL_SCRIPT=@<path> reads the JSON from a file
   ECHO=1             streamed chat answers "Echo: <last user message>" instead of
                      the canned text; a trailing assistant message (a prefill,
                      as the Chat's Continue sends) is continued with "…and then
@@ -72,9 +77,18 @@ Environment:
                      of silence
   TRANSCRIPT=<text>  what `/audio/transcriptions` hears (default "Hello there.")
   VOICES=<a,b>       the voices `GET /audio/voices` lists (default "alba")
+  IMAGE_DELAY=<s>    delay before `/images/generations` and `/images/edits` answer
+                     (default 0): long enough to see the Chat's live pane of an
+                     image call (scripts/drive/chat-media.json)
+
+`/images/generations` and `/images/edits` answer OpenAI-shaped with one PNG as
+`b64_json` (or the request's `n`), a gradient of the asked `size` (at most
+256 px a side, the aspect kept) whose hue moves with every picture, so a re-roll
+looks different from its source.
 
 Usage: mock-openai.py <port>
 """
+import base64
 import io
 import itertools
 import json
@@ -97,6 +111,8 @@ EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "0"))
 SPEECH_WAV = os.environ.get("SPEECH_WAV", "")
 TRANSCRIPT = os.environ.get("TRANSCRIPT", "Hello there.")
 VOICES = [v.strip() for v in os.environ.get("VOICES", "alba").split(",") if v.strip()]
+IMAGE_DELAY = float(os.environ.get("IMAGE_DELAY", "0"))
+IMAGE_COUNT = itertools.count()
 
 
 def load_tool_script():
@@ -105,16 +121,21 @@ def load_tool_script():
         with open(raw[1:]) as f:
             raw = f.read()
     turns = json.loads(raw) if raw else []
+    calls = lambda r: isinstance(r, list) and all(isinstance(c, dict) and "name" in c for c in r)
     if not isinstance(turns, list) or not all(
-        isinstance(t, list) and all(isinstance(c, dict) and "name" in c for c in t) for t in turns
+        calls(t) or (isinstance(t, dict) and isinstance(t.get("rounds"), list)
+                     and t["rounds"] and all(calls(r) for r in t["rounds"]))
+        for t in turns
     ):
-        sys.exit("TOOL_SCRIPT must be a JSON list of turns, each a list of {name, arguments}")
-    return turns
+        sys.exit("TOOL_SCRIPT must be a JSON list of turns, each a list of {name, arguments} "
+                 "or {\"rounds\": [lists of them]}")
+    return [t["rounds"] if isinstance(t, dict) else [t] for t in turns]
 
 
-TOOL_TURNS = load_tool_script()
+TOOL_TURNS = load_tool_script()  # each turn as its rounds
 TOOL_LOCK = threading.Lock()
 TOOL_NEXT = [0]  # index of the next unused turn
+TOOL_ROUNDS = []  # the latest turn's rounds not answered yet, with their names
 
 # Matched against the mail's own text only — deliberately narrow keys, so the
 # List-Unsubscribe header every mail carries does not turn everything into a
@@ -232,6 +253,37 @@ def silent_wav(seconds=0.5, rate=16000):
     return buf.getvalue()
 
 
+def gradient_png(width, height, shift):
+    """A `width`×`height` RGB PNG (stdlib zlib, no imaging library): a
+    diagonal gradient whose colours move with `shift`."""
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)  # filter: none
+        for x in range(width):
+            t = (x + y) / max(1, width + height - 2)
+            rows += bytes((int(40 + 180 * t + 60 * shift) % 256,
+                           int(90 + 120 * (1 - t) + 37 * shift) % 256,
+                           int(160 + 80 * t + 23 * shift) % 256))
+
+    def chunk(kind, data):
+        body = kind + data
+        return len(data).to_bytes(4, "big") + body + zlib.crc32(body).to_bytes(4, "big")
+
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes((8, 2, 0, 0, 0))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
+
+
+def image_size(size):
+    """The asked `WxH`, scaled down to at most 256 px a side."""
+    try:
+        w, h = (int(v) for v in str(size).lower().split("x", 1))
+    except ValueError:
+        w, h = 256, 256
+    scale = min(1.0, 256 / max(w, h, 1))
+    return max(1, round(w * scale)), max(1, round(h * scale))
+
+
 def answer_pieces(n):
     """`n` chunk-sized pieces of a canned answer (word + trailing space).
 
@@ -286,7 +338,7 @@ def tool_calls_wire(calls, turn):
         args = c.get("arguments", {})
         out.append({
             "index": i,
-            "id": c.get("id") or f"call_mock_{turn}_{i}",
+            "id": None if c.get("id") is False else (c.get("id") or f"call_mock_{turn}_{i}"),
             "type": "function",
             "function": {
                 "name": c["name"],
@@ -368,6 +420,14 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._binary(200, "audio/wav", silent_wav())
 
+    def images(self, req):
+        if IMAGE_DELAY:
+            time.sleep(IMAGE_DELAY)
+        w, h = image_size(req.get("size", "256x256"))
+        data = [{"b64_json": base64.b64encode(gradient_png(w, h, next(IMAGE_COUNT))).decode()}
+                for _ in range(max(1, int(req.get("n") or 1)))]
+        self._json(200, {"created": int(time.time()), "data": data})
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n) or b"{}"
@@ -376,6 +436,13 @@ class Handler(BaseHTTPRequestHandler):
         # A multipart upload, not JSON: answered before the body is parsed.
         if path.endswith("/audio/transcriptions"):
             self._json(200, {"text": TRANSCRIPT})
+            return
+        if path.endswith("/images/edits"):
+            size = re.search(rb'name="size"\r\n\r\n([0-9]+x[0-9]+)', raw)
+            self.images({"size": size.group(1).decode() if size else "256x256"})
+            return
+        if path.endswith("/images/generations"):
+            self.images(json.loads(raw))
             return
 
         routes = {
@@ -454,6 +521,10 @@ class Handler(BaseHTTPRequestHandler):
             return None
         results = trailing_tool_results(req.get("messages", []))
         if results is not None:
+            with TOOL_LOCK:
+                nxt = TOOL_ROUNDS.pop(0) if TOOL_ROUNDS else None
+            if nxt is not None:
+                return "calls", tool_calls_wire(*nxt)
             return "text", re.findall(r"\S+\s*", "Tool result: " + "\n".join(results))
         if not req.get("tools"):
             return None
@@ -462,14 +533,17 @@ class Handler(BaseHTTPRequestHandler):
             if turn >= len(TOOL_TURNS):
                 return None
             TOOL_NEXT[0] += 1
-        return "calls", tool_calls_wire(TOOL_TURNS[turn], turn)
+            rounds = TOOL_TURNS[turn]
+            TOOL_ROUNDS[:] = [(r, f"{turn}r{n}") for n, r in enumerate(rounds[1:], 1)]
+        return "calls", tool_calls_wire(rounds[0], turn)
 
     def complete_scripted(self, req, kind, payload):
         if DELAY:
             time.sleep(DELAY)
         msg = {"role": "assistant", "content": "".join(payload) if kind == "text" else None}
         if kind == "calls":
-            msg["tool_calls"] = [{k: v for k, v in c.items() if k != "index"} for c in payload]
+            msg["tool_calls"] = [{k: v for k, v in c.items() if k != "index" and v is not None}
+                                 for c in payload]
         self._json(200, {
             "id": "chatcmpl-mock",
             "object": "chat.completion",
@@ -519,9 +593,11 @@ class Handler(BaseHTTPRequestHandler):
                 if STREAM_DELAY:
                     time.sleep(STREAM_DELAY)
                 fn = c["function"]
-                self._sse(frame({"tool_calls": [{
-                    "index": c["index"], "id": c["id"], "type": "function",
-                    "function": {"name": fn["name"], "arguments": ""}}]}))
+                head = {"index": c["index"], "id": c["id"], "type": "function",
+                        "function": {"name": fn["name"], "arguments": ""}}
+                if c["id"] is None:
+                    del head["id"]
+                self._sse(frame({"tool_calls": [head]}))
                 args = fn["arguments"]
                 half = max(1, len(args) // 2)
                 for frag in (args[:half], args[half:]):

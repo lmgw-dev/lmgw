@@ -157,22 +157,9 @@ pub(crate) fn classify_image_file(path: &str, repo: Option<&str>) -> &'static st
     "other"
 }
 
-/// The quantization label embedded in a GGUF filename (`…-UD-Q4_K_XL.gguf` →
-/// `UD-Q4_K_XL`). Best-effort: repos are not consistent, so this is a hint for
-/// choosing a file, never a fact about the file (the GGUF's own `general
-/// .file_type` is the fact, and the two genuinely disagree in the wild).
-pub(super) fn quant_label(path: &str) -> Option<String> {
-    let stem = path.rsplit('/').next()?.strip_suffix(".gguf")?;
-    let stem = hf::split_part_name(&format!("{stem}.gguf"))
-        .map(|(p, _, _)| p.to_string())
-        .unwrap_or_else(|| stem.to_string());
-    let up = stem.to_ascii_uppercase();
-    let idx = ["-UD-", "-Q", "-IQ", "-BF16", "-F16", "-F32"]
-        .iter()
-        .filter_map(|m| up.rfind(m))
-        .min()?;
-    Some(stem[idx + 1..].to_string())
-}
+/// The quantization label embedded in a GGUF filename, [`hf::quant_label`]:
+/// the projector rule (D121) reads it too, so it lives with the hub's names.
+pub(super) use crate::hf::quant_label;
 
 /// List a Hugging Face repo's files, classified by role and grouped by quant.
 ///
@@ -180,15 +167,24 @@ pub(super) fn quant_label(path: &str) -> Option<String> {
 /// names them (§7.1): GGUF-only with weights/mmproj/drafter for the three
 /// llama.cpp-shaped classes, and the whole stable-diffusion.cpp set with the
 /// pipeline roles for `image`.
+///
+/// `fit` marks every listed `weights` file with its fit on the graphics card
+/// and names the recommended one (find-a-model design §3.3,
+/// [`crate::modelinfo::hub_fit::marks`]), reading file headers from the hub:
+/// one, the files near the card's edge and the pick's candidates, 1 to 16 MiB
+/// each; with [`dto::RepoFit::UnlessMetered`] on a metered connection none,
+/// and every mark is by size (D68). The chat and aux classes only; the
+/// others say why in `fit_notes`.
 pub async fn hf_repo(
     state: &SharedState,
     repo: &str,
     search: Option<&str>,
     target: &str,
+    fit: dto::RepoFit,
 ) -> Result<dto::RepoFiles, String> {
     let target = hf::normalize_target(target)?;
     let snap = state.snapshot();
-    let files = hf::list_repo_files(&state.http, &snap.settings.hf_token, repo).await?;
+    let files = hf::list_repo_files(&state.hub_http, &snap.settings.hf_token, repo).await?;
     let needle = search.map(str::to_ascii_lowercase);
 
     let mut out: Vec<dto::RepoFile> = Vec::new();
@@ -235,8 +231,32 @@ pub async fn hf_repo(
             parts: parts.len() as u32,
             size_bytes: total,
             size: hf::fmt_bytes(total),
+            ..Default::default()
         });
     }
+    let marks = match fit {
+        dto::RepoFit::No => None,
+        fit => {
+            use crate::modelinfo::hub_fit::marks::{repo_marks, Reads};
+            let weights: Vec<String> = out
+                .iter()
+                .filter(|f| f.role == "weights")
+                .map(|f| f.file.clone())
+                .collect();
+            // The page's own ask reads nothing on a metered connection
+            // (D123); an explicit one reads (D59).
+            let reads = match fit {
+                dto::RepoFit::UnlessMetered => {
+                    match crate::machine::connection_metered(state).await {
+                        crate::machine::Metered::Yes(how) => Reads::Metered(how),
+                        _ => Reads::Headers,
+                    }
+                }
+                _ => Reads::Headers,
+            };
+            Some(repo_marks(state, repo, &files, &weights, Some(target), reads).await)
+        }
+    };
     // Nothing to list is an answer, not a refusal: the repo exists, the
     // request was valid, and the empty `files` says so.
     let nothing = out.is_empty();
@@ -245,7 +265,7 @@ pub async fn hf_repo(
     } else {
         ""
     };
-    Ok(dto::RepoFiles {
+    let mut answer = dto::RepoFiles {
         repo: repo.to_string(),
         target: target.to_string(),
         files: out,
@@ -272,7 +292,29 @@ pub async fn hf_repo(
             }
             .to_string()
         },
-    })
+        ..Default::default()
+    };
+    if let Some(m) = marks {
+        // Nothing measured (a class whose files aren't, or no weights
+        // listed): no picks to name.
+        let measured = !m.files.is_empty();
+        for marked in m.files {
+            if let Some(f) = answer.files.iter_mut().find(|f| f.file == marked.file) {
+                f.fit = Some(marked.fit);
+                f.estimated_from = marked.estimated_from;
+            }
+        }
+        answer.recommended = m.recommended;
+        answer.picks = measured.then_some(dto::RepoPicks {
+            whole_card: m.whole_card,
+            beside: m.beside,
+        });
+        answer.card = m.card;
+        answer.header_bytes_read = m.header_bytes_read;
+        answer.fit_notes = m.notes;
+        answer.metered = m.metered;
+    }
+    Ok(answer)
 }
 
 /// Download a repo file and, by default, its companions.
@@ -295,7 +337,7 @@ pub async fn hf_add(
     // Refused before the hub is asked, like an unset models dir.
     hf::models_dir_to_write(state, target)?;
     let snap = state.snapshot();
-    let available = hf::list_repo_files(&state.http, &snap.settings.hf_token, repo).await?;
+    let available = hf::list_repo_files(&state.hub_http, &snap.settings.hf_token, repo).await?;
     let ggufs: Vec<&hf::HfFile> = available
         .iter()
         .filter(|f| hf::accepts_file(target, &f.path))
@@ -381,34 +423,14 @@ pub async fn hf_add(
         }
     };
 
-    // Companions live beside the chosen file; a repo with several quants ships
-    // exactly one projector/drafter shared by all of them.
-    let dir = chosen.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let mut wanted = vec![chosen.clone()];
-    let mut extras: Vec<dto::HfCompanion> = Vec::new();
     // Companions are a llama.cpp repo's shape — a projector and a drafter
-    // beside the weights. An aux row has no drafter (an encoder, a reranker
-    // or a decision model does not speculate), so aux takes the projector
-    // only (decision-models design §3.2). An image pipeline's components
-    // live in *other* repos (§2.7), so there is nothing here to pull along
-    // and the recipe verbs are what fetch a whole pipeline.
-    if companions && target != "image" {
-        for f in &ggufs {
-            let same_dir = f.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("") == dir;
-            let role = classify_repo_file(&f.path, target);
-            let companion = match target {
-                "aux" => role == "mmproj",
-                _ => matches!(role, "mmproj" | "drafter"),
-            };
-            if same_dir && companion && !wanted.contains(&f.path) {
-                wanted.push(f.path.clone());
-                extras.push(dto::HfCompanion {
-                    file: f.path.clone(),
-                    role: role.to_string(),
-                });
-            }
-        }
-    }
+    // beside the weights. An image pipeline's components live in *other*
+    // repos (§2.7), so there is nothing here to pull along and the recipe
+    // verbs are what fetch a whole pipeline.
+    let (wanted, extras) = match companions && target != "image" {
+        true => with_companions(&available, &chosen, target),
+        false => (vec![chosen.clone()], Vec::new()),
+    };
 
     // The rows the queueing itself wrote, with their ids and destination
     // paths: without them a caller can only re-list every download ever
@@ -428,6 +450,37 @@ pub async fn hf_add(
         ));
     }
     let n = queued_rows.len();
+    // What the files' models run in, when it is not here: fetched too, and
+    // nothing started (machine-check design §5, D16).
+    let engine = crate::web::hf::engine::fetch(state, target).await;
+    let message = match target {
+            "aux" => format!(
+                "queued {n} file(s) into the aux (embedding / rerank / decision) models dir; poll \
+                 lmgw__hf_downloads with ids = the queued ids in 'downloads' until status is \
+                 'done', then call lmgw__local_model_plan \
+                 with gguf_path '{repo}/{chosen}' and target=aux — it returns the parameters \
+                 lmgw__aux_model_set action=create takes"
+            ),
+            "audio" => format!(
+                "queued {n} file(s) into the audio models dir; poll lmgw__hf_downloads \
+                 with ids = the queued ids in 'downloads' until status is 'done', then configure the model on the dashboard's Audio \
+                 page (audio.cpp models need a family and task)"
+            ),
+            "image" => format!(
+                "queued {n} file(s) into the image models dir as '{repo}/{chosen}'; poll \
+                 lmgw__hf_downloads with ids = the queued ids in 'downloads' until status \
+                 is 'done'. An image pipeline needs more than \
+                 this one file — its VAE and text encoders live in other repos — so either \
+                 run lmgw__image_recipe_add for a known family (it queues every component and \
+                 hands back a prefilled row) or call lmgw__local_model_plan target=image on \
+                 this path to see which components a matching recipe still wants"
+            ),
+            _ => format!(
+                "queued {n} file(s); poll lmgw__hf_downloads with ids = the queued ids \
+                 in 'downloads' until status is 'done', then call lmgw__local_model_plan with gguf_path \
+                 '{repo}/{chosen}' to get ready-to-apply parameters"
+            ),
+    };
     Ok(dto::HfAddResult {
         ok: true,
         repo: repo.to_string(),
@@ -439,33 +492,65 @@ pub async fn hf_add(
         gguf_path: hf::dest_rel_path(repo, &chosen).unwrap_or_default(),
         dest_prefix: format!("{repo}/"),
         target: target.to_string(),
-        message: match target {
-            "aux" => format!(
-                "queued {n} file(s) into the aux (embedding / rerank / decision) models dir; poll \
-                 lmgw__hf_downloads until status is 'done', then call lmgw__local_model_plan \
-                 with gguf_path '{repo}/{chosen}' and target=aux — it returns the parameters \
-                 lmgw__aux_model_set action=create takes"
-            ),
-            "audio" => format!(
-                "queued {n} file(s) into the audio models dir; poll lmgw__hf_downloads \
-                 until status is 'done', then configure the model on the dashboard's Audio \
-                 page (audio.cpp models need a family and task)"
-            ),
-            "image" => format!(
-                "queued {n} file(s) into the image models dir as '{repo}/{chosen}'; poll \
-                 lmgw__hf_downloads until status is 'done'. An image pipeline needs more than \
-                 this one file — its VAE and text encoders live in other repos — so either \
-                 run lmgw__image_recipe_add for a known family (it queues every component and \
-                 hands back a prefilled row) or call lmgw__local_model_plan target=image on \
-                 this path to see which components a matching recipe still wants"
-            ),
-            _ => format!(
-                "queued {n} file(s); poll lmgw__hf_downloads until status is \
-                 'done', then call lmgw__local_model_plan with gguf_path \
-                 '{repo}/{chosen}' to get ready-to-apply parameters"
-            ),
-        },
+        message,
+        engine,
     })
+}
+
+/// The files `hf_add` fetches for `chosen` with its companions: the file
+/// itself, and beside it (in the same directory, shared by every quant
+/// there) the projector the one rule picks (find-a-model design D121, bug
+/// H1) and, for the chat class, the drafters. An aux row has no drafter (an
+/// encoder, a reranker or a decision model does not speculate), so aux
+/// takes the projector only (decision-models design §3.2). Get it
+/// (`model_get`) fetches the same files.
+pub(crate) fn with_companions(
+    available: &[hf::HfFile],
+    chosen: &str,
+    target: &str,
+) -> (Vec<String>, Vec<dto::HfCompanion>) {
+    let dir = chosen.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let wanted = vec![chosen.to_string()];
+    let beside: Vec<&hf::HfFile> = available
+        .iter()
+        .filter(|f| hf::accepts_file(target, &f.path))
+        .filter(|f| f.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("") == dir)
+        .filter(|f| !wanted.contains(&f.path))
+        .collect();
+    // One projector: llama-server loads one, and a repo often ships it
+    // in two or three widths. The others stay in the file list, choosable
+    // by name.
+    let projector = hf::pick_projector(
+        beside
+            .iter()
+            .filter(|f| classify_repo_file(&f.path, target) == "mmproj")
+            .map(|f| (f.path.as_str(), f.size.unwrap_or(u64::MAX))),
+    );
+    let mut wanted = wanted;
+    let mut extras: Vec<dto::HfCompanion> = Vec::new();
+    for f in &beside {
+        let role = classify_repo_file(&f.path, target);
+        let companion = match role {
+            "mmproj" => projector == Some(f.path.as_str()),
+            "drafter" => target != "aux",
+            _ => false,
+        };
+        if companion {
+            wanted.push(f.path.clone());
+            extras.push(dto::HfCompanion {
+                file: f.path.clone(),
+                role: role.to_string(),
+            });
+        }
+    }
+    (wanted, extras)
+}
+
+/// Whether a download row still needs attention: `queued`, `downloading` or
+/// `failed`. `done` and `update_available` (the file is on disk, a newer one
+/// exists upstream) are finished.
+fn hf_status_is_active(status: &str) -> bool {
+    matches!(status, "queued" | "downloading" | "failed")
 }
 
 /// Tracked downloads with live byte progress.
@@ -475,39 +560,81 @@ pub async fn hf_add(
 /// downloads had their own registry — `lmgw__hf_downloads` is a documented
 /// agent workflow ("poll until status is 'done'") and it keeps working
 /// verbatim. `job_id` is additive, for cancelling.
-pub async fn hf_downloads(state: &SharedState) -> Result<dto::DownloadsView, String> {
+///
+/// `ids` keeps only those rows; `active` keeps only the rows that still need
+/// attention (see [`hf_status_is_active`]). Both given: a row must pass both.
+/// Neither: every row ever recorded, as before. A poller passes the ids its
+/// `hf_add` returned, so the history is not re-sent on every poll.
+pub async fn hf_downloads(
+    state: &SharedState,
+    ids: Option<&[i64]>,
+    active: bool,
+) -> Result<dto::DownloadsView, String> {
     let rows = store::list_hf_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;
-    let active = state.jobs.live_of_kind(JobKind::HfDownload);
-    let items: Vec<dto::DownloadRow> = rows
-        .iter()
-        .map(|r| {
-            let key = jobs::hf_download::job_key(r.id);
-            let live = active
-                .iter()
-                .find(|j| j.key.as_deref() == Some(key.as_str()));
-            dto::DownloadRow {
-                id: r.id,
-                repo: r.repo.clone(),
-                file: r.file.clone(),
-                dest_path: r.dest_path.clone(),
-                target: r.target.clone(),
-                status: r.status.clone(),
-                error: r.error.clone(),
-                size: r.size_bytes.map(|b| hf::fmt_bytes(b.max(0) as u64)),
-                downloaded_at: r.downloaded_at.clone(),
-                received_bytes: live.map(|j| j.done),
-                percent: live.and_then(|j| j.percent),
-                job_id: live.map(|j| j.id),
-                // What the download asked for and what it got; null on a row
-                // from before lmgw recorded them (unknown, not guessed).
-                requested_revision: r.requested_revision.clone(),
-                resolved_commit: r.resolved_commit.clone(),
-            }
-        })
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| ids.is_none_or(|ids| ids.contains(&r.id)))
+        .filter(|r| !active || hf_status_is_active(&r.status))
         .collect();
+    let active = state.jobs.live_of_kind(JobKind::HfDownload);
+    let settings = state.snapshot().settings.clone();
+    let mut items: Vec<dto::DownloadRow> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let key = jobs::hf_download::job_key(r.id);
+        let live = active
+            .iter()
+            .find(|j| j.key.as_deref() == Some(key.as_str()));
+        // What a transfer that isn't running left for the next one (D135).
+        let kept_bytes = match (live, r.status.as_str()) {
+            (None, "failed" | "queued" | "downloading") => {
+                kept_part(
+                    &hf::models_dir_for_target(&settings, &r.target),
+                    &r.dest_path,
+                )
+                .await
+            }
+            _ => None,
+        };
+        items.push(dto::DownloadRow {
+            id: r.id,
+            repo: r.repo.clone(),
+            file: r.file.clone(),
+            dest_path: r.dest_path.clone(),
+            target: r.target.clone(),
+            status: r.status.clone(),
+            error: r.error.clone(),
+            size: r.size_bytes.map(|b| hf::fmt_bytes(b.max(0) as u64)),
+            downloaded_at: r.downloaded_at.clone(),
+            received_bytes: live.map(|j| j.done),
+            percent: live.and_then(|j| j.percent),
+            job_id: live.map(|j| j.id),
+            // What the download asked for and what it got; null on a row
+            // from before lmgw recorded them (unknown, not guessed).
+            requested_revision: r.requested_revision.clone(),
+            resolved_commit: r.resolved_commit.clone(),
+            kept_bytes,
+        });
+    }
     Ok(dto::DownloadsView { downloads: items })
+}
+
+/// The bytes of `<dir>/<dest_path>.part`, when there are some.
+async fn kept_part(dir: &str, dest_path: &str) -> Option<u64> {
+    if dir.trim().is_empty() {
+        return None;
+    }
+    let part = format!(
+        "{}.part",
+        std::path::Path::new(dir).join(dest_path).display()
+    );
+    tokio::fs::metadata(part)
+        .await
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .filter(|n| *n > 0)
 }
 
 /// Background jobs (§9c) — the poll half of the live feed. `limit <= 0` returns

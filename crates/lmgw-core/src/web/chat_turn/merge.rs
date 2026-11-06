@@ -111,20 +111,57 @@ fn join(
     let typed_before = matches!(prev.content.last(), Some(ContentPart::Text { .. }))
         && prev_ctx != Some(prev.content.len() - 1);
     let typed_after = matches!(parts.first(), Some(ContentPart::Text { .. })) && ctx != Some(0);
-    if typed_before && typed_after {
-        if let (Some(ContentPart::Text { text: before }), ContentPart::Text { text: after }) =
-            (prev.content.last_mut(), parts.remove(0))
+    if typed_before && typed_after && one_scope(prev.content.last(), parts.first()) {
+        if let (
+            Some(ContentPart::Text {
+                text: before,
+                citations: cited_before,
+                citations_scope: scope_before,
+            }),
+            ContentPart::Text {
+                text: after,
+                citations: cited_after,
+                citations_scope: scope_after,
+            },
+        ) = (prev.content.last_mut(), parts.remove(0))
         {
             if !before.is_empty() && !after.is_empty() {
                 before.push_str("\n\n");
             }
             before.push_str(&after);
+            // Both texts' citations, in order, under the one scope they
+            // share ([`one_scope`]).
+            cited_before.extend(cited_after);
+            if scope_before.is_none() {
+                *scope_before = scope_after;
+            }
         }
         ctx = ctx.map(|c| c - 1);
     }
     let base = prev.content.len();
     prev.content.extend(parts);
     ctx.map(|c| base + c).or(prev_ctx)
+}
+
+/// Whether two texts' citations can be one text's: one of them has none,
+/// or both came from one scope. Citations of two scopes stay two texts, as
+/// each goes only where its scope does ([`crate::ir::AnthropicSent`]).
+fn one_scope(a: Option<&ContentPart>, b: Option<&ContentPart>) -> bool {
+    match (a, b) {
+        (
+            Some(ContentPart::Text {
+                citations: ca,
+                citations_scope: sa,
+                ..
+            }),
+            Some(ContentPart::Text {
+                citations: cb,
+                citations_scope: sb,
+                ..
+            }),
+        ) => ca.is_empty() || cb.is_empty() || sa == sb,
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +302,50 @@ mod tests {
                 image(),
                 image(),
                 ContentPart::text("last"),
+            ]
+        );
+    }
+
+    /// Two cited texts that meet keep both texts' citations, in order;
+    /// citations of two scopes stay two texts.
+    #[test]
+    fn joined_texts_keep_both_citations() {
+        let here = Some(crate::ir::Signer::new("https://api.anthropic.com"));
+        let cite = |n: u64| serde_json::json!({"type": "char_location", "document_index": n});
+        let user = |p: ContentPart| Message {
+            role: Role::User,
+            content: vec![p],
+        };
+        let out = built(vec![
+            user(ContentPart::cited("a", vec![cite(0)], None)),
+            user(ContentPart::cited("b", vec![cite(1)], None)),
+            user(ContentPart::text("c")),
+        ]);
+        assert_eq!(
+            out[0].content,
+            [ContentPart::cited(
+                "a\n\nb\n\nc",
+                vec![cite(0), cite(1)],
+                None
+            )]
+        );
+        let out = built(vec![
+            user(ContentPart::text("a")),
+            user(ContentPart::cited("b", vec![cite(1)], here.clone())),
+        ]);
+        assert_eq!(
+            out[0].content,
+            [ContentPart::cited("a\n\nb", vec![cite(1)], here.clone())]
+        );
+        let out = built(vec![
+            user(ContentPart::cited("a", vec![cite(0)], None)),
+            user(ContentPart::cited("b", vec![cite(1)], here.clone())),
+        ]);
+        assert_eq!(
+            out[0].content,
+            [
+                ContentPart::cited("a", vec![cite(0)], None),
+                ContentPart::cited("b", vec![cite(1)], here)
             ]
         );
     }

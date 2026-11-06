@@ -12,7 +12,7 @@ fn upstream(id: i64, enabled: bool) -> Upstream {
     Upstream {
         id,
         name: format!("up{id}"),
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind: UpstreamKind::Generic,
         base_url: "http://localhost:1234/v1".into(),
         api_key: None,
@@ -35,6 +35,7 @@ fn alias(name: &str, upstream_id: i64, enabled: bool, overrides: Params) -> Mode
         param_overrides: overrides,
         enabled,
         capabilities_override: None,
+        fallback: None,
     }
 }
 
@@ -159,8 +160,7 @@ fn local(model_id: &str, enabled: bool, public: bool) -> LocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -178,7 +178,7 @@ fn public_local_resolves_without_alias() {
     // unforwardable until `vram::admit` hands back a hold and the caller
     // overwrites this with the acquired container's endpoint (§5). Port 0
     // makes an unheld forward fail immediately instead of hitting whatever is
-    // listening on 9292.
+    // listening on 9393.
     assert_eq!(route.upstream.base_url, "http://127.0.0.1:0/v1");
     assert_eq!(route.upstream.base_url, snap.router_upstream().base_url);
     assert!(!route.upstream.expose_all);
@@ -203,8 +203,7 @@ fn aux(model_id: &str, kind: AuxKind, enabled: bool) -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -232,8 +231,7 @@ fn audio(model_id: &str, enabled: bool) -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }

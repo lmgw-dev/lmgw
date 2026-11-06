@@ -1,7 +1,9 @@
 //! Pre-migration guards (migration 0023; migration 0070, [`billable_units`]),
 //! pre-migration repair (migration 0018), pre-migration notices (migration
-//! 0055, [`empty_run_args`]; migration 0058, [`llama_cpp`]) and the
-//! post-migration foreign-key check ([`foreign_keys`])
+//! 0055, [`empty_run_args`]; migration 0058, [`llama_cpp`]; migration 0090,
+//! [`openai_compatible`]; migration 0095, [`one_fallback`], which can also
+//! refuse) and the post-migration foreign-key check
+//! ([`foreign_keys`])
 
 use sqlx::{Row, SqlitePool};
 
@@ -11,8 +13,14 @@ pub(super) use empty_run_args::empty_run_args_notice;
 mod llama_cpp;
 pub(super) use llama_cpp::llama_cpp_notice;
 
+mod openai_compatible;
+pub(super) use openai_compatible::openai_compatible_notice;
+
 mod device_rows;
 pub(super) use device_rows::device_rows_notice;
+
+mod one_fallback;
+pub(super) use one_fallback::one_fallback_notice;
 
 mod billable_units;
 pub(super) use billable_units::{refuse_unmappable_price_rows, BILLABLE_UNITS_MIGRATION};

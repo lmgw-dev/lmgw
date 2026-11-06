@@ -33,6 +33,7 @@ mod v1;
 
 pub use build::{admin_doc, v1_doc};
 pub use endpoints::lmgw_endpoints;
+pub(crate) use headers::takes_background;
 pub use headers::{
     headers_block, Audience, Direction, HeaderSchema, LmgwHeader, Scope, LMGW_HEADERS,
 };

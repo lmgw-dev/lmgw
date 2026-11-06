@@ -93,6 +93,14 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                     "description": "\"auto\" | \"none\" | \"required\" | \
                         {type:function,function:{name}}."
                 },
+                "service_tier": {"type": "string", "description": "OpenAI's processing tier \
+                    (auto, default, flex, priority, fast, scale, ultrafast), forwarded as sent; on an \
+                    OpenAI platform row lmgw sends auto when it is unset, and prices the answer at \
+                    the tier the answer reports. A request by a caller with a budget (its key's, \
+                    or the gateway's) on a cloud model with no price on file for what it is billed \
+                    in is refused before the send: 403 budget_unpriced, naming the model and the \
+                    missing price. A flex request needs a flex price: no other tier's price bounds \
+                    a flex answer's spend, which is cheaper."},
                 "stream": {"type": "boolean", "default": false},
                 "stream_options": {
                     "type": "object",
@@ -114,6 +122,31 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                 "frequency_penalty": {"type": "number"},
                 "seed": {"type": "integer"},
                 "stop": {"description": "A string, or an array of strings."},
+                "response_format": {
+                    "type": "object",
+                    "description": "{type:text} | {type:json_object} | {type:json_schema, \
+                        json_schema:{name, description, schema, strict}} — translated for \
+                        every upstream: Anthropic output_config.format (json_schema only; \
+                        json_object is refused with response_format_unsupported), Gemini \
+                        responseMimeType + responseJsonSchema. A type the model's \
+                        capabilities.structured_output flag says false is refused before any \
+                        upstream call (400 response_format_unsupported, param \
+                        response_format); a schema the upstream rejects is 400 \
+                        invalid_json_schema with its message. Another type goes verbatim to \
+                        OpenAI-compatible upstreams. Keys lmgw does not model, on the object \
+                        and on json_schema, reach OpenAI-compatible and llama.cpp upstreams \
+                        as sent.",
+                    "additionalProperties": true
+                },
+                "json_schema": {
+                    "type": "object",
+                    "description": "llama.cpp's own top-level schema; without a \
+                        response_format, or next to a {type:text} one, it is read as \
+                        response_format {type:json_schema} and sent in that spelling. Next \
+                        to a grammar it is 400 bad_request, as llama-server refuses the \
+                        pair.",
+                    "additionalProperties": true
+                },
                 "reasoning_effort": {"type": "string", "description": "lmgw extension: an \
                     effort level, or 'none' for off — one spelling of the reasoning control \
                     (also x-lmgw-reasoning-effort, and reasoning.effort below); the header \
@@ -216,6 +249,9 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
                         "properties": {
                             "index": {"type": "integer"},
                             "message": choice_message(true),
+                            "logprobs": {"type": "null", "description": "Always null: lmgw \
+                                relays no log probabilities yet. Present because OpenAI's \
+                                schema requires the field."},
                             "finish_reason": {"type": ["string", "null"]}
                         }
                     }

@@ -2,14 +2,15 @@
 resolver = "2"
 # First-party example agents (examples/agents/*) are ordinary members, so
 # `cargo test --workspace` and `cargo fmt --all` cover them like the gateway.
-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-update", "crates/lmgw-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
-# lmgw-ui is wasm32-only (built by Trunk); keep it out of plain `cargo build`.
+members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-update", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+# lmgw-ui and the Chat it mounts (lmgw-chat-ui) are wasm32-only (built by Trunk);
+# keep them out of plain `cargo build`.
 # lmgw-client builds for both: natively here, for wasm32 inside the dashboard
 # (and on its own in ci/check.sh).
-default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-update", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-update", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 
@@ -33,6 +34,11 @@ debug = "line-tables-only"
 [profile.release.package.lmgw-ui]
 opt-level = "s"
 
+# The Chat was lmgw-ui's code until it became a crate of its own (chat-plane
+# design, WP3b): it keeps the dashboard's size settings, here and below.
+[profile.release.package.lmgw-chat-ui]
+opt-level = "s"
+
 # The debug `trunk build` (ci/check.sh, the dev loop). With full DWARF the
 # dashboard's debug wasm was 2.28 GB, and with the Benchmarks page rust-lld
 # crashed writing it (SIGSEGV in CustomSection::writeTo, 2026-09-29). Trunk's
@@ -42,7 +48,27 @@ opt-level = "s"
 # panic location, not debug info), and index.html's data-no-demangle keeps
 # the function names in dist/ as the linker wrote them — demangled, the
 # monomorphized view types grew the name section fourfold, to 0.65 GB.
+#
+# Then the names went too (2026-10-20): the wasm `name` section was 238 MB of
+# the 301 MB debug bundle (code 60 MB, data 2 MB), and a page took 26 s from
+# navigation to main.content in WebKit and 12 s in Chrome, 15 s and 1.3 s
+# once the debug server's own 11 s per fetch was fixed (web/ui.rs and sha2
+# below). crates/lmgw-ui/build.rs links the debug wasm with --strip-all, as
+# `strip` cannot (it gives rust-lld only --strip-debug for wasm32): dist/'s
+# wasm is 63 MB, a page renders in 3.3 s in WebKit and 0.43 s in Chrome, and a
+# `trunk build` after a one-line page change takes 31 s instead of 34.5 s
+# (cargo 14.5 s either way, wasm-bindgen reads a fifth of the bytes). A stack
+# trace shows wasm-function[N] for a name; the panic message keeps file:line.
+# Measured the same day and not taken: opt-level 1 for this crate and all its
+# dependencies (a custom profile, so host builds stay at 0) halves the wasm
+# to 36 MB and renders in 0.95 s in WebKit and 0.15 s in Chrome (the hbars
+# drive in WebKit 164 s instead of 215 s), but the same rebuild takes 43 s
+# (cargo 36 s; codegen-units 1024 did not help), and every edit pays it; at
+# opt-level 1 for the dependencies only, the code shrank just 60 to 56 MB.
 [profile.dev.package.lmgw-ui]
+debug = false
+
+[profile.dev.package.lmgw-chat-ui]
 debug = false
 
 # rubato's sinc loops (realtime audio resampling) are ~20x slower unoptimised:
@@ -88,4 +114,13 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+# A debug lmgw-core reads every dashboard file from disk per request and
+# rust-embed hashes it for the ETag: the 36 MB wasm took 0.67 s per fetch at
+# opt-level 0 and 0.04 s with this at 3, the 301 MB one 0.35 s at 3 and 11 s
+# before (at 0, and read twice per request until web/ui.rs read it once),
+# measured 2026-10-20. WebKit fetches the wasm twice per page load (Trunk's
+# preload and the module's own fetch).
+[profile.dev.package.sha2]
 opt-level = 3

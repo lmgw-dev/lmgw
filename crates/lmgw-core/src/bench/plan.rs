@@ -142,10 +142,14 @@ pub fn settings_of(rt: &ModelRuntime, ov: &BenchOverrides) -> BenchSettings {
 }
 
 /// The bench container's render and argv (§3.4): the row's own spec with the
-/// bench name, `port` published, and the bench label.
+/// bench name, `port` published, and the bench label. `globals` are the
+/// Podman global options its run args need — lmgw's own CDI spec dir for a
+/// GPU row ([`crate::runtime::cdi::podman_globals`]), as a model start puts
+/// them before `run`.
 pub fn render(
     prep: &Prepared,
     prefix: &str,
+    globals: &[String],
     port: u16,
     data_dir: &Path,
     run_id: i64,
@@ -155,8 +159,33 @@ pub fn render(
         .preview_spec(prefix, port, &prep.models_dir, data_dir)
         .map_err(|e| format!("rendering the container spec failed: {e}"))?;
     spec.container_name = container_name(prefix, run_id);
+    spec.set_globals(globals.to_vec());
     let argv = run_argv(&spec, run_id);
     Ok((spec, argv))
+}
+
+/// When `image` is not on this machine and a registry has it, the run
+/// downloads it first — before it takes the GPU's lease, so the download
+/// neither holds the card nor is timed as the load (machine-check design
+/// §5) — and this says so. `None` when it cannot: podman cannot say whether
+/// it is here, or it is a `localhost/` build no registry has.
+pub async fn downloads_first(state: &SharedState, image: &str) -> Option<String> {
+    if crate::backends::pull::presence(state, image).await
+        != crate::backends::pull::Presence::Missing
+    {
+        return None;
+    }
+    crate::backends::pull::start_reference(image).ok()?;
+    Some(format!(
+        "the image '{image}' is not on this machine: the run downloads it first, before it \
+         takes the GPU, so the download is not timed as its load"
+    ))
+}
+
+/// A run's image that is not on this machine and that it cannot download
+/// (`podman image inspect` said `why`).
+pub fn image_missing(image: &str, why: &str) -> String {
+    format!("the image '{image}' is not on this machine ({why}) — pull or build it first")
 }
 
 fn blocked(reason: BlockedReason, message: String) -> BenchBlocked {
@@ -221,7 +250,10 @@ pub async fn prepare(
     if models_dir.trim().is_empty() {
         return Err(blocked(
             BlockedReason::NoWeights,
-            "the chat models dir is not configured (Settings → Local models)".into(),
+            format!(
+                "the chat models directory is not set ({})",
+                crate::hf::models_dir_location("chat")
+            ),
         ));
     }
     let mut runtime = model_runtime_at(snap, Class::Chat, id, overrides.rung as usize)
@@ -248,6 +280,23 @@ pub async fn prepare(
         models_dir,
         caps,
     })
+}
+
+/// The image a run of `args` starts: its override, else its row's (at its
+/// rung). `None` for a request that names no local chat model or no rung
+/// of it ([`prepare`] then says why).
+pub fn engine_image(snap: &Snapshot, args: &BenchArgs) -> Option<String> {
+    let overrides = args.overrides();
+    if let Some(image) = overrides.image {
+        return Some(image);
+    }
+    model_runtime_at(
+        snap,
+        Class::Chat,
+        args.model_id.trim(),
+        overrides.rung as usize,
+    )
+    .map(|r| r.image)
 }
 
 /// The `image` override goes onto `podman image inspect` and `podman run` as
@@ -451,7 +500,8 @@ pub async fn plan(state: &SharedState, args: &BenchArgs) -> BenchPlan {
     out.settings_hash = prep.settings_hash.clone();
     out.model = prep.model.clone();
     let prefix = &snap.settings.container_prefix;
-    match render(&prep, prefix, 0, &state.data_dir, 0) {
+    let globals = crate::runtime::cdi::podman_globals(state, &prep.runtime.extra_run_args);
+    match render(&prep, prefix, &globals, 0, &state.data_dir, 0) {
         Ok((_, argv)) => {
             // Rendered as run 0 on port 0; shown with the two placeholders
             // a start fills in.
@@ -475,14 +525,15 @@ pub async fn plan(state: &SharedState, args: &BenchArgs) -> BenchPlan {
         Ok((id, labels)) => out.build = build_identity(&prep.runtime.image, Some(id), labels),
         Err(e) => {
             out.build = build_identity(&prep.runtime.image, None, Default::default());
-            out.blocked = Some(blocked(
-                BlockedReason::ImageMissing,
-                format!(
-                    "the image '{}' is not on this machine ({e}) — pull or build it first; a \
-                     run would otherwise time the download as its load",
-                    prep.runtime.image
-                ),
-            ));
+            match downloads_first(state, &prep.runtime.image).await {
+                Some(note) => out.warnings.push(note),
+                None => {
+                    out.blocked = Some(blocked(
+                        BlockedReason::ImageMissing,
+                        image_missing(&prep.runtime.image, &e),
+                    ))
+                }
+            }
         }
     }
     out.points = provisional_points(state, &prep).await;
@@ -528,8 +579,7 @@ mod tests {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
                 capabilities_override: None,
                 ladder: vec![],
             });

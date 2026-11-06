@@ -27,7 +27,6 @@ use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::chat_threads::SpeechStopped;
@@ -93,9 +92,7 @@ pub(crate) async fn speak(
         let f = reader.recv().await?;
         Some((Ok::<_, Infallible>(f.into_sse()), reader))
     });
-    Sse::new(caller.sse(&state, events))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    caller.sse_response(&state, events)
 }
 
 /// `POST /chat/api/threads/{id}/speech/stop` (module doc).

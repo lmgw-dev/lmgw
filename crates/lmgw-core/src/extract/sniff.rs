@@ -114,9 +114,9 @@ impl fmt::Display for SniffError {
             Self::ManifestTooLarge(name) => write!(
                 f,
                 "unsupported file — the ZIP entry '{name}' inflates past \
-                 MAX_UNCOMPRESSED_BYTES ({} MiB), so this is not an office document. This \
+                 MAX_UNCOMPRESSED_BYTES ({}), so this is not an office document. This \
                  gateway accepts {ACCEPTED}",
-                super::office::MAX_UNCOMPRESSED_BYTES >> 20
+                crate::hf::fmt_bytes(super::office::MAX_UNCOMPRESSED_BYTES)
             ),
             Self::Video(what) => write!(
                 f,

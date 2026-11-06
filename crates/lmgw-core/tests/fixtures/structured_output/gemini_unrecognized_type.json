@@ -1,0 +1,13 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, aistudio/gemini-3.5-flash-lite, json_schema {\"type\": \"nonsense\"}",
+  "upstream": "gemini",
+  "status": 400,
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "unrecognized type 'nonsense' at top-level",
+      "status": "INVALID_ARGUMENT"
+    }
+  },
+  "expect": "invalid_json_schema"
+}

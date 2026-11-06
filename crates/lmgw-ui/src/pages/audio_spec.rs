@@ -511,6 +511,16 @@ pub fn samples_to_secs(sample: Option<f64>, rate: f64) -> String {
     }
 }
 
+/// A timeline row's time: the seconds its answer states, when it does (the
+/// alignment answer does, for any clip's rate), else the sample index
+/// at `rate`.
+pub fn time_text(seconds: Option<f64>, sample: Option<f64>, rate: f64) -> String {
+    match seconds {
+        Some(s) => format!("{s:.2}s"),
+        None => samples_to_secs(sample, rate),
+    }
+}
+
 pub fn fmt_ms(ms: Option<f64>) -> String {
     match ms {
         None => "–".to_string(),
@@ -770,6 +780,15 @@ mod tests {
         assert_eq!(samples_to_secs(Some(16000.0), 16000.0), "1.00s");
         assert_eq!(samples_to_secs(Some(24000.0), 16000.0), "1.50s");
         assert_eq!(samples_to_secs(None, 16000.0), "–");
+    }
+
+    #[test]
+    fn a_stated_time_is_never_read_through_the_timeline_rate() {
+        // A 24 kHz clip's word at sample 36000 is at 1.5 s; read at the
+        // default 16 kHz it would show 2.25 s.
+        assert_eq!(time_text(Some(1.5), Some(36000.0), 16000.0), "1.50s");
+        assert_eq!(time_text(None, Some(36000.0), 16000.0), "2.25s");
+        assert_eq!(time_text(None, None, 16000.0), "–");
         assert_eq!(fmt_ms(Some(999.4)), "999ms");
         assert_eq!(fmt_ms(Some(1500.0)), "1.50s");
         assert_eq!(fmt_ms(None), "–");

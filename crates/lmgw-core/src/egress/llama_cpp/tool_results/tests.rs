@@ -140,6 +140,37 @@ fn a_sendable_image_turns_the_result_into_one_part_per_block() {
     );
 }
 
+/// A tool result's document and search result go as their text beside a
+/// sendable image, a Files API document as nothing: no file id, no block
+/// JSON (gateway design §6.1, changed 2026-11-06).
+#[test]
+fn a_verbatim_block_goes_as_its_text_or_not_at_all() {
+    let block =
+        |v: Value| ToolResultBlock::AnthropicBlock(crate::ir::AnthropicBlock::from_client(v));
+    let blocks = vec![
+        image("image/png", PNG),
+        block(json!({"type": "document", "title": "Forecast",
+                     "source": {"type": "text", "media_type": "text/plain", "data": "15 degrees"}})),
+        block(json!({"type": "document", "source": {"type": "file", "file_id": "file_doc9"}})),
+        block(
+            json!({"type": "search_result", "source": "kb://1", "title": "T",
+                     "content": [{"type": "text", "text": "Set it."}]}),
+        ),
+    ];
+    assert_eq!(
+        SEND.render("c", &blocks),
+        json!([
+            url("image/png", PNG),
+            text_part("Forecast\n\n15 degrees"),
+            text_part("T\nkb://1\n\nSet it."),
+        ])
+    );
+    assert_eq!(
+        NO_VISION.render("c", &blocks[1..]),
+        json!("Forecast\n\n15 degrees\n\nT\nkb://1\n\nSet it.")
+    );
+}
+
 #[test]
 fn an_image_alone_is_an_array_of_its_one_part() {
     assert_eq!(
@@ -392,8 +423,12 @@ fn chat_body_renders_by_the_routes_decision() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let content = |decision: Option<LlamaRoute>| {
         let mut up = crate::config::Snapshot::default().router_upstream();

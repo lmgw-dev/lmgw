@@ -352,6 +352,41 @@ impl FormState {
         }
     }
 
+    /// What the server holds changed while the page was open, written by
+    /// something else than this form's save (the machine check's settings
+    /// switch): every key that is not dirty takes `now`, and every dirty key
+    /// keeps its typed text over the new baseline, so nothing typed is lost.
+    /// The answer is the dirty keys whose stored value moved underneath: a
+    /// save would write the edit over what was written meanwhile, which the
+    /// page says beside the field.
+    pub fn refetched(&self, now: Map<String, Value>) -> Vec<String> {
+        let (Some(base), Some(draft), Some(kinds)) = (
+            self.baseline.try_get_untracked(),
+            self.draft.try_get_untracked(),
+            self.kinds.try_get_untracked(),
+        ) else {
+            return Vec::new();
+        };
+        let edits: Vec<(String, Value)> = draft
+            .iter()
+            .filter(|(k, _)| is_dirty_in(&base, &draft, &kinds, k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let moved = edits
+            .iter()
+            .filter(|(k, _)| base.get(k) != now.get(k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.rebase(now);
+        for (k, v) in edits {
+            match v {
+                Value::String(s) => self.set_text(&k, s),
+                other => self.set_value(&k, other),
+            }
+        }
+        moved
+    }
+
     /// What the server holds after a save of `sent` when it could not be read
     /// back: the baseline with every changed key of `sent` in its normalized
     /// form (review code:S4). Fields the server rewrites on the way in
@@ -790,7 +825,7 @@ mod tests {
             "bind_addr": "127.0.0.1:8001",
             "max_body_mb": 64,
             "vram": {"headroom_mb": 512, "safety": 0.9},
-            "hold": {"fallback_alias": "", "active": false},
+            "hold": {"active": false},
             "budget": null,
         }))
     }
@@ -818,7 +853,7 @@ mod tests {
                 "bind_addr": "127.0.0.1:8001",
                 "max_body_mb": 64,
                 "vram": {"headroom_mb": 512, "safety": 0.9},
-                "hold": {"fallback_alias": "", "active": false},
+                "hold": {"active": false},
                 "budget": null,
             })
         );
@@ -969,6 +1004,28 @@ mod tests {
         form.saved(&sent, now);
         assert_eq!(form.dirty_count(), 0);
         assert_eq!(form.text("max_body_mb"), "128");
+    }
+
+    #[test]
+    fn a_refetch_keeps_the_edits_and_names_the_ones_written_under() {
+        let form = FormState::new(base());
+        form.set_text("max_body_mb", "128");
+        form.set_text("bind_addr", "0.0.0.0:8001");
+        // Written meanwhile by someone else: one edited key, one not.
+        let mut now = base();
+        now.insert("max_body_mb".into(), json!(256));
+        now.insert("vram.headroom_mb".into(), json!(1024));
+        let moved = form.refetched(now);
+        assert_eq!(moved, ["max_body_mb"]);
+        // The edits stand, the untouched key took the new value.
+        assert_eq!(form.text("max_body_mb"), "128");
+        assert_eq!(form.text("bind_addr"), "0.0.0.0:8001");
+        assert_eq!(form.text("vram.headroom_mb"), "1024");
+        assert_eq!(form.dirty_keys(), ["bind_addr", "max_body_mb"]);
+        assert_eq!(
+            form.patch().unwrap(),
+            json!({"bind_addr": "0.0.0.0:8001", "max_body_mb": 128})
+        );
     }
 
     #[test]

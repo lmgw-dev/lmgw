@@ -147,6 +147,7 @@ pub(crate) fn thread_row(
         kb_mode,
         kb_budget_tokens,
         voice,
+        media_defaults,
         created_at,
         updated_at,
         // Internal to the approval check (client-apps design §6.6).
@@ -181,6 +182,7 @@ pub(crate) fn thread_row(
         kb_mode: kb_mode_of(kb_mode),
         kb_budget_tokens,
         voice: thread_voice(&voice),
+        media_defaults,
         created_at,
         updated_at,
         last_message_at,
@@ -340,6 +342,7 @@ fn thread_defaults(d: &store::ThreadDefaults) -> api::ThreadDefaults {
         kb_budget_tokens,
         voice,
         profile_id,
+        media_defaults,
     } = d.clone();
     api::ThreadDefaults {
         model_alias,
@@ -363,5 +366,6 @@ fn thread_defaults(d: &store::ThreadDefaults) -> api::ThreadDefaults {
         kb_budget_tokens,
         voice: voice.as_ref().map(thread_voice),
         profile_id,
+        media_defaults,
     }
 }

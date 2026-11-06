@@ -1778,7 +1778,28 @@ pub(crate) async fn import_inner(
 /// note, 2026-10-07): a device's write must not turn the owner's agent into
 /// one that runs what the device chose. The owner's replace (`by_device`
 /// `None`) adopts the agent: it is the owner's from then on.
+///
+/// The whole import is a task of its own (*changed 2026-10-24*, see
+/// [`crate::detached::detached`]): a dropped request would leave the
+/// manifest written and its token scope, MCP row, dev URL and running
+/// container behind it.
 pub(crate) async fn import_inner_as(
+    state: &SharedState,
+    text: &str,
+    replace: bool,
+    validate_only: bool,
+    by_device: Option<i64>,
+) -> Result<dto::AgentImportReport, ApiRefusal> {
+    let st = state.clone();
+    let text = text.to_string();
+    crate::detached::detached("importing the agent", async move {
+        import_now(&st, &text, replace, validate_only, by_device).await
+    })
+    .await?
+}
+
+/// [`import_inner_as`]'s import.
+async fn import_now(
     state: &SharedState,
     text: &str,
     replace: bool,
@@ -2136,7 +2157,30 @@ fn not_found_or_bad_request(id: &str, e: String) -> Response {
 /// own address (origins §4.1), and a mount path the rules refuse (mounts
 /// §5.3). Every other op here refuses with the flat `op_failed` it always did
 /// — the `?` below is what renders it.
+///
+/// Every op runs as a task of its own (*changed 2026-10-24*, see
+/// [`crate::detached::detached`]): the writes here are followed by work
+/// only this process does — a resync of the agent's token and MCP row, a
+/// stop of its container, a snapshot reload — which a dropped request
+/// would skip.
+///
+/// **Except the three that can pull an image** (`agent_install`, `agent_pull`,
+/// `agent_reimport`). A pull is deliberately unbounded and no cancel op
+/// exists, so the request is what stops it: a hang-up drops the future and
+/// `kill_on_drop` kills `podman pull`. Those ops run on the request up to the
+/// pull and detach from the first write after it, in their own bodies.
 pub(super) async fn op(state: &SharedState, name: &str, args: Args) -> Result<Value, ApiRefusal> {
+    if matches!(name, "agent_install" | "agent_pull" | "agent_reimport") {
+        return op_now(state, name, args).await;
+    }
+    let st = state.clone();
+    let what = format!("the agent op {name}");
+    let name = name.to_string();
+    crate::detached::detached(&what, async move { op_now(&st, &name, args).await }).await?
+}
+
+/// [`op`]'s dispatch.
+async fn op_now(state: &SharedState, name: &str, args: Args) -> Result<Value, ApiRefusal> {
     let id = need_id(&args).ok();
     let out = async {
         match name {
@@ -2151,7 +2195,7 @@ pub(super) async fn op(state: &SharedState, name: &str, args: Args) -> Result<Va
             "agent_reimport" => to_json(agent_reimport(state, &need_id(&args)?).await),
             "agent_dev_url_set" => to_json(agent_dev_url_set(state, &args).await),
             "agent_enable" => to_json(agent_enable(state, &args).await),
-            "agent_delete" => to_json(agent_delete(state, &need_id(&args)?).await),
+            "agent_delete" => return wire::coded(agent_delete(state, &need_id(&args)?).await),
             "agent_reset" => to_json(agent_reset(state, &need_id(&args)?).await),
             "agent_open_chat" => {
                 to_json(agents::chat::open(state, &need_id(&args)?, &values_arg(&args)?).await)
@@ -2185,7 +2229,6 @@ pub(super) async fn op(state: &SharedState, name: &str, args: Args) -> Result<Va
 /// its manifest (see [`op`]).
 const OWNER_WRITES: &[&str] = &[
     "agent_config_set",
-    "agent_pull",
     "agent_dev_url_set",
     "agent_enable",
     "agent_reset",
@@ -2293,7 +2336,7 @@ pub(crate) async fn agent_install_as(
     args: &Args,
     by_device: Option<i64>,
 ) -> Result<dto::AgentInstalled, String> {
-    use agents::package::{self, Provenance};
+    use agents::package;
 
     let image = arg_str(args, "image")
         .unwrap_or_default()
@@ -2335,7 +2378,7 @@ pub(crate) async fn agent_install_as(
     // has already happened by the time the import refuses. Say so, rather than
     // leaving the owner to wonder whether the several gigabytes are on the box
     // (they are).
-    let mut report = match import_inner_as(state, &text, replace, validate_only, by_device).await {
+    let report = match import_inner_as(state, &text, replace, validate_only, by_device).await {
         Ok(r) => r,
         // The refusal's *code* stops here: an install answers on the flat
         // `op_failed` this op has always had, and the message — which names
@@ -2349,6 +2392,28 @@ pub(crate) async fn agent_install_as(
         }
         Err(e) => return Err(e.message),
     };
+    // The pull is behind us and the row is written: the provenance that goes
+    // with it is a task of its own, so a hang-up cannot leave an installed
+    // row with none.
+    let st = state.clone();
+    crate::detached::detached("recording the install", async move {
+        record_install(&st, report, image, declared, validate_only, pulled).await
+    })
+    .await
+    .map_err(|r| r.message)?
+}
+
+/// [`agent_install_as`]'s tail, once the import has landed.
+async fn record_install(
+    state: &SharedState,
+    mut report: dto::AgentImportReport,
+    image: String,
+    declared: Option<String>,
+    validate_only: bool,
+    pulled: bool,
+) -> Result<dto::AgentInstalled, String> {
+    use agents::package::{self, Provenance};
+
     let digest = package::image_digest(state, &image).await;
     if digest.is_none() {
         report.warnings.push(format!(
@@ -2405,13 +2470,35 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<dto::AgentPulled, S
                  Definition tab, or install it from an image with agent_install."
         )
     })?;
-    let mut prov = Provenance::of_row(&agent.row);
+    let prov = Provenance::of_row(&agent.row);
     // Two "befores", and they answer different questions: what podman has right
     // now (did the tag move?) and what provenance recorded (is this row still
     // on the image it was installed from?). The comparison below uses the
     // first; the second is reported so a divergence is visible.
     let before = package::image_digest(state, &image).await;
     package::pull_image(state, &image).await?;
+    // The pull is behind us: what follows writes the row, and is a task of its
+    // own so a hang-up cannot leave the pulled image unrecorded.
+    let st = state.clone();
+    let id = id.to_string();
+    crate::detached::detached("recording the pull", async move {
+        pull_tail(&st, &id, agent, image, prov, before).await
+    })
+    .await
+    .map_err(|r| r.message)?
+}
+
+/// [`agent_pull`]'s half after the image is on the box.
+async fn pull_tail(
+    state: &SharedState,
+    id: &str,
+    agent: Agent,
+    image: String,
+    mut prov: agents::package::Provenance,
+    before: Option<String>,
+) -> Result<dto::AgentPulled, String> {
+    use agents::package;
+
     let after = package::image_digest(state, &image).await;
 
     prov.image = if prov.image.is_empty() {
@@ -2430,6 +2517,11 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<dto::AgentPulled, S
     prov.digest = after.clone().unwrap_or_default();
     prov.pulled_at = package::now();
     store::set_agent_provenance(&state.db, id, &prov.to_json())
+        .await
+        .map_err(|e| e.to_string())?;
+    // An owner's write to the row adopts it (see `OWNER_WRITES`; this op is
+    // not listed there because its tail is the part that must not be dropped).
+    store::adopt_agent(&state.db, id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2504,7 +2596,7 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<dto::AgentPulled, S
 /// importing it would write a second row and leave this one pointing at an
 /// image that no longer describes it.
 async fn agent_reimport(state: &SharedState, id: &str) -> Result<dto::AgentReimported, String> {
-    use agents::package::{self, Provenance};
+    use agents::package;
 
     let agent = load_agent(state, id).await?;
     let image = package::image_of(&agent).ok_or_else(|| {
@@ -2521,6 +2613,29 @@ async fn agent_reimport(state: &SharedState, id: &str) -> Result<dto::AgentReimp
         ));
     }
     let changed = incoming.to_json() != agent.manifest.to_json();
+    // The pull is behind us: the import and the provenance after it are a task
+    // of its own, so a hang-up cannot leave the manifest adopted and the row's
+    // record of where it came from stale.
+    let st = state.clone();
+    let id = id.to_string();
+    crate::detached::detached("re-importing the agent", async move {
+        reimport_tail(&st, &id, agent, text, image, changed).await
+    })
+    .await
+    .map_err(|r| r.message)?
+}
+
+/// [`agent_reimport`]'s half once the image's manifest is in hand.
+async fn reimport_tail(
+    state: &SharedState,
+    id: &str,
+    agent: Agent,
+    text: String,
+    image: String,
+    changed: bool,
+) -> Result<dto::AgentReimported, String> {
+    use agents::package::{self, Provenance};
+
     // `replace = true`: the row exists and this is the act of adopting the
     // image's document over it. `import_inner` keeps the stored config, stops a
     // running app container and re-syncs the token and the MCP row.
@@ -2776,7 +2891,7 @@ async fn agent_enable(state: &SharedState, args: &Args) -> Result<dto::AgentEnab
 pub(crate) async fn agent_delete(
     state: &SharedState,
     id: &str,
-) -> Result<dto::AgentDeleted, String> {
+) -> Result<dto::AgentDeleted, ApiRefusal> {
     agent_delete_as(state, id, None).await
 }
 
@@ -2786,6 +2901,26 @@ pub(crate) async fn agent_delete(
 /// Otherwise a delete and a create under the same id would replace the
 /// owner's agent with one the device chose.
 pub(crate) async fn agent_delete_as(
+    state: &SharedState,
+    id: &str,
+    by_device: Option<i64>,
+) -> Result<dto::AgentDeleted, ApiRefusal> {
+    // From the row's delete on, a task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): a dropped request would leave the
+    // agent's key, its container, its MCP row and the snapshot behind the
+    // deleted row.
+    let st = state.clone();
+    let id = id.to_string();
+    crate::detached::detached("deleting the agent", async move {
+        delete_agent_now(&st, &id, by_device)
+            .await
+            .map_err(ApiRefusal::from)
+    })
+    .await?
+}
+
+/// [`agent_delete_as`]'s delete.
+async fn delete_agent_now(
     state: &SharedState,
     id: &str,
     by_device: Option<i64>,

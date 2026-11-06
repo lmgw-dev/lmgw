@@ -124,7 +124,8 @@ guards that skip a configured fallback by content are outside this change.
   fallback counts as lacking the Audio facet, so the walk and the predicate agree.
 - **A claim let go while tools wait** and refused again by a GPU block (the hold switched on
   meanwhile) no longer fails the turn: that call goes where the gate sends any request under the
-  block, its configured fallback (`agentchat::claim::under_block`).
+  block, its configured fallback (`agentchat::claim::under_block`, since 2026-10-21
+  `agent::claim::reroute`).
 - **A dropped connection on a route that is no llama-server**, under the audio and before an
   answer, retries that one turn with the transcript and is not remembered (`refusal::dropped`):
   a provider that closes the connection on large bodies no longer fails every turn. D5 stays for
@@ -571,7 +572,7 @@ Tested with a stub MCP server and the self-admin plane (`tests/it/chat_voice_aud
 indefinitely") a GPU ASR that is not loaded and does not fit beside the chat model waits for the
 loop's claim, which waits for the row, which waits for the ASR — the turn hung for good, held and
 silent; with a timeout it became a heard failure. Now the first tool call lets the claim go before
-it waits (`web/agentchat/claim.rs`, `LocalHold::let_go`), as the plain path drops its claim before
+it waits (`web/agentchat/claim.rs`, since 2026-10-21 `agent/claim.rs`; `LocalHold::let_go`), as the plain path drops its claim before
 its barrier, and the loop's next model call takes it again through admission on the same model
 (`vram::LetGo::regain`: a model still up is joined at once; one the ASR evicted is started again;
 the hold's policy, origin and restart rule are kept, so a ladder's climb and a candidate's walk go

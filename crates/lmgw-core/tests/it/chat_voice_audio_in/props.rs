@@ -158,6 +158,7 @@ async fn an_external_llama_servers_props_reach_the_verdict_from_the_cache() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: Some(super::turns::hears()),
+            fallback: None,
         },
     )
     .await

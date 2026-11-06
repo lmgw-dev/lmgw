@@ -1,0 +1,29 @@
+{
+  "request": {
+    "body": "{\"max_completion_tokens\":1,\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"seed\":-1,\"service_tier\":\"auto\",\"stop\":[\"</s>\"],\"temperature\":0.0,\"top_p\":1.0}",
+    "body_json": {
+      "max_completion_tokens": 1,
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "seed": -1,
+      "service_tier": "auto",
+      "stop": [
+        "</s>"
+      ],
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/chat/completions"
+  }
+}

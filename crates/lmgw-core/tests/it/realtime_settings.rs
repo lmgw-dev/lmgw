@@ -20,7 +20,7 @@ async fn setup() -> (SharedState, Gw) {
     let state = AppState::init_for_tests().await.unwrap();
     let upstream = |name: &str, kind| NewUpstream {
         name: name.into(),
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind,
         base_url: "https://never-called.invalid/v1".into(),
         api_key: None,
@@ -55,6 +55,7 @@ async fn setup() -> (SharedState, Gw) {
                 capabilities_override: Some(json!({ "capabilities": {
                     "task": task, "endpoints": [endpoint], "source": "owner"
                 } })),
+                fallback: None,
             },
         )
         .await
@@ -358,8 +359,7 @@ async fn audio_row(g: &Gpu, id: &str, task: &str, on_disk: u64) -> i64 {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -416,7 +416,7 @@ async fn the_budget_sizes_each_stage_with_the_figures_admission_charges() {
         &g.state.db,
         &NewUpstream {
             name: "provider".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: "https://api.provider.invalid/v1".into(),
             api_key: None,
@@ -440,6 +440,7 @@ async fn the_budget_sizes_each_stage_with_the_figures_admission_charges() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -508,6 +509,17 @@ async fn the_budget_sizes_each_stage_with_the_figures_admission_charges() {
     let b = budget(&gw, json!({"tts_alias": "", "default_model": ""})).await;
     assert_eq!(stage(&b, "tts").placement, "unset");
     assert_eq!(b.verdict, "fits");
+    // The notes the panel shows name the setting where the page has it.
+    for (id, at) in [
+        (
+            "tts",
+            "Settings → Realtime → Voice cascade → Text to speech",
+        ),
+        ("chat", "Settings → Realtime → Voice cascade → Chat model"),
+    ] {
+        let note = &stage(&b, id).note;
+        assert!(note.contains(at) && !note.contains("realtime."), "{note}");
+    }
     let (status, body) = op(&gw, "realtime_budget", json!({"barge_in_check": "both"})).await;
     assert_eq!(status, 400, "{body}");
 

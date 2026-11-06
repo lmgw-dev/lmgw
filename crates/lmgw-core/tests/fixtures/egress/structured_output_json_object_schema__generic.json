@@ -1,0 +1,32 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"response_format\":{\"schema\":{\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"type\":\"json_object\"}}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "response_format": {
+        "schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "type": "json_object"
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

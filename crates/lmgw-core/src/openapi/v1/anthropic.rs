@@ -19,8 +19,10 @@ fn content_block() -> Value {
             its thought signature and runs to hundreds of characters; echo it exactly, and \
             do not send it to another provider directly), {type:tool_result,tool_use_id,content,is_error}, \
             {type:thinking,thinking,signature} (replayed; unsigned when lmgw itself \
-            produced it), {type:redacted_thinking} (accepted and dropped: lmgw never asks \
-            an Anthropic upstream for thinking with a redaction key). A custom tool \
+            produced it). Every other block type (redacted_thinking, the provider's own \
+            tool blocks, a type newer than lmgw) goes to an Anthropic upstream as written; \
+            any other upstream is sent none of it, and x-lmgw-params-ignored names it as \
+            content.<type>. A block without a type is refused with 400. A custom tool \
             without input_schema (a server tool) is refused with 400.",
     })
 }
@@ -78,14 +80,52 @@ pub(crate) fn messages_request(g: &mut SchemaGenerator) -> Schema {
                     "type": "object",
                     "description": "{type:enabled,budget_tokens} | {type:disabled} | \
                         {type:adaptive} (enabled, no budget — \"think as much as judged \
-                        necessary\").",
+                        necessary\") | {type:between_tools} (no up-front thinking: an off \
+                        that goes to an Anthropic model as written; every other model gets its \
+                        own off, and x-lmgw-reasoning-ignored names between_tools). Any other \
+                        type is refused with 400. display goes to an Anthropic model inside \
+                        adaptive and enabled; beside an off, and to every other model, it is \
+                        left out and x-lmgw-params-ignored names thinking.display.",
                     "additionalProperties": true
                 },
                 "output_config": {
                     "type": "object",
-                    "properties": {"effort": {"type": "string"}},
+                    "properties": {
+                        "effort": {"type": "string"},
+                        "format": {"type": "object", "additionalProperties": true}
+                    },
                     "description": "lmgw reads output_config.effort as the same reasoning \
-                        tier x-lmgw-reasoning-effort sets."
+                        tier x-lmgw-reasoning-effort sets, and output_config.format \
+                        ({type:json_schema, schema}; the deprecated top-level output_format \
+                        too) as the structured output every upstream gets in its own \
+                        spelling. Its refusals are 400 invalid_request_error with the \
+                        upstream's message. To an OpenAI model the schema goes with \
+                        strict: true (this format guarantees the schema), so OpenAI's \
+                        strict-mode rules apply — every property in required, \
+                        additionalProperties false — and a schema that breaks them comes \
+                        back as OpenAI's invalid_json_schema refusal, its message kept."
+                },
+                "context_management": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Anthropic's context management ({edits: [...]}; send its \
+                        beta flag in anthropic-beta). To an Anthropic model it goes as written, \
+                        and Anthropic answers for it; a compaction edit (compact_…) included, \
+                        whose compaction block comes back as Anthropic wrote it. Every other \
+                        model's provider has no equivalent: it is left out and named in \
+                        x-lmgw-params-ignored. A model's capabilities.context_editing on GET \
+                        /v1/models says what it takes."
+                },
+                "compaction": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Anthropic's on-demand compaction ({type: summarize}; send \
+                        its beta flag in anthropic-beta). To an Anthropic model it goes as \
+                        written, and the compaction block Anthropic answers with comes back as \
+                        it wrote it (stop_reason compaction). Every other model's provider has \
+                        no equivalent: it is left out and named in x-lmgw-params-ignored. A \
+                        model's capabilities.context_editing.compaction says which types it \
+                        takes."
                 }
             },
             "additionalProperties": true
@@ -100,7 +140,9 @@ fn content_json() -> Value {
             "type": "object",
             "description": "{type:text,text} | {type:tool_use,id,name,input}; a leading \
                 {type:thinking,thinking} block when the completion carried reasoning \
-                (unsigned: produced by lmgw, not by Anthropic).",
+                (unsigned: produced by lmgw, not by Anthropic); a leading \
+                {type:compaction,content,signature,…} block exactly as an Anthropic model \
+                answered a compaction (send it back unchanged).",
             "additionalProperties": true
         }
     })
@@ -116,7 +158,11 @@ fn usage_schema() -> Value {
             "cache_read_input_tokens": {"type": "integer", "description": "Present only when \
                 the upstream reported a cache read."},
             "cache_creation_input_tokens": {"type": "integer", "description": "Present only \
-                when the upstream reported cache writes."}
+                when the upstream reported cache writes."},
+            "iterations": {"type": "array", "items": {"type": "object", "additionalProperties": true},
+                "description": "An Anthropic model's per-iteration usage, as it reported it \
+                (a compaction entry for a compaction it ran, which the top-level counts \
+                leave out). Present only when the upstream reported it."}
         }
     })
 }
@@ -144,7 +190,15 @@ pub(crate) fn messages_response(g: &mut SchemaGenerator) -> Schema {
                 "content": content_json(),
                 "stop_reason": {"type": ["string", "null"]},
                 "stop_sequence": {"type": "null"},
-                "usage": usage_schema()
+                "usage": usage_schema(),
+                "context_management": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "The context management an Anthropic model applied \
+                        ({applied_edits: [...]}), as Anthropic reported it; a stream carries \
+                        it on its closing message_delta. Absent from every other model's \
+                        answer."
+                }
             }
         }),
     )
@@ -228,7 +282,16 @@ pub(crate) fn count_response(g: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "object",
             "required": ["input_tokens"],
-            "properties": {"input_tokens": {"type": "integer"}}
+            "properties": {
+                "input_tokens": {"type": "integer"},
+                "context_management": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Anthropic's own count of the input before the request's \
+                        context edits ({original_input_tokens}), as it reported it. Only on \
+                        an Anthropic model's count of a request with context_management."
+                }
+            }
         }),
     )
 }

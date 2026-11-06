@@ -75,7 +75,7 @@ fn full_voice() -> MessageVoice {
 #[tokio::test]
 async fn a_thread_reads_into_its_type_whole() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = post(&gw, "/chat/api/threads", json!({"model_alias": "m"}))
         .await
         .json::<Value>()
@@ -149,6 +149,7 @@ async fn a_thread_reads_into_its_type_whole() {
         &ChatReply {
             content: "answer".into(),
             reasoning: "thinking".into(),
+            reasoning_seals: Vec::new(),
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
             ir_messages: Some("[]".into()),
@@ -167,6 +168,7 @@ async fn a_thread_reads_into_its_type_whole() {
                 }],
                 ..Default::default()
             }),
+            tool_files: Vec::new(),
         },
     )
     .await
@@ -191,7 +193,7 @@ async fn a_thread_reads_into_its_type_whole() {
 #[tokio::test]
 async fn the_thread_routes_answer_their_types() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let created = json_of(
         post(&gw, "/chat/api/threads", json!({"model_alias": "m"})).await,
         "create",

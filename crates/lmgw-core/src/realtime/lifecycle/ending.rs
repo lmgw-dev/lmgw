@@ -172,7 +172,9 @@ impl Core {
                 active.output.done(conv, ob, status, details, Some(usage));
                 status
             }
-            // The stream failed after its finish: every item was already
+            // The stream failed after its finish (an error the upstream
+            // reported; a silence or a broken body there is no failure,
+            // `drive_upstream_until`): every item was already
             // announced whole — a call may have been run on that — so the
             // response is what it said it was, and the failure is the log's.
             // Its server-side calls still open were never run, or a failed

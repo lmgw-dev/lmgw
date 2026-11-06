@@ -1,0 +1,1 @@
+{"error":{"code":"unsupported_parameter","message":"Unsupported parameter: 'stop' is not supported with this model.","param":"stop","type":"invalid_request_error"}}

@@ -284,6 +284,7 @@ mod tests {
             },
             hosted: Hosted::of(&snap(), None, &[], HashMap::new()),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -294,6 +295,7 @@ mod tests {
             list: List::All,
             hosted: Hosted::of(snap, None, &[], routes),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -338,6 +340,7 @@ mod tests {
             },
             hosted: Hosted::of(snap, Some(key_id), &key.policy.device_tools, r),
             spellings: HashMap::new(),
+            key: None,
         }
     }
 
@@ -472,6 +475,7 @@ mod tests {
         let host = ToolScope {
             hosted: Hosted::of(&s, Some(3), &[], routes(&[("desktop__echo", 9)])),
             spellings: HashMap::new(),
+            key: None,
             ..anon.clone()
         };
         assert!(host.admits("desktop__echo") && !host.narrows_for(&s.mcp_servers[&9]));

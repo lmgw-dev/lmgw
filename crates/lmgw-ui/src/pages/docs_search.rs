@@ -20,7 +20,7 @@ use lmgw_api_types::{
 };
 use serde_json::json;
 
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::widgets::{use_toasts, Explain, Select};
 
 use super::docs::use_docs;
@@ -402,7 +402,7 @@ fn MarkdownPane(markdown: String, raw: RwSignal<bool>) -> impl IntoView {
     let src = markdown.clone();
     Effect::new(move |_| {
         let Some(el) = md_ref.get() else { return };
-        el.set_inner_html(&super::chat::md_to_html(&src));
+        el.set_inner_html(&lmgw_chat_ui::md_to_html(&src));
     });
     view! {
         <Show
@@ -470,7 +470,7 @@ pub(super) fn TracePane(t: SearchTraceView) -> impl IntoView {
                 <span class="dim">"KNN kernel"</span>
                 <span class="mono-sm">
                     {t.knn_kernel.clone()} " · " {t.resident_vectors} " vectors · "
-                    {human_bytes(t.resident_bytes)}
+                    {fmt_bytes(t.resident_bytes)}
                 </span>
                 <span class="dim">"FTS query"</span>
                 <span class="mono-sm">{t.fts_query.clone()}</span>

@@ -60,6 +60,7 @@ mod opening;
 mod render;
 mod stream;
 mod tasks;
+mod transfers;
 
 pub(crate) use live::{hold_of, Ending, LiveFeed, TurnObserver, TurnWatch, VoiceEnd, VoiceWatch};
 
@@ -77,10 +78,7 @@ impl Feed {
     pub(crate) fn new(snap: &Snapshot) -> Self {
         Self {
             stored: watch::Sender::new(0),
-            live: LiveFeed::new(
-                snap.settings.chat_feed_live_buffer,
-                hold_of(&snap.settings.hold),
-            ),
+            live: LiveFeed::new(snap.settings.chat_feed_live_buffer, hold_of(snap)),
         }
     }
 
@@ -99,10 +97,7 @@ impl Feed {
     pub(crate) fn published(&self, current: impl FnOnce() -> std::sync::Arc<Snapshot>) {
         self.live.published_from(|| {
             let snap = current();
-            (
-                hold_of(&snap.settings.hold),
-                snap.settings.chat_feed_live_buffer,
-            )
+            (hold_of(&snap), snap.settings.chat_feed_live_buffer)
         });
     }
 }
@@ -383,8 +378,9 @@ async fn open(
     // A device's feed sets `TCP_USER_TIMEOUT` on its connection's socket
     // from `keepalive_s` (§7.1, D16): a keep-alive that a vanished phone
     // never acknowledges then fails within one more interval and the stream
-    // ends. `Links` records the keep-alive, the peer and the start.
-    set_user_timeout(ctx, keepalive_s);
+    // ends. Held by the stream, and put back when it ends. `Links` records
+    // the keep-alive, the peer and the start.
+    let timers = stream_timers(ctx, keepalive_s);
     let conn = crate::devices::connect_with(state, ctx, LinkKind::Feed, Some(keepalive_s)).await;
     Ok(stream::FeedStream {
         state: state.clone(),
@@ -414,6 +410,7 @@ async fn open(
         ended: false,
         stalled: None,
         waiting: None,
+        timers,
     })
 }
 
@@ -429,23 +426,24 @@ fn cert_of(link: &crate::config::DeviceLink) -> Option<lmgw_api_types::chat_feed
 /// Set `TCP_USER_TIMEOUT` on a device feed's connection to its keep-alive
 /// (device link design §7.1): data the peer never acknowledges ends the
 /// connection one interval after the comment that could not be delivered.
-/// Only the device listener's connections carry a socket handle; a failure
-/// is logged, never a refusal (the stream's own timers still work).
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn set_user_timeout(ctx: &RequestCtx, keepalive_s: u32) {
-    let Some(socket) = ctx.conn.as_ref().and_then(|c| c.socket.as_ref()) else {
-        return;
-    };
-    let timeout = std::time::Duration::from_secs(u64::from(keepalive_s));
-    if let Err(e) = socket.set_tcp_user_timeout(Some(timeout)) {
-        tracing::warn!("device feed: TCP_USER_TIMEOUT not set: {e}");
-    }
+/// The connection's TCP keep-alive, which every device listener connection
+/// gets from `chat_feed_keepalive_s` at its accept, moves to the stream's
+/// interval too, so a phone that asked a long keep-alive is not woken by
+/// probes at the gateway's shorter one (2026-10-24). Both hold while the
+/// returned guard does — the stream's life — and the accept-time values are
+/// back after it (2026-10-24). Only the device listener's connections carry
+/// a socket handle; a failure is logged, never a refusal (the stream's own
+/// timers still work).
+fn stream_timers(ctx: &RequestCtx, keepalive_s: u32) -> Option<crate::server::TimersOverride> {
+    let socket = ctx.conn.as_ref().and_then(|c| c.socket.as_ref())?;
+    let every = std::time::Duration::from_secs(u64::from(keepalive_s));
+    socket
+        .override_timers(Some(every), Some(every))
+        .inspect_err(|e| {
+            tracing::warn!("device feed: TCP keep-alive or TCP_USER_TIMEOUT not set: {e}")
+        })
+        .ok()
 }
-
-/// Where the option does not exist (socket2 has it on Linux and Android
-/// here), the stream's own timers are all there is.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn set_user_timeout(_: &RequestCtx, _: u32) {}
 
 /// The device key a feed reads for; `None` for the owner.
 fn key_of(caller: &Caller) -> Option<i64> {

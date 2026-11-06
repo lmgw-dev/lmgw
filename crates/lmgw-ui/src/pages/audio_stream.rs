@@ -2,17 +2,18 @@
 //! the WAV header a raw PCM stream needs before any `<audio>` element will play
 //! it. Ported from `assets/audio-lab/audio-lab.js:131-188, 651-717`.
 //!
-//! The reader loop is the Chat page's ([`super::chat_stream`]) — EventSource
-//! cannot POST, so SSE is parsed off a fetch `ReadableStream` by hand. Frame
+//! EventSource cannot POST, so the records are read off the fetch body with
+//! the kit's SSE decoder (`lmgw_ui_kit::http::sse`, the Chat's too). Frame
 //! decoding, event folding, base64 and the WAV header are pure functions so
 //! they can be unit-tested on the native target.
 
 use futures::StreamExt;
+use lmgw_ui_kit::http::sse::{Decoder, Record};
 use serde_json::Value;
 use wasm_bindgen::JsCast;
 
 /// One meaningful frame of an audio stream. Everything else (keep-alives,
-/// `[DONE]`, unknown event names) is dropped by [`parse_record`].
+/// `[DONE]`, unknown event names) is dropped by [`audio_event`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioEvent {
     /// `speech.audio.delta` — a chunk of raw PCM, already base64-decoded.
@@ -24,33 +25,28 @@ pub enum AudioEvent {
     Error(String),
 }
 
-/// Parse one SSE record (the text between blank lines).
+/// Parse one SSE record's text (between blank lines), as the decoder reads
+/// it.
+#[cfg(test)]
+fn parse_record(record: &str) -> Option<AudioEvent> {
+    Decoder::default()
+        .push(format!("{record}\n\n").as_bytes())
+        .first()
+        .and_then(audio_event)
+}
+
+/// One decoded record as an audio event.
 ///
 /// The event name lives in the `event:` line or in the payload's `type`,
 /// depending on the emitter — the payload wins, and both are accepted, exactly
 /// as the old island did.
-pub fn parse_record(record: &str) -> Option<AudioEvent> {
-    let mut event = "message";
-    let mut data = String::new();
-    for line in record.split('\n') {
-        let line = line.trim_end_matches('\r');
-        if line.starts_with(':') {
-            continue; // keep-alive / comment
-        }
-        if let Some(rest) = line.strip_prefix("event:") {
-            event = rest.trim();
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
-        }
-    }
+pub fn audio_event(r: &Record) -> Option<AudioEvent> {
+    let data = r.data.as_str();
     if data.is_empty() || data == "[DONE]" {
         return None;
     }
-    let v: Value = serde_json::from_str(&data).ok()?;
-    let kind = v["type"].as_str().unwrap_or(event);
+    let v: Value = serde_json::from_str(data).ok()?;
+    let kind = v["type"].as_str().unwrap_or(&r.event);
     match kind {
         "speech.audio.delta" => {
             let b64 = v["audio"].as_str().filter(|s| !s.is_empty())?;
@@ -104,34 +100,7 @@ impl StreamAcc {
 /// protocol send it: `lmgw-client`'s, which the voice panel runs on.
 pub use lmgw_client::base64::decode as b64_decode;
 
-/// Wrap raw PCM in the canonical 44-byte RIFF/WAVE header.
-///
-/// A headless PCM stream carries no format at all, so `rate` / `channels` /
-/// `bits` are what the user declared in the form — a declaration, not a
-/// measurement. Getting them wrong yields audio at the wrong pitch, never an
-/// error, which is why the form says so out loud.
-pub fn pcm_to_wav(pcm: &[u8], rate: u32, channels: u16, bits: u16) -> Vec<u8> {
-    let bytes_per_sample = (bits / 8) as u32;
-    let block_align = (channels as u32).wrapping_mul(bytes_per_sample);
-    let data_len = pcm.len() as u32;
-    let mut out = Vec::with_capacity(44 + pcm.len());
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&data_len.wrapping_add(36).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-                                                 // 3 = IEEE float (f32le), 1 = integer PCM.
-    out.extend_from_slice(&if bits == 32 { 3u16 } else { 1u16 }.to_le_bytes());
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&rate.wrapping_mul(block_align).to_le_bytes()); // byte rate
-    out.extend_from_slice(&(block_align as u16).to_le_bytes());
-    out.extend_from_slice(&bits.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    out.extend_from_slice(pcm);
-    out
-}
+pub use lmgw_ui_kit::wav::pcm_to_wav;
 
 /// Read an SSE body off an already-sent fetch response, handing every
 /// recognized frame to `on_event`. Transport errors (including an abort) end
@@ -146,16 +115,11 @@ pub async fn read_sse(
         .unchecked_into::<web_sys::ReadableStream>();
     let mut stream = wasm_streams::ReadableStream::from_raw(raw).into_stream();
 
-    let mut buf: Vec<u8> = Vec::new();
+    let mut records = Decoder::default();
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else { break }; // aborted or network drop
-        buf.extend_from_slice(&js_sys::Uint8Array::from(chunk).to_vec());
-        // Records end at a blank line; the terminator is ASCII, so byte
-        // scanning never splits UTF-8 inside a record.
-        while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-            let record: Vec<u8> = buf.drain(..pos + 2).collect();
-            let text = String::from_utf8_lossy(&record);
-            if let Some(ev) = parse_record(text.trim()) {
+        for r in records.push(&js_sys::Uint8Array::from(chunk).to_vec()) {
+            if let Some(ev) = audio_event(&r) {
                 on_event(ev);
             }
         }
@@ -166,43 +130,6 @@ pub async fn read_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wav_header_is_byte_exact_for_s16le() {
-        let pcm = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        let wav = pcm_to_wav(&pcm, 24000, 1, 16);
-        assert_eq!(wav.len(), 44 + pcm.len());
-        assert_eq!(
-            &wav[..44],
-            &[
-                b'R', b'I', b'F', b'F', // "RIFF"
-                44, 0, 0, 0, // 36 + 8 data bytes
-                b'W', b'A', b'V', b'E', //
-                b'f', b'm', b't', b' ', //
-                16, 0, 0, 0, // fmt chunk size
-                1, 0, // audioFormat = 1 (integer PCM)
-                1, 0, // channels
-                0xC0, 0x5D, 0x00, 0x00, // 24000 Hz
-                0x80, 0xBB, 0x00, 0x00, // byteRate = 24000 * 2
-                2, 0, // blockAlign = channels * 2
-                16, 0, // bits per sample
-                b'd', b'a', b't', b'a', //
-                8, 0, 0, 0, // data length
-            ]
-        );
-        assert_eq!(&wav[44..], &pcm[..]);
-    }
-
-    #[test]
-    fn wav_header_marks_32_bit_as_ieee_float_and_scales_stereo() {
-        let wav = pcm_to_wav(&[0; 16], 48000, 2, 32);
-        assert_eq!(&wav[20..22], &[3, 0]); // audioFormat = 3 (f32le)
-        assert_eq!(&wav[22..24], &[2, 0]); // channels
-        assert_eq!(&wav[24..28], &48000u32.to_le_bytes()); // sample rate
-        assert_eq!(&wav[28..32], &(48000u32 * 8).to_le_bytes()); // byte rate
-        assert_eq!(&wav[32..34], &[8, 0]); // blockAlign = 2 * 4
-        assert_eq!(&wav[34..36], &[32, 0]); // bits
-    }
 
     fn fold(records: &[&str]) -> StreamAcc {
         let mut acc = StreamAcc::default();

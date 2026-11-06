@@ -153,7 +153,9 @@ pub async fn hears(
 /// `ContentPart::Audio`.
 pub fn egress_takes_audio(protocol: Protocol) -> bool {
     match protocol {
-        Protocol::Openai | Protocol::LlamaCpp | Protocol::Gemini => true,
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp | Protocol::Gemini => {
+            true
+        }
         Protocol::Anthropic => false,
     }
 }

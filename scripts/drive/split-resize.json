@@ -1,0 +1,1467 @@
+[
+ {
+  "js": "'Side panels in both engines with html.tauri set (the app window\\'s classic scrollbars): the Conversations list never scrolls sideways at any window width or panel width, and every side panel\\'s drag handle (SplitPane) resizes it: a live drag that stops at the panel\\'s floor and at what leaves the main pane its floor, the width kept across a reload, a click that is not a drag storing nothing, double-click and Enter back to the automatic width, the arrow keys, Home and End, a window narrower than the chosen width showing it narrower without forgetting it. Conversations, Thread settings (a thread is open: the first in the list) and the Audio lab\\'s library. Read-only: only localStorage changes, and the drive removes what it set. Pointer and key events are dispatched in the page (no trusted input in webkit-check). Run: scripts/ui-drive.py scripts/drive/split-resize.json --block-writes --dsf 1.25 --token-file <dir>.token --base http://<addr>, or scripts/webkit-check.py --backend broadway --zoom 1.25 --timeout 1500 --drive scripts/drive/split-resize.json --token-file <dir>.token --base http://<addr>.'"
+ },
+ {
+  "js": "(() => { for (const k of ['chat.threads', 'chat.settings', 'audio-lab.library']) localStorage.removeItem('lmgw.ui.side.' + k + '.width'); localStorage.setItem('lmgw.ui.side.chat.threads', 'true'); localStorage.setItem('lmgw.ui.side.chat.settings', 'false'); localStorage.removeItem('lmgw.ui.side.audio-lab.library'); return 'reset'; })()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "js": "window.__which = 'threads'"
+ },
+ {
+  "size": "1000x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1000x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1000x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1040x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1040x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1040x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1080x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1080x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1080x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1120x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1120x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1120x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1160x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1160x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1160x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1200x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1200x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1200x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1240x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1240x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1240x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1280x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1280x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1280x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1320x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1320x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1320x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1360x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1360x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1360x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1400x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1400x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1400x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1440x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1440x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1480x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1480x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1480x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1520x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1520x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1520x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1560x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1560x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1560x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1600x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1600x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1600x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1640x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1640x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1640x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1680x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1680x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1680x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1720x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1720x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1720x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1760x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1760x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1760x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1800x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1800x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1800x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1840x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1840x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1840x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1880x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1880x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1880x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1920x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1920x900 automatic width"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1920x900: the Conversations list never scrolls sideways (automatic width)"
+ },
+ {
+  "size": "1080x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "split_threads_1080"
+ },
+ {
+  "size": "1200x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "split_threads_1200"
+ },
+ {
+  "size": "1480x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "split_threads_1480"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "window.__a = __m('threads')",
+  "label": "threads at 1440x900, automatic"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.handle && m.role === 'separator' && m.orient === 'vertical' && m.label === 'Resize Conversations' && m.tab === 0 && m.min === 220 && /automatic/.test(m.text) && m.cursor === 'col-resize' && m.stored === null && __near(m.now, m.side); })()",
+  "label": "the Conversations handle: a focusable vertical separator named Resize Conversations, its values the width, automatic"
+ },
+ {
+  "js": "__drag('threads', 60)",
+  "label": "a drag 60 px right widens the panel by 60 px and stores the width (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "a drag 60 px right widens the panel by 60 px and stores the width (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return __near(m.side, Math.round(__a.side + 60)) && m.stored === String(m.now) && !m.resizing && !/automatic/.test(m.text); })()",
+  "label": "a drag 60 px right widens the panel by 60 px and stores the width"
+ },
+ {
+  "js": "(() => { __down('threads'); __move('threads', 40); return __w0; })()",
+  "label": "mid-drag: the width follows the pointer live, the split marked resizing (no text selection), the line lit (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "mid-drag: the width follows the pointer live, the split marked resizing (no text selection), the line lit (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.resizing && __near(m.side, __w0 + 40) && (s => (s.userSelect || s.webkitUserSelect) === 'none')(getComputedStyle(__d('threads'))) && /rgb/.test(m.line) && !/rgba\\(0, 0, 0, 0\\)/.test(m.line); })()",
+  "label": "mid-drag: the width follows the pointer live, the split marked resizing (no text selection), the line lit"
+ },
+ {
+  "shot": "split_threads_mid_drag"
+ },
+ {
+  "js": "__up('threads', 40)",
+  "label": "released: the width is stored (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "released: the width is stored (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return !m.resizing && m.stored === String(m.now) && __near(m.side, __w0 + 40); })()",
+  "label": "released: the width is stored"
+ },
+ {
+  "js": "__drag('threads', -2000)",
+  "label": "dragged far left, the panel stops at its 220 px floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "dragged far left, the panel stops at its 220 px floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return __near(m.side, 220) && m.now === 220 && m.stored === '220'; })()",
+  "label": "dragged far left, the panel stops at its 220 px floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "at its floor the Conversations list does not scroll sideways"
+ },
+ {
+  "shot": "split_threads_floor"
+ },
+ {
+  "js": "__drag('threads', 5000)",
+  "label": "dragged far right, it stops where the main pane keeps its 560 px floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "dragged far right, it stops where the main pane keeps its 560 px floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.now === m.max && __near(m.side, m.max) && __near(m.main, 560); })()",
+  "label": "dragged far right, it stops where the main pane keeps its 560 px floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "at its widest the Conversations list does not scroll sideways"
+ },
+ {
+  "shot": "split_threads_widest"
+ },
+ {
+  "js": "__dbl('threads')",
+  "label": "a double-click forgets the width: automatic again (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "a double-click forgets the width: automatic again (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.stored === null && /automatic/.test(m.text) && __near(m.side, __a.side); })()",
+  "label": "a double-click forgets the width: automatic again"
+ },
+ {
+  "js": "(() => { __down('threads'); __up('threads', 0); return 'pressed'; })()",
+  "label": "a press without a move stores nothing (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "a press without a move stores nothing (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.stored === null && /automatic/.test(m.text); })()",
+  "label": "a press without a move stores nothing"
+ },
+ {
+  "js": "(() => { window.__b = __m('threads'); __key('threads', 'ArrowRight'); return __b; })()",
+  "label": "ArrowRight widens a left panel by 16 px, stored (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "ArrowRight widens a left panel by 16 px, stored (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return __near(m.now, __b.side + 16) && m.stored === String(m.now); })()",
+  "label": "ArrowRight widens a left panel by 16 px, stored"
+ },
+ {
+  "js": "(() => { window.__b = __m('threads'); __key('threads', 'ArrowRight', true); return __b; })()",
+  "label": "Shift+ArrowRight by 64 px (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "Shift+ArrowRight by 64 px (state)"
+ },
+ {
+  "expect": "__m('threads').now === __b.now + 64",
+  "label": "Shift+ArrowRight by 64 px"
+ },
+ {
+  "js": "(() => { window.__b = __m('threads'); __key('threads', 'ArrowLeft'); return __b; })()",
+  "label": "ArrowLeft narrows it by 16 px (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "ArrowLeft narrows it by 16 px (state)"
+ },
+ {
+  "expect": "__m('threads').now === __b.now - 16",
+  "label": "ArrowLeft narrows it by 16 px"
+ },
+ {
+  "js": "__key('threads', 'Home')",
+  "label": "Home: the floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "Home: the floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.now === 220 && __near(m.side, 220); })()",
+  "label": "Home: the floor"
+ },
+ {
+  "js": "__key('threads', 'End')",
+  "label": "End: the widest that leaves the main pane its floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "End: the widest that leaves the main pane its floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.now === m.max && __near(m.main, 560); })()",
+  "label": "End: the widest that leaves the main pane its floor"
+ },
+ {
+  "shot": "split_threads_focused"
+ },
+ {
+  "js": "__key('threads', 'Enter')",
+  "label": "Enter: automatic again (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "Enter: automatic again (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); return m.stored === null && /automatic/.test(m.text); })()",
+  "label": "Enter: automatic again"
+ },
+ {
+  "js": "__drag('threads', 80)",
+  "label": "dragged 80 px right before the reload (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "dragged 80 px right before the reload (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); sessionStorage.setItem('split-kept', m.stored); return m.stored === String(m.now); })()",
+  "label": "dragged 80 px right before the reload"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "js": "window.__which = 'threads'"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "__m('threads')",
+  "label": "after the reload"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'), k = sessionStorage.getItem('split-kept'); return m.stored === k && String(m.now) === k && __near(m.side, +k); })()",
+  "label": "the chosen width survives a reload"
+ },
+ {
+  "js": "__key('threads', 'End')",
+  "label": "End before narrowing the window (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "End before narrowing the window (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'); sessionStorage.setItem('split-kept', m.stored); return m.now === m.max; })()",
+  "label": "End before narrowing the window"
+ },
+ {
+  "size": "1100x900"
+ },
+ {
+  "wait": 3.0
+ },
+ {
+  "js": "__m('threads')",
+  "label": "1100x900 with the wider choice"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'), k = sessionStorage.getItem('split-kept'); return m.stored === k && +k > m.max && m.now === m.max && __near(m.main, 560); })()",
+  "label": "a narrower window shows the chosen width narrower (the main pane keeps 560), the choice untouched"
+ },
+ {
+  "expect": "__flat()",
+  "label": "squeezed below its choice the Conversations list does not scroll sideways"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__m('threads')",
+  "label": "1440x900 again"
+ },
+ {
+  "expect": "(() => { const m = __m('threads'), k = sessionStorage.getItem('split-kept'); return String(m.now) === k && __near(m.side, +k); })()",
+  "label": "the window wide again, the chosen width is back"
+ },
+ {
+  "js": "__key('threads', 'Home')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "size": "1000x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1000x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1000x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1080x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1080x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1080x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1160x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1160x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1160x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1240x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1240x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1240x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1320x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1320x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1320x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1400x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1400x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1400x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1480x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1480x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1480x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1560x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1560x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1560x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1640x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1640x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1640x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1720x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1720x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1720x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1800x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1800x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1800x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "size": "1880x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1880x900 at its floor"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1880x900: the Conversations list never scrolls sideways (at its floor)"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.chat.threads.width', '300'); return 'set'; })()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "js": "window.__which = 'threads'"
+ },
+ {
+  "size": "1000x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1000x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1000x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1080x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1080x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1080x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1160x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1160x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1160x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1240x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1240x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1240x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1320x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1320x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1320x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1400x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1400x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1400x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1480x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1480x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1480x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1560x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1560x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1560x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1640x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1640x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1640x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1720x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1720x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1720x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1800x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1800x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1800x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "size": "1880x900"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__list()",
+  "label": "list 1880x900 at 300 px"
+ },
+ {
+  "expect": "__flat()",
+  "label": "1880x900: the Conversations list never scrolls sideways (at 300 px)"
+ },
+ {
+  "js": "__dbl('threads')",
+  "label": "Conversations back to automatic (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "Conversations back to automatic (state)"
+ },
+ {
+  "expect": "__m('threads').stored === null",
+  "label": "Conversations back to automatic"
+ },
+ {
+  "js": "(() => { for (const k of ['chat.threads', 'chat.settings', 'audio-lab.library']) localStorage.removeItem('lmgw.ui.side.' + k + '.width'); localStorage.setItem('lmgw.ui.side.chat.threads', 'true'); localStorage.setItem('lmgw.ui.side.chat.settings', 'true'); localStorage.removeItem('lmgw.ui.side.audio-lab.library'); return 'reset'; })()"
+ },
+ {
+  "size": "1920x1080"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "js": "window.__which = 'settings'"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "js": "window.__b = __m('settings')",
+  "label": "thread settings at 1920x1080, automatic"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return !!document.querySelector('.chat-settings') && m.handle && m.label === 'Resize Thread settings' && m.min === 280 && /automatic/.test(m.text) && __near(m.main, m.split - m.side); })()",
+  "label": "the thread settings panel is open beside the thread, with its handle"
+ },
+ {
+  "js": "__drag('settings', -50)",
+  "label": "a right panel widens as its edge is dragged left (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "a right panel widens as its edge is dragged left (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return __near(m.side, Math.round(__b.side + 50)) && m.stored === String(m.now); })()",
+  "label": "a right panel widens as its edge is dragged left"
+ },
+ {
+  "js": "(() => { window.__b = __m('settings'); __key('settings', 'ArrowLeft'); return __b; })()",
+  "label": "ArrowLeft widens a right panel by 16 px (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "ArrowLeft widens a right panel by 16 px (state)"
+ },
+ {
+  "expect": "__m('settings').now === __b.now + 16",
+  "label": "ArrowLeft widens a right panel by 16 px"
+ },
+ {
+  "js": "__drag('settings', 3000)",
+  "label": "dragged far right, it stops at its 280 px floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "dragged far right, it stops at its 280 px floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return m.now === 280 && __near(m.side, 280); })()",
+  "label": "dragged far right, it stops at its 280 px floor"
+ },
+ {
+  "js": "__drag('settings', -3000)",
+  "label": "dragged far left, it stops where the thread keeps its 480 px (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "dragged far left, it stops where the thread keeps its 480 px (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return m.now === m.max && __near(m.main, 480); })()",
+  "label": "dragged far left, it stops where the thread keeps its 480 px"
+ },
+ {
+  "js": "(() => { __down('settings'); __move('settings', 60); return __w0; })()",
+  "label": "settings mid-drag: the panel follows the pointer (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "settings mid-drag: the panel follows the pointer (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return m.resizing && __near(m.side, __w0 - 60); })()",
+  "label": "settings mid-drag: the panel follows the pointer"
+ },
+ {
+  "shot": "split_settings_mid_drag"
+ },
+ {
+  "js": "__up('settings', 60)",
+  "label": "settings released (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "settings released (state)"
+ },
+ {
+  "expect": "!__m('settings').resizing",
+  "label": "settings released"
+ },
+ {
+  "js": "(() => { window.__b0 = __b; return __dbl('settings'); })()",
+  "label": "double-click: thread settings automatic again (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "double-click: thread settings automatic again (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('settings'); return m.stored === null && /automatic/.test(m.text); })()",
+  "label": "double-click: thread settings automatic again"
+ },
+ {
+  "size": "2560x1400"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "js": "window.__which = 'lab'"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "window.__c = __m('lab')",
+  "label": "audio lab at 2560x1400, automatic"
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return m.handle && m.label === 'Resize Voice library' && m.min === 220 && /automatic/.test(m.text); })()",
+  "label": "the Audio lab's library has a handle named Resize Voice library"
+ },
+ {
+  "js": "__drag('lab', -100)",
+  "label": "the library widens by 100 px, past the automatic ceiling (360) where there is room (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "the library widens by 100 px, past the automatic ceiling (360) where there is room (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return __near(m.side, Math.min(m.max, Math.round(__c.side + 100))) && m.stored === String(m.now); })()",
+  "label": "the library widens by 100 px, past the automatic ceiling (360) where there is room"
+ },
+ {
+  "js": "__key('lab', 'End')",
+  "label": "End: the lab keeps its 1240 px beside the library (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "End: the lab keeps its 1240 px beside the library (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return m.now === m.max && __near(m.main, 1240); })()",
+  "label": "End: the lab keeps its 1240 px beside the library"
+ },
+ {
+  "shot": "split_lab_widest"
+ },
+ {
+  "js": "__key('lab', 'Home')",
+  "label": "Home: the library at its 220 px floor (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "Home: the library at its 220 px floor (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return m.now === 220 && __near(m.side, 220); })()",
+  "label": "Home: the library at its 220 px floor"
+ },
+ {
+  "js": "__dbl('lab')",
+  "label": "double-click: the library automatic again (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__m(window.__which)",
+  "label": "double-click: the library automatic again (state)"
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return m.stored === null && __near(m.side, __c.side); })()",
+  "label": "double-click: the library automatic again"
+ },
+ {
+  "js": "(() => { for (const k of ['chat.threads', 'chat.settings', 'audio-lab.library']) { localStorage.removeItem('lmgw.ui.side.' + k + '.width'); localStorage.removeItem('lmgw.ui.side.' + k); } sessionStorage.removeItem('fold-ran'); return 'reset'; })()",
+  "label": "review fixes: storage clean"
+ },
+ {
+  "size": "2221x900"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.audio-lab.library.width', '300'); return 'x'; })()"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(() => { const m = __m('lab'); return m.handle && __near(m.side, 300); })()",
+  "label": "a 300 px library is kept and docks"
+ },
+ {
+  "expect": "(() => { const h = __h('lab'), id = h.getAttribute('aria-controls'); const a = id && document.getElementById(id); return !!a && a === __d('lab').querySelector(':scope > .dock-side') && document.querySelectorAll('[id=\"' + id + '\"]').length === 1; })()",
+  "label": "the handle's aria-controls names the panel, and that id is the only one on the page"
+ },
+ {
+  "expect": "(() => { const h = __h('lab'); const mk = (key, o) => { const e = new KeyboardEvent('keydown', Object.assign({ key, bubbles: true, cancelable: true }, o)); h.dispatchEvent(e); return e.defaultPrevented; }; return mk('ArrowLeft', { altKey: true }) === false && mk('Home', { ctrlKey: true }) === false && mk('End', { metaKey: true }) === false && mk('ArrowRight', {}) === true; })()",
+  "label": "Alt+Arrow, Ctrl+Home and Meta+End are left to the browser; a plain arrow is the handle's"
+ },
+ {
+  "size": "2221x900"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.audio-lab.library.width', '300'); return 'x'; })()"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(() => { const pe = (type, x) => __h('lab').dispatchEvent(new PointerEvent(type, { pointerId: 9, pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, bubbles: true, cancelable: true })); pe('pointerdown', 700); pe('pointermove', 690); return __d('lab').classList.contains('resizing'); })()",
+  "label": "a drag in progress (state)"
+ },
+ {
+  "expect": "__d('lab').classList.contains('resizing')",
+  "label": "the drag is on (.resizing)"
+ },
+ {
+  "size": "1300x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(() => { const d = __d('lab'); return !!d && !__h('lab') && !d.classList.contains('resizing') && getComputedStyle(document.body).userSelect !== 'none'; })()",
+  "label": "the window narrowing under a drag takes the handle away and ends the drag: no .resizing left behind"
+ },
+ {
+  "expect": "(() => { const w = localStorage.getItem('lmgw.ui.side.audio-lab.library.width'); return /^\\d+$/.test(w || '') && w !== '300'; })()",
+  "label": "the width reached is stored when the drag ends that way"
+ },
+ {
+  "size": "1777x900"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.audio-lab.library.width', '300'); return 'x'; })()"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(() => { window.__foldRes = null; const sp = __d('lab').getBoundingClientRect().width; if (!(sp >= 1540 && sp < 1600)) return 'split ' + Math.round(sp) + ': not this size'; sessionStorage.setItem('fold-ran', '1'); const m = __m('lab'); if (!(m.handle && __near(m.side, 300))) { window.__foldRes = false; return 'no 300 px handle'; } __h('lab').focus(); __key('lab', 'Enter'); setTimeout(() => { const a = document.activeElement; window.__foldRes = !__h('lab') && a.classList.contains('dock-rail') && !!a.closest('.lab-shell'); }, 400); return 'reset pressed'; })()",
+  "label": "Enter on a 300 px library in a 1540 to 1600 px split (act)"
+ },
+ {
+  "wait": 0.9
+ },
+ {
+  "expect": "window.__foldRes !== false",
+  "label": "Enter resets a 300 px library to the automatic 360 that folds the panel, in a split of 1540 to 1600 px (where the window size lands there): the focus is on the rail's open button, not on <body>"
+ },
+ {
+  "size": "2221x900"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.audio-lab.library.width', '300'); return 'x'; })()"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(() => { window.__foldRes = null; const sp = __d('lab').getBoundingClientRect().width; if (!(sp >= 1540 && sp < 1600)) return 'split ' + Math.round(sp) + ': not this size'; sessionStorage.setItem('fold-ran', '1'); const m = __m('lab'); if (!(m.handle && __near(m.side, 300))) { window.__foldRes = false; return 'no 300 px handle'; } __h('lab').focus(); __key('lab', 'Enter'); setTimeout(() => { const a = document.activeElement; window.__foldRes = !__h('lab') && a.classList.contains('dock-rail') && !!a.closest('.lab-shell'); }, 400); return 'reset pressed'; })()",
+  "label": "Enter on a 300 px library in a 1540 to 1600 px split (act)"
+ },
+ {
+  "wait": 0.9
+ },
+ {
+  "expect": "window.__foldRes !== false",
+  "label": "Enter resets a 300 px library to the automatic 360 that folds the panel, in a split of 1540 to 1600 px (where the window size lands there): the focus is on the rail's open button, not on <body>"
+ },
+ {
+  "expect": "sessionStorage.getItem('fold-ran') === '1'",
+  "label": "the fold-on-reset case ran at one of the two window sizes"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.ui.side.audio-lab.library.width'); return 'x'; })()"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const KEY = { threads: 'chat.threads', settings: 'chat.settings', lab: 'audio-lab.library' };\n  window.__d = w => w === 'threads' ? document.querySelector('.chat-shell > .dock.left')\n    : w === 'settings' ? document.querySelector('.chat-shell .dock.right')\n    : document.querySelector('.lab-shell > .dock.right');\n  window.__h = w => { const d = __d(w); return d && d.querySelector(':scope > .dock-handle'); };\n  window.__m = w => { const d = __d(w); if (!d) return null;\n    const side = d.querySelector(':scope > .dock-side'), main = d.querySelector(':scope > .dock-main');\n    const hd = __h(w);\n    return { split: d.getBoundingClientRect().width, side: side ? side.getBoundingClientRect().width : null,\n      main: main.getBoundingClientRect().width, handle: !!hd,\n      now: hd && +hd.getAttribute('aria-valuenow'), min: hd && +hd.getAttribute('aria-valuemin'),\n      max: hd && +hd.getAttribute('aria-valuemax'), text: hd && hd.getAttribute('aria-valuetext'),\n      label: hd && hd.getAttribute('aria-label'), role: hd && hd.getAttribute('role'),\n      orient: hd && hd.getAttribute('aria-orientation'), tab: hd && hd.tabIndex,\n      cursor: hd && getComputedStyle(hd).cursor, resizing: d.classList.contains('resizing'),\n      line: hd && getComputedStyle(hd, '::after').backgroundColor,\n      stored: localStorage.getItem('lmgw.ui.side.' + KEY[w] + '.width') };\n  };\n  const pe = (w, type, x) => __h(w).dispatchEvent(new PointerEvent(type, { pointerId: 7,\n    pointerType: 'mouse', isPrimary: true, button: type === 'pointermove' ? -1 : 0,\n    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: 300, bubbles: true, cancelable: true }));\n  window.__down = w => { const r = __h(w).getBoundingClientRect(); window.__x0 = r.left + r.width / 2;\n    window.__w0 = __m(w).side; pe(w, 'pointerdown', __x0); return __m(w); };\n  window.__move = (w, dx) => { pe(w, 'pointermove', __x0 + dx); return __m(w); };\n  window.__up = (w, dx) => { pe(w, 'pointerup', __x0 + dx); return __m(w); };\n  window.__drag = (w, dx) => { __down(w); __move(w, dx / 2); __move(w, dx); return __up(w, dx); };\n  window.__key = (w, key, shift) => { const hd = __h(w); hd.focus();\n    hd.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true, cancelable: true }));\n    return __m(w); };\n  window.__dbl = w => { __h(w).dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));\n    return __m(w); };\n  const near = (a, b) => Math.abs(a - b) <= 1;\n  window.__near = near;\n  // The Conversations list: never wider inside than it is, nothing in it\n  // past its content edge, and its body guarded (overflow-x hidden).\n  window.__list = () => { const b = document.querySelector('.chat-shell > .dock.left > .dock-side .dock-body');\n    if (!b) return document.querySelector('.chat-shell > .dock.left > .dock-rail') ? { folded: true } : null;\n    const br = b.getBoundingClientRect(), edge = br.left + b.clientLeft + b.clientWidth;\n    let worst = 0, who = null;\n    for (const el of b.querySelectorAll('*')) { const r = el.getBoundingClientRect();\n      if (!r.width) continue;\n      if (r.right - edge > worst) { worst = r.right - edge; who = String(el.className.baseVal ?? el.className); } }\n    return { cli: b.clientWidth, scr: b.scrollWidth, bar: b.offsetHeight - b.clientHeight,\n      ox: getComputedStyle(b).overflowX, oy: getComputedStyle(b).overflowY, worst: +worst.toFixed(2), who,\n      side: __m('threads').side };\n  };\n  // Folded to its rail (a window too narrow for it) there is no list to scroll.\n  window.__flat = () => { const l = __list(); return !!l && (l.folded || l.scr <= l.cli + 1\n    && l.worst <= 1 && l.ox === 'hidden' && l.bar === 0); };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "js": "__key('threads', 'End')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "(() => { const head = document.querySelector('.chat-head'); for (const t of ['3 mcp', 'kb: 2', 'reasoning: high', 'folder\\'s model']) { const s = document.createElement('span'); s.className = 'type-badge probe-pill'; s.textContent = t; head.insertBefore(s, head.querySelector('.export-menu')); } return 1; })()",
+  "label": "pills in the header at the widest list (act)"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const head = document.querySelector('.chat-head'); const pills = [...head.querySelectorAll('.type-badge')]; return { list: __m('threads').side, head: [head.scrollWidth, head.clientWidth, head.getBoundingClientRect().height], pills: pills.map(p => [p.textContent, Math.round(p.getBoundingClientRect().height), p.getClientRects().length]), picker: head.querySelector('.model-picker').getBoundingClientRect().width }; })()",
+  "label": "header at the widest list (state)"
+ },
+ {
+  "expect": "(() => { const head = document.querySelector('.chat-head'); const pills = [...head.querySelectorAll('.type-badge')]; const lh = parseFloat(getComputedStyle(pills[0]).lineHeight) || 16; return __m('threads').now === __m('threads').max && pills.length >= 4 && pills.every(p => p.getClientRects().length === 1 && p.getBoundingClientRect().height < lh * 1.9 + 4) && head.scrollWidth <= head.clientWidth + 1; })()",
+  "label": "with the list at its widest the header's pills are one line each and the header does not overflow sideways"
+ },
+ {
+  "shot": "split_chat_head_widest"
+ },
+ {
+  "js": "(() => { document.querySelectorAll('.probe-pill').forEach(e => e.remove()); const body = document.querySelector('.chat-shell > .dock.left .dock-body'); const row = document.createElement('div'); row.className = 'thread-row probe-row'; row.innerHTML = '<span class=\"thread-title\">probe</span><span class=\"thread-meta\"><span class=\"thread-model\">Anthropic Claude Sonnet 4.5 long</span><span title=\"agent\">· mail-labeler-agent</span><span title=\"folder\">Projects/some/folder</span><span title=\"purge\">purges in 12 days</span></span>'; body.prepend(row); return 1; })()",
+  "label": "a thread row with every trailing meta span (act)"
+ },
+ {
+  "js": "__key('threads', 'Home')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "(() => { const m = document.querySelector('.probe-row .thread-meta'); const b = document.querySelector('.chat-shell > .dock.left .dock-body'); return { side: __m('threads').side, meta: [m.scrollWidth, m.clientWidth, Math.round(m.getBoundingClientRect().height)], body: [b.scrollWidth, b.clientWidth], spans: [...m.children].map(c => [Math.round(c.getBoundingClientRect().height), Math.round(c.getBoundingClientRect().right - m.getBoundingClientRect().left)]) }; })()",
+  "label": "meta at the panel's floor (state)"
+ },
+ {
+  "expect": "(() => { const m = document.querySelector('.probe-row .thread-meta'); const b = document.querySelector('.chat-shell > .dock.left .dock-body'); return __m('threads').now === __m('threads').min && m.scrollWidth <= m.clientWidth + 1 && b.scrollWidth <= b.clientWidth + 1 && [...m.children].every(c => c.getBoundingClientRect().right <= m.getBoundingClientRect().right + 1 && c.getBoundingClientRect().height > 0) && m.getBoundingClientRect().height > 20; })()",
+  "label": "at the panel's floor the thread meta spans wrap onto further lines, all visible, nothing scrolls sideways"
+ },
+ {
+  "js": "document.querySelector('.probe-row').remove()"
+ },
+ {
+  "js": "(() => { for (const k of ['chat.threads', 'chat.settings', 'audio-lab.library']) { localStorage.removeItem('lmgw.ui.side.' + k + '.width'); localStorage.removeItem('lmgw.ui.side.' + k); } sessionStorage.removeItem('split-kept'); return 'cleaned'; })()"
+ }
+]

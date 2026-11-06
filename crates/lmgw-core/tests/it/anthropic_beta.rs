@@ -43,6 +43,7 @@ async fn world(base: &str, protocol: Protocol, extra_headers: Vec<(String, Strin
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -233,7 +234,7 @@ async fn a_non_anthropic_upstream_gets_no_beta_header() {
         .expect(1)
         .mount(&mock)
         .await;
-    let gw = world(&mock.uri(), Protocol::Openai, vec![]).await;
+    let gw = world(&mock.uri(), Protocol::OpenaiCompatible, vec![]).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{gw}/v1/messages"))

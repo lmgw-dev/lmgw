@@ -267,6 +267,14 @@ fn expected(cap: Cap, who: Who) -> Expect {
             Client | Agent => Forbidden,
             Owner | OwnerCookie => Admitted,
         },
+        // Transfers between devices (device transfers design §10): the
+        // owner and a paired device, and nobody else; a client key and an
+        // agent token are refused by the layer with transfer_device_only.
+        Cap::Transfer => match who {
+            AnonOpen | AnonClosed | Device => Unauthorized,
+            Client | Agent => Forbidden,
+            Owner | OwnerCookie => Admitted,
+        },
         Cap::Ledger => match who {
             AnonOpen | AnonClosed => Unauthorized,
             // `Ledger` is deliberately agent-only (§3.2), so an owner is
@@ -478,6 +486,18 @@ async fn every_table_row_answers_the_status_class_its_capability_implies() {
             if *path == "/mcp/host" && want == Expect::Admitted && status == 403 {
                 assert_eq!(body["code"], "host_not_granted", "{who:?}: {body}");
                 continue;
+            }
+            // A device's part of a transfer (the targets, the offer, the
+            // bytes, received and decline): the layer admits the owner,
+            // and the handler refuses it with the API's code (device
+            // transfers design §1).
+            if *cap == Cap::Transfer && want == Expect::Admitted && status == 403 {
+                assert_eq!(body["code"], "transfer_device_only", "{who:?}: {body}");
+                continue;
+            }
+            // The layer's refusal on `Transfer` is the API's code too.
+            if *cap == Cap::Transfer && want == Expect::Forbidden {
+                assert_eq!(body["code"], "transfer_device_only", "{who:?}: {body}");
             }
             assert!(
                 want.check(status),

@@ -59,11 +59,25 @@ pub struct EnrolRequest {
     /// The device's public key: standard base64 (RFC 4648 §4, padded) of its
     /// DER SubjectPublicKeyInfo, an EC P-256 key.
     pub public_key: String,
+    /// The device's own name, as its user chose it on the device ("Anna's
+    /// phone"): free text, shown on the Devices card beside the name the
+    /// owner gave the link (*added 2026-10-23*). Named `device_name` here,
+    /// as the card's field is, because the answer's `device.name` is the
+    /// owner's name for the link. Optional, and never trusted for anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
     /// Free text naming the client, shown on the Devices card
     /// ("Kai mobile 0.1.0 (Android 16)"). Optional, and never trusted for
     /// anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// The app this install is, as a lowercase reverse-DNS name
+    /// (`dev.example.storyplayer`, [`crate::transfer::APP_ID_RULE`]):
+    /// what other devices of the same app offer files to (device transfers
+    /// design §2). Optional; a device without one receives no transfer. A
+    /// malformed one is refused 400 `bad_request` before the token is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
 }
 
 impl std::fmt::Debug for EnrolRequest {
@@ -72,7 +86,9 @@ impl std::fmt::Debug for EnrolRequest {
         f.debug_struct("EnrolRequest")
             .field("token", &"<redacted>")
             .field("public_key", &self.public_key)
+            .field("device_name", &self.device_name)
             .field("client", &self.client)
+            .field("app_id", &self.app_id)
             .finish()
     }
 }
@@ -244,6 +260,10 @@ pub const UNAUTHENTICATED_MAX: Bound = Bound { min: 1, max: 4096 };
 /// `devices.unauthenticated_per_peer`: the same, from one peer (an IPv4
 /// address, an IPv6 address by its /64).
 pub const UNAUTHENTICATED_PER_PEER: Bound = Bound { min: 1, max: 4096 };
+/// `devices.transfer_expiry_days`: how long a transfer offer lasts, in days
+/// (device transfers design §7). No `0`: every offer carries its
+/// `expires_at`.
+pub const TRANSFER_EXPIRY_DAYS: Bound = Bound { min: 1, max: 3650 };
 
 /// Settings → Network & access → Devices (`devices.*` in
 /// `GET /api/settings-full`, device link design §9.1).
@@ -299,6 +319,10 @@ pub struct DevicesSettings {
     /// (1 to 4096); a new one past it closes that peer's oldest. Applies to
     /// the next connection.
     pub unauthenticated_per_peer: u32,
+    /// How long a transfer offer between devices lasts, in days (1 to
+    /// 3650); its bytes are deleted when it expires undelivered. Applies to
+    /// the next offer.
+    pub transfer_expiry_days: u32,
 }
 
 /// `devices` in `GET /api/status` (device link design §9.2): lmgw's device
@@ -354,12 +378,21 @@ pub struct DevicePairingView {
     pub state: DevicePairingState,
     /// Its latest pairing token, if it was ever given one.
     pub token: Option<PairingTokenView>,
-    /// When its last enrolment was (RFC 3339 UTC), from where (the peer
-    /// address) and with which client (the enrolment's free text, never
-    /// trusted for anything): a waiting key's, while one waits.
+    /// When its last enrolment was (RFC 3339 UTC): the waiting key's while
+    /// one waits (state `enrolled`), the key that works now's otherwise.
     pub enrolled_at: Option<String>,
+    /// From where its last enrolment came (the peer address): the waiting
+    /// key's while one waits, the key that works now's otherwise.
     pub enrolled_from: Option<String>,
+    /// The client its last enrolment named (the enrolment's `client`, free
+    /// text, never trusted for anything): the waiting key's while one waits,
+    /// the key that works now's otherwise.
     pub client: Option<String>,
+    /// The name the device's user gave the device, as its last enrolment
+    /// said it (the enrolment's `device_name`, free text, never trusted for
+    /// anything; *added 2026-10-23*): the waiting key's while one waits, the
+    /// key that works now's otherwise. Not the name the owner gave the link.
+    pub device_name: Option<String>,
     /// The confirmation code, `7F3A-91C2`, of the key that waits for the
     /// owner's confirmation in state `enrolled`, of the confirmed key
     /// otherwise: what the device shows, and what the owner compares and
@@ -369,6 +402,11 @@ pub struct DevicePairingView {
     /// that kept the current key): the kept key's code. The kept key is
     /// served until the waiting one is confirmed, which ends it.
     pub kept_code: Option<String>,
+    /// With a key waiting beside the kept one: the kept key's `device_name`
+    /// (*added 2026-10-23*), which `device_name` no longer shows then.
+    pub kept_device_name: Option<String>,
+    /// With a key waiting beside the kept one: the kept key's `client`.
+    pub kept_client: Option<String>,
     /// When the owner confirmed the key that works now (RFC 3339 UTC); with
     /// a key waiting, the kept key's confirmation.
     pub confirmed_at: Option<String>,
@@ -669,11 +707,24 @@ mod tests {
         let r = EnrolRequest {
             token: format!("{TOKEN_PREFIX}{}", "4b1d".repeat(8)),
             public_key: "MFkw".into(),
+            device_name: None,
             client: None,
+            app_id: None,
         };
         let json = serde_json::to_string(&r).unwrap();
-        assert!(!json.contains("client"), "{json}");
+        assert!(
+            !json.contains("device_name") && !json.contains("client") && !json.contains("app_id"),
+            "{json}"
+        );
         assert!(!format!("{r:?}").contains("4b1d"));
+        let named = EnrolRequest {
+            device_name: Some("Anna's phone".into()),
+            ..r.clone()
+        };
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(json.contains(r#""device_name":"Anna's phone""#), "{json}");
+        assert_eq!(serde_json::from_str::<EnrolRequest>(&json).unwrap(), named);
+        assert!(format!("{named:?}").contains("Anna's phone"));
         let extra = r#"{"token": "t", "public_key": "k", "key": "x"}"#;
         assert!(serde_json::from_str::<EnrolRequest>(extra).is_err());
     }

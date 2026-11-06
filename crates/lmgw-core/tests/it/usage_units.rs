@@ -107,12 +107,18 @@ async fn a_request_fee_reaches_the_usage_plane_the_csv_and_the_tool() {
         })))
         .mount(&mock)
         .await;
-    let (state, gw) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, gw) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     store::upsert_price(
         &state.db,
         PriceScope::Alias,
         "my-model",
         PriceUnit::PerMtok,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             price_in: Some(3.0),
             price_out: Some(15.0),
@@ -201,6 +207,7 @@ async fn a_stream_stopped_before_its_answer_on_a_fee_scope_is_unpriced_and_in_th
         PriceScope::Alias,
         "chatty",
         PriceUnit::PerRequest,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             source: PriceSource::Manual,
             ..Default::default()
@@ -617,7 +624,7 @@ async fn a_decision_answer_is_priced_per_input_token_from_a_manual_row() {
         .await;
     let (state, gw) = setup_kind(
         &format!("{}/api/v1", mock.uri()),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
     )
     .await;

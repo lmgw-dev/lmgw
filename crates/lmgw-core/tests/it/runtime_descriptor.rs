@@ -39,8 +39,7 @@ fn local(model_id: &str, image: Option<&str>, extra: Option<Vec<&str>>, warm: bo
         image: image.map(String::from),
         extra_run_args: extra.map(|v| v.into_iter().map(String::from).collect()),
         warm_start: warm,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -65,8 +64,7 @@ fn aux(model_id: &str, image: Option<&str>, extra: Option<Vec<&str>>, warm: bool
         image: image.map(String::from),
         extra_run_args: extra.map(|v| v.into_iter().map(String::from).collect()),
         warm_start: warm,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -94,8 +92,7 @@ fn audio(model_id: &str, image: Option<&str>, warm: bool) -> AudioModel {
         image: image.map(String::from),
         extra_run_args: None,
         warm_start: warm,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }
@@ -122,11 +119,12 @@ fn image(model_id: &str, image: Option<&str>, warm: bool) -> ImageModel {
         extra_run_args: None,
         warm_start: warm,
         idle_seconds: 600,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         peak_extra_bytes: None,
         peak_learned_at: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -887,29 +885,27 @@ fn the_image_class_routes_through_the_synthetic_upstream_minus_four() {
     assert!(snap.resolve("image/z-image").is_err());
 }
 
-/// Hold fallback: the image class behaves like aux and audio — it never
-/// inherits the global chat alias (a chat model cannot draw a picture), and
-/// only an explicit `alias` mode gives a row one.
+/// Fallback: an image row has its own, like every row (openai egress design
+/// §14.2) — none until one is set.
 #[test]
-fn an_image_row_never_inherits_the_global_hold_fallback() {
-    use lmgw_core::config::HoldFallbackMode;
+fn an_image_row_has_its_own_fallback_or_none() {
+    use lmgw_core::config::HopKey;
 
+    let key = |id: &str| HopKey::Local(Class::Image, id.to_string());
     let mut snap =
         snapshot_with_images(vec![], vec![], vec![], vec![image("z-image", None, false)]);
-    snap.settings.hold.fallback_alias = Some("cloud-chat".into());
-    assert_eq!(snap.hold_fallback_for(Class::Image, "z-image"), None);
+    assert_eq!(snap.fallback_of(&key("z-image")), None);
 
-    snap.image_models[0].hold_fallback_mode = HoldFallbackMode::Alias;
-    snap.image_models[0].hold_fallback = Some("openai/gpt-image-1".into());
+    snap.image_models[0].fallback = Some("openai/gpt-image-1".into());
     assert_eq!(
-        snap.hold_fallback_for(Class::Image, "z-image"),
-        Some("openai/gpt-image-1".to_string())
+        snap.fallback_of(&key("z-image")),
+        Some("openai/gpt-image-1")
     );
 
-    snap.image_models[0].hold_fallback_mode = HoldFallbackMode::None;
-    assert_eq!(snap.hold_fallback_for(Class::Image, "z-image"), None);
-    // A row this snapshot does not know refuses rather than inherits.
-    assert_eq!(snap.hold_fallback_for(Class::Image, "gone"), None);
+    snap.image_models[0].fallback = None;
+    assert_eq!(snap.fallback_of(&key("z-image")), None);
+    // A row this snapshot does not know has none.
+    assert_eq!(snap.fallback_of(&key("gone")), None);
 }
 
 // ---------------------------------------------------------------------------

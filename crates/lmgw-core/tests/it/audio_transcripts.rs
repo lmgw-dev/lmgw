@@ -6,7 +6,7 @@
 //! model that does not transcribe never hears the clip. The clips here are a
 //! few synthetic bytes; no recording is in the repo.
 
-use lmgw_core::config::{HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{Protocol, UpstreamKind};
 use lmgw_core::store::{self, NewAlias, NewUpstream};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
@@ -26,8 +26,7 @@ async fn asr_world(fallback: Option<&str>) -> World {
         |row| {
             row.task = "asr".into();
             if let Some(fb) = fallback {
-                row.hold_fallback_mode = HoldFallbackMode::Alias;
-                row.hold_fallback = Some(fb.into());
+                row.fallback = Some(fb.into());
             }
         },
     )
@@ -56,7 +55,7 @@ async fn cloud_asr(w: &World) -> MockServer {
         &w.state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -82,6 +81,7 @@ async fn cloud_asr(w: &World) -> MockServer {
             capabilities_override: Some(json!({"capabilities": {
                 "task": "asr", "endpoints": ["/v1/audio/transcriptions"], "source": "owner"
             }})),
+            fallback: None,
         },
     )
     .await
@@ -97,6 +97,7 @@ async fn cloud_asr(w: &World) -> MockServer {
             capabilities_override: Some(json!({"capabilities": {
                 "task": "chat", "endpoints": ["/v1/chat/completions"], "source": "owner"
             }})),
+            fallback: None,
         },
     )
     .await
@@ -432,7 +433,7 @@ async fn admissions_fallback_that_does_not_transcribe_never_hears_a_clip() {
         &g.state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -458,12 +459,13 @@ async fn admissions_fallback_that_does_not_transcribe_never_hears_a_clip() {
             capabilities_override: Some(json!({"capabilities": {
                 "task": "chat", "endpoints": ["/v1/chat/completions"], "source": "owner"
             }})),
+            fallback: None,
         },
     )
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE local_models SET hold_fallback_mode = 'alias', hold_fallback = 'cloud-chat'
+        "UPDATE local_models SET fallback = 'cloud-chat'
          WHERE model_id = 'ears'",
     )
     .execute(&g.state.db)
@@ -484,7 +486,7 @@ async fn admissions_fallback_that_does_not_transcribe_never_hears_a_clip() {
     )
     .await
     .unwrap_err();
-    assert_eq!(e.code(), "asr_required", "{e}");
+    assert_eq!(e.kind(), "asr_required", "{e}");
     assert!(
         e.to_string().contains("'cloud-chat' is a 'chat' model"),
         "{e}"

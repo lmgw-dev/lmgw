@@ -26,7 +26,7 @@ use lmgw_api_types::builds::{BuildRunStatus, ContainerImage, Engine};
 
 use super::filter_words;
 use super::popover::{self, Popover};
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::pages::backends::{
     ago, engine_label, is_dev_tag, is_moving_tag, parse_ts, rebuild_tag_run, short_repo,
 };
@@ -263,7 +263,7 @@ pub fn presence_chip(p: &Presence) -> (&'static str, &'static str, &'static str)
         Presence::Local(Some(BuildRunStatus::Unverified)) => (
             "chip warn ip-chip",
             "not GPU-verified",
-            "built here, but never probed on the GPU; Verify now on Backends can finish that",
+            "built here, but never probed on the GPU; Verify now on Engines can finish that",
         ),
         Presence::Local(_) => ("chip ok ip-chip", "local", "on this machine"),
         Presence::Missing(Pull::Registry) => (
@@ -1170,7 +1170,7 @@ pub fn ImagePicker(
                                     // committed first: the page's guard then
                                     // asks about it before leaving.
                                     <a href="/backends" on:mousedown=move |_| commit_typed()>
-                                        "Backends"
+                                        "Engines"
                                     </a>
                                     "."
                                 </Show>
@@ -1301,7 +1301,7 @@ fn render_item(
                     <span class="ip-meta">
                         {chip.map(|(c, l)| view! { <span class=c>{l}</span> })}
                         {(!s.label.is_empty()).then(|| view! { <span class="ip-label">{s.label.clone()}</span> })}
-                        <span>{human_bytes(s.size)}</span>
+                        <span>{fmt_bytes(s.size)}</span>
                         <span>{created}</span>
                     </span>
                 </div>

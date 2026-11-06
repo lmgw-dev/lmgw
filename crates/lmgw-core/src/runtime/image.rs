@@ -194,6 +194,16 @@ pub struct ImageCapabilities {
     /// Upscalers: the built-in resize modes plus anything under
     /// `--hires-upscalers-dir`.
     pub upscalers: Vec<ImageAsset>,
+    /// The preview modes the job API offers (`none`, `proj`, `tae`, `vae`);
+    /// empty for a build without previews (`c678dfe`).
+    pub preview_modes: Vec<String>,
+    /// The build can run `POST /sdcpp/v1/upscale` with a model under the
+    /// upscalers directory.
+    pub upscale: bool,
+    /// The request defaults per mode, as the server serializes its own
+    /// request struct (`img_gen` → `{width, height, sample_params, …}`):
+    /// what a request that sets nothing gets.
+    pub defaults_by_mode: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Bounds the server enforces on a request. Every field is optional because a
@@ -209,9 +219,12 @@ pub struct ImageLimits {
     pub max_height: Option<i64>,
     pub max_batch_count: Option<i64>,
     /// Depth of the native async job queue; a `429` is what a full one
-    /// answers. Irrelevant to the synchronous OpenAI routes WP2 serves, kept
-    /// because it is the only published number about queueing at all.
+    /// answers. Irrelevant to the synchronous OpenAI routes WP2 serves; the
+    /// media tools' job queue is this one (chat-media-tools §4.1).
     pub max_queue_size: Option<i64>,
+    /// The largest picture `POST /sdcpp/v1/upscale` makes.
+    pub max_upscale_width: Option<i64>,
+    pub max_upscale_height: Option<i64>,
 }
 
 /// Which optional inputs the loaded pipeline accepts.
@@ -235,6 +248,8 @@ pub struct ImageFeatures {
     pub cache: bool,
     pub cancel_queued: bool,
     pub cancel_generating: bool,
+    /// The job API draws previews of a running generation.
+    pub preview: bool,
 }
 
 /// A named LoRA or upscaler. The server spells these as objects
@@ -243,6 +258,9 @@ pub struct ImageFeatures {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ImageAsset {
     pub name: String,
+    /// An upscaler `POST /sdcpp/v1/upscale` can run (a model under the
+    /// upscalers directory); `false` for the built-in resize modes.
+    pub image_upscale: bool,
 }
 
 impl<'de> Deserialize<'de> for ImageAsset {
@@ -254,10 +272,22 @@ impl<'de> Deserialize<'de> for ImageAsset {
             Object {
                 #[serde(default)]
                 name: String,
+                #[serde(default)]
+                image_upscale: bool,
             },
         }
         Ok(match Shape::deserialize(d)? {
-            Shape::Name(name) | Shape::Object { name } => ImageAsset { name },
+            Shape::Name(name) => ImageAsset {
+                name,
+                image_upscale: false,
+            },
+            Shape::Object {
+                name,
+                image_upscale,
+            } => ImageAsset {
+                name,
+                image_upscale,
+            },
         })
     }
 }
@@ -329,11 +359,12 @@ mod tests {
             extra_run_args: None,
             warm_start: false,
             idle_seconds: 300,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             peak_extra_bytes: None,
             peak_learned_at: None,
+            prompt_style: None,
+            preview_mode: None,
         }
     }
 

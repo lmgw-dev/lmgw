@@ -28,7 +28,7 @@ async fn feed(gw: &Gw, client: &reqwest::Client) -> Feed {
 }
 
 /// `GET /chat/api/threads` as `client`: the status.
-async fn threads(w: &World, client: &reqwest::Client) -> u16 {
+pub(super) async fn threads(w: &World, client: &reqwest::Client) -> u16 {
     client
         .get(format!("{}/chat/api/threads", w.gw))
         .send()
@@ -41,12 +41,12 @@ async fn threads(w: &World, client: &reqwest::Client) -> u16 {
 /// A watch on device `d`'s key from now: whether a revocation of it has
 /// been raised since, read without waiting (a watch resolves at once on a
 /// revocation after its mark, or on a credential its row no longer holds).
-struct Since {
+pub(super) struct Since {
     watch: lmgw_core::devices::RevocationWatch,
 }
 
 impl Since {
-    fn now(state: &SharedState, d: &Paired) -> Self {
+    pub(super) fn now(state: &SharedState, d: &Paired) -> Self {
         let fp = state
             .snapshot()
             .api_keys
@@ -60,7 +60,10 @@ impl Since {
         }
     }
 
-    fn ended(&mut self, state: &SharedState) -> Option<lmgw_core::devices::RevokeReason> {
+    pub(super) fn ended(
+        &mut self,
+        state: &SharedState,
+    ) -> Option<lmgw_core::devices::RevokeReason> {
         self.watch.revoked(state).now_or_never()
     }
 }

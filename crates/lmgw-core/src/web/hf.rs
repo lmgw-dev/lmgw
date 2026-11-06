@@ -7,6 +7,8 @@
 //! called from both front doors — the `/api` plane (via [`crate::ops`]) and
 //! the MCP tool plane — so neither has its own copy of the rules.
 
+pub(crate) mod engine;
+
 use crate::hf::{self, models_dir_for_target};
 use crate::jobs::{hf_download, JobKind, Spawn};
 use crate::state::SharedState;
@@ -37,12 +39,41 @@ pub(crate) async fn queue_files_at(
     revision: &str,
     pin_note: Option<&str>,
 ) -> Result<Vec<lmgw_api_types::QueuedDownload>, String> {
+    Ok(
+        queue_and_say(state, repo, files, target, revision, pin_note)
+            .await?
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect(),
+    )
+}
+
+/// [`queue_files`], each row with whether this call started its transfer
+/// (`true`) or joined one already running (`false`): what a get's cancel
+/// stops (find-a-model design D81).
+pub(crate) async fn queue_files_owned(
+    state: &SharedState,
+    repo: &str,
+    files: &[String],
+    target: &str,
+) -> Result<Vec<(lmgw_api_types::QueuedDownload, bool)>, String> {
+    queue_and_say(state, repo, files, target, "main", None).await
+}
+
+async fn queue_and_say(
+    state: &SharedState,
+    repo: &str,
+    files: &[String],
+    target: &str,
+    revision: &str,
+    pin_note: Option<&str>,
+) -> Result<Vec<(lmgw_api_types::QueuedDownload, bool)>, String> {
     // Before the listing and before any row is written: a dev instance on a
     // models dir outside its data dir refuses here (`models_dir_to_write`).
     hf::models_dir_to_write(state, target)?;
     let snap = state.snapshot();
     let token = &snap.settings.hf_token;
-    let available = hf::list_tree(&state.http, token, &hf::hf_base(), repo, revision)
+    let available = hf::list_tree(&state.hub_http, token, &hf::hf_base(), repo, revision)
         .await
         .map_err(|f| hf::listing_refusal(f, pin_note))?;
     let mut parts: Vec<String> = Vec::new();
@@ -71,18 +102,21 @@ pub(crate) async fn queue_files_at(
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("download entry {id} for {part} vanished"))?;
-        hf_download::start(state, &row).await?;
+        let started = matches!(hf_download::start(state, &row).await?, Spawn::Started(_));
         // Read again: starting moves the row on (queued → downloading).
         let row = store::get_hf_model(&state.db, id)
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or(row);
-        queued.push(lmgw_api_types::QueuedDownload {
-            id,
-            file: row.file,
-            dest_path: row.dest_path,
-            status: row.status,
-        });
+        queued.push((
+            lmgw_api_types::QueuedDownload {
+                id,
+                file: row.file,
+                dest_path: row.dest_path,
+                status: row.status,
+            },
+            started,
+        ));
     }
     Ok(queued)
 }
@@ -152,6 +186,8 @@ pub(crate) async fn delete_tracked(state: &SharedState, id: i64) -> Result<(), S
     store::delete_hf_model(&state.db, id)
         .await
         .map_err(|e| e.to_string())?;
+    // A get waiting for this row reads it again at the feed's next frame.
+    state.jobs.publish(state);
     if !models_dir.trim().is_empty() {
         let _ = tokio::fs::remove_file(format!("{}.part", dest.display())).await;
         let _ = tokio::fs::remove_file(&dest).await;

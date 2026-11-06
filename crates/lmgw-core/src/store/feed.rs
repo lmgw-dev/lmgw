@@ -83,16 +83,25 @@ pub mod kind {
     /// device's name and the hosts of its open tasks in `detail`, at the
     /// level its changes were shown at.
     pub const DEVICE_REVOKED: &str = "device.revoked";
+    /// A transfer between devices was offered, became `ready` or ended
+    /// (device transfers design §6;
+    /// [`record_transfer`](super::feed::record_transfer)): the transfer's
+    /// id, its two devices and whether the receiver was offered it by then
+    /// in `detail`; the sender, the receiver from then on and the owner
+    /// hear it.
+    pub const TRANSFER_UPDATED: &str = "transfer.updated";
 }
 
 mod devices;
 mod messages;
 mod open;
 mod tasks;
+mod transfers;
 pub use devices::{record_device_revoked, DeviceRevoked};
 pub use messages::{record_added, record_deleted, record_messages, record_updated};
 pub use open::{opening, waiting, Opening, WaitingReply};
 pub use tasks::{record_task, TaskFacts};
+pub use transfers::{record_transfer, TransferFacts};
 
 /// One change, as [`record`] writes it.
 #[derive(Debug, Clone, Default)]

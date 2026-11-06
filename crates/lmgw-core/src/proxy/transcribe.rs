@@ -249,7 +249,7 @@ async fn transcribe_labelled(
     // The stop is raced inside, so a call stopped once the gate opened keeps
     // its route on the row (`multipart_call`).
     let called = if clip {
-        match clip::open(state, alias).await {
+        match clip::open(state, alias, ctx.origin()).await {
             Ok(opened) => {
                 multipart_send(
                     state,
@@ -270,6 +270,7 @@ async fn transcribe_labelled(
             &fields,
             AudioUpload::Transcription,
             started,
+            ctx.origin(),
             stop,
         )
         .await
@@ -290,7 +291,7 @@ async fn transcribe_labelled(
                 row_status(&e),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
             )
             .await;
             in_flight.finished();
@@ -319,7 +320,7 @@ async fn transcribe_labelled(
         Err(e) if is_canceled(e) => row_status(e),
         _ => status,
     };
-    let error = result.as_ref().err().map(|e| (e.kind(), e.to_string()));
+    let error = result.as_ref().err().map(|e| (e.kind(), e.log_text()));
     record(
         LogParams {
             quantities,
@@ -379,6 +380,7 @@ fn log<'a>(
         rung: None,
         degraded: None,
         quantities: Default::default(),
+        service_tier: Default::default(),
     }
 }
 

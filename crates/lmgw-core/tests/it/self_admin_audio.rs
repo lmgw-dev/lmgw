@@ -3,7 +3,7 @@
 //! (the cached listing, a refresh, a queued download with its `next_step`) and
 //! `lmgw__audio_model_set` (a `next_step` after a create only).
 //!
-//! The text is the answer's pretty JSON with sorted keys, so a key a type
+//! The text is the answer's compact JSON with sorted keys, so a key a type
 //! adds, drops, renames or turns from absent into `null` shows up as a
 //! difference between the text and what the type writes back.
 

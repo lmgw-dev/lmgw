@@ -14,7 +14,9 @@
 //! ([`ApprovalRequested`], [`ApprovalDecided`]); `task.*` an MCP task a
 //! turn started and its result entering the thread, as the record's write
 //! left them ([`TaskStarted`], [`TaskDone`]); `device.revoked` a paired
-//! device whose key was deleted ([`DeviceRevoked`]). A **live** event (`turn.*`, `voice.*`, `hold`, `state`,
+//! device whose key was deleted ([`DeviceRevoked`]); `transfer.updated` a
+//! transfer between devices as it is now, to its sender, its receiver (from
+//! `ready` on) and the owner ([`crate::transfer::Transfer`]). A **live** event (`turn.*`, `voice.*`, `hold`, `state`,
 //! `resync`, `revoked`, `caught_up`) has no `id:`; what is live now is in [`Hello`] and
 //! [`LiveState`].
 //!
@@ -66,16 +68,20 @@ pub mod event {
     pub const TASK_STARTED: &str = "task.started";
     pub const TASK_DONE: &str = "task.done";
     pub const DEVICE_REVOKED: &str = "device.revoked";
+    pub const TRANSFER_UPDATED: &str = "transfer.updated";
     pub const CAUGHT_UP: &str = "caught_up";
 }
 
 /// The largest value `chat_feed_keepalive_max_s` may take, so the longest
-/// keep-alive a stream may ask (`?keepalive_s=`): a day. Between events a
-/// stream sends only its keep-alive comment, so this bounds how long a
-/// stream whose device vanished silently can stay open on lmgw before a
-/// keep-alive it never acknowledges ends it.
+/// keep-alive a stream may ask (`?keepalive_s=`): 32 767 seconds, about nine
+/// hours. That is the kernel's own maximum, not a choice: Linux refuses
+/// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` above it with EINVAL, and a stream
+/// whose keep-alive is set as socket timers would then run without any. Between
+/// events a stream sends only its keep-alive comment, so this also bounds
+/// how long a stream whose device vanished silently can stay open on lmgw
+/// before a keep-alive it never acknowledges ends it.
 // Shared with the dashboard, which shows it as the field's maximum.
-pub const MAX_KEEPALIVE_S: u32 = 86_400;
+pub const MAX_KEEPALIVE_S: u32 = 32_767;
 
 // Review W4-1.
 /// The most live events `chat_feed_live_buffer` may hold.
@@ -86,7 +92,7 @@ pub const MAX_KEEPALIVE_S: u32 = 86_400;
 /// filled slot keeps (a few hundred bytes of JSON). 65 536 slots are about
 /// 5 MiB up front and some tens of MiB full, while live events come a few
 /// per turn, so a client this far behind has long been sent a fresh
-/// `state`. An unbounded value could ask for hundreds of GB at a save, and
+/// `state`. An unbounded value could ask for hundreds of GiB at a save, and
 /// again at every start.
 // Shared with the dashboard, which shows it as the field's maximum.
 pub const MAX_LIVE_BUFFER: u32 = 65_536;
@@ -185,15 +191,19 @@ impl FeedPrincipal {
     }
 }
 
-/// The GPU hold: whether local models are paused, and the alias that answers
-/// for them meanwhile. The `hold` event and part of
-/// [`Hello`].
+/// The GPU hold: whether local models are paused. A held model answers with
+/// its own fallback, where one is set (each thread's model says which). The
+/// `hold` event and part of [`Hello`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FeedHold {
+    /// The owner's GPU hold is on: models on the graphics card are paused.
     pub active: bool,
-    pub fallback_alias: Option<String>,
+    /// A benchmark run holds the graphics card: every local model waits
+    /// until it ends, one on the CPU too, or answers with its fallback
+    /// (chat-plane design D6).
+    pub benchmark: bool,
 }
 
 /// A realtime session bound to a thread now, and who bound it ("the
@@ -764,6 +774,9 @@ pub enum FeedEvent {
     TaskStarted(TaskStarted),
     TaskDone(TaskDone),
     DeviceRevoked(DeviceRevoked),
+    /// A transfer between devices was offered, became `ready` or ended
+    /// (device transfers design §6): the transfer as it is at delivery.
+    TransferUpdated(crate::transfer::Transfer),
     TurnStarted(TurnStarted),
     TurnDone(TurnDone),
     VoiceBound(VoiceBound),
@@ -821,6 +834,7 @@ pub const EVENTS: &[&str] = &[
     event::TASK_STARTED,
     event::TASK_DONE,
     event::DEVICE_REVOKED,
+    event::TRANSFER_UPDATED,
     event::TURN_STARTED,
     event::TURN_DONE,
     event::VOICE_BOUND,
@@ -886,6 +900,7 @@ impl FeedEvent {
             event::TASK_STARTED => Self::TaskStarted(read(name, data)?),
             event::TASK_DONE => Self::TaskDone(read(name, data)?),
             event::DEVICE_REVOKED => Self::DeviceRevoked(read(name, data)?),
+            event::TRANSFER_UPDATED => Self::TransferUpdated(read(name, data)?),
             event::TURN_STARTED => Self::TurnStarted(read(name, data)?),
             event::TURN_DONE => Self::TurnDone(read(name, data)?),
             event::VOICE_BOUND => Self::VoiceBound(read(name, data)?),
@@ -924,6 +939,7 @@ impl FeedEvent {
             Self::TaskStarted(_) => event::TASK_STARTED,
             Self::TaskDone(_) => event::TASK_DONE,
             Self::DeviceRevoked(_) => event::DEVICE_REVOKED,
+            Self::TransferUpdated(_) => event::TRANSFER_UPDATED,
             Self::TurnStarted(_) => event::TURN_STARTED,
             Self::TurnDone(_) => event::TURN_DONE,
             Self::VoiceBound(_) => event::VOICE_BOUND,
@@ -1107,6 +1123,22 @@ mod tests {
         assert_eq!(d.device.by(), "device 'phone'");
         assert_eq!(d.by.as_deref(), Some(BY_ADMIN));
         assert_eq!(ev.name(), "device.revoked");
+    }
+
+    #[test]
+    fn a_transfer_event_carries_the_transfer() {
+        let ev = FeedEvent::parse(
+            event::TRANSFER_UPDATED,
+            r#"{"id": "0f", "state": "ready", "received": 9, "size": 9,
+                "from": {"device_id": 4, "name": "desktop"}}"#,
+        )
+        .unwrap();
+        let FeedEvent::TransferUpdated(t) = &ev else {
+            panic!("transfer.updated: {ev:?}")
+        };
+        assert_eq!(t.state, crate::transfer::TransferState::Ready);
+        assert_eq!((t.from.device_id, t.received), (4, 9));
+        assert_eq!(ev.name(), "transfer.updated");
     }
 
     #[test]

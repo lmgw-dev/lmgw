@@ -89,7 +89,7 @@ pub fn ResponseBody(outcome: FinishedKind) -> impl IntoView {
             filename,
             size,
         } => {
-            let bytes = crate::fmt::human_bytes(size as u64);
+            let bytes = crate::fmt::fmt_bytes(size as u64);
             let player = if content_type.starts_with("audio/") {
                 Some(
                     view! { <audio controls class="resp-audio" src=url.clone()></audio> }

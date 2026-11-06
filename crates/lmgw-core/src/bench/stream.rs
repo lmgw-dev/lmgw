@@ -71,7 +71,7 @@ pub fn parse_chunk(data: &str) -> Result<Option<Chunk>, String> {
         })
         .unwrap_or_default();
     let timings = if stop {
-        crate::egress::openai::parse_timings(v.get("timings"))
+        crate::egress::openai_wire::parse_timings(v.get("timings"))
     } else {
         None
     };

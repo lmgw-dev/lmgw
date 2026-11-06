@@ -1,0 +1,14 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, anthropic/claude-haiku-4-5-20251001, json_schema {\"type\": \"nonsense\"}",
+  "upstream": "anthropic",
+  "status": 400,
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "output_config.format.schema: Invalid JSON Schema in output format: 'nonsense' is not valid under any of the given schemas"
+    },
+    "request_id": "req_scrubbed"
+  },
+  "expect": "invalid_json_schema"
+}

@@ -3,7 +3,7 @@
 //! writes that the document does (`lmgw__price_set`, `lmgw__price_delete`,
 //! `lmgw__prices_sync`): each tool's text is read into its type and written
 //! out again, and the two texts are equal byte for byte. The text is the
-//! answer's pretty JSON with sorted keys, so a key a type adds, drops, renames
+//! answer's compact JSON with sorted keys, so a key a type adds, drops, renames
 //! or turns from absent into `null` (or an integer into a float) shows up
 //! here.
 //!
@@ -35,7 +35,7 @@ fn assert_keys(live: &Value, want: &[&str]) {
     assert_eq!(got, want, "{live}");
 }
 
-const SHEET_KEYS: [&str; 12] = [
+const SHEET_KEYS: [&str; 13] = [
     "id",
     "scope_kind",
     "scope_key",
@@ -48,6 +48,7 @@ const SHEET_KEYS: [&str; 12] = [
     "source",
     "note",
     "updated_at",
+    "service_tier",
 ];
 
 const CELL_KEYS: [&str; 22] = [
@@ -80,7 +81,7 @@ async fn upstream(state: &SharedState, name: &str, expose_all: bool, prefix: &st
         &state.db,
         &NewUpstream {
             name: name.into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             // Nothing in these tests asks it: the worklist reads the
             // snapshot and the rollup.
@@ -111,6 +112,7 @@ async fn alias(state: &SharedState, up: i64, model: &str, name: &str) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -125,9 +127,18 @@ async fn sheet(
     price: Option<f64>,
     note: Option<&str>,
 ) {
-    store::upsert_price(&state.db, kind, key, unit, &rates, price, note)
-        .await
-        .unwrap();
+    store::upsert_price(
+        &state.db,
+        kind,
+        key,
+        unit,
+        lmgw_core::config::PriceTier::Standard,
+        &rates,
+        price,
+        note,
+    )
+    .await
+    .unwrap();
     state.reload_snapshot().await.unwrap();
 }
 
@@ -197,13 +208,25 @@ async fn roll(
 }
 
 #[tokio::test]
-async fn the_prices_text_of_an_empty_gateway_is_four_keys_and_two_empty_lists() {
+async fn the_prices_text_of_an_empty_gateway_is_its_keys_and_empty_lists() {
     let state = AppState::init_for_tests().await.unwrap();
     let admin = Admin::new(&state).await;
 
     let text = admin.text("lmgw__prices", json!({})).await;
     let live = parse(&text);
-    assert_keys(&live, &["currency", "sheets", "unpriced_models", "hint"]);
+    assert_keys(
+        &live,
+        &[
+            "currency",
+            "sheets",
+            "unpriced_models",
+            "unpriced_tiers",
+            "unpriced_hosted_tools",
+            "hint",
+        ],
+    );
+    assert_eq!(live["unpriced_tiers"], json!([]));
+    assert_eq!(live["unpriced_hosted_tools"], json!([]));
     assert_eq!(live["sheets"], json!([]));
     assert_eq!(live["unpriced_models"], json!([]));
     assert!(live["hint"].as_str().unwrap().contains("lmgw__price_set"));
@@ -601,10 +624,18 @@ async fn the_price_write_tools_answer_the_types_their_http_ops_do() {
         .await;
     assert_keys(
         &parse(&text),
-        &["ok", "scope_kind", "scope_key", "unit", "source"],
+        &[
+            "ok",
+            "scope_kind",
+            "scope_key",
+            "unit",
+            "service_tier",
+            "source",
+        ],
     );
     let saved: dto::PriceSaved = read_back(&text);
     assert_eq!(saved.unit, "per_mtok");
+    assert_eq!(saved.service_tier, "standard");
     assert_eq!(
         (saved.scope_kind.as_str(), saved.source.as_str()),
         ("alias", "manual")

@@ -16,7 +16,7 @@ use super::*;
 /// feature: add the field here and to [`ThreadDefaults::apply`], and (for the
 /// input checks) to `web::chat_folders::check_defaults`. The UI keeps folder
 /// defaults as JSON: its folder form is the thread settings' fields
-/// (`lmgw-ui`'s `pages/chat_folders.rs`, `FolderSettingsForm`).
+/// (`lmgw-chat-ui`'s `chat_folders.rs`, `FolderSettingsForm`).
 ///
 /// Input is strict (`deny_unknown_fields`: a typo is a 400, not a silently
 /// ignored default); what is *stored* is read tolerantly
@@ -53,6 +53,12 @@ pub struct ThreadDefaults {
     /// (personality-profiles design D9); whether it exists is the route's
     /// check, and a delete strips it from every folder.
     pub profile_id: Option<i64>,
+    /// The image and audio tools' default models of every thread in the
+    /// folder (chat-media-tools design §3.8). **Not copied** by
+    /// [`Self::apply`]: a turn reads its folder's at the time it runs
+    /// (`web::chat_turn`), between Settings → Chat's and the thread's own.
+    /// Checked on input by the folder routes (`mcp::media::defaults::check`).
+    pub media_defaults: Option<lmgw_api_types::chat_media::MediaDefaults>,
 }
 
 impl ThreadDefaults {
@@ -78,6 +84,11 @@ impl ThreadDefaults {
         // it would fail the whole read below, and `unwrap_or_default` would
         // wipe every default of the folder.
         let voice = map.remove("voice").and_then(ThreadVoice::from_value);
+        // The media defaults likewise: strict on input too.
+        let media = map
+            .remove("media_defaults")
+            .filter(|v| !v.is_null())
+            .map(lmgw_api_types::chat_media::MediaDefaults::from_stored);
         // Every field serializes (no skip), so the default's keys are the
         // known set — adding a field needs no second list.
         if let Ok(serde_json::Value::Object(known)) = serde_json::to_value(Self::default()) {
@@ -86,6 +97,7 @@ impl ThreadDefaults {
         let mut d: Self =
             serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default();
         d.voice = voice;
+        d.media_defaults = media;
         d
     }
 
@@ -126,6 +138,8 @@ impl ThreadDefaults {
             t.voice.overlay(v);
         }
         t.profile_id = d.profile_id.or(t.profile_id);
+        // `media_defaults` is read live at each turn, never copied (its
+        // field's doc).
     }
 }
 
@@ -827,9 +841,10 @@ pub(super) async fn insert_chat_thread(
            (model_alias, system_prompt, temperature, max_tokens, kind, mcp_tools,
             reasoning_enabled, reasoning_effort, reasoning_budget, folder_id,
             top_p, top_k, min_p, repeat_penalty, presence_penalty, frequency_penalty,
-            seed, stop, kb_ids, kb_mode, kb_budget_tokens, voice, profile_id, approval_floor)
+            seed, stop, kb_ids, kb_mode, kb_budget_tokens, voice, profile_id, approval_floor,
+            media_defaults)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22, (SELECT id FROM chat_profiles WHERE id = ?23), ?24)",
+                 ?19, ?20, ?21, ?22, (SELECT id FROM chat_profiles WHERE id = ?23), ?24, ?25)",
     )
     .bind(&t.model_alias)
     .bind(&t.system_prompt)
@@ -855,6 +870,7 @@ pub(super) async fn insert_chat_thread(
     .bind(t.voice.to_stored())
     .bind(t.profile_id)
     .bind(super::chat_approval_floor::to_column(&t.approval_floor))
+    .bind(super::chat::media_defaults_column(&t.media_defaults))
     .execute(&mut *conn)
     .await?;
     let id = res.last_insert_rowid();

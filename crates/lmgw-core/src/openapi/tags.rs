@@ -159,6 +159,16 @@ pub(crate) const TAGS: &[TagDef] = &[
                        kept in the lab store.",
     },
     TagDef {
+        id: "voice-lab",
+        name: "Voices lab",
+        group: Group::DashboardApi,
+        description: "The dashboard's voice sample generator: fixed voices for the cloning \
+                       text-to-speech models. A text-to-speech model renders rounds of \
+                       candidates of a phonetically rich sentence; the chosen one is saved to \
+                       the voice library with its exact transcript and how it was made, and a \
+                       cloning model can speak a test line with it.",
+    },
+    TagDef {
         id: "labs",
         name: "Lab store",
         group: Group::DashboardApi,
@@ -195,6 +205,24 @@ pub(crate) const TAGS: &[TagDef] = &[
                        key_expired wait for the gateway's side, key_unknown and \
                        certificate_expired mean pair the device again, and revoked is any \
                        other kind of key's revocation.",
+    },
+    TagDef {
+        id: "transfers",
+        name: "Transfers",
+        group: Group::DeviceApi,
+        description: "Files between paired devices of one app (device transfers design): a \
+                       device offers a file to another device that declared the same app id \
+                       at pairing, uploads it to lmgw in ranges it can resume, and the other \
+                       device is offered it once every byte matched its sha256, downloads it \
+                       with ranges and says it arrived; lmgw then deletes the bytes. The \
+                       transfer capability: paired devices (on the device listener) send and \
+                       receive; the owner lists every transfer and cancels any; a client key or \
+                       an agent token is refused 403 transfer_device_only. A refusal is the \
+                       flat {code, message}, with free_bytes, received or state where its code \
+                       names one. JSON bodies are at most 16 KiB (16384 bytes), refused 413 \
+                       body_too_large; the only bound on a file is the free space of lmgw's \
+                       data directory. The Chat feed's transfer.updated says each offer, ready \
+                       and end to the sender, to the receiver from ready on, and to the owner.",
     },
     TagDef {
         id: "devices",

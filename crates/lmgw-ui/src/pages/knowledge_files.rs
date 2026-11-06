@@ -7,11 +7,11 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 use crate::widgets::{use_toasts, MenuItem, RowMenu};
 
 use super::knowledge::{use_kb, KbFile, KbJobLine};
-use super::knowledge_source::{SourceModal, SourceRef};
+use lmgw_chat_ui::knowledge_source::{SourceModal, SourceRef};
 
 use lmgw_api_types::knowledge::{
     ResumeResult, UploadItem, UploadResult as UploadResponse, UploadVerdict,
@@ -318,7 +318,7 @@ fn FileRow(f: KbFile, source: RwSignal<Option<SourceRef>>) -> impl IntoView {
                 {f.kind.clone()}
                 {(!f.sub.is_empty() && f.sub != f.kind).then(|| format!(" · {}", f.sub))}
             </td>
-            <td class="num">{human_bytes(f.size.max(0) as u64)}</td>
+            <td class="num">{fmt_bytes(f.size.max(0) as u64)}</td>
             <td>
                 <span class=chip>
                     <span class="dot"></span>

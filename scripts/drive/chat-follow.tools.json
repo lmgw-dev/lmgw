@@ -1,0 +1,8 @@
+[
+ [{"name": "image__generate", "arguments": {"model": "image/mock-turbo", "prompt": "a tall lighthouse on a cliff at dusk, waves below", "size": "768x1024", "seed": 42}}],
+ [{"name": "audio__speak", "arguments": {"model": "tts-mock", "text": "The lighthouse is ready."}}],
+ [{"name": "image__generate", "arguments": {"model": "image/mock-turbo", "prompt": "a tall lighthouse on a cliff at dusk, waves below", "size": "768x1024", "seed": 42}}],
+ [{"name": "image__generate", "arguments": {"model": "image/mock-turbo", "prompt": "a tall lighthouse on a cliff at dusk, waves below", "size": "768x1024", "seed": 42}}],
+ [{"name": "audio__speak", "arguments": {"model": "tts-mock", "text": "The lighthouse is ready."}}],
+ [{"name": "image__generate", "arguments": {"model": "image/mock-turbo", "prompt": "a tall lighthouse on a cliff at dusk, waves below", "size": "768x1024", "seed": 42}}]
+]

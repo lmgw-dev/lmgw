@@ -3,7 +3,7 @@
 //! plus the names a container that is already up adds.
 
 use lmgw_api_types::audio_lab::{AudioLabModels, LabVoiceKind, LabVoices, LabVoicesSource};
-use lmgw_core::config::{HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{Protocol, UpstreamKind};
 use lmgw_core::store;
 use lmgw_core::store::{NewAlias, NewUpstream};
 use serde_json::{json, Value};
@@ -154,8 +154,7 @@ async fn a_running_container_adds_the_names_only_it_knows() {
 #[tokio::test]
 async fn a_held_row_with_a_cloud_fallback_lists_its_catalog_and_names_the_fallback() {
     let w = magpie_world_with(|row| {
-        row.hold_fallback_mode = HoldFallbackMode::Alias;
-        row.hold_fallback = Some("cloud-tts".into());
+        row.fallback = Some("cloud-tts".into());
     })
     .await;
     // The fallback's provider: any request reaching it fails the test.
@@ -168,7 +167,7 @@ async fn a_held_row_with_a_cloud_fallback_lists_its_catalog_and_names_the_fallba
         &w.state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -194,6 +193,7 @@ async fn a_held_row_with_a_cloud_fallback_lists_its_catalog_and_names_the_fallba
             capabilities_override: Some(json!({"capabilities": {
                 "task": "tts", "endpoints": ["/v1/audio/speech"], "source": "owner"
             }})),
+            fallback: None,
         },
     )
     .await

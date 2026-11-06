@@ -77,7 +77,9 @@ pub async fn agent_delete(
     id: &str,
     by_device: Option<i64>,
 ) -> Result<AgentDeleted, String> {
-    crate::web::api_agents::agent_delete_as(state, id, by_device).await
+    crate::web::api_agents::agent_delete_as(state, id, by_device)
+        .await
+        .map_err(|r| r.message)
 }
 
 /// `lmgw__agent_install` — install an agent from an **image** (container-runtime

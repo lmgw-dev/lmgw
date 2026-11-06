@@ -56,13 +56,13 @@ pub async fn observe(
         return sent;
     }
     let resp = match sent {
-        Err(GatewayError::Transport(why)) => {
+        Err(e @ (GatewayError::Transport(_) | GatewayError::Unreachable(_))) => {
             state.llama_facts.invalidate(up.id);
             tracing::info!(
                 upstream = %up.name,
-                "llama-server unreachable ({why}): its /props facts are read again on next use"
+                "llama-server unreachable ({e}): its /props facts are read again on next use"
             );
-            return Err(GatewayError::Transport(why));
+            return Err(e);
         }
         Ok(Sent::Upstream(resp))
             if resp.status().is_client_error() || resp.status().is_server_error() =>

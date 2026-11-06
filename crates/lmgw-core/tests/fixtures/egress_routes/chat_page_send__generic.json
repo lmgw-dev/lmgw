@@ -1,0 +1,33 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"You are m. Be brief.\",\"role\":\"system\"},{\"content\":\"hi there\",\"role\":\"user\"}],\"model\":\"chat-gguf\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "You are m. Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "hi there",
+            "role": "user"
+          }
+        ],
+        "model": "chat-gguf",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        }
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

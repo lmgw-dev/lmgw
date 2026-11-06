@@ -25,6 +25,7 @@ use quickdoc_core::store as qstore;
 use serde_json::{json, Map, Value};
 
 use crate::quickdoc::query;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use super::selfadmin::err_result;
@@ -203,6 +204,8 @@ fn arg_usize(args: &Map<String, Value>, key: &str) -> Result<Option<usize>, Stri
 /// one; `docs__request` records it so the owner's queue says who asked.
 /// `charged`: whose request a query's embedder and reranker run for — a
 /// device's Chat turn (client-apps design L4); `None` for the gateway's own.
+/// `origin`: whose traffic those calls are — a `/v1/responses` run's own
+/// (per-request background design §7), the owner's everywhere else.
 /// `Err(CallError)` means "not one of these tools" — everything else is an
 /// `isError` result the calling model can read and act on.
 pub async fn call(
@@ -210,13 +213,13 @@ pub async fn call(
     name: &str,
     args: Option<Map<String, Value>>,
     client_name: Option<&str>,
-    charged: Option<&crate::proxy::RequestCtx>,
+    (charged, origin): (Option<&crate::proxy::RequestCtx>, Origin),
 ) -> Result<Value, CallError> {
     let a = args.unwrap_or_default();
     let out = match name {
         "docs__resolve" => resolve(state, &a).await,
         "docs__query" => {
-            return Ok(query_tool(state, &a, charged)
+            return Ok(query_tool(state, &a, (charged, origin))
                 .await
                 .unwrap_or_else(|e| err_result(&e)))
         }
@@ -375,7 +378,7 @@ async fn resolve(state: &SharedState, args: &Map<String, Value>) -> Result<Value
 async fn query_tool(
     state: &SharedState,
     args: &Map<String, Value>,
-    charged: Option<&crate::proxy::RequestCtx>,
+    (charged, origin): (Option<&crate::proxy::RequestCtx>, Origin),
 ) -> Result<Value, String> {
     let corpus_id = arg_str(args, "corpus_id")?
         .map(str::trim)
@@ -404,7 +407,7 @@ async fn query_tool(
         params.budget_tokens = (b > 0).then_some(b);
     }
 
-    let retriever = query::open_retriever_as(state, &corpus, charged)
+    let retriever = query::open_retriever_as(state, &corpus, charged, origin)
         .await
         .map_err(|e| e.to_string())?;
     let result = retriever

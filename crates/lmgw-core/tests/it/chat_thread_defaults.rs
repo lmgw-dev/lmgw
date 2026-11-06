@@ -28,7 +28,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream_base.trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -52,6 +52,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -320,6 +321,7 @@ async fn an_override_the_alias_defaults_carry_is_not_reported_ignored() {
             },
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

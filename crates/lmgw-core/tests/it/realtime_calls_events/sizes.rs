@@ -254,7 +254,7 @@ async fn an_unbound_calls_oversized_event_arrives_with_its_largest_fields_emptie
             });
         let marker = field.as_str().unwrap_or_else(|| panic!("{kind}: {e}"));
         assert!(
-            marker.starts_with("[omitted: 100 KiB over this call's 64 KiB event limit]"),
+            marker.starts_with("[omitted: 100 KiB over this call's 64.0 KiB event limit]"),
             "{kind}: {marker}"
         );
         let error = &events[at + 1];

@@ -4,7 +4,12 @@ fn main() {
     // is not tracked); capabilities/remote-ui.json grants the allow ones to
     // the gateway page. A command missing here is refused to the page.
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
-        tauri_build::AppManifest::new().commands(&["audio_outputs", "audio_output_set"]),
+        tauri_build::AppManifest::new().commands(&[
+            "audio_outputs",
+            "audio_output_set",
+            // The machine check's fix (machine-check design §4.3).
+            "machine_apply",
+        ]),
     ))
     .expect("tauri build script");
 }

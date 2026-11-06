@@ -219,8 +219,12 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
         tools,
         stream: true,
         passthrough,
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -318,6 +322,7 @@ fn tool_def(t: &Tool) -> Option<ToolDef> {
         name: name.clone(),
         description: description.clone(),
         parameters,
+        strict: None,
     })
 }
 
@@ -512,7 +517,7 @@ fn has_calls(m: &Message) -> bool {
 /// Merge `text` into a one-text-part message, one line apart.
 fn append_text(m: &mut Message, text: &str) {
     match m.content.iter_mut().find_map(|p| match p {
-        ir::ContentPart::Text { text } => Some(text),
+        ir::ContentPart::Text { text, .. } => Some(text),
         _ => None,
     }) {
         Some(t) => {

@@ -25,6 +25,7 @@ use lmgw_api_types as dto;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::detached::detached;
 use crate::state::SharedState;
 use crate::telemetry::Event;
 
@@ -128,6 +129,18 @@ pub(super) fn ops_result(res: Result<Value, String>) -> Response {
     }
 }
 
+/// [`ops_result`] for an op that answers with a [`crate::principal::Refusal`]
+/// of its own: the status and code it carries, so a task that panicked stays
+/// the 500 `internal` it is and is not turned into a 400 `op_failed`.
+fn refused<T: serde::Serialize, E: Into<crate::principal::Refusal>>(r: Result<T, E>) -> Response {
+    match r.map_err(Into::into).and_then(|v| {
+        serde_json::to_value(v).map_err(|e| format!("serializing the answer: {e}").into())
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
 async fn version() -> Json<dto::VersionInfo> {
     Json(dto::VersionInfo {
         version: env!("CARGO_PKG_VERSION").into(),
@@ -139,8 +152,9 @@ async fn status(State(st): State<SharedState>) -> Response {
 }
 
 /// `GET /api/vram` — the GPU ledger and the admission queue (quickdoc §9b),
-/// freshly measured. The same object the `vram` SSE frame carries, so a page
-/// can fetch once and then follow the stream.
+/// freshly measured, and the starts waiting for their engine image's
+/// download (machine-check design §5). The same object the `vram` SSE frame
+/// carries, so a page can fetch once and then follow the stream.
 async fn vram(State(st): State<SharedState>) -> Response {
     Json(st.vram.view(&st).await).into_response()
 }
@@ -286,6 +300,8 @@ async fn logs(State(st): State<SharedState>, Query(q): Query<LogsQuery>) -> Resp
                         audio_in_ms: r.audio_in_ms,
                         chars_in: r.chars_in,
                         images_out: r.images_out,
+                        service_tier: r.service_tier,
+                        price_note: r.price_note,
                         pricing: Some(dto::RowPricing {
                             currency: currency.clone(),
                             source: r.price_source,
@@ -380,11 +396,35 @@ async fn model_inspect(State(st): State<SharedState>, Query(q): Query<InspectQue
     ))
 }
 
-async fn local_model_plan(
-    State(st): State<SharedState>,
-    Query(q): Query<InspectQuery>,
-) -> Response {
-    ops_result(crate::modelinfo::local_model_plan(&st, &q.path, q.target.as_deref()).await)
+/// `GET /api/local-model-plan`: a file on disk by `path`, or a file on
+/// Hugging Face by `repo` and `file`, planned from its header before any
+/// download (find-a-model design §9.3). One of the two forms.
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct PlanQuery {
+    /// The weights GGUF relative to the target's models dir.
+    path: Option<String>,
+    /// A Hugging Face repo (`owner/name`), with `file`: the plan reads the
+    /// file's header from the hub (1 to 16 MiB) before anything is downloaded.
+    repo: Option<String>,
+    /// The weights file's path in `repo`.
+    file: Option<String>,
+    /// `chat` (default) | `aux` | `image` — which class's models dir `path`
+    /// is under; for `repo` + `file`, the class to plan for, else the
+    /// header's.
+    target: Option<String>,
+}
+
+async fn local_model_plan(State(st): State<SharedState>, Query(q): Query<PlanQuery>) -> Response {
+    ops_result(
+        crate::modelinfo::local_model_plan_of(
+            &st,
+            q.path.as_deref(),
+            q.repo.as_deref(),
+            q.file.as_deref(),
+            q.target.as_deref(),
+        )
+        .await,
+    )
 }
 
 /// The editor's ladder table: every rung shares cache types, projector and
@@ -430,6 +470,16 @@ pub(crate) struct HfRepoQuery {
     /// caller says nothing, which is every client written before the image
     /// class existed.
     target: Option<String>,
+    /// `true`: mark every `weights` file with its fit on this computer's
+    /// graphics card and name the recommended one (find-a-model design
+    /// §3.3). It reads file headers from Hugging Face, 1 to 16 MiB each: one
+    /// file's, then only the files near the card's edge and those that could
+    /// be the recommended one; the answer's `header_bytes_read` says how
+    /// much. `unless_metered`: the same, except that on a metered
+    /// connection nothing is read and every mark is by size (`metered` says
+    /// why; D123). The chat and aux classes only. Default `false`: no marks,
+    /// no header read.
+    fit: Option<dto::RepoFit>,
 }
 
 async fn hf_repo(State(st): State<SharedState>, Query(q): Query<HfRepoQuery>) -> Response {
@@ -439,15 +489,43 @@ async fn hf_repo(State(st): State<SharedState>, Query(q): Query<HfRepoQuery>) ->
             &q.repo,
             q.search.as_deref(),
             q.target.as_deref().unwrap_or("chat"),
+            q.fit.unwrap_or_default(),
         )
         .await,
     ))
 }
 
-async fn hf_downloads(State(st): State<SharedState>) -> Response {
+/// Filters for `/api/hf/downloads`; none given means every row.
+#[derive(Deserialize, Default, schemars::JsonSchema)]
+#[serde(default)]
+pub(crate) struct DownloadsQuery {
+    /// Comma-separated download row ids, e.g. `1,2,3`; only these rows.
+    ids: Option<String>,
+    /// `true`: only rows that are not finished (queued, downloading or failed).
+    active: Option<bool>,
+}
+
+async fn hf_downloads(State(st): State<SharedState>, Query(q): Query<DownloadsQuery>) -> Response {
+    let ids = match q.ids.as_deref().map(parse_ids).transpose() {
+        Ok(ids) => ids,
+        Err(e) => return ops_result(Err(e)),
+    };
     ops_result(crate::ops::backends::to_json(
-        crate::ops::hf_downloads(&st).await,
+        crate::ops::hf_downloads(&st, ids.as_deref(), q.active.unwrap_or(false)).await,
     ))
+}
+
+/// `1,2,3` as ids; an empty string is no ids (not "no filter"), a bad element
+/// is refused.
+fn parse_ids(s: &str) -> Result<Vec<i64>, String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            p.parse::<i64>()
+                .map_err(|_| format!("ids: '{p}' is not an integer"))
+        })
+        .collect()
 }
 
 /// Poll half of the jobs feed; the SSE `jobs` frame on `/api/events` is
@@ -679,6 +757,10 @@ async fn op(
             }
             Err(e) => Err(e),
         },
+        "upstream_quota_clear" => match patch_from_args(Some(args)) {
+            Ok(p) => ops::backends::to_json(ops::upstream_quota_clear(&st, p).await),
+            Err(e) => Err(e),
+        },
         "model_set" => match patch_from_args(Some(args)) {
             Ok(p) => ops::backends::to_json(ops::model_set(&st, p).await),
             Err(e) => Err(e),
@@ -768,6 +850,8 @@ async fn op(
             // The editor also posts the row's `id`; the unit is part of a
             // row's key, so the op writes by scope and unit and ignores it.
             let unit = arg_str(&args, "unit").map(str::to_string);
+            // Part of the key as well, like the unit.
+            let tier = arg_str(&args, "service_tier").map(str::to_string);
             match rates {
                 Ok(rates) => ops::backends::to_json(
                     ops::price_set(
@@ -775,6 +859,7 @@ async fn op(
                         &scope_kind,
                         scope_key.as_deref(),
                         unit.as_deref(),
+                        tier.as_deref(),
                         rates,
                         note.as_deref(),
                     )
@@ -794,7 +879,7 @@ async fn op(
             }
             None => Err("pass id".to_string()),
         },
-        "prices_sync" => ops::backends::to_json(ops::prices_sync(&st).await),
+        "prices_sync" => return refused(ops::prices_sync(&st).await),
         "tool_set" => match (
             arg_str(&args, "name"),
             args.get("enabled").and_then(Value::as_bool),
@@ -835,6 +920,13 @@ async fn op(
                 .await,
             )
         }
+        // Get it (find-a-model design §6, WP5): queue, then set up
+        // server-side; shared with `lmgw__model_get`.
+        "model_get" => typed(args, |a| ops::model_get(&st, a)).await,
+        // How a get stands, and the row it made (WP5's review round).
+        "model_get_status" => typed(args, |a| ops::model_get_status(&st, a)).await,
+        // The model editor's "Fit again" (D26).
+        "model_fit_again" => typed(args, |a| ops::model_fit_again(&st, a)).await,
         "hf_set" => {
             let action = arg_str(&args, "action").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").unwrap_or("chat").to_string();
@@ -866,15 +958,26 @@ async fn op(
         // engaging it stops containers, which a generic settings save must not
         // start doing.
         "hold_set" => match args.get("active").and_then(Value::as_bool) {
-            Some(active) => ops::backends::to_json(ops::hold_set(&st, active).await),
+            Some(active) => return refused(ops::hold_set(&st, active).await),
             None => Err("pass active: true or false".into()),
         },
+        // The machine check (machine-check design §4.2): read-only; the
+        // fix runs only from the app's own window, never from a route.
+        "machine_check" => typed(args, |a| crate::machine::op(&st, a)).await,
+        // Its one fix without a password (§4.2, D18, WP12): the model
+        // settings for the card this computer has, through the Settings
+        // page's own save.
+        "machine_settings_fit" => typed(args, |a| crate::machine::settings_fit(&st, a)).await,
         "audio_catalog" => audio_catalog_op(&st, &args).await,
         // Voice-library transcripts by a speech-to-text model
         // (audio-class gap 5); shared with `lmgw__voice_transcribe`.
         "voice_transcribe" => ops::backends::to_json(
             ops::voice_transcribe(&st, arg_str(&args, "clip"), arg_str(&args, "alias")).await,
         ),
+        // The Voices lab's round and save; shared with `lmgw__voice_generate`
+        // and `lmgw__voice_sample_save`, and with the lab's own routes.
+        "voice_generate" => typed(args, |a| ops::voice_generate(&st, a)).await,
+        "voice_sample_save" => typed(args, |a| ops::voice_sample_save(&st, a)).await,
         // "Add from recipe" for the image class (image-generation design
         // §7.2), the audio catalog's sibling with a compiled-in source.
         // Shared with `lmgw__image_recipes` / `lmgw__image_recipe_add`.
@@ -884,6 +987,10 @@ async fn op(
             ops::backends::to_json(
                 ops::image_recipe_add(&st, key, arg_str(&args, "diffusion_file")).await,
             )
+        }
+        "image_upscaler_add" => {
+            let key = arg_str(&args, "key").unwrap_or_default();
+            ops::backends::to_json(ops::image_upscaler_add(&st, key).await)
         }
         "local_model_test" => {
             let model_id = arg_str(&args, "model_id").unwrap_or_default().to_string();
@@ -897,18 +1004,36 @@ async fn op(
         // `job_cancel` on the run's job, above.
         "builds" => ops::backends::to_json(ops::backends::builds(&st).await),
         "build_get" => typed(args, |a| ops::backends::build_get(&st, a)).await,
-        "build_set" => typed(args, |a| ops::backends::build_set(&st, a)).await,
+        "build_set" => {
+            return match patch_from_args(Some(args)) {
+                Ok(a) => refused(ops::backends::build_set(&st, a).await),
+                Err(e) => ops_result(Err(e)),
+            }
+        }
         "build_resolve" => typed(args, |a| ops::backends::build_resolve(&st, a)).await,
         "build_check_merge" => typed(args, |a| ops::backends::build_check_merge(&st, a)).await,
         "build_run" => {
-            typed(args, |a| {
-                ops::backends::build_run(&st, a, lmgw_api_types::builds::BuildTrigger::Manual)
-            })
-            .await
+            return match patch_from_args(Some(args)) {
+                Ok(a) => refused(
+                    ops::backends::build_run(&st, a, lmgw_api_types::builds::BuildTrigger::Manual)
+                        .await,
+                ),
+                Err(e) => ops_result(Err(e)),
+            }
         }
         "build_run_log" => typed(args, |a| ops::backends::build_run_log(&st, a)).await,
-        "build_promote" => typed(args, |a| ops::backends::build_promote(&st, a)).await,
-        "build_verify" => typed(args, |a| ops::backends::build_verify(&st, a)).await,
+        "build_promote" => {
+            return match patch_from_args(Some(args)) {
+                Ok(a) => refused(ops::backends::build_promote(&st, a).await),
+                Err(e) => ops_result(Err(e)),
+            }
+        }
+        "build_verify" => {
+            return match patch_from_args(Some(args)) {
+                Ok(a) => refused(ops::backends::build_verify(&st, a).await),
+                Err(e) => ops_result(Err(e)),
+            }
+        }
         "build_env" => ops::backends::to_json(ops::backends::build_env(&st).await),
         "forge_refs" => typed(args, |a| ops::backends::forge_refs(&st, a)).await,
         "forge_prs" => typed(args, |a| ops::backends::forge_prs(&st, a)).await,
@@ -931,7 +1056,12 @@ async fn op(
         // Cancel is its own op (not `job_cancel`), so a caller never needs
         // the run's job id.
         "bench_plan" => typed(args, |a| ops::bench::bench_plan(&st, a)).await,
-        "bench_start" => typed(args, |a| ops::bench::bench_start(&st, a)).await,
+        "bench_start" => {
+            return match patch_from_args(Some(args)) {
+                Ok(a) => refused(ops::bench::bench_start(&st, a).await),
+                Err(e) => ops_result(Err(e)),
+            }
+        }
         "bench_runs" => typed(args, |a| ops::bench::bench_runs(&st, a)).await,
         "bench_run" => typed(args, |a| ops::bench::bench_run(&st, a)).await,
         "bench_cancel" => typed(args, |a| ops::bench::bench_cancel(&st, a)).await,
@@ -940,6 +1070,9 @@ async fn op(
         // The Realtime settings' VRAM budget (realtime design §12): the
         // saved cascade, or the draft's when the page passes its aliases.
         "realtime_budget" => typed(args, |a| ops::realtime_budget(&st, a)).await,
+        // Find a model by its name (find-a-model design §9.1): a read, no
+        // header; shared with `lmgw__model_find`.
+        "model_find" => typed(args, |a| ops::model_find(&st, a)).await,
         other => Err(format!("unknown op '{other}'")),
     };
     ops_result(res)
@@ -992,7 +1125,10 @@ async fn upstream_test(st: &SharedState, args: &Args) -> Result<dto::UpstreamTes
     super::admin::test_upstream(st, &u)
         .await
         .map_err(|e| format!("connection test failed — {e}"))?;
-    Ok(dto::UpstreamTested { ok: true })
+    Ok(dto::UpstreamTested {
+        ok: true,
+        note: crate::config::openai_host_note(u.protocol, &u.base_url),
+    })
 }
 
 /// Upstream create/update including `extra_headers`, which the self-admin
@@ -1005,7 +1141,15 @@ pub(crate) struct UpstreamFullPatch {
     action: String,
     id: Option<i64>,
     name: Option<String>,
+    /// The API the upstream speaks. `openai`: the OpenAI platform (api.openai.com)
+    /// only. `openai_compatible`: every other OpenAI-shaped provider (OpenRouter,
+    /// vLLM, an external audio.cpp server…). `anthropic`: Anthropic's API.
+    /// `gemini`: Google's Gemini API. `llama_cpp`: llama.cpp's own server.
     protocol: Option<String>,
+    /// What the upstream is, tied to its protocol: `openai` is `generic` only;
+    /// `openai_compatible` is `generic` or `audio_cpp` (an external audio.cpp
+    /// server); `llama_cpp` is `llama_server` only; `anthropic` is `generic` or
+    /// `llama_server`; `gemini` is `generic`. A pairing outside this is refused.
     kind: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -1017,10 +1161,13 @@ pub(crate) struct UpstreamFullPatch {
     enabled: Option<bool>,
     expose_all: Option<bool>,
     expose_prefix: Option<String>,
+    /// Forward `/v1/responses` natively instead of lmgw's own loop. Applies to
+    /// `openai_compatible` upstreams only; on any other protocol it is refused
+    /// when turned on and switched off when the row leaves `openai_compatible`.
     supports_responses: Option<bool>,
     /// Ask the catalog for every output modality
     /// (`GET …/models?output_modalities=all`). On unless turned off; only an
-    /// `openai` row of kind `generic` sends it.
+    /// `openai_compatible` row of kind `generic` sends it.
     catalog_all_modalities: Option<bool>,
 }
 
@@ -1031,7 +1178,9 @@ async fn upstream_set_full(
     use crate::ops::{sent_kind, sent_protocol, settle, UpstreamShape};
     use crate::store;
     // Protocol and kind as sent — `sd_cpp` refused by name like the tool
-    // plane's — settled against the row (llama.cpp egress design §5).
+    // plane's — settled against the row (llama.cpp egress design §5), with
+    // the host note, for the address the write stores, goes in the answer's
+    // own `note` (openai egress design §4.3).
     let settled = |cur: UpstreamShape| {
         settle(
             sent_protocol(p.protocol.as_deref())?,
@@ -1040,6 +1189,8 @@ async fn upstream_set_full(
             cur,
         )
     };
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = st.routing_write().await;
     match p.action.as_str() {
         "create" => {
             let name = p
@@ -1072,16 +1223,49 @@ async fn upstream_set_full(
                 supports_responses: settled.shape.supports_responses,
                 catalog_all_modalities: p.catalog_all_modalities.unwrap_or(true),
             };
-            let id = store::insert_upstream(&st.db, &new)
+            // An `expose_all` upstream answers the names under its prefix,
+            // which a dangling fallback may hold: a dry run (§14.2).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            st.catalog.invalidate(id).await;
-            st.llama_facts.invalidate(id);
-            Ok(dto::RowSaved::new(
-                id,
-                settled.message(format!("upstream '{name}' created")),
-            ))
+            let dry = store::insert_upstream_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            crate::ops::fallback::dry_run(
+                st,
+                &st.snapshot(),
+                tx,
+                &[crate::ops::fallback::Touch::Upstream(dry)],
+                None,
+            )
+            .await?;
+            // The write and everything after it are a task of their own
+            // (*changed 2026-10-23*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot without the new upstream and its catalog and facts caches unflushed.
+            let task_st = st.clone();
+            detached("creating the upstream", async move {
+                let st = &task_st;
+                let id = store::insert_upstream(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Published first, then the caches flushed, then MCP reconciled:
+                // the reconcile can take seconds, and a request meanwhile must not
+                // read the replaced upstream's catalog or facts.
+                let snap = st.publish_snapshot().await.map_err(|e| e.to_string())?;
+                st.catalog.invalidate(id).await;
+                st.llama_facts.invalidate(id);
+                drop(routing);
+                st.mcp.reconcile(&snap).await;
+                Ok(
+                    dto::RowSaved::new(id, settled.message(format!("upstream '{name}' created")))
+                        .with_note(crate::config::openai_host_note(
+                            settled.shape.protocol,
+                            &new.base_url,
+                        )),
+                )
+            })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" => {
             let id = p.id.ok_or("pass id")?;
@@ -1089,6 +1273,11 @@ async fn upstream_set_full(
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no upstream with id {id}"))?;
+            let base_url = p
+                .base_url
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| cur.base_url.clone());
             let settled = settled(UpstreamShape::of(&cur))?;
             let new_key = p.api_key.clone().filter(|k| !k.is_empty());
             let update_key = new_key.is_some();
@@ -1119,11 +1308,7 @@ async fn upstream_set_full(
                     .unwrap_or(cur.name),
                 protocol: settled.shape.protocol,
                 kind: settled.shape.kind,
-                base_url: p
-                    .base_url
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(cur.base_url),
+                base_url,
                 api_key: new_key,
                 extra_headers: headers,
                 timeout_ms: p.timeout_ms.unwrap_or(cur.timeout_ms),
@@ -1141,16 +1326,69 @@ async fn upstream_set_full(
                     .catalog_all_modalities
                     .unwrap_or(!st.snapshot().catalog_bare.contains(&id)),
             };
-            store::update_upstream(&st.db, id, &upd, update_key)
+            let snap = st.snapshot();
+            // A new prefix renames every passthrough id of this upstream:
+            // the fallbacks naming one follow it (decision 27).
+            let rewrites =
+                crate::ops::fallback::upstream_prefix_rewrites(st, &snap, id, &upd.expose_prefix)
+                    .await;
+            // What a prefix, an enable or an `expose_all` change does to the
+            // fallbacks naming this upstream's models, in a dry run (§14.2).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            st.catalog.invalidate(id).await;
-            st.llama_facts.invalidate(id);
-            Ok(dto::RowSaved::new(
-                id,
-                settled.message(format!("upstream '{}' updated", upd.name)),
-            ))
+            store::update_upstream_in(&mut tx, id, &upd, update_key)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            crate::ops::fallback::dry_run(
+                st,
+                &snap,
+                tx,
+                &[crate::ops::fallback::Touch::Upstream(id)],
+                None,
+            )
+            .await?;
+            // The write and everything after it are a task of their own
+            // (*changed 2026-10-23*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot serving the old row and its catalog and facts caches unflushed.
+            let task_st = st.clone();
+            detached("updating the upstream", async move {
+                let st = &task_st;
+                let mut tx = store::begin_write(&st.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_upstream_in(&mut tx, id, &upd, update_key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                // Published first, then the caches flushed, then MCP reconciled:
+                // the reconcile can take seconds, and a request meanwhile must not
+                // read the replaced upstream's catalog or facts.
+                let snap = st.publish_snapshot().await.map_err(|e| e.to_string())?;
+                st.catalog.invalidate(id).await;
+                st.llama_facts.invalidate(id);
+                drop(routing);
+                // The key may have changed (openai egress design §14.6).
+                st.upstream_quota.clear(id, &upd.name, "its row was edited");
+                st.mcp.reconcile(&snap).await;
+                Ok(dto::RowSaved::new(
+                    id,
+                    settled.message(format!("upstream '{}' updated", upd.name)),
+                )
+                .with_note(crate::config::openai_host_note(
+                    settled.shape.protocol,
+                    &upd.base_url,
+                ))
+                .with_fallback_notes(rewrites.notes))
+            })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!("unknown action '{other}' (create, update)")),
     }
@@ -1178,6 +1416,11 @@ pub(crate) struct AliasFullPatch {
     // `None`), so — like `chat_template_kwargs` on the local model form — the
     // form sends an empty string to clear, never `null`.
     capabilities_override: Option<serde_json::Value>,
+    /// The alias's one fallback (openai egress design §14.2), checked as
+    /// `model_set` checks it; `clear: "fallback"` removes it.
+    fallback: Option<String>,
+    /// Field names to reset: `fallback`.
+    clear: Option<String>,
 }
 
 async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<dto::RowSaved, String> {
@@ -1200,6 +1443,14 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<dto::RowSaved,
             .map(|_| id)
             .ok_or_else(|| format!("no upstream with id {id}"))
     };
+    for name in crate::ops::clear_names(p.clear.as_deref()) {
+        if name != "fallback" {
+            return Err(format!("clear: '{name}' is not a clearable field name"));
+        }
+    }
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = st.routing_write().await;
+    let snap = st.snapshot();
     match p.action.as_str() {
         "create" => {
             let alias = p
@@ -1209,19 +1460,69 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<dto::RowSaved,
                 .ok_or("create requires alias")?;
             let upstream_id =
                 upstream_ok(p.upstream_id.ok_or("create requires upstream_id")?).await?;
+            let upstream_model_id = p.upstream_model.clone().unwrap_or_default();
+            let capabilities_override = capabilities_override_patch.flatten();
+            let save = crate::ops::fallback::settle_alias(
+                st,
+                &snap,
+                None,
+                &alias,
+                upstream_id,
+                &upstream_model_id,
+                &overrides,
+                capabilities_override.as_ref(),
+                p.clear.as_deref(),
+                &p.fallback,
+            )
+            .await?;
             let new = store::NewAlias {
                 alias: alias.clone(),
                 upstream_id,
-                upstream_model_id: p.upstream_model.clone().unwrap_or_default(),
+                upstream_model_id,
                 param_overrides: overrides,
                 enabled: p.enabled.unwrap_or(true),
-                capabilities_override: capabilities_override_patch.flatten(),
+                capabilities_override,
+                fallback: save.fallback,
             };
-            let id = store::insert_alias(&st.db, &new)
+            let notes = save.notes;
+            // A fallback that holds the new name reaches this alias from now
+            // on: a dry run (§14.2, `fallback::referrers`).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::RowSaved::new(id, format!("alias '{alias}' created")))
+            let dry = store::insert_alias_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let own = (store::FallbackTable::Models, dry);
+            crate::ops::fallback::dry_run(
+                st,
+                &snap,
+                tx,
+                &[crate::ops::fallback::Touch::Row(own.0, dry)],
+                Some(own),
+            )
+            .await?;
+            // The write and everything after it are a task of their own
+            // (*changed 2026-10-23*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot without the new alias.
+            let task_st = st.clone();
+            detached("creating the alias", async move {
+                let st = &task_st;
+                let id = store::insert_alias(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut notes = notes;
+                if let Some(f) = &new.fallback {
+                    notes.extend(crate::ops::fallback::facet_notes(st, &alias, f).await);
+                }
+                Ok(dto::RowSaved::new(id, format!("alias '{alias}' created"))
+                    .with_fallback_notes(notes))
+            })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" => {
             let id = p.id.ok_or("pass id")?;
@@ -1236,33 +1537,97 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<dto::RowSaved,
                 Some(uid) => upstream_ok(uid).await?,
                 None => cur.upstream_id,
             };
-            let upd = store::NewAlias {
-                alias: p
-                    .alias
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(cur.alias),
-                upstream_id,
-                upstream_model_id: p.upstream_model.clone().unwrap_or(cur.upstream_model_id),
-                param_overrides: if p.overrides.is_some() {
-                    overrides
-                } else {
-                    cur.param_overrides
-                },
-                enabled: p.enabled.unwrap_or(cur.enabled),
-                capabilities_override: match capabilities_override_patch {
-                    Some(v) => v,
-                    None => cur.capabilities_override,
-                },
+            let name = p
+                .alias
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| cur.alias.clone());
+            let upstream_model_id = p
+                .upstream_model
+                .clone()
+                .unwrap_or_else(|| cur.upstream_model_id.clone());
+            let param_overrides = if p.overrides.is_some() {
+                overrides
+            } else {
+                cur.param_overrides.clone()
             };
-            store::update_alias(&st.db, id, &upd)
+            let capabilities_override = match capabilities_override_patch {
+                Some(v) => v,
+                None => cur.capabilities_override.clone(),
+            };
+            let save = crate::ops::fallback::settle_alias(
+                st,
+                &snap,
+                Some(&cur),
+                &name,
+                upstream_id,
+                &upstream_model_id,
+                &param_overrides,
+                capabilities_override.as_ref(),
+                p.clear.as_deref(),
+                &p.fallback,
+            )
+            .await?;
+            let upd = store::NewAlias {
+                alias: name,
+                upstream_id,
+                upstream_model_id,
+                param_overrides,
+                enabled: p.enabled.unwrap_or(cur.enabled),
+                capabilities_override,
+                fallback: save.fallback,
+            };
+            let (notes, rewrites, changed) = (save.notes, save.rewrites, save.changed);
+            // What a rename, a retarget or an enable change does to the
+            // fallbacks naming this alias's name, in a dry run (§14.2).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(dto::RowSaved::new(
-                id,
-                format!("alias '{}' updated", upd.alias),
-            ))
+            store::update_alias_in(&mut tx, id, &upd)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let own = (store::FallbackTable::Models, id);
+            crate::ops::fallback::dry_run(
+                st,
+                &snap,
+                tx,
+                &[crate::ops::fallback::Touch::Row(own.0, id)],
+                save.checked.then_some(own),
+            )
+            .await?;
+            // The write and everything after it are a task of their own
+            // (*changed 2026-10-23*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot serving the old alias.
+            let task_st = st.clone();
+            detached("updating the alias", async move {
+                let st = &task_st;
+                let mut tx = store::begin_write(&st.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_alias_in(&mut tx, id, &upd)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut notes = notes;
+                if let (Some(f), true) = (&upd.fallback, changed) {
+                    notes.extend(crate::ops::fallback::facet_notes(st, &upd.alias, f).await);
+                }
+                Ok(
+                    dto::RowSaved::new(id, format!("alias '{}' updated", upd.alias))
+                        .with_fallback_notes(notes),
+                )
+            })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!("unknown action '{other}' (create, update)")),
     }
@@ -1310,20 +1675,29 @@ async fn model_visibility_set(
         "unhide" => false,
         other => return Err(format!("unknown action '{other}' (hide, unhide)")),
     };
-    store::set_passthrough_hidden(&st.db, upstream_id, &ids, hide)
-        .await
-        .map_err(|e| e.to_string())?;
-    st.reload_snapshot().await.map_err(|e| e.to_string())?;
-    let what = match ids.as_slice() {
-        [one] => format!("'{one}'"),
-        many => format!("{} models", many.len()),
-    };
-    let message = if hide {
-        format!("{what} hidden from the client-facing model list")
-    } else {
-        format!("{what} restored to the client-facing model list")
-    };
-    Ok(dto::ModelVisibilitySaved::new(message, ids.len()))
+    let task_st = st.clone();
+    // The write and the reload are a task of their own (*changed 2026-10-23*,
+    // see [`crate::detached::detached`]): a dropped request would leave the
+    // snapshot serving the old model list.
+    detached("changing the model list", async move {
+        let st = &task_st;
+        store::set_passthrough_hidden(&st.db, upstream_id, &ids, hide)
+            .await
+            .map_err(|e| e.to_string())?;
+        st.reload_snapshot().await.map_err(|e| e.to_string())?;
+        let what = match ids.as_slice() {
+            [one] => format!("'{one}'"),
+            many => format!("{} models", many.len()),
+        };
+        let message = if hide {
+            format!("{what} hidden from the client-facing model list")
+        } else {
+            format!("{what} restored to the client-facing model list")
+        };
+        Ok(dto::ModelVisibilitySaved::new(message, ids.len()))
+    })
+    .await
+    .map_err(|r| r.message)?
 }
 
 /// How often a `stats` frame is refreshed *while a request is in flight*, so
@@ -1397,7 +1771,13 @@ async fn events(
     .chain(stream::once({
         let st = st.clone();
         async move { frame("updates", &crate::backends::updates::summary(&st).await) }
-    }));
+    }))
+    // The machine check's summary once a check finished (machine-check
+    // design D183): a page that read the check before this stream
+    // (re)connected compares it.
+    .chain(stream::iter(
+        st.machine.summary().map(|s| frame("machine", &s)),
+    ));
 
     let live = {
         let st = st.clone();
@@ -1419,18 +1799,23 @@ async fn events(
                     Ok(Event::Runtime(views)) => vec![frame("runtime", &views)],
                     Ok(Event::Updates(summary)) => vec![frame("updates", &summary)],
                     Ok(Event::Keys(changed)) => vec![frame("keys", &changed)],
+                    Ok(Event::Machine(summary)) => vec![frame("machine", &summary)],
                     // Lagged: the frames missed are not replayed, but a
                     // `keys` frame may be among them, and the Keys page polls
                     // nothing — so it is told to refetch (review W3-19). The
-                    // other frames carry whole views and catch up on their
-                    // next change or tick.
-                    Err(_) => vec![frame(
+                    // machine check's summary changes rarely and is polled by
+                    // nothing either, so it is sent as it is now. The other
+                    // frames carry whole views and catch up on their next
+                    // change or tick.
+                    Err(_) => std::iter::once(frame(
                         "keys",
                         &lmgw_api_types::KeysChanged {
                             key_id: 0,
                             what: "resync".into(),
                         },
-                    )],
+                    ))
+                    .chain(st.machine.summary().map(|s| frame("machine", &s)))
+                    .collect(),
                 }
             })
             .flat_map(stream::iter)

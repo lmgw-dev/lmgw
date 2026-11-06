@@ -27,8 +27,8 @@ end.
 
 It calls no cloud model (design §7). Since 2026-10-06 a configured fallback
 hears a turn wherever it runs, so the check refuses to start unless MODEL is
-a local chat row with no fallback at all: its hold_fallback_mode `none`, or
-`inherit` with no global hold fallback. Nothing can then hand a turn on —
+a local chat row with no fallback at all (its `fallback` unset; there is no
+global one). Nothing can then hand a turn on —
 not the GPU hold, a benchmark run or a busy card, whenever they come. As a
 backstop it still checks the verdict at start and stops at the first
 response a fallback answered.
@@ -98,14 +98,12 @@ def no_fallback(gw, model):
     except urllib.error.HTTPError as e:
         raise SystemExit(f"refusing: {model} is no local chat row of this dev copy ({e}); "
                          "the live check runs on one with no fallback")
-    mode = row.get("hold_fallback_mode")
-    glob = ((gw.call("GET", "/api/settings-full") or {}).get("hold") or {}).get("fallback_alias")
-    named = {"alias": row.get("hold_fallback"), "inherit": glob}.get(mode)
-    if mode not in ("none", "inherit", "alias") or (named or "").strip():
+    named = row.get("fallback")
+    if (named or "").strip():
         raise SystemExit(
-            f"refusing: {model} has a fallback ({mode}: {named!r}); a configured fallback is "
-            "always used, and the live check calls no other model. Set its hold fallback to "
-            "none on the dev copy first.")
+            f"refusing: {model} has a fallback ({named!r}); a configured fallback is always "
+            "used, and the live check calls no other model. Clear its fallback on the dev "
+            "copy first.")
     tid = gw.thread(model, "on")
     try:
         v = gw.verdict(tid)

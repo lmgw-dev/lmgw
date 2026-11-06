@@ -10,7 +10,6 @@
 
 use std::path::Path;
 
-use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::gguf::synth;
 use lmgw_core::store;
 use serde_json::{json, Value};
@@ -145,8 +144,7 @@ async fn a_dictation_a_fallback_answers_goes_up_in_the_fallback_s_spelling() {
     nemotron(&root);
     let mut row = tts_row("nemo", "nemotron_asr");
     row.task = "asr".into();
-    row.hold_fallback_mode = HoldFallbackMode::Alias;
-    row.hold_fallback = Some("cloud-asr".into());
+    row.fallback = Some("cloud-asr".into());
     store::insert_audio_model(&g.state.db, &row).await.unwrap();
     g.state.reload_snapshot().await.unwrap();
     let tid = new_thread(&gw, "talk", false).await;

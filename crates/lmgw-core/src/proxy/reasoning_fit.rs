@@ -35,7 +35,14 @@
 //! control at all**, so the model reasons as it does by default
 //! ([`refusal::next_after_refusal`]). Every refused attempt keeps its own
 //! request row saying what was retried with, and the form that answered is
-//! remembered for the route so it is not asked again ([`send::send_chat`]).
+//! remembered for the route so it is not asked again ([`send::send_chat`])
+//! — when every refusal retried was about the control alone ([`OffRetry`]):
+//! one whose words or `param` name something else the request carried (its
+//! tools, its format, a key of the client's, a native body's hosted tool),
+//! or that names no control on a request that carried a hosted tool
+//! or a key of the client's (function tools, a tool choice and a format do not
+//! count), is retried for that request only, its note saying why nothing
+//! is kept.
 //! A refusal lmgw can tell is about something else (the prompt does not fit
 //! the context) stands at once; any other one that is not about the off is
 //! refused again without it, and that answer stands.
@@ -55,22 +62,52 @@
 //! template's own `enable_thinking` (§5.3), which llama-server does not
 //! refuse — a template that does not read it just thinks, and that is
 //! observed and reported.
+//!
+//! The same mechanic carries a sampling parameter a model refuses
+//! (`temperature` on a current Claude or GPT model, §5.7): retried once
+//! without exactly that one, learned per route, reported in
+//! `x-lmgw-params-refused` ([`params`]).
+//!
+//! Two kinds of send fit an off: the chat sends, on the [`Params`] they
+//! render ([`fit`], [`send_chat`]), and the native `/v1/responses`
+//! passthrough, which forwards the client's body and writes the fitted form
+//! into its `reasoning.effort` ([`fit_off`] with [`Spelling::Responses`],
+//! `responses/native/reasoning_off.rs`). Both decide by the same rule, retry
+//! a refusal the same way ([`OffRetry`]) and read and teach the one
+//! [`Learned`] memory, so an off one of them learned is fitted on the other.
 
+mod off_retry;
+pub(crate) mod params;
+mod quota;
 mod refusal;
 mod rule;
 mod send;
+mod summary;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use off_retry::{OffRetry, Retried};
+pub(crate) use quota::{open_deferred, Deferred, Handover};
+pub(crate) use refusal::Carried;
 pub(crate) use send::{send_chat, RowAs};
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::capabilities::{self, ReasoningCaps};
 use crate::config::{Protocol, Route, UpstreamKind};
 use crate::ir::{Params, ReasoningControl};
 use crate::state::SharedState;
+
+/// Which body an off is written into, for what the log lines and notes say
+/// went out ([`Off::describe_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// A chat send's body, in its protocol's words (§5.3).
+    Chat,
+    /// A native `/v1/responses` body: the OpenAI wire's `reasoning.effort`.
+    Responses,
+}
 
 /// The form an off takes on one route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +119,13 @@ pub enum Off {
     Omitted,
     /// The model's lowest effort level: it reasons and cannot stop.
     Lowest(String),
+    /// Anthropic's `thinking: {type: "between_tools"}`: the lowest thinking
+    /// setting of a model that takes no `disabled` but takes this type
+    /// (Claude Sonnet 5.5) — no up-front thinking, only the short notes it
+    /// writes between tool calls. The model's own off, reported as honoured
+    /// like [`Self::Control`]; notes that do arrive are observed as
+    /// reasoning ([`Fitted::observe`]).
+    BetweenTools,
 }
 
 impl Off {
@@ -94,7 +138,14 @@ impl Off {
                 params.reasoning = Some(ReasoningControl {
                     enabled: Some(true),
                     effort: Some(level.clone()),
-                    budget_tokens: None,
+                    ..ReasoningControl::default()
+                });
+            }
+            Self::BetweenTools => {
+                params.reasoning = Some(ReasoningControl {
+                    enabled: Some(false),
+                    between_tools: true,
+                    ..ReasoningControl::default()
                 });
             }
         }
@@ -102,19 +153,49 @@ impl Off {
 
     /// What goes on the wire, in `protocol`'s words — for the log lines.
     fn describe(&self, protocol: Protocol) -> String {
+        self.describe_in(protocol, Spelling::Chat)
+    }
+
+    /// [`Self::describe`] for the body `spelling` names: a native
+    /// `/v1/responses` body carries the level as `reasoning.effort`.
+    fn describe_in(&self, protocol: Protocol, spelling: Spelling) -> String {
+        match (self, protocol, spelling) {
+            (Self::Omitted, ..) => "no reasoning control".into(),
+            // `BetweenTools` is only decided for an Anthropic route, which the
+            // native Responses passthrough never is: there it is the plain off.
+            (Self::Control | Self::BetweenTools, _, Spelling::Responses) => {
+                "reasoning.effort: \"none\"".into()
+            }
+            (Self::Lowest(l), _, Spelling::Responses) => format!("reasoning.effort: \"{l}\""),
+            (_, _, Spelling::Chat) => self.chat_spelling(protocol),
+        }
+    }
+
+    fn chat_spelling(&self, protocol: Protocol) -> String {
         match (self, protocol) {
             (Self::Omitted, _) => "no reasoning control".into(),
-            (Self::Control, Protocol::Openai) => "reasoning_effort: \"none\"".into(),
+            (Self::Control, Protocol::Openai | Protocol::OpenaiCompatible) => {
+                "reasoning_effort: \"none\"".into()
+            }
             (Self::Control, Protocol::LlamaCpp) => {
                 "chat_template_kwargs: {enable_thinking: false}".into()
             }
             (Self::Control, Protocol::Anthropic) => "thinking: {type: \"disabled\"}".into(),
             (Self::Control, Protocol::Gemini) => "thinkingBudget: 0".into(),
-            (Self::Lowest(l), Protocol::Openai | Protocol::LlamaCpp) => {
+            (
+                Self::Lowest(l),
+                Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp,
+            ) => {
                 format!("reasoning_effort: \"{l}\"")
             }
             (Self::Lowest(l), Protocol::Anthropic) => format!("output_config.effort: \"{l}\""),
             (Self::Lowest(l), Protocol::Gemini) => format!("thinkingLevel: \"{l}\""),
+            (Self::BetweenTools, Protocol::Anthropic) => {
+                "thinking: {type: \"between_tools\"}".into()
+            }
+            // Only decided for an Anthropic route (`rule`); anywhere else the
+            // protocol's own off is what such a control renders as.
+            (Self::BetweenTools, p) => Self::Control.describe(p),
         }
     }
 }
@@ -142,6 +223,9 @@ pub(crate) struct Fitted {
     /// The answer carried reasoning although the off went out
     /// ([`Self::observe`]).
     reasoned: bool,
+    /// The parameters the send left out because the model refused them, on
+    /// this request or an earlier one ([`params`]).
+    params_refused: BTreeSet<params::Sampler>,
 }
 
 impl Fitted {
@@ -150,7 +234,9 @@ impl Fitted {
     /// the route did not honour.
     pub(crate) fn ignored(&self) -> Option<&'static str> {
         match &self.off {
-            Some((off, _)) if *off != Off::Control || self.reasoned => Some("enabled"),
+            Some((off, _)) if !matches!(off, Off::Control | Off::BetweenTools) || self.reasoned => {
+                Some("enabled")
+            }
             _ => None,
         }
     }
@@ -174,6 +260,20 @@ impl Fitted {
         }
     }
 
+    /// The form the off goes out in now — the protocol's own off on a local
+    /// route, which is not fitted — or `None` when the request asked for no
+    /// off: what a body that is not [`Params`] is written from (the native
+    /// `/v1/responses` passthrough).
+    pub(crate) fn form(&self) -> Option<&Off> {
+        self.off.as_ref().map(|(off, _)| off)
+    }
+
+    /// The parameters a send that is not [`send_chat`]'s left out because
+    /// the model refused them ([`Self::params_refused`]).
+    pub(crate) fn set_params_refused(&mut self, left_out: BTreeSet<params::Sampler>) {
+        self.params_refused = left_out;
+    }
+
     /// The form came from what the provider said before.
     fn learned(&self) -> bool {
         matches!(&self.off, Some((_, Basis::Learned { .. })))
@@ -183,6 +283,12 @@ impl Fitted {
     fn retried(&mut self, instead: Off, how: refusal::Retry) {
         let fallback = how == refusal::Retry::Fallback;
         self.off = Some((instead, Basis::Learned { fallback }));
+    }
+
+    /// The parameters the send left out because the model refused them
+    /// ([`params`]): `x-lmgw-params-refused`'s value, in its order.
+    pub(crate) fn params_refused(&self) -> Vec<&'static str> {
+        params::names(&self.params_refused)
     }
 
     /// Add [`Self::ignored`] to a request's list of ignored controls, once.
@@ -235,6 +341,10 @@ impl Fitted {
             (Off::Lowest(level), _) => Some(format!(
                 "{model} cannot switch reasoning off; it reasons at its lowest level ({level})"
             )),
+            (Off::BetweenTools, _) if self.reasoned => Some(format!(
+                "{model} cannot switch reasoning off entirely; at its lowest setting it still \
+                 reasons between tool calls"
+            )),
             (Off::Omitted, Basis::Learned { fallback: true }) => Some(format!(
                 "{model} refused every way lmgw has to switch reasoning off; it reasons as it \
                  does by default"
@@ -252,13 +362,37 @@ impl Fitted {
 /// route that is not a cloud one ([`UpstreamKind::Generic`]) — whose off is
 /// still recorded, so what its answer shows can be observed.
 pub(crate) async fn fit(state: &SharedState, route: &Route, params: &mut Params) -> Fitted {
-    if params.reasoning_control().enabled != Some(false) {
+    let fitted = fit_off(state, route, &params.reasoning_control(), Spelling::Chat).await;
+    if let Some(off) = fitted.form() {
+        off.apply(params);
+    }
+    fitted
+}
+
+/// The form an off in `control` (resolved: every tier merged) takes on
+/// `route`, decided as [`fit`] decides it, with the INFO line of an off that
+/// goes out in another form than asked spelled for the body `spelling`
+/// names. Writing the form in is the caller's: [`fit`] for the chat sends'
+/// [`Params`], the native `/v1/responses` passthrough for the client's body.
+pub(crate) async fn fit_off(
+    state: &SharedState,
+    route: &Route,
+    control: &ReasoningControl,
+    spelling: Spelling,
+) -> Fitted {
+    if control.enabled != Some(false) {
+        return Fitted::default();
+    }
+    // A Messages client's own `between_tools` on an Anthropic route is that
+    // protocol's spelling, chosen by the client: it goes as asked, like an
+    // explicit level, and a refusal of it is the provider's to give.
+    if control.between_tools && route.upstream.protocol == Protocol::Anthropic {
         return Fitted::default();
     }
     if route.upstream.kind != UpstreamKind::Generic {
         return Fitted {
             off: Some((Off::Control, Basis::Local)),
-            reasoned: false,
+            ..Fitted::default()
         };
     }
     let facts = facts(state, route).await;
@@ -280,19 +414,33 @@ pub(crate) async fn fit(state: &SharedState, route: &Route, params: &mut Params)
             Basis::Default => rule::default_reason(route.upstream.protocol).to_string(),
             Basis::Local => unreachable!("a local route is not fitted"),
         };
+        let protocol = route.upstream.protocol;
         tracing::info!(
             upstream = %route.upstream.name,
             model = %route.upstream_model,
             "reasoning off goes out as {} instead of {}: {why}",
-            off.describe(route.upstream.protocol),
-            Off::Control.describe(route.upstream.protocol),
+            off.describe_in(protocol, spelling),
+            Off::Control.describe_in(protocol, spelling),
         );
-        off.apply(params);
     }
     Fitted {
         off: Some((off, basis)),
-        reasoned: false,
+        ..Fitted::default()
     }
+}
+
+/// The parameters of `params` a refusal on record for `route` leaves out of
+/// its sends ([`params`]), by name: what `/v1/responses`, whose headers
+/// leave before its turns are sent, names in `x-lmgw-params-refused`.
+pub(crate) fn params_on_record(
+    state: &SharedState,
+    route: &Route,
+    params: &Params,
+) -> Vec<&'static str> {
+    params::names(&params::carried(
+        &state.reasoning_learned.params_refused(route),
+        params,
+    ))
 }
 
 /// What an off becomes on a model with these capabilities, as a sentence for
@@ -308,7 +456,7 @@ pub(crate) fn off_note(protocol: Protocol, facts: Option<&ReasoningCaps>) -> Str
         (Off::Control, Basis::Facts(_)) => {
             format!("x-lmgw-reasoning: off is sent upstream as {sent}.")
         }
-        (Off::Lowest(_), Basis::Facts(why)) => {
+        (Off::Lowest(_) | Off::BetweenTools, Basis::Facts(why)) => {
             format!("x-lmgw-reasoning: off is sent upstream as {sent}, since {why}.")
         }
         _ => {
@@ -383,14 +531,24 @@ struct Lesson {
 }
 
 /// What providers said about their models' off controls, per route — the
-/// form a refusal showed works ([`send::send_chat`]). Kept for the process's
-/// life; keyed by the upstream's base URL as well, so an upstream pointed
+/// form a refusal showed works ([`send::send_chat`]) — and, the second kind
+/// of lesson, the routes that refused a reasoning summary
+/// ([`summary`], openai egress design §7.2.2). Kept for the process's life;
+/// keyed by the upstream's base URL as well, so an upstream pointed
 /// elsewhere starts over.
 #[derive(Debug, Default)]
-pub struct Learned(Mutex<HashMap<(i64, String, String), Lesson>>);
+pub struct Learned {
+    offs: Mutex<HashMap<RouteKey, Lesson>>,
+    summaries: Mutex<HashSet<RouteKey>>,
+    /// The third kind: the parameters a route's model refused ([`params`]).
+    params: Mutex<HashMap<RouteKey, BTreeSet<params::Sampler>>>,
+}
+
+/// A route as [`Learned`] tells routes apart.
+type RouteKey = (i64, String, String);
 
 impl Learned {
-    fn key(route: &Route) -> (i64, String, String) {
+    fn key(route: &Route) -> RouteKey {
         (
             route.upstream.id,
             route.upstream.base_url.clone(),
@@ -399,12 +557,40 @@ impl Learned {
     }
 
     fn get(&self, route: &Route) -> Option<Lesson> {
-        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self.offs.lock().unwrap_or_else(|e| e.into_inner());
         map.get(&Self::key(route)).cloned()
     }
 
     fn remember(&self, route: &Route, lesson: Lesson) {
-        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.offs.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(Self::key(route), lesson);
+    }
+
+    /// Whether `route`'s provider refused a reasoning summary.
+    fn summary_refused(&self, route: &Route) -> bool {
+        let set = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        set.contains(&Self::key(route))
+    }
+
+    /// `route`'s provider refused a reasoning summary: none is asked for
+    /// there from now on.
+    fn remember_summary_refused(&self, route: &Route) {
+        let mut set = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(Self::key(route));
+    }
+
+    /// The parameters `route`'s model refused.
+    fn params_refused(&self, route: &Route) -> BTreeSet<params::Sampler> {
+        let map = self.params.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&Self::key(route)).cloned().unwrap_or_default()
+    }
+
+    /// `route`'s model refused `refused` and answered without them: they are
+    /// left out of its sends from now on.
+    fn remember_params_refused(&self, route: &Route, refused: &BTreeSet<params::Sampler>) {
+        let mut map = self.params.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(Self::key(route))
+            .or_default()
+            .extend(refused.iter().copied());
     }
 }

@@ -65,16 +65,18 @@ pub(crate) async fn decision_route_guard(
         return Err(not_supported(format!(
             "model '{alias}' is the {} model '{}', not a decision model. {SYSTEMONE} answers \
              aux rows of kind decision (a GGUF whose header declares decision.type) and models \
-             of openai or llama_cpp upstreams.",
+             of openai_compatible or llama_cpp upstreams.",
             target.class, target.model_id
         )));
     }
     match route.upstream.protocol {
-        Protocol::Openai | Protocol::LlamaCpp => {}
-        Protocol::Anthropic | Protocol::Gemini => {
+        Protocol::OpenaiCompatible | Protocol::LlamaCpp => {}
+        // The OpenAI platform has no System One route either (openai egress
+        // design §1.1): refused before admission, like Anthropic's.
+        Protocol::Openai | Protocol::Anthropic | Protocol::Gemini => {
             return Err(not_supported(format!(
                 "'{alias}' resolves to '{}' on {} upstream '{}', which has no System One \
-                 route; {SYSTEMONE} forwards to openai and llama_cpp upstreams",
+                 route; {SYSTEMONE} forwards to openai_compatible and llama_cpp upstreams",
                 route.upstream_model,
                 route.upstream.protocol.as_str(),
                 route.upstream.name

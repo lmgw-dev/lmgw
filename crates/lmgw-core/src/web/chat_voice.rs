@@ -52,7 +52,7 @@ pub(super) use transcribe::transcribe;
 /// A chat turn's `state` frames around an admission that starts its model
 /// (§4.3).
 mod turn_state;
-pub(super) use turn_state::{admit_reporting, held_at_resolve};
+pub(super) use turn_state::{admit_reporting, held_at_resolve, RegainFrames};
 
 /// Read-aloud's engine (§6.1): realtime's speech pipeline without a writer,
 /// for a thread's voice, answered as the Chat's speech frames.

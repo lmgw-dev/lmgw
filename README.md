@@ -63,8 +63,8 @@ Android (see [Paired devices and clients](#paired-devices-and-clients)).
       <sub><b>Traffic</b> · every request, across both API dialects</sub>
     </td>
     <td align="center">
-      <a href="docs/screenshots/backends.png"><img src="docs/screenshots/thumbs/backends.png" width="400" alt="Backends page"></a><br>
-      <sub><b>Backends</b> · engine images built from git</sub>
+      <a href="docs/screenshots/backends.png"><img src="docs/screenshots/thumbs/backends.png" width="400" alt="Engines page"></a><br>
+      <sub><b>Engines</b> · llama.cpp, audio.cpp and sd.cpp images built from git</sub>
     </td>
   </tr>
   <tr>
@@ -86,7 +86,7 @@ Android (see [Paired devices and clients](#paired-devices-and-clients)).
 **Local models**
 - **One container per model.** Chat, embedding and rerank models run on llama.cpp or ik_llama.cpp, and decision models on llama.cpp from b11361 on. audio.cpp covers TTS, ASR and a dozen other audio tasks, and stable-diffusion.cpp generates and edits images.
 - **VRAM-aware scheduling.** Admission works from measured GPU memory (NVML, or amdgpu sysfs). A model that doesn't fit waits, or pushes out an idle one, and idle models hand their memory back. A row's footprint counts llama.cpp's compute buffers and lays the KV cache out the way llama.cpp does, and a plan that can't fit the card says so.
-- **From Hugging Face to a running model.** Download a GGUF together with its projector and draft model, and lmgw proposes llama.cpp settings from the file's metadata. The Models page shows the licence the file's header states.
+- **From Hugging Face to a running model.** Download a GGUF together with its projector and draft model, and lmgw proposes llama.cpp settings from the file's metadata. **Find a model** takes a name as someone said it ("qwen 3.6"), a link or a shared model text, and picks the one file that fits your graphics card. The Models page shows the licence the file's header states.
 - **Engine builds and benchmarks.** Build engine images from any git ref with pull requests merged in. Benchmarks measure prefill, decode, VRAM and tokens per joule.
 
 **API and routing**
@@ -109,7 +109,8 @@ Android (see [Paired devices and clients](#paired-devices-and-clients)).
 **Operations**
 - **Usage and cost.** Every request is logged with its tokens, latency and price. Charts break it down by alias and key.
 - **API keys with policy.** A key can carry alias and tool scopes, a budget, rate limits and a concurrency cap.
-- **GPU hold.** A tray switch pauses local models while you need the card for something else. Requests can fall back to a cloud alias, and the `x-lmgw-fallback` header names the one that answered. An audio model switched to the CPU (its row's "Runs on") takes no VRAM and keeps serving through the hold.
+- **GPU hold.** A tray switch pauses local models while you need the card for something else. Each model and alias can have its own fallback, of the same model type, and a fallback can have one in turn: a held model's requests go along that chain to the first that can answer. The `x-lmgw-fallback` header names the one that answered, and `x-lmgw-fallback-chain` lists every hop with its reason. An audio model switched to the CPU (its row's "Runs on") takes no VRAM and keeps serving through the hold.
+- **Background requests.** A client doing speculative work, such as pre-generating what a user may ask for next, sends `x-lmgw-background: on`. The request then uses a local model only if that disturbs nobody: it shares a model that is already loaded, or starts one into free GPU memory, and never evicts or waits for a model other work is using. Otherwise the model's fallback answers, or a `503` with code `gpu_deferred` says to retry later. Other work never interrupts a background request once it has started; the client cancels one by closing it.
 
 **Dashboard and extensions**
 - **Desktop app, remote-ready.** The tray menu covers the GPU hold, starting and stopping models, and updates, and the dashboard opens in a native window. Bind lmgw to your LAN and the same dashboard works remotely in any browser.
@@ -147,10 +148,7 @@ go to `$XDG_DATA_HOME/lmgw`, usually `~/.local/share/lmgw`, unless
 
 - **Linux, x86_64.** Developed and used daily on Fedora, and packaged as an RPM or an AppImage. There is no macOS or Windows build.
 - **Podman** runs local models and stdio MCP servers, and the RPM depends on it. Cloud-only use needs no GPU.
-- **NVIDIA GPU** is the tested path. Model containers get the card through `--device nvidia.com/gpu=all --security-opt label=disable` (the default in **Settings → Runtimes**), so you need the driver plus the NVIDIA Container Toolkit. Generate its CDI spec once:
-  ```sh
-  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-  ```
+- **NVIDIA GPU** is the tested path. Model containers get the card through `--device nvidia.com/gpu=all --security-opt label=disable` (the default in **Settings → Runtimes**), so you need the driver plus NVIDIA's container toolkit (the `nvidia-container-toolkit-base` package, from [NVIDIA's repository](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)). lmgw writes the card's CDI description itself, without root, into its own runtime directory, writes it again after a driver or package update, and points the containers it gives the card to (models, benchmarks, the probes that read an engine's options, and MCP servers whose run arguments ask for it) at it, so there is no `nvidia-ctk cdi generate` to run for them. Containers you start yourself still read the system's description in `/etc/cdi` or `/var/run/cdi`, and so do lmgw's when the toolkit isn't installed or Podman has no `--cdi-spec-dir` option. lmgw checks at start whether this computer can run local models (the card, its driver, the toolkit, Podman, the model settings) and says in plain words what is missing. The dashboard shows the result on **Settings → GPU** (the "This computer" card), on the Overview and above the Chat's empty state, and the tray gains a "Graphics card needs attention…" item when something needs doing. Where the fix is a package, **Set it up** in the app's window installs NVIDIA's container toolkit (or switches the model settings) after a native confirmation and your password (a polkit prompt) through `lmgw-machine-helper`, a small root helper the RPM installs; **Show the commands** lists exactly what it would run. In a browser the card shows the same commands to type instead, since a remote page can't open a password prompt on your desktop. Through the API the check is the `machine_check` op and the `lmgw__machine_check` tool.
 - **AMD** works on a Ryzen APU with Vulkan images and a few changed settings, as [docs/amd-arch.md](docs/amd-arch.md) describes. Self-built Vulkan and ROCm images are untested.
 
 ## Install
@@ -191,6 +189,7 @@ Then build and install the RPM:
 ```sh
 git clone https://github.com/lmgw-dev/lmgw.git && cd lmgw
 (cd crates/lmgw-ui && trunk build --release)   # the dashboard, embedded into the binary
+cargo build --release -p lmgw-machine-helper    # the root helper the RPM packs; build it before the bundle
 cargo tauri build --bundles rpm                 # or --bundles appimage on other distributions
 sudo dnf install target/release/bundle/rpm/lmgw-*.rpm
 ```
@@ -200,8 +199,9 @@ Arch Linux notes are in [docs/amd-arch.md](docs/amd-arch.md).
 ## Quick start
 
 1. Start **lmgw** from the application menu. It lands in the tray, and **Open Dashboard** opens the dashboard with you already signed in.
-2. Add a provider under **Upstreams**. For local models, set a models directory under **Settings → Runtimes** first, then download one with **Models → Add from Hugging Face**.
-3. Give it an alias under **Models** and call it in either dialect:
+2. Add a model. For a local one, open **Models → Add from Hugging Face**, pick a file and choose **Download & create**. A fresh install keeps the files under `~/.local/share/lmgw/models/`, one folder per kind of model, and **Settings → Runtimes** shows and changes those folders. For a cloud model, add a provider under **Upstreams**.
+   To find a model by its name instead, use **Models → Find a model**: it picks the file that fits your graphics card. If a friend sent you a model (their **Send to a friend** button copies a short text with its link), paste it into the Find box. Any Hugging Face link to a model or one of its files works there too.
+3. Call it in either dialect. A local model answers to its id, and a cloud model to the name **Models** lists for it (`GET /v1/models` lists every name the gateway answers to). An alias under **Models** is optional: it gives a model a name of your own.
 
 ```sh
 # OpenAI style
@@ -209,7 +209,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model": "my-model", "messages": [{"role": "user", "content": "Hello!"}]}'
 
-# Anthropic style, same alias
+# Anthropic style, same model
 curl http://127.0.0.1:8787/v1/messages \
   -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
   -d '{"model": "my-model", "max_tokens": 512, "messages": [{"role": "user", "content": "Hello!"}]}'
@@ -616,7 +616,7 @@ copies an audited, scanned tree onto the public tip, and `--tag` puts the releas
 
 lmgw is under the MIT License ([LICENSE.md](LICENSE.md)). The dashboard
 bundles KaTeX, Mermaid, DOMPurify and highlight.js, each under its own license, in
-[crates/lmgw-ui/assets/vendor](crates/lmgw-ui/assets/vendor/). The gateway
+[crates/lmgw-chat-ui/assets/vendor](crates/lmgw-chat-ui/assets/vendor/). The gateway
 embeds the Silero VAD model (MIT) from
 [crates/lmgw-core/assets/realtime](crates/lmgw-core/assets/realtime/) and links
 ONNX Runtime (MIT) to run it. Their licences and ONNX Runtime's third-party

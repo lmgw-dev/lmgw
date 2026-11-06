@@ -27,16 +27,38 @@ pub use lmgw_api_types::device_link::{EnrolRequest, EnrolledDevice, Enrolment, E
 use super::{code, read_refusal, ApiError, Method, Request};
 use crate::pairing::{refresh_urls, PairingLink, PairingToken, Urls};
 
+/// What a device says of itself in its enrolment (*changed 2026-10-23*; a
+/// struct because three optional strings in a row are easy to swap). Every
+/// field is optional, and none is trusted for anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceSelf<'a> {
+    /// The device's own name, as its user chose it on the device ("Anna's
+    /// phone"): shown on the Devices card beside the name the owner gave the
+    /// link. Goes out as the enrolment's `device_name`.
+    pub name: Option<&'a str>,
+    /// The client text the Devices card shows ("Kai mobile 0.1.0 (Android
+    /// 16)").
+    pub client: Option<&'a str>,
+    /// The app the install is (`dev.example.storyplayer`, a lowercase
+    /// reverse-DNS name, [`lmgw_api_types::transfer::APP_ID_RULE`]): what
+    /// other devices of the same app offer files to (device transfers
+    /// design §2); `None` receives none. lmgw refuses a malformed one 400
+    /// `bad_request` before the token is used.
+    pub app_id: Option<&'a str>,
+}
+
 /// `POST /devices/enrol` with the link's `token`, the device's public key
-/// (`public_key`, its DER SubjectPublicKeyInfo, an EC P-256 key) and the
-/// `client` text the Devices card shows ("Kai mobile 0.1.0 (Android 16)").
-/// Read with [`read_enrolment`]. The request carries the token: keep it out
-/// of logs.
-pub fn enrol(token: &PairingToken, public_key: &[u8], client: Option<&str>) -> Request {
+/// (`public_key`, its DER SubjectPublicKeyInfo, an EC P-256 key) and what
+/// the device says of itself (`device`: its name, the client text and the
+/// app id). Read with [`read_enrolment`]. The request carries the token:
+/// keep it out of logs.
+pub fn enrol(token: &PairingToken, public_key: &[u8], device: DeviceSelf<'_>) -> Request {
     let body = EnrolRequest {
         token: token.expose().to_string(),
         public_key: crate::base64::encode(public_key),
-        client: client.map(str::to_string),
+        device_name: device.name.map(str::to_string),
+        client: device.client.map(str::to_string),
+        app_id: device.app_id.map(str::to_string),
     };
     Request::new(Method::Post, ENROL_PATH.into())
         .json(serde_json::to_string(&body).expect("an enrolment always serializes"))

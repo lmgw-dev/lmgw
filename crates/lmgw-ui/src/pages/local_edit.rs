@@ -22,12 +22,12 @@ use lmgw_api_types::{
 };
 use serde_json::{json, Map, Value};
 
+use super::fallback_field::{FallbackField, Saves};
 use super::local_test::{
     not_tested, run_load_test, test_key, LoadTestCard, Outcome, UnsavedTestModal,
 };
-use super::model_editors::HoldFallback;
 use crate::catalog::use_model_catalog;
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 use crate::model_ops::ContainerStatusRow;
 use crate::scope::Scope;
 use crate::widgets::{
@@ -460,13 +460,21 @@ fn is_flag(t: &str) -> bool {
 /// `podman run … image llama-server-args` one option per line, each with its
 /// value, so a flag can be found by eye instead of in one 900-character line.
 /// A bare word after an option that already has its value (the image) gets a
-/// line of its own.
+/// line of its own. Podman's own options before the subcommand
+/// (`--cdi-spec-dir <dir>`, lmgw's spec of the graphics card) stay on the
+/// first line, between `podman` and `run`: they are the command, not the
+/// container's options.
 fn flag_lines(cmd: &str) -> String {
+    let tokens = shell_tokens(cmd);
+    let head = command_head(&tokens);
     let mut lines: Vec<String> = Vec::new();
+    if head > 0 {
+        lines.push(tokens[..head].join(" "));
+    }
     let mut cur = String::new();
     // The current line is an option still waiting for its value.
     let mut open = false;
-    for t in shell_tokens(cmd) {
+    for &t in &tokens[head..] {
         let flag = is_flag(t);
         if flag || (!open && !cur.is_empty() && lines_started(&lines, &cur)) {
             if !cur.is_empty() {
@@ -486,6 +494,21 @@ fn flag_lines(cmd: &str) -> String {
         lines.push(cur);
     }
     lines.join("\n")
+}
+
+/// How many leading tokens are `podman`, its global options (each with its
+/// value: `--opt value` or `--opt=value`) and the subcommand; 0 when the line
+/// does not start with `podman` and a global option.
+fn command_head(tokens: &[&str]) -> usize {
+    if tokens.first() != Some(&"podman") || !tokens.get(1).is_some_and(|t| t.starts_with("--")) {
+        return 0;
+    }
+    let mut i = 1;
+    while let Some(t) = tokens.get(i).filter(|t| t.starts_with("--")) {
+        i += if t.contains('=') { 1 } else { 2 };
+    }
+    // The subcommand.
+    (i + 1).min(tokens.len())
 }
 
 /// Before the first option the words are the command itself ("podman run"):
@@ -750,11 +773,11 @@ fn Editor(id_param: String) -> impl IntoView {
     let image = RwSignal::new(String::new());
     let extra_run_args = RwSignal::new(String::new());
     let warm_start = RwSignal::new(false);
-    // GPU-hold fallback (gpu-hold design §2/§3.2): the mode, and the model
-    // when it routes elsewhere; `collect` writes them as
-    // `hold_fallback_mode`/`hold_fallback`.
-    let hold_mode = RwSignal::new(String::from("inherit"));
-    let hold_alias = RwSignal::new(String::new());
+    // The row's one fallback (openai egress design §14.2): "" is none;
+    // `collect` sends it, or names it in `clear`. `saves` keeps what the
+    // saves said about it and a refusal of it, under the field.
+    let fallback = RwSignal::new(String::new());
+    let saves = Saves::new(row_id.unwrap_or_default());
     let loaded = RwSignal::new(create_mode);
     let saving = RwSignal::new(false);
     let save_error = RwSignal::new(None::<String>);
@@ -794,8 +817,7 @@ fn Editor(id_param: String) -> impl IntoView {
             ("jinja", "Identity", Val::Flag(jinja)),
             ("no_mmproj", "Identity", Val::Flag(no_mmproj)),
             ("warm_start", "Container", Val::Flag(warm_start)),
-            ("hold_fallback_mode", "Container", Val::Text(hold_mode)),
-            ("hold_fallback", "Container", Val::Text(hold_alias)),
+            ("fallback", "Container", Val::Text(fallback)),
             ("image", "Container", Val::Text(image)),
             ("extra_run_args", "Container", Val::Text(extra_run_args)),
         ];
@@ -1056,11 +1078,7 @@ fn Editor(id_param: String) -> impl IntoView {
         image.set(d.image.clone().unwrap_or_default());
         extra_run_args.set(d.extra_run_args.clone().unwrap_or_default().join("\n"));
         warm_start.set(d.warm_start);
-        hold_mode.set(match d.hold_fallback_mode.as_str() {
-            "alias" | "none" => d.hold_fallback_mode.clone(),
-            _ => "inherit".to_string(),
-        });
-        hold_alias.set(d.hold_fallback.clone().unwrap_or_default());
+        fallback.set(d.fallback.clone().unwrap_or_default());
         capabilities_override.set(
             d.capabilities_override
                 .as_ref()
@@ -1169,20 +1187,12 @@ fn Editor(id_param: String) -> impl IntoView {
                 args.insert("extra_run_args".into(), Value::from(era));
             }
             args.insert("warm_start".into(), Value::from(warm_start.get_untracked()));
-            // Sending `hold_fallback_mode` always resets `hold_fallback` to
-            // `None` server-side when the mode is not `alias`
-            // (`ops::resolve_hold_fallback`), so there is no separate
-            // `clear` entry to add here.
-            let mode = hold_mode.get_untracked();
-            args.insert("hold_fallback_mode".into(), Value::from(mode.as_str()));
-            if mode == "alias" {
-                let a = hold_alias.get_untracked().trim().to_string();
-                if a.is_empty() {
-                    return Err(
-                        "hold fallback: pick the model to route to, or choose another mode".into(),
-                    );
-                }
-                args.insert("hold_fallback".into(), Value::from(a));
+            // "None" clears a stored one; clearing none is no change.
+            let fb = fallback.get_untracked().trim().to_string();
+            if fb.is_empty() {
+                clear.push("fallback");
+            } else {
+                args.insert("fallback".into(), Value::from(fb));
             }
             let mid = model_id.get_untracked().trim().to_string();
             if mid.is_empty() {
@@ -1278,6 +1288,7 @@ fn Editor(id_param: String) -> impl IntoView {
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
+                    saves.answered(v.id, v.fallback_notes.clone());
                     // Pickers everywhere list what the gateway serves; this
                     // just changed it.
                     catalog.refresh();
@@ -1288,6 +1299,8 @@ fn Editor(id_param: String) -> impl IntoView {
                     }
                     rebase();
                     if create_mode {
+                        // The row's page shows what this save said.
+                        saves.carry();
                         navigate(&format!("/models/local/{}", v.id), Default::default());
                     } else {
                         reload.update(|n| *n += 1);
@@ -1309,7 +1322,12 @@ fn Editor(id_param: String) -> impl IntoView {
                         }
                     }
                 }
-                Err(e) => save_error.set(Some(e.to_string())),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        save_error.set(Some(e));
+                    }
+                }
             }
         });
     });
@@ -1524,6 +1542,36 @@ fn Editor(id_param: String) -> impl IntoView {
             <Show when=move || loaded.get()>
                 <div class="editor">
                     <div class="editor-main card-flow">
+                        // The note of a context Get it fitted to the card,
+                        // and "Fit again" (find-a-model design D26). Its save
+                        // is the row's: the fields it wrote take the saved
+                        // values, and other unsaved edits stay as they are.
+                        <Show when=move || !create_mode>
+                            <super::model_editors::fit_again::FitAgainNote
+                                target="chat"
+                                model_id=Signal::derive(move || {
+                                    detail.get().flatten().map(|d| d.model_id).unwrap_or_default()
+                                })
+                                note=Signal::derive(move || detail.get().flatten().and_then(|d| d.fit_note))
+                                on_saved=Callback::new(move |changes: Vec<lmgw_api_types::model_get::FitChange>| {
+                                    for c in changes {
+                                        let to = c.to.map(|v| v.to_string()).unwrap_or_default();
+                                        if let Some(sig) = fields.with_value(|f| f.get(c.key.as_str()).copied()) {
+                                            sig.set(to.clone());
+                                        }
+                                        let at = entries
+                                            .with_value(|es| es.iter().position(|e| e.key == c.key.as_str()));
+                                        if let Some(i) = at {
+                                            baseline.update(|b| {
+                                                if let Some(v) = b.get_mut(i) {
+                                                    *v = to.clone();
+                                                }
+                                            });
+                                        }
+                                    }
+                                })
+                            />
+                        </Show>
                         <section class="card edit-section">
                             <h3>"Identity"</h3>
                             <div class="field-grid">
@@ -1656,30 +1704,30 @@ fn Editor(id_param: String) -> impl IntoView {
                             </section>
                         </Show>
 
+                        // Its own card, as the alias editor's: what answers
+                        // when this model can't is no container setting.
+                        <section class="card edit-section">
+                            <h3>"When it can't answer"</h3>
+                            <FallbackField
+                                value=fallback
+                                tasks=Signal::derive(|| &["chat"][..])
+                                own_name=Signal::derive(move || {
+                                    let prefix = class_settings
+                                        .get()
+                                        .and_then(|r| r.ok())
+                                        .map(|s| s.router.public_prefix)
+                                        .unwrap_or_default();
+                                    lmgw_api_types::public_names::prefixed(&prefix, model_id.get().trim())
+                                })
+                                saves=saves
+                                dirty=is_dirty("fallback")
+                                hint="Answers whenever this model can't: while the GPU is held, when VRAM outside lmgw is short, for background requests that would disturb other work, and while the row is disabled. A chat model: a plain alias, another local model or a passthrough id."
+                            />
+                        </section>
+
                         <section class="card edit-section">
                             <h3>"Container"</h3>
                             {check("start at boot (warm start)", warm_start, "warm_start")}
-                            <Field
-                                label="Hold fallback"
-                                hint="While a GPU hold is on. Inherit follows the global fallback; None refuses with a 503 even when one is set."
-                                hint_extra=|| {
-                                    view! {
-                                        <a href=super::settings::href("hold.fallback_alias")>
-                                            "Settings → GPU → Hold"
-                                        </a>
-                                    }
-                                }
-                                dirty=Signal::derive(move || {
-                                    is_dirty("hold_fallback_mode").get() || is_dirty("hold_fallback").get()
-                                })
-                            >
-                                <HoldFallback
-                                    mode=hold_mode
-                                    alias=hold_alias
-                                    inherit_label="Inherit · global fallback"
-                                    tasks=&["chat"]
-                                />
-                            </Field>
                             <div class="field-grid">
                                 <Field label="Image override" dirty=is_dirty("image") wide=true>
                                     <ImagePicker
@@ -2081,7 +2129,7 @@ fn LadderRungRow(
             .and_then(|r| r.err())
             .map(|e| e.to_string())
     };
-    let footprint_disp = move || plan_ok().map(|p| human_bytes(p.footprint.total_bytes));
+    let footprint_disp = move || plan_ok().map(|p| fmt_bytes(p.footprint.total_bytes));
     // The slot the rung really gets: what is configured, capped at the
     // weights' trained context once the plan has read it (review finding 1).
     let trained = move || plan_ok().and_then(|p| p.trained_context);
@@ -2163,6 +2211,21 @@ mod tests {
         assert_eq!(
             shell_tokens("podman run --label 'a=b c' -v \"x y\":/m"),
             ["podman", "run", "--label", "'a=b c'", "-v", "\"x y\":/m"]
+        );
+    }
+
+    #[test]
+    fn podmans_own_options_stay_on_the_podman_line() {
+        let cmd = "podman --cdi-spec-dir /run/user/1000/lmgw-machine/lmgw/cdi run -d \
+                   --device nvidia.com/gpu=all img -m /models/x.gguf";
+        assert_eq!(
+            flag_lines(cmd),
+            "podman --cdi-spec-dir /run/user/1000/lmgw-machine/lmgw/cdi run\n-d\n\
+             --device nvidia.com/gpu=all\nimg\n-m /models/x.gguf"
+        );
+        assert_eq!(
+            flag_lines("podman --cdi-spec-dir=/a --cdi-spec-dir /b run --name x img"),
+            "podman --cdi-spec-dir=/a --cdi-spec-dir /b run\n--name x\nimg"
         );
     }
 

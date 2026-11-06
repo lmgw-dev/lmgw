@@ -22,7 +22,9 @@
 //! `output` is flattened text.
 //!
 //! A response cut off (`Length`, `ContentFilter`) runs none of its calls,
-//! and one whose stream failed after its `Stop` runs none either: their
+//! and one whose upstream reported an error after its `Stop` runs none
+//! either (a silence or a broken body there ends a whole answer,
+//! `proxy::drive_upstream_until`): their
 //! calls close as never made ([`UNMADE_CALL`]) — at the `Stop`, or when the
 //! response ends ([`Output::mcp_unfinished`]), where a call still running
 //! closes as abandoned ([`ABANDONED_CALL`]): it was sent, so it may have

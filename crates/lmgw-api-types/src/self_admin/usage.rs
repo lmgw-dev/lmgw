@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PriceRowView, UnpricedModel};
+use crate::{PriceRowView, UnpricedHostedTool, UnpricedModel, UnpricedTier};
 
 /// `lmgw__prices`: every price sheet on file, and the models that resolve to
 /// no price at all, with a hint on how to read them.
@@ -25,7 +25,15 @@ pub struct Prices {
     /// passthrough model the usage rollup has seen, that no unit prices.
     /// Busiest first.
     pub unpriced_models: Vec<UnpricedModel>,
-    /// How to read `sheets` and `unpriced_models`, and the units.
+    /// Every model that answered at an OpenAI service tier it has no price
+    /// row for, busiest first: unpriced until a row of that tier is set.
+    pub unpriced_tiers: Vec<UnpricedTier>,
+    /// Every model whose native answers ran a hosted tool that bills beyond
+    /// its tokens (web search, file search, a container, image generation),
+    /// busiest first: unpriced, since no price unit covers those fees yet.
+    pub unpriced_hosted_tools: Vec<UnpricedHostedTool>,
+    /// How to read `sheets`, `unpriced_models`, `unpriced_tiers` and
+    /// `unpriced_hosted_tools`, and the units and tiers.
     pub hint: String,
 }
 

@@ -4,7 +4,7 @@
 //! file only places its single entry in the catalog).
 
 use crate::mcp::selfadmin::candidate_alias;
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, fallback_p, int_p, str_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -36,11 +36,22 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "protocol",
                     enum_p(
-                        "Wire protocol the upstream speaks. Required on create. 'llama_cpp' is \
-                         llama.cpp's own server (llama-server, ik_llama.cpp) and is always kind \
-                         'llama_server'; 'openai' with kind 'llama_server' (its old spelling) is \
-                         refused, use protocol 'llama_cpp'.",
-                        &["openai", "anthropic", "gemini", "llama_cpp"],
+                        "Wire protocol the upstream speaks. Required on create. 'openai' is the \
+                         OpenAI platform only (api.openai.com or a regional *.api.openai.com \
+                         host), always kind 'generic': lmgw sends it OpenAI's own dialect, and \
+                         another host is accepted with a note. 'openai_compatible' is every \
+                         other OpenAI-shaped provider (OpenRouter, Kilo, Groq, Gemini's \
+                         OpenAI-compatible endpoint, vLLM, an external audio.cpp server). \
+                         'llama_cpp' is llama.cpp's own server (llama-server, ik_llama.cpp) and \
+                         is always kind 'llama_server'; 'openai' or 'openai_compatible' with \
+                         kind 'llama_server' is refused, use protocol 'llama_cpp'.",
+                        &[
+                            "openai",
+                            "openai_compatible",
+                            "anthropic",
+                            "gemini",
+                            "llama_cpp",
+                        ],
                     ),
                 ),
                 (
@@ -49,8 +60,11 @@ pub(super) fn tools() -> Vec<Builtin> {
                         "Upstream flavour. Default 'generic'. 'llama_server' goes with protocol \
                          'llama_cpp' (or 'anthropic', for llama-server's /v1/messages) and \
                          marks the upstream local and free; leave it out with 'llama_cpp'. \
-                         Switching the protocol to openai or gemini alone makes a llama_server \
-                         'generic'.",
+                         'audio_cpp' (an external audio.cpp server) goes with \
+                         'openai_compatible'. Protocol 'openai' is always 'generic'. Switching \
+                         the protocol to openai, openai_compatible or gemini alone makes a \
+                         llama_server 'generic', and switching it to openai alone makes an \
+                         audio_cpp row 'generic'.",
                         &["generic", "llama_server", "audio_cpp"],
                     ),
                 ),
@@ -65,7 +79,14 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ("api_key", str_p("Provider API key. Write-only.")),
                 (
                     "timeout_ms",
-                    int_p("Request timeout in ms. Default 120000."),
+                    int_p(
+                        "Timeout in ms of every request to it: its sends and its catalog \
+                         (models-list) reads wait that long for an answer, and a streamed \
+                         answer may go that long without an event before lmgw ends it \
+                         with an error (keep-alives count only before the answer shows \
+                         and while the model thinks out of sight). 0 means no bound. \
+                         Default 120000.",
+                    ),
                 ),
                 ("enabled", bool_p("Whether the upstream is usable.")),
                 (
@@ -81,10 +102,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                     bool_p(
                         "The upstream implements OpenAI's /v1/responses itself, so the gateway \
                          forwards that route verbatim instead of synthesizing it from \
-                         /v1/chat/completions. Default false. Never on for protocol \
-                         'llama_cpp': lmgw synthesizes /v1/responses there, so every request \
-                         goes through its llama.cpp egress. Most other local servers have no \
-                         such endpoint.",
+                         /v1/chat/completions. 'openai_compatible' only; default false. \
+                         Implied on 'openai' (the OpenAI platform forwards it without the \
+                         flag), and refused on every other protocol: lmgw synthesizes \
+                         /v1/responses there. Most local servers have no such endpoint.",
                     ),
                 ),
                 (
@@ -94,7 +115,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                          (GET …/models?output_modalities=all), so OpenRouter lists its decision, \
                          embedding, rerank, speech, transcription, image and video models as \
                          well as its chat models. Default true; only the catalog request of an \
-                         'openai' upstream of kind 'generic' carries it. Some endpoints refuse \
+                         'openai_compatible' upstream of kind 'generic' carries it. Some \
+                         endpoints refuse \
                          the parameter: Gemini's OpenAI-compatible one answers 400, so with \
                          this on its catalog fails, and the error names this option. Set it \
                          false for such an upstream.",
@@ -150,15 +172,34 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 (
+                    "fallback",
+                    fallback_p(
+                        "what this alias's upstream model is: a chat model for a chat model, \
+                         an embedder for an embedder",
+                    ),
+                ),
+                (
                     "clear",
                     str_p(
-                        "Field names to reset to unset, comma-separated. Only \
-                         'capabilities_override' is clearable here today.",
+                        "Field names to reset to unset, comma-separated: \
+                         'capabilities_override', 'fallback'.",
                     ),
                 ),
             ],
             required: &["action"],
         },
         candidate_alias::tool(),
+        Builtin {
+            name: "lmgw__upstream_quota_clear",
+            writes: true,
+            description:
+                "Forget that an upstream is out of quota, so the next request goes to it again \
+                 (Check now on the Upstreams page). lmgw remembers an upstream that answered \
+                 insufficient_quota (lmgw__upstreams shows it as quota): until its next check, \
+                 models and aliases on it that have a fallback answer with the fallback. Answers \
+                 what it did, also when nothing was remembered.",
+            props: vec![("id", int_p("Upstream id, from lmgw__upstreams."))],
+            required: &["id"],
+        },
     ]
 }

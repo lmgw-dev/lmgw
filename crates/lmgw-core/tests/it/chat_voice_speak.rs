@@ -655,7 +655,8 @@ async fn a_tool_preamble_is_spoken_before_the_result() {
     )
     .await;
     let (state, gw) =
-        crate::chat_actions::gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+        crate::chat_actions::gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible)
+            .await;
     let tts = tts_fake(&VOICES).await;
     add_tts_alias(&state, &tts).await;
     settings(&state, |s| {

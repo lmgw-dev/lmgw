@@ -133,7 +133,7 @@ async fn an_image_without_espeak_says_to_rebuild_it() {
     let m = body["error"]["message"].as_str().unwrap();
     assert!(m.starts_with("'audio/tts' needs eSpeak NG"), "{m}");
     assert!(
-        m.contains("rebuild the audio.cpp image on the Backends page"),
+        m.contains("rebuild the audio.cpp image on the Engines page"),
         "{m}"
     );
 }

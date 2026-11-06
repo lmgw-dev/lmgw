@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 use lmgw_core::catalog::{
     parse_anthropic_entry, parse_gemini_entry, parse_openai_entry, price_updates_for_upstream,
-    sync_prices, CatalogReasoning, CatalogStructured, ModelInfo, PriceSyncSummary, PriceUpdate,
-    PriceUpdates,
+    sync_prices, CatalogContextManagement, CatalogReasoning, CatalogStructured, ModelInfo,
+    PriceSyncSummary, PriceUpdate, PriceUpdates,
 };
 use lmgw_core::config::{
     upstream_scope_key, PriceRow, PriceScope, PriceUnit, Protocol, UpstreamKind,
@@ -83,6 +83,7 @@ fn kilo_anthropic_variants() {
                 "max".to_string(),
             ],
             can_disable: Some(true),
+            thinking_types: Vec::new(),
         })
     );
     assert_eq!(info.tools, Some(true));
@@ -182,6 +183,7 @@ fn kilo_reordered_levels_sorted_canonically() {
                 "max".to_string(),
             ],
             can_disable: Some(true),
+            thinking_types: Vec::new(),
         })
     );
 }
@@ -204,6 +206,7 @@ fn kilo_preset_variants_are_a_toggle_not_levels() {
             enabled: None,
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     );
 }
@@ -236,6 +239,7 @@ fn gemini_thinking_model() {
             enabled: None,
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     );
     assert_eq!(info.tools, Some(true));
@@ -260,6 +264,7 @@ fn gemini_tts_no_thinking() {
             enabled: Some(false),
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     );
     assert_eq!(
@@ -287,6 +292,7 @@ fn gemini_embedding_model() {
             enabled: Some(false),
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     );
     assert_eq!(info.tools, Some(false));
@@ -313,6 +319,7 @@ fn gemini_bidi_only_model() {
             enabled: Some(false),
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     );
     assert_eq!(info.tools, Some(false));
@@ -363,12 +370,18 @@ fn anthropic_full_capabilities() {
                 "max".to_string(),
             ],
             can_disable: None,
+            thinking_types: vec!["adaptive".to_string()],
         })
     );
     assert_eq!(info.tools, Some(true));
+    // The tree's own `structured_outputs`, and no JSON-object mode
+    // (structured-output design §10).
     assert_eq!(
-        info.structured_output, None,
-        "Anthropic egress drops response_format today"
+        info.structured_output,
+        Some(CatalogStructured {
+            json_schema: Some(true),
+            json_object: Some(false),
+        })
     );
 }
 
@@ -397,9 +410,77 @@ fn anthropic_thinking_without_effort_levels() {
             enabled: None,
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: vec!["enabled".to_string()],
         })
     );
     assert_eq!(info.tools, Some(true));
+}
+
+/// The full `thinking.types` tree: `disabled.supported` is `can_disable`, as
+/// published either way, and `thinking_types` names every type that says
+/// `true`, sorted (Anthropic's order for its four), a newer one included.
+/// `claude-sonnet-5-5` cannot switch thinking
+/// off (`disabled: false`) but takes `between_tools`; `claude-opus-5` can.
+#[test]
+fn anthropic_thinking_types_and_disabled() {
+    let info = parse_anthropic_entry(&anthropic_entry("claude-sonnet-5-5")).expect("parses");
+    let r = info.reasoning.expect("reasoning");
+    assert_eq!(r.kind, "levels");
+    assert_eq!(r.can_disable, Some(false));
+    assert_eq!(r.thinking_types, ["adaptive", "between_tools"]);
+    assert_eq!(
+        info.context_management,
+        Some(CatalogContextManagement {
+            supported: Some(true),
+            edits: vec![
+                "clear_thinking_20251015".to_string(),
+                "clear_tool_uses_20250919".to_string(),
+                "compact_20260112".to_string(),
+            ],
+            compaction: vec![],
+        })
+    );
+
+    let info = parse_anthropic_entry(&anthropic_entry("claude-opus-5")).expect("parses");
+    let r = info.reasoning.expect("reasoning");
+    assert_eq!(r.can_disable, Some(true));
+    assert_eq!(r.thinking_types, ["adaptive", "disabled"]);
+    // A `null` edit is no statement; a `false` one is not taken.
+    assert_eq!(
+        info.context_management.expect("context_management").edits,
+        ["clear_tool_uses_20250919"]
+    );
+
+    // A non-bool `disabled.supported` states nothing.
+    let m = json!({"id": "claude-test", "capabilities": {"thinking": {
+        "supported": true,
+        "types": {"disabled": {"supported": "yes"}, "adaptive": {"supported": true}},
+    }}});
+    let r = parse_anthropic_entry(&m).unwrap().reasoning.unwrap();
+    assert_eq!(r.can_disable, None);
+    assert_eq!(r.thinking_types, ["adaptive"]);
+
+    // A type lmgw does not know yet is kept when the catalog says the model
+    // takes it: the facts say what the provider says.
+    let m = json!({"id": "claude-test", "capabilities": {"thinking": {
+        "supported": true,
+        "types": {
+            "adaptive": {"supported": true},
+            "interleaved_lite": {"supported": true},
+            "enabled": {"supported": false},
+        },
+    }}});
+    let r = parse_anthropic_entry(&m).unwrap().reasoning.unwrap();
+    assert_eq!(r.thinking_types, ["adaptive", "interleaved_lite"]);
+
+    // A model that does not think has no types, whatever the tree says.
+    let m = json!({"id": "claude-test", "capabilities": {"thinking": {
+        "supported": false,
+        "types": {"disabled": {"supported": true}},
+    }}});
+    let r = parse_anthropic_entry(&m).unwrap().reasoning.unwrap();
+    assert_eq!((r.kind.as_str(), r.can_disable), ("fixed", None));
+    assert!(r.thinking_types.is_empty());
 }
 
 /// `claude-3-haiku-20240307` — no `capabilities` object at all: `reasoning`,
@@ -427,7 +508,92 @@ fn anthropic_no_capabilities_object() {
         Some(true),
         "tool calling is a base Messages API feature"
     );
-    assert_eq!(info.structured_output, None);
+    // Nothing to read json_schema from; json_object is no mode Anthropic has.
+    assert_eq!(
+        info.structured_output,
+        Some(CatalogStructured {
+            json_schema: None,
+            json_object: Some(false),
+        })
+    );
+}
+
+/// `capabilities.context_management`: its own `supported` and every edit
+/// type whose `supported` is `true`, sorted, a newer key included; a
+/// `false` or malformed one is left out. Absent without the object.
+#[test]
+fn anthropic_context_management() {
+    let m = json!({
+        "id": "claude-test",
+        "capabilities": {
+            "context_management": {
+                "supported": true,
+                "compact_20260112": {"supported": true},
+                "clear_tool_uses_20250919": {"supported": true},
+                "clear_thinking_20251015": {"supported": false},
+                "clear_example_20990101": {"supported": true},
+                "odd": "not an object",
+            }
+        }
+    });
+    let info = parse_anthropic_entry(&m).expect("parses");
+    assert_eq!(
+        info.context_management,
+        Some(CatalogContextManagement {
+            supported: Some(true),
+            edits: vec![
+                "clear_example_20990101".to_string(),
+                "clear_tool_uses_20250919".to_string(),
+                "compact_20260112".to_string(),
+            ],
+            compaction: vec![],
+        })
+    );
+
+    let m = json!({"id": "claude-test", "capabilities": {"context_management": {}}});
+    assert_eq!(
+        parse_anthropic_entry(&m).unwrap().context_management,
+        Some(CatalogContextManagement::default())
+    );
+    let m = json!({"id": "claude-test", "capabilities": {}});
+    assert_eq!(parse_anthropic_entry(&m).unwrap().context_management, None);
+}
+
+/// `capabilities.compaction` (on-demand compaction, listed under its beta
+/// flag): every type whose `supported` is `true`, sorted, a newer one
+/// included; none when the block says `supported: false`. Read even without
+/// a `context_management` object.
+#[test]
+fn anthropic_compaction() {
+    let m = json!({
+        "id": "claude-test",
+        "capabilities": {
+            "compaction": {
+                "supported": true,
+                "summarize": {"supported": true},
+                "summarize_v9": {"supported": true},
+                "other": {"supported": false},
+            }
+        }
+    });
+    let cm = parse_anthropic_entry(&m)
+        .unwrap()
+        .context_management
+        .unwrap();
+    assert_eq!(cm.compaction, ["summarize", "summarize_v9"]);
+    assert_eq!(cm.supported, None);
+    assert!(cm.edits.is_empty());
+
+    let m = json!({"id": "claude-test", "capabilities": {
+        "compaction": {"supported": false, "summarize": {"supported": true}},
+        "context_management": {"supported": true},
+    }});
+    let cm = parse_anthropic_entry(&m)
+        .unwrap()
+        .context_management
+        .unwrap();
+    assert!(cm.compaction.is_empty());
+    assert_eq!(cm.supported, Some(true));
 }
 
 // ---------------------------------------------------------------------
@@ -481,6 +647,7 @@ fn on_file(
         note: None,
         updated_at: String::new(),
         price: Some(0.01),
+        service_tier: lmgw_core::config::PriceTier::Standard,
     }
 }
 
@@ -840,7 +1007,7 @@ async fn catalog_gateway(models: Value) -> (SharedState, MockServer, i64) {
         &st.db,
         &NewUpstream {
             name: "kilo".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", server.uri()),
             api_key: None,
@@ -869,6 +1036,7 @@ async fn add_alias(st: &SharedState, up: i64, model: &str, alias: &str) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -896,7 +1064,8 @@ async fn rows_in(st: &SharedState, unit: PriceUnit) -> Vec<PriceRow> {
 #[tokio::test]
 async fn the_sync_reports_the_kilo_web_search_as_not_synced() {
     let (st, _server, up) = catalog_gateway(json!([fixture("kilo_anthropic_variants.json")])).await;
-    let v = ops::backends::to_json(ops::prices_sync(&st).await).expect("sync");
+    let v =
+        ops::backends::to_json(ops::prices_sync(&st).await.map_err(|r| r.message)).expect("sync");
 
     assert_eq!(v["rows_written"], 1, "{v}");
     assert_eq!(v["not_synced"], json!({ "web_search": 1 }), "{v}");
@@ -930,9 +1099,12 @@ async fn the_sync_writes_the_request_fee_beside_the_token_row() {
     assert_eq!((fee[0].price_in, fee[0].price_out), (None, None));
 
     // The very next request is priced with both: the sync reloads the snapshot.
-    let sheet = st
-        .snapshot()
-        .sheet_for("fee-chat", Some(up), Some("vendor/m"));
+    let sheet = st.snapshot().sheet_for(
+        "fee-chat",
+        Some(up),
+        Some("vendor/m"),
+        Some(lmgw_core::config::PriceTier::Standard),
+    );
     assert_eq!(
         sheet.request.map(|r| (r.price, r.source)),
         Some((0.002, PriceSource::Catalog))
@@ -952,7 +1124,12 @@ async fn the_sync_writes_no_fee_for_a_model_whose_prompt_does_not_parse() {
     assert!(store::list_prices(&st.db).await.unwrap().is_empty());
     assert!(st
         .snapshot()
-        .sheet_for("x", Some(up), Some("m"))
+        .sheet_for(
+            "x",
+            Some(up),
+            Some("m"),
+            Some(lmgw_core::config::PriceTier::Standard)
+        )
         .request
         .is_none());
 }
@@ -972,6 +1149,7 @@ async fn a_zero_fee_updates_the_catalog_row_on_file_and_creates_none() {
         PriceScope::UpstreamModel,
         &b,
         PriceUnit::PerRequest,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             source: PriceSource::Manual,
             ..Default::default()
@@ -1017,6 +1195,7 @@ async fn a_fee_the_catalog_stopped_publishing_is_removed_and_the_manual_row_stay
         PriceScope::UpstreamModel,
         &a,
         PriceUnit::PerRequest,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             source: PriceSource::Manual,
             ..Default::default()
@@ -1054,7 +1233,12 @@ async fn a_fee_the_catalog_stopped_publishing_is_removed_and_the_manual_row_stay
         "the token row stays"
     );
     // The sync reloaded the snapshot: the manual fee is what prices `a` now.
-    let sheet = st.snapshot().sheet_for("x", Some(up), Some("a"));
+    let sheet = st.snapshot().sheet_for(
+        "x",
+        Some(up),
+        Some("a"),
+        Some(lmgw_core::config::PriceTier::Standard),
+    );
     assert_eq!(
         sheet.request.map(|r| (r.price, r.source)),
         Some((0.5, PriceSource::Manual))

@@ -1,0 +1,43 @@
+{
+  "requests": [
+    {
+      "body": "{\"max_tokens\":64,\"messages\":[{\"content\":\"Be brief.\",\"role\":\"system\"},{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"chat-gguf\",\"reasoning_effort\":\"low\",\"tools\":[{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}",
+      "body_json": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "chat-gguf",
+        "reasoning_effort": "low",
+        "tools": [
+          {
+            "function": {
+              "name": "get_weather",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

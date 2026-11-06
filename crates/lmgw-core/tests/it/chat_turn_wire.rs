@@ -113,12 +113,14 @@ fn the_requests_write_what_the_handlers_read() {
         attachments: vec![1],
         kb_refs: vec![2],
         voice: Some(serde_json::from_value(json!({"via": "dictation", "asr_ms": 3})).unwrap()),
+        origin: Some("Typed in a sidebar.".into()),
         speak: true,
     };
     assert_eq!(
         serde_json::to_value(&send).unwrap(),
         json!({"content": "hi", "attachments": [1], "kb_refs": [2],
-               "voice": {"via": "dictation", "asr_ms": 3}, "speak": true})
+               "voice": {"via": "dictation", "asr_ms": 3},
+               "origin": "Typed in a sidebar.", "speak": true})
     );
     assert_eq!(
         serde_json::to_value(TurnRequest::default()).unwrap(),
@@ -137,7 +139,7 @@ async fn a_plain_turns_frames_are_the_documented_types() {
         .respond_with(sse_reply(FULL_SSE))
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
     let events = sse_events(&send(&gw, tid, "hi there").await);
     let seen = typed_frames(&events);
@@ -167,7 +169,7 @@ async fn a_tool_turns_frames_are_the_documented_types() {
         openai_call("Checking. ", "c1", "stub__echo", "{\"text\":\"hi\"}")
     );
     mount_in_order(&mock, &[first, openai_sse("it said hi", 20, 4)]).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
     let tid = tool_thread(&gw).await;
     let events = sse_events(&send(&gw, tid, "say hi through the tool").await);
@@ -200,7 +202,7 @@ async fn a_refused_turns_frames_are_the_documented_types() {
         .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
     let events = sse_events(&send(&gw, tid, "hi").await);
     let seen = typed_frames(&events);

@@ -1,0 +1,709 @@
+/* lmgw-chat-ui: the Chat's own rules (chat-plane design, "WP3b: the
+   lmgw-chat-ui crate"). A host links it after kit.css and its own base
+   stylesheet (the dashboard: app.css, whose buttons, fields, chips and
+   notices the Chat uses), and before voice.css. Moved out of the
+   dashboard's app.css as they were, in the same order. */
+
+/* Labels and controls are not text to select, as the host's base rule has
+   it for its own (the dashboard's app.css): the thread list's heads and
+   rows, and a code block's tools. */
+.thread-group, .thread-row, .thread-folder, .md .code-tools {
+  -webkit-user-select: none; user-select: none; }
+
+/* The Chat's own change feed stopped (chat_live::FeedStopped). */
+.type-badge.feed-stopped-badge { color: var(--amber); border-color: var(--amber); }
+
+/* Under a tool's stage line: as wide as a picture, not the transcript. */
+.media-live-text .dl-bar { max-width: 360px; margin: 2px 0 4px; }
+
+/* chat */
+/* The thread list on the left and the thread's settings on the right are
+   split panes; the conversation between them is a column: head, transcript
+   (the one scroller), stats, composer — the composer always the last row. */
+/* --chat-side is the conversation's side gutter (10 px in the narrow
+   layout): a host's surface laid in the Chat's column (the dashboard's
+   machine-check banner) keeps to it. */
+.chat-shell { height: 100%; min-height: 0; --chat-side: 22px; }
+.thread-tools { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column;
+  gap: 6px; padding: 8px; background: var(--bg0); }
+/* New chat and Admin chat fit the panel's floor beside its scrollbar; a
+   larger font wraps Admin chat under New chat rather than widen the list. */
+.thread-tools .row { gap: 6px; flex-wrap: wrap; }
+.thread-tools .row .btn:first-child { flex: 1; }
+.thread-tools > .btn { width: 100%; }
+.thread-tools > .btn.active { background: var(--accent-bg); color: var(--accent);
+  border-color: var(--accent); }
+.thread-filter { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.thread-q { flex: 1 1 auto; width: auto; min-width: 0; }
+.thread-list { display: flex; flex-direction: column; padding: 0 6px 10px; }
+.thread-group { display: flex; align-items: center; gap: 6px; padding: 10px 6px 4px;
+  font: 600 10.5px var(--sans); letter-spacing: .09em; text-transform: uppercase;
+  color: var(--text-3); }
+.thread-group .count { margin-left: 0; letter-spacing: 0; text-transform: none; }
+.thread-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 6px;
+  align-items: center; padding: 4px 6px 5px 10px; border-radius: 8px; cursor: pointer;
+  color: var(--text-2); font-size: 13px; outline: none; }
+.thread-row:hover, .thread-row:focus-visible { background: var(--surface); color: var(--text); }
+.thread-row.open { background: var(--accent-bg); color: var(--accent); }
+.thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Wraps rather than clips: at the panel's floor the trailing spans (agent,
+   folder, purge countdown) would otherwise vanish with their titles. The
+   model keeps its ellipsis and a span that is wider than the line alone
+   ellipsizes too. */
+.thread-meta { grid-column: 1; display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0;
+  font: 400 11px var(--mono); color: var(--text-3); white-space: nowrap; }
+.thread-meta > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.thread-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread-kind { color: var(--text-2); }
+/* An ongoing folder's current thread (client-apps §3.6): an accent bar on
+   its row and on its folder's header, beside the words "current" and
+   "ongoing", so the colour is never the only cue (chat-plane §9.10). */
+.thread-current { color: var(--accent); font-weight: 600; }
+.thread-row.ongoing-current, .thread-folder.ongoing { box-shadow: inset 2px 0 0 var(--accent); }
+.folder-ongoing { flex: none; font-size: 11px; font-weight: 400; color: var(--accent); }
+.thread-row > .thread-row-menu { grid-column: 2; grid-row: 1 / span 2; }
+.thread-row-menu .row-menu-btn { padding: 0 5px; font-size: 11px; color: var(--text-3); }
+.thread-row-menu .row-menu-btn:hover { color: var(--text); }
+.pin-mark { margin-right: 3px; font-size: 11px; color: var(--text-3); }
+.pin-mark svg { width: 10px; height: 10px; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
+.thread-purge { color: var(--text-3); }
+.thread-folder-name { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Folders (chat-complete §5): a header line, its threads indented under it. */
+.thread-folder { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 6px;
+  margin-top: 4px; border-radius: 8px; cursor: pointer; outline: none; font-size: 13px;
+  font-weight: 600; color: var(--text); }
+.thread-folder:hover, .thread-folder:focus-visible { background: var(--surface); }
+.thread-folder .count { margin-left: 0; }
+.thread-folder .thread-row-menu { margin-left: auto; }
+.folder-chev { flex: none; width: 12px; font-size: 10px; color: var(--text-3);
+  transition: transform .12s; }
+.folder-chev.collapsed { transform: rotate(-90deg); }
+.folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A folder a device's delete hid from devices (review F-7): it gives way
+   before the name does, ellipsized, its whole text on hover. */
+.folder-hidden { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; font-weight: 400; color: var(--text-3); white-space: nowrap; }
+.folder-rename { flex: 1; min-width: 0; }
+.thread-rename { width: 100%; min-width: 0; }
+.thread-row.nested { margin-left: 14px; }
+.thread-folder.drop-over, .thread-dropzone.drop-over { background: var(--accent-bg);
+  outline: 1px dashed var(--accent); }
+/* Only there while a thread is dragged; sticky, so it appears without moving
+   anything above it. */
+.thread-dropzone { position: sticky; bottom: 6px; margin-top: 8px; padding: 10px 8px;
+  border: 1px dashed var(--border); border-radius: 8px; background: var(--bg0);
+  color: var(--text-2); font-size: 12px; text-align: center; }
+.move-list { display: flex; flex-direction: column; gap: 4px; }
+.move-list .btn { justify-content: flex-start; }
+.folder-settings { padding: 0; }
+.modal-foot .folder-apply { margin-right: auto; font-size: var(--fs-sm); }
+.chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.chat-head { flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px; border-bottom: 1px solid var(--border); min-width: 0; }
+/* The pills (mcp, knowledge, reasoning, profile) are one line each and never
+   shrink; the model picker gives way first and ellipsizes, down to a floor
+   that still reads. Should even that not fit, the row wraps as whole items
+   instead of overflowing. */
+.chat-head { flex-wrap: wrap; row-gap: 6px; }
+.chat-head > :not(.model-picker) { flex: none; white-space: nowrap; }
+.chat-head .model-picker { flex: 0 1 auto; min-width: 7rem; max-width: 100%; }
+.chat-head .model-picker :is(.select, .select-btn) { max-width: 100%; }
+.chat-settings { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 0; }
+.chat-settings .field + .field { margin-top: 0; }
+.chat-settings-save { position: sticky; bottom: 0; display: flex; justify-content: flex-end;
+  align-items: center; gap: 8px; padding: 8px 0 10px; background: var(--bg0); border-top: 1px solid var(--border); }
+
+.chat-empty { flex: 1; display: grid; place-items: center; }
+.chat-empty .empty { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+/* The host's machine check above the empty state (machine-check design
+   D173): the empty state becomes a column that scrolls under it, the one
+   scroller there; the host's card fills the Chat's own box. */
+.chat-empty:has(> .chat-empty-machine > *) { display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-start; gap: 22px; min-height: 0; overflow-y: auto;
+  padding: 18px 22px; --mc-stick-gap: 18px; }
+.chat-empty-machine { flex: none; width: 100%; max-width: 110ch; }
+.chat-empty-machine:empty { display: none; }
+.chat-empty:has(> .chat-empty-machine > *) > .empty { flex: none; }
+/* The transcript's top padding, for the sticky head of a setup's run that
+   the host's check under a gpu_setup card shows. */
+.chat-scroll { --mc-stick-gap: 18px; }
+/* A turn whose model could not start on the graphics card (machine-check
+   design D176): its sentence, what the start said, and under the newest
+   such card the host's check. */
+.chat-gpu-setup { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
+  padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--amber);
+  border-radius: 8px; background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
+.chat-gpu-setup-head { display: flex; align-items: flex-start; gap: 10px; color: var(--text);
+  font-weight: 500; line-height: 1.5; }
+.chat-gpu-setup-mark { flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--amber); color: var(--accent-ink); font: 700 12px/1 var(--sans); }
+.chat-gpu-setup-said { font-size: var(--fs-sm); color: var(--text-2); padding-left: 30px; }
+.chat-gpu-setup-said > summary { cursor: pointer; list-style: none; display: inline-block; }
+.chat-gpu-setup-said > summary::-webkit-details-marker { display: none; }
+.chat-gpu-setup-said > summary::before { content: "\25B8  "; color: var(--text-3); font-size: 10px; }
+.chat-gpu-setup-said[open] > summary::before { content: "\25BE  "; }
+.chat-gpu-setup-said > div { margin-top: 4px; font: 12px/1.5 var(--mono); color: var(--text-2);
+  white-space: pre-wrap; }
+.chat-gpu-setup-fix { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: 13.5px; }
+/* The transcript reads in a 110ch column centred in the pane; the question
+   sits at the column's right edge, not the window's. Code and tables start on
+   the column's left edge and may run on to the pane's right edge before they
+   scroll sideways (`(100cqi - 100%) / 2` is the gutter beside the column).
+   The stats row and the composer keep to the same column. */
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px;
+  container: transcript / inline-size; }
+.chat-main.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px;
+  background: var(--accent-bg); }
+.chat-col, .stats-row, .composer-wrap, .chip-row, .archive-strip { width: 100%;
+  margin-inline: auto; font-size: 14px; }
+.chat-col { max-width: 110ch; display: flex; flex-direction: column; gap: 16px; }
+/* their own 22px sides around the same 110ch */
+.stats-row, .composer-wrap, .chip-row, .archive-strip { max-width: calc(110ch + 44px); }
+.msg-user { align-self: flex-end; max-width: 75%; display: flex;
+  flex-direction: column; gap: 6px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 16px 16px 4px 16px;
+  padding: 10px 14px; font-size: 14px; }
+.msg-user-text { white-space: pre-wrap; }
+.msg-assistant { min-width: 0; font-size: 14px; line-height: 1.55; }
+.chat-col .md > :is(pre, .code-wrap) { width: max-content; min-width: 100%;
+  max-width: calc(100% + (100cqi - 100%) / 2); }
+.chat-col .md > table { display: block; overflow-x: auto; width: max-content;
+  max-width: calc(100% + (100cqi - 100%) / 2); }
+.md :is(h1,h2,h3) { font-size: 15px; margin: 12px 0 6px; }
+.md p { margin: 6px 0; }
+.md pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  background: var(--bg0); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; overflow-x: auto; }
+.md code { font-family: var(--mono); font-size: 12.5px;
+  background: var(--surface-hi); border-radius: 4px; padding: 1px 4px; }
+.md pre code { background: none; padding: 0; }
+
+/* Per-code-block toolbar (language chip · Preview · Copy), injected by
+   assets/codeblocks.js into the rendered markdown. Anchored to a .code-wrap
+   around <pre> so it stays put when the block is scrolled horizontally. */
+.md .code-wrap { position: relative; }
+.md .code-tools { position: absolute; top: 7px; right: 7px; display: flex;
+  gap: 5px; opacity: 0; transition: opacity .12s; }
+.md .code-wrap:hover .code-tools, .md .code-tools:focus-within { opacity: 1; }
+.md .code-tools .lang { align-self: center; margin-right: 2px; font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
+.md .code-tools button { display: inline-flex; align-items: center; gap: 4px;
+  font: 500 11px var(--sans); background: var(--surface); color: var(--text-2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px;
+  cursor: pointer; }
+.md .code-tools button:hover { color: var(--text); border-color: var(--accent); }
+.md .code-tools button.ok { color: var(--ok); border-color: var(--ok); }
+.md .code-tools svg { width: 12px; height: 12px; display: block; }
+
+/* Math (KaTeX, assets/vendor/katex). Display math scrolls inside the message
+   column; it never widens the page. */
+.md .math-display { display: block; overflow-x: auto; overflow-y: hidden;
+  max-width: 100%; margin: 8px 0; padding: 2px 0; }
+.md .math-display .katex-display { margin: 0; }
+.md .katex { font-size: 1.08em; }
+
+/* Mermaid diagrams (assets/codeblocks.js): the SVG on a .code-wrap-like card,
+   the source kept behind the toolbar's Code toggle. */
+.md .mermaid-wrap { position: relative; }
+.chat-col .md > .mermaid-wrap { max-width: 100%; }
+.md .mermaid-view { background: var(--bg0); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px; overflow-x: auto; text-align: center; }
+.md .mermaid-view svg { max-width: 100%; height: auto; }
+.md .mermaid-wrap .mermaid-src { display: none; }
+.md .mermaid-wrap.show-code .mermaid-src { display: block; }
+.md .mermaid-wrap.show-code .mermaid-view { display: none; }
+.md .mermaid-wrap .mermaid-src .code-tools { display: none; }
+.md .mermaid-wrap:hover > .code-tools, .md .mermaid-wrap > .code-tools:focus-within { opacity: 1; }
+.md .mermaid-error { margin: -4px 0 8px; padding: 6px 10px; font-size: 12px;
+  color: var(--err); background: var(--err-bg); border-radius: 8px;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* highlight.js token theme, mapped onto the design tokens (both themes). */
+.md .hljs { color: var(--text); background: transparent; }
+.md .hljs-comment, .md .hljs-quote { color: var(--code-cmt); font-style: italic; }
+.md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-section,
+.md .hljs-doctag { color: var(--code-key); }
+.md .hljs-name, .md .hljs-tag { color: var(--code-tag); }
+.md .hljs-attr, .md .hljs-attribute, .md .hljs-variable,
+.md .hljs-template-variable { color: var(--code-attr); }
+.md .hljs-string, .md .hljs-regexp, .md .hljs-addition,
+.md .hljs-meta .hljs-string { color: var(--code-str); }
+.md .hljs-number, .md .hljs-literal, .md .hljs-bullet, .md .hljs-link,
+.md .hljs-symbol { color: var(--code-num); }
+.md .hljs-built_in, .md .hljs-class .hljs-title,
+.md .hljs-title.class_ { color: var(--code-type); }
+.md .hljs-title, .md .hljs-title.function_,
+.md .hljs-function .hljs-title { color: var(--code-fn); }
+.md .hljs-type, .md .hljs-params, .md .hljs-property { color: var(--code-type); }
+.md .hljs-meta { color: var(--code-meta); }
+.md .hljs-deletion { color: var(--err); }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 600; }
+.md table { border-collapse: collapse; margin: 8px 0; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 10px;
+  font-size: 13px; }
+.reasoning { margin-bottom: 6px; }
+.reasoning summary { cursor: pointer; font-size: 12px; }
+.reasoning-body { font-size: 12.5px; color: var(--text-2); white-space: pre-wrap;
+  border-left: 2px solid var(--border-strong); padding-left: 10px; margin: 6px 0; }
+.tool-card { border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px 10px; margin: 6px 0; background: var(--surface); }
+.tool-card.err { border-color: var(--err); }
+.tool-card summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }
+.tool-io { margin-top: 6px; }
+/* The Chat's image and audio tools (chat_media; chat-media-tools design §8).
+   A picture and its live preview share one frame, so the picture lands where
+   its preview was: in the picture's aspect ratio (--ar, width over height,
+   set by the page), as wide as the column allows up to 448px, never wider
+   than the picture itself (--nw, its width in pixels: a small picture is not
+   stretched), and never taller than half the window, so the card's facts
+   and buttons stay in view beside it. The spinner turns forever (an animation that never ends;
+   WebKitGTK blanks an element for a frame after an opacity transition ends,
+   so nothing here fades). */
+.media-frame { position: relative; aspect-ratio: var(--ar, 1);
+  width: min(100%, 448px, calc(50vh * var(--ar, 1)), var(--nw, 448px));
+  display: grid; place-items: center; overflow: hidden; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-hi); }
+.media-frame img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.media-pic { padding: 0; font: inherit; color: inherit; cursor: zoom-in; }
+.media-pic:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.media-live { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+.media-live-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.media-stage { display: flex; align-items: center; gap: 6px; font-size: 13px;
+  color: var(--text); overflow-wrap: anywhere; }
+.media-step { font-size: 12px; }
+.media-live-actions { margin-top: 4px; }
+.media-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  padding: 6px 10px; border: 1px solid var(--amber); border-radius: 8px;
+  background: var(--amber-bg); font-size: 12.5px; max-width: 448px; }
+.media-confirm-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.media-spinner { width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  animation: media-spin .9s linear infinite; }
+.media-spinner.sm { width: 12px; height: 12px; flex: none; }
+@keyframes media-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .media-spinner { animation-duration: 3s; } }
+/* A card action's run sits beside the strip (not in its list): a thumbnail
+   beside its words. */
+.media-strip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  max-width: 448px; }
+.media-strip-row:empty { display: none; }
+.media-live.compact { flex-direction: row; align-items: center; gap: 8px; margin: 0;
+  min-width: 0; flex: 1 1 200px; }
+.media-live.compact .media-frame { width: 56px; height: 56px; flex: none;
+  border-radius: 6px; }
+.media-live.compact .media-spinner { width: 16px; height: 16px; }
+.media-live.compact .media-live-actions { margin-top: 2px; }
+.media-card { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 12px;
+  min-width: 0; }
+.media-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  min-width: 0; }
+.media-thumb { flex: none; width: 56px; height: 56px; padding: 0; overflow: hidden;
+  border-radius: 6px; border: 2px solid transparent; background: var(--surface-hi);
+  cursor: pointer; }
+.media-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.media-thumb[aria-selected="true"] { border-color: var(--accent); }
+.media-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.media-facts { font-size: 12px; max-width: 448px; overflow-wrap: anywhere; }
+.media-facts.mini-note { margin-top: 0; }
+.media-fallback { display: inline-block; margin-left: .5ch; color: var(--amber); }
+.media-facts > .media-fallback::before { content: "· "; color: var(--text-3); }
+.media-prompt { max-width: 448px; font-size: 12.5px; color: var(--text-2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere; }
+.media-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  max-width: 448px; }
+.media-actions-gap { flex: 1 1 0; min-width: 0; }
+.media-form { display: flex; flex-direction: column; gap: 6px; max-width: 448px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); font-size: 12.5px; }
+.media-form .field { display: flex; flex-direction: column; gap: 3px; margin: 0; }
+.media-form .field > span { color: var(--text-2); font-size: 12px; }
+.media-form .input.ta { min-height: 0; resize: vertical; }
+.media-strength .input { max-width: 180px; }
+.media-form-note { color: var(--text-2); }
+.media-form-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.media-notice { max-width: 448px; padding: 4px 0 4px 8px; font-size: 12.5px;
+  border-left: 2px solid var(--amber); color: var(--text); overflow-wrap: anywhere; }
+.media-audio { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; }
+.media-player { width: min(100%, 420px); height: 36px; }
+
+.stats-row { flex: none; display: flex; align-items: center; gap: 12px;
+  padding: 6px 22px; border-top: 1px solid var(--border); min-height: 30px; }
+.stats-row.live .mono-sm { color: var(--amber); }
+.stats-row .fallback-badge { flex: none; white-space: nowrap; margin-left: 0; }
+.ctx-bar { width: 120px; height: 5px; border-radius: 999px;
+  background: var(--surface-hi); overflow: hidden; display: inline-block; }
+.ctx-bar i { display: block; height: 100%; background: var(--accent);
+  border-radius: 999px; }
+/* The composer is one bubble, as chat apps draw it: the draft's chips, the
+   text, and a toolbar row under the text, attach and knowledge at its left,
+   Answer, the voice group and Send at its right. A row of separate controls
+   beside the text box read as clutter (the owner's ruling, 2026-10-20). The text always
+   has the bubble's full width, so no width needs a layout of its own; where
+   even the toolbar is too wide, its right group wraps under its left. */
+.composer-wrap { flex: none; padding: 8px 22px 16px; }
+.composer { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 6px;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: 16px; }
+.composer:focus-within { border-color: var(--accent); }
+/* The chips sit inside the bubble: none of the page column's centring. */
+.composer .chip-row { width: auto; max-width: none; margin: 0; padding: 0 2px; }
+/* The text box is the bubble's: no border, fill or grip of its own, and the
+   bubble shows its focus. Its height follows its text (chat/composer.rs) up
+   to the cap, and only past the cap does it scroll (the Rust sets overflow-y
+   then). Its text wraps, so it never scrolls sideways. */
+.composer-field { position: relative; }
+.input.ta.composer-input { display: block; min-height: 0; max-height: min(320px, 40vh);
+  padding: 4px 6px; border: 0; background: none; resize: none; overflow: hidden;
+  font-size: 14px; }
+.composer .composer-input:focus-visible { outline: none; }
+/* The empty box's hint (chat/composer.rs): over its first line in its font,
+   one line however narrow, fading from one hint to the next. One animation is
+   the whole cycle, one hint per 5 s iteration: fade in (200 ms), hold, fade
+   out (200 ms), with 100 ms at 0 on either side of each iteration's end,
+   where composer.rs swaps the text on `animationiteration`. It repeats for as
+   long as the hint is shown and never finishes: WebKitGTK's compositor drops
+   an element for one frame right after an opacity transition ends (a blank
+   frame after most fade-ins, measured in a nested KWin), and an infinite
+   animation has no end. The -0.3 s delay starts it fully in, so a page or an
+   emptied box shows its hint at once; a display: none (text in the box, voice
+   mode) stops it, and showing the hint again starts it afresh. No transition
+   on the hint: one would end. */
+.composer-hint { position: absolute; inset: 0 0 auto 0; padding: 4px 6px;
+  font: 400 14px/1.45 var(--sans); color: var(--text-3); pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  animation: composer-hint 5s ease -0.3s infinite; }
+@keyframes composer-hint { 0%, 2% { opacity: 0; } 6%, 94% { opacity: 1; }
+  98%, 100% { opacity: 0; } }
+/* Reduced motion: the same 5 s iterations at a steady opacity, so the text
+   swaps plainly on the same event. */
+@keyframes composer-hint-still { from, to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .composer-hint { animation-name: composer-hint-still; } }
+.composer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.composer-tools, .composer-actions { flex: none; display: flex; align-items: center;
+  gap: 2px; }
+.composer-actions { margin-left: auto; gap: 6px; }
+/* Every icon button in the bar is one ghost square. */
+.composer-attach { flex: none; height: 32px; width: 32px; padding: 0; border-radius: 8px;
+  justify-content: center; font-size: 16px; }
+.composer-attach svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.composer .answer-btn { height: 32px; }
+/* Send is the round accent button; Stop is the same circle in the danger
+   colour, with a filled square. */
+.composer-send { width: 32px; height: 32px; padding: 0; border-radius: 50%;
+  justify-content: center; }
+.composer-send svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.composer-send.danger svg { fill: currentColor; stroke: none; }
+/* For screen readers only (a live region, a label). */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Message actions (chat-complete §3): a row under each message, shown on
+   hover or focus-within, and always on a narrow transcript, where there is no
+   hover to wait for. The row keeps its height hidden, so nothing jumps. */
+.msg-item { min-width: 0; }
+.msg-item-user { align-self: flex-end; max-width: 75%; display: flex;
+  flex-direction: column; align-items: flex-end; }
+.msg-item-user > .msg-user { max-width: 100%; }
+.msg-actions { display: flex; gap: 2px; margin-top: 4px; opacity: 0;
+  transition: opacity .12s; }
+.msg-item:hover .msg-actions, .msg-item:focus-within .msg-actions { opacity: 1; }
+@container transcript (width < 640px) { .msg-actions { opacity: 1; } }
+.msg-actions .msg-act, .msg-actions .confirm .msg-act { display: inline-flex;
+  align-items: center; justify-content: center; width: 26px; height: 24px; padding: 0;
+  border: 0; border-radius: 6px; background: none; color: var(--text-3); cursor: pointer; }
+.msg-actions .msg-act:hover:not(:disabled) { color: var(--text); background: var(--surface-hi); }
+.msg-actions .msg-act:disabled { opacity: .4; cursor: default; }
+.msg-actions .msg-act svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.msg-actions .confirm { display: inline-flex; align-items: center; gap: 4px; }
+.msg-editor { display: flex; flex-direction: column; gap: 6px; min-width: min(60ch, 100%); }
+.msg-edit-ta { width: 100%; min-height: 6em; resize: vertical; font: inherit; }
+.msg-edit-note { margin-top: 0; }
+.msg-edit-btns { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* Temporary chats (§7): the banner above the composer, and the ✕ on a row
+   of the sidebar's "Temporary" group. */
+.temp-strip { flex: none; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 6px 22px; margin-top: 4px; width: 100%; max-width: calc(110ch + 44px);
+  margin-inline: auto; color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
+.temp-strip > span:first-child { flex: 1; }
+/* Export (§6): the head's menu sits at the far end; the sidebar's ⋯ ends the
+   filter's line and never shrinks. */
+.chat-head .export-menu { margin-left: auto; }
+/* "Back to <folder>" (chat-plane §9.10): an ongoing folder's current thread
+   from another one. The name gives way first. */
+.chat-head > .chat-back { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 4px;
+  min-width: 0; max-width: 16rem; color: var(--accent); }
+.chat-back svg { flex: none; width: 14px; height: 14px; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.chat-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Where a user message was written, as its app said (§9.10): one line under
+   the bubble, the whole sentence on hover. */
+.msg-origin { max-width: 100%; margin-top: 3px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-3); }
+.export-all { flex: none; }
+.thread-x { border: 0; background: none; color: var(--text-3); cursor: pointer;
+  padding: 0 5px; font-size: 11px; }
+.thread-x:hover { color: var(--text); }
+
+/* Archived-thread strip, above the composer: when it was filed away, when
+   the purge sweep takes it, and a way back. */
+.archive-strip { flex: none; display: flex; align-items: center;
+  justify-content: space-between; gap: 10px; padding: 6px 22px; margin-top: 4px;
+  color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
+
+/* Attachment chips: the composer's own drafts (uploading/uploaded/failed),
+   and the ones a sent message carries above its text. Both reuse the
+   `.chip`/`.chip-x` look. */
+.chip-row { flex: none; display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 6px 22px 0; }
+/* Inside a message bubble rather than the page column: shrink to content,
+   none of the composer's page-width centring. */
+.msg-user .msg-attach-row { width: auto; max-width: 100%; margin: 0; padding: 0; }
+/* `height: auto` plus a `min-height` floor, not `.chip`'s fixed `height`: an
+   upload error can be longer than the chip is wide, and it wraps in full
+   rather than being clipped (the rule against silent truncation)
+   — the chip grows to fit it instead of the wrapped lines overflowing a
+   height that never grew. */
+.attach-chip { height: auto; min-height: 26px; padding: 3px 4px; cursor: default;
+  background: var(--surface-hi); color: var(--text); max-width: 220px; }
+.attach-chip[role="button"] { cursor: pointer; }
+.attach-chip[role="button"]:hover { background: var(--surface); }
+.attach-chip.err { background: var(--err-bg); color: var(--err); }
+.attach-chip.warn { background: var(--amber-bg); color: var(--amber); }
+/* The name still ellipsizes (the full name is one hover away in its
+   `title`) — a filename has no useful information past its start the way an
+   error message does. */
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 120px; }
+.chip-err-text { white-space: normal; overflow-wrap: anywhere; }
+.chip-thumb { width: 18px; height: 18px; border-radius: 4px; object-fit: cover;
+  flex: none; }
+.chip-warn-mark { color: var(--amber); }
+.chip-dot-pending { width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--text-3); animation: blink 1.4s ease-in-out infinite; }
+.attach-modal-img { max-width: 100%; display: block; border-radius: 8px; }
+/* A picture whose bytes did not come through the Chat's transport
+   (chat_bytes::ChatImg): a marked box in its place, the reason in its
+   tooltip, and as text where the box is larger than a chip's thumbnail. */
+.bytes-failed { display: inline-flex; align-items: center; gap: 6px;
+  min-width: 18px; min-height: 18px; padding: 2px 6px; box-sizing: border-box;
+  border: 1px dashed var(--amber); border-radius: 4px; color: var(--text-2);
+  font-size: var(--fs-sm); overflow: hidden; }
+.bytes-failed-mark { color: var(--amber); flex: none; }
+.chip-thumb.bytes-failed { padding: 0; justify-content: center; }
+.chip-thumb.bytes-failed .bytes-failed-why { display: none; }
+
+/* the source viewer: the extracted text, the cited chunk marked */
+.kb-src-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 4px; }
+.kb-src-where { margin-bottom: 8px; }
+.kb-src { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono);
+  font-size: 12.5px; line-height: 1.55; color: var(--text); }
+mark.kb-hl { background: var(--amber-bg); color: var(--text);
+  box-shadow: 0 0 0 1px var(--amber); border-radius: 2px; }
+
+/* chat search: the sidebar's Messages section and the flash on a revealed hit */
+.msg-hits { border-top: 1px solid var(--border); margin-top: 8px; }
+.msg-hits-arch { display: flex; align-items: center; gap: 4px; padding: 0 6px 4px; font-size: 11.5px; }
+.msg-hit-list { display: flex; flex-direction: column; gap: 8px; padding: 2px 0; }
+.msg-hit-thread { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.msg-hit-title { all: unset; cursor: pointer; padding: 2px 6px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; }
+.msg-hit-meta { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; padding: 0 6px;
+  font-size: 11px; }
+.msg-hit-meta:empty { display: none; }
+.msg-hit { all: unset; cursor: pointer; display: grid; grid-template-columns: 44px minmax(0, 1fr);
+  gap: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px; color: var(--text-2);
+  line-height: 1.4; }
+.msg-hit-who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding-top: 1px; }
+.msg-hit-text { overflow-wrap: anywhere; }
+.msg-hit-title:hover, .msg-hit:hover, .msg-hit-title:focus-visible, .msg-hit:focus-visible {
+  background: var(--surface); color: var(--text); }
+.msg-hit-text mark { background: var(--amber-bg); color: var(--text); border-radius: 2px; padding: 0 1px; }
+.msg-hit-more { padding: 0 6px; font-size: 11px; }
+.msg-item.msg-flash { animation: msg-flash 1.5s ease-out; }
+@keyframes msg-flash {
+  0%, 40% { background: var(--amber-bg); box-shadow: 0 0 0 4px var(--amber-bg); }
+  100% { background: transparent; box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-item.msg-flash { animation: none; background: var(--amber-bg); box-shadow: 0 0 0 4px var(--amber-bg); }
+}
+
+/* ===== Chat knowledge (chat-complete §9.3): settings section, `#` picker,
+   chips, the retrieval summary above an answer, citation badges ===== */
+.kb-section .kb-pick { display: flex; align-items: center; gap: 8px; padding: 2px 0; flex-wrap: wrap; margin-bottom: 0; }
+.kb-warn { color: var(--amber); font-size: 11.5px; }
+.kb-gone .mono { text-decoration: line-through; }
+.kb-mode { margin: 8px 0 10px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.kb-chip { background: var(--accent-bg); color: var(--text); }
+.kb-chip.warn { background: var(--amber-bg); color: var(--amber); }
+.kb-chip-tag { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .04em;
+  color: var(--accent); padding: 0 3px; }
+.kb-chip.warn .kb-chip-tag { color: var(--amber); }
+.msg-editor .kb-chips { padding: 6px 0 0; }
+.composer-kb svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.kb-pop .mp-row { cursor: pointer; }
+.kb-ctx { margin-bottom: 6px; font-size: 12.5px; }
+.kb-ctx summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+.kb-ctx-sum { margin-right: 6px; }
+.kb-ctx.empty summary { color: var(--amber); }
+.kb-notes { margin: 4px 0 0; padding-left: 18px; color: var(--amber); font-size: 12px; }
+.kb-excerpts { list-style: none; margin: 6px 0 4px; padding: 0; display: flex;
+  flex-direction: column; gap: 4px; }
+.kb-ex { all: unset; box-sizing: border-box; cursor: pointer; display: grid; width: 100%;
+  grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 8px; align-items: baseline; }
+.kb-ex:hover, .kb-ex:focus-visible { background: var(--surface); border-color: var(--border-strong); }
+.kb-ex-n { font: 600 11px var(--mono); color: var(--accent); text-align: center; }
+.kb-ex-file { font-weight: 500; overflow-wrap: anywhere; }
+.kb-ex-head { grid-column: 2 / 4; font-size: 11.5px; overflow-wrap: anywhere; }
+.kb-ex-text { grid-column: 2 / 4; color: var(--text-2); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.md .cite { display: inline-block; min-width: 1.5em; padding: 0 5px; margin: 0 1px; border-radius: 999px;
+  font: 600 11px/1.6 var(--mono); text-align: center; vertical-align: 1px; cursor: pointer;
+  color: var(--accent); background: var(--accent-bg); }
+.md .cite::before { content: "["; opacity: .6; }
+.md .cite::after { content: "]"; opacity: .6; }
+.md .cite:hover, .md .cite:focus-visible { outline: 1px solid var(--accent); }
+.kb-ex .mono-sm { grid-column: 3; grid-row: 1; }
+.kb-ex-n { grid-row: 1; }
+
+/* --- Chat attachment kinds (chat-complete §8): chip icons and facts, the
+   PDF Text | Pages switch, the Send blockers, the extracted-text viewer. --- */
+.attach-chip.rich { max-width: 100%; flex-wrap: wrap; row-gap: 2px; }
+.attach-ico { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none;
+  stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; color: var(--text-2); }
+.chip-name.chip-open { cursor: pointer; }
+.chip-name.chip-open:hover { text-decoration: underline; }
+.chip-fact { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.chip-fact.warn { color: var(--amber); white-space: normal; }
+.chip-fact::before { content: "·"; margin-right: 6px; color: var(--text-3); }
+.attach-blockers { flex-direction: column; gap: 2px; }
+.attach-blocker { color: var(--amber); }
+/* What a draft becomes on the way (a GPU block's fallback that cannot see):
+   amber like the blockers above, and Send stays on. */
+.attach-hints { flex-direction: column; gap: 2px; }
+.attach-hint { color: var(--amber); }
+.viewer-meta { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px; }
+.attach-text { margin: 0; white-space: pre-wrap;
+  overflow-wrap: anywhere; font-family: var(--mono, monospace); font-size: 12px; }
+/* A reply the server refused to store: dimmed, with its note (Copy only). */
+.msg-unsaved > .md, .msg-unsaved > .reasoning { opacity: .6; }
+.msg-unsaved-note { color: var(--amber); }
+/* A reply a fallback that cannot see answered: what it got in the images' place. */
+.msg-images-note { color: var(--amber); }
+
+/* A gated tool call (client-apps design §6): the card that waits for a
+   decision joins the bar with Approve and Decline under it; a call that did
+   not run says why in a line under its card. */
+.tool-card.await { margin-bottom: 0; border-color: var(--accent);
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.tool-state { font-family: var(--mono); font-size: 11.5px; }
+.tool-state.await, .tool-state.sending { color: var(--accent); }
+.tool-state.declined, .tool-state.moved, .tool-state.held { color: var(--text-3); }
+.tool-state.notrun { color: var(--amber); }
+.tool-ask, .tool-batch { display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 6px 12px; padding: 6px 10px; margin: 0 0 6px;
+  border: 1px solid var(--accent); background: var(--surface);
+  border-top: 0; border-radius: 0 0 10px 10px; font-size: 12.5px; }
+.tool-ask-text { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
+.tool-ask-btns { display: inline-flex; gap: 6px; }
+.tool-ask .btn.on:not(.primary), .tool-batch .btn.on:not(.primary) {
+  background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+.tool-batch { border-top: 1px solid var(--accent); border-radius: 10px; }
+.tool-note { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--text-3); }
+.tool-said { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--err); }
+
+/* MCP Tasks in the Chat (MCP Tasks design §6). A late result is a card of
+   its own in the transcript, its status in its colour: completed green,
+   failed red, abandoned amber, cancelled grey. */
+.job-card .job-sum { display: inline-flex; align-items: baseline; flex-wrap: wrap;
+  gap: 4px 8px; width: calc(100% - 1.2em); vertical-align: top; }
+.job-card .job-head { color: var(--text-2); }
+.job-card .type-badge { margin-left: 0; }
+.job-card .job-when { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
+.job-card.completed { border-left: 3px solid var(--ok); }
+.job-card.failed { border-color: var(--err); border-left-width: 3px; }
+.job-card.abandoned { border-color: var(--amber); border-left-width: 3px; }
+.job-card.cancelled { border-left: 3px solid var(--text-3); }
+.tool-state.completed { color: var(--ok); }
+.tool-state.failed { color: var(--err); }
+.tool-state.abandoned { color: var(--amber); }
+.tool-state.cancelled { color: var(--text-3); }
+.tool-state.working { color: var(--accent); }
+.tool-state.input_required { color: var(--amber); }
+.job-unanswered { color: var(--accent); }
+/* The open thread's jobs, above the composer, in the composer's column. Many
+   jobs (there is no cap) scroll inside the strip rather than squeezing the
+   transcript away; the head counts them all. */
+.job-strip { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
+  padding: 0 22px; display: flex; flex-direction: column; gap: 4px; max-height: 35vh;
+  overflow-y: auto; font-size: 12.5px; }
+.job-strip-head { display: flex; align-items: baseline; justify-content: space-between;
+  flex-wrap: wrap; gap: 2px 12px; color: var(--text-2); }
+.job-strip-head .job-count { font-weight: 500; }
+.job-strip-head .job-fresh { font-size: 11.5px; }
+.job-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); }
+/* A running job is not a focused field: the neutral border, a 3px left accent as the
+   result cards have, the blue dot and status word say it is live. */
+.job-row.working { border-left: 3px solid var(--accent); }
+.job-row.input_required { border-left: 3px solid var(--amber); }
+.job-row .type-badge { margin-left: 0; }
+.job-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
+.job-dot.live { background: var(--accent); animation: blink 1.4s ease-in-out infinite; }
+.job-row.input_required .job-dot.live { background: var(--amber); }
+.job-msg { color: var(--text); overflow-wrap: anywhere; }
+.job-since { font-size: 11.5px; }
+.job-wait { color: var(--amber); overflow-wrap: anywhere; }
+.job-cancel { margin-left: auto; }
+/* A refused Answer: the gateway's reason, until dismissed or the thread changes. */
+.job-said { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
+  padding: 0 22px; display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; font-size: 12.5px; color: var(--amber); }
+.answer-btn { flex: none; border-color: var(--accent); color: var(--accent); }
+.answer-btn:hover:not(:disabled) { background: var(--accent-bg); }
+
+/* ---------- the narrow layout (chat/narrow.rs) ----------
+   Below 520 px of the Chat's own width the thread list and the thread's
+   settings have no rails: they are drawers over the conversation (the kit's
+   .dock.drawer), opened from buttons in the head, and the conversation takes
+   the whole column with tighter sides. It works from 280 px up; a Firefox
+   sidebar opens at 338. */
+.chat-drawer-btn { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  gap: 4px; height: 30px; min-width: 30px; padding: 0 6px; border-radius: 8px; }
+.chat-drawer-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.chat-drawer-btn .count { margin: 0; }
+.chat-drawer-btn[aria-expanded="true"] { background: var(--accent-bg); color: var(--accent); }
+.chat-shell.narrow { --chat-side: 10px; }
+.chat-shell.narrow .chat-head { padding: 8px 10px; gap: 6px; }
+/* The first line is the list's button, New chat, the model and the settings'
+   button; the way back, then the badges and Export wrap under them. Narrow,
+   the way back is its icon and the folder's name. */
+.chat-shell.narrow .chat-head > * { order: 2; }
+.chat-shell.narrow .chat-head > :is(.chat-drawer-btn, .model-picker) { order: 0; }
+.chat-shell.narrow .chat-head > .chat-back { order: 1; max-width: 10rem; }
+.chat-shell.narrow .chat-back-to { display: none; }
+.chat-shell.narrow .chat-head .model-picker { flex: 1 1 8rem; min-width: 0; }
+.chat-shell.narrow .chat-scroll { padding: 12px 10px; --mc-stick-gap: 12px; }
+.chat-shell.narrow :is(.stats-row, .composer-wrap, .chip-row, .archive-strip, .temp-strip,
+  .job-strip, .job-said) { padding-left: 10px; padding-right: 10px; }
+.chat-shell.narrow .composer-wrap { padding-bottom: 10px; }
+.chat-shell.narrow .stats-row { flex-wrap: wrap; row-gap: 2px; }
+.chat-shell.narrow :is(.msg-user, .msg-item-user) { max-width: 90%; }
+.chat-shell.narrow .chat-empty .empty { padding: 0 16px; text-align: center; }
+.chat-shell.narrow .chat-empty:has(> .chat-empty-machine > *) { padding: 12px 10px;
+  --mc-stick-gap: 12px; }

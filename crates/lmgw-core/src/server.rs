@@ -15,6 +15,8 @@ use crate::principal::Cap;
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 
+/// `x-lmgw-background` (per-request background design §3).
+mod background;
 /// The connect info both listeners serve with (device link design §4.5).
 mod conn;
 /// The principal on the device listener (device link design §4.7).
@@ -27,7 +29,9 @@ mod face;
 /// `principal_mw` and the gate (principals §3.5, device link §4.7).
 mod gate;
 mod stop;
-pub use conn::{canonical, Conn, DevicePeer, SocketHandle, Via};
+use background::background_or_400;
+pub use background::BACKGROUND_HEADER;
+pub use conn::{canonical, Conn, DevicePeer, SocketHandle, TimersOverride, Via};
 pub use device_listener::{peer_key, DeviceListener};
 pub use face::{serves_on, DEVICE_ROUTES};
 pub(crate) use gate::{require, require_admin_token};
@@ -64,6 +68,11 @@ fn build_router_for(state: SharedState, via: Via) -> Router {
         // these are how a client reads, continues from, and drops one.
         .route("/responses/{id}", get(response_get).delete(response_delete))
         .route("/responses/{id}/input_items", get(response_input_items))
+        // The OpenAI SDKs' `responses.input_tokens.count()` (api-compat
+        // design §9): a thin adapter onto the counter, as
+        // `/messages/count_tokens` is. A static segment, so it wins over
+        // `{id}` above.
+        .route("/responses/input_tokens", post(responses_input_tokens))
         .route("/completions", post(legacy_completions))
         .route("/embeddings", post(embeddings))
         // quickdoc §9a: the cross-encoder half of the aux router. Jina and TEI
@@ -180,7 +189,20 @@ fn build_router_for(state: SharedState, via: Via) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             gate::principal_mw,
-        ));
+        ))
+        // Outside the gate, so its refusals carry them too (machine-check
+        // design WP13, D90): `X-Content-Type-Options: nosniff` and
+        // `Content-Security-Policy: sandbox` on every answer of this origin,
+        // a second policy beside one the answer already has (an agent
+        // container's on its MCP face, an upstream's). A navigation carries
+        // the owner's cookie, so whatever a route relays or stores is opened
+        // at the gateway's origin with the owner's rights unless the answer
+        // itself says otherwise; API clients ignore both headers. Exempt is
+        // exactly what `web::ui::routes` answers (the dashboard's page, its
+        // assets and its fallback), which marks itself `DashboardOwned`.
+        // Inside the faces and the agent origins' dispatch: an agent's origin
+        // is answered above this and is the container's own.
+        .layer(middleware::map_response(crate::web::stored::by_default));
     let routes = match via {
         Via::Plain => plain_face(&state, routes),
         Via::Devices => face::device_face(routes),
@@ -274,6 +296,7 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/v1/responses/{id}", Cap::Inference),
     ("DELETE", "/v1/responses/{id}", Cap::Inference),
     ("GET", "/v1/responses/{id}/input_items", Cap::Inference),
+    ("POST", "/v1/responses/input_tokens", Cap::Inference),
     ("POST", "/v1/completions", Cap::Inference),
     ("POST", "/v1/embeddings", Cap::Inference),
     ("POST", "/v1/rerank", Cap::Inference),
@@ -441,6 +464,7 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/chat/api/threads/{id}/transcribe", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/speech/stop", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/pin", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/title", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/move", Cap::Chat),
     ("GET", "/chat/api/search", Cap::Chat),
     ("GET", "/chat/api/profiles", Cap::Chat),
@@ -474,6 +498,11 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ),
     (
         "POST",
+        "/chat/api/threads/{id}/media/{call_id}/cancel",
+        Cap::Chat,
+    ),
+    (
+        "POST",
         "/chat/api/threads/{id}/messages/{mid}/delete",
         Cap::Chat,
     ),
@@ -498,9 +527,19 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/chat/api/attachments/{id}/mode", Cap::Chat),
     ("POST", "/chat/api/attachments/{id}/transcribe", Cap::Chat),
     ("GET", "/chat/api/attachments/{id}/text", Cap::Chat),
-    // The owner's alone: the dashboard's Chat page reads the rows a `chat`
-    // frame named (review CL-11). A device's feed carries rows already.
-    ("GET", "/chat/api/threads/rows", Cap::Admin),
+    ("POST", "/chat/api/attachments/{id}/media", Cap::Chat),
+    ("GET", "/chat/api/media/defaults", Cap::Chat),
+    // The rows a change that names only messages named (review CL-11):
+    // every Chat client's (chat-plane design D2).
+    ("GET", "/chat/api/threads/rows", Cap::Chat),
+    // The Chat's reads beside its threads (chat-plane design §2): what it
+    // read from `/api` before, scoped to the caller.
+    ("GET", "/chat/api/settings", Cap::Chat),
+    ("GET", "/chat/api/tools", Cap::Chat),
+    ("GET", "/chat/api/tools/{label}", Cap::Chat),
+    ("GET", "/chat/api/knowledge/bases", Cap::Chat),
+    ("GET", "/chat/api/knowledge/files/{id}/text", Cap::Chat),
+    ("GET", "/chat/api/knowledge/files/{id}/original", Cap::Chat),
     // -- The labs and their store: the owner's own playgrounds -------------
     ("GET", "/audio-lab/api/models", Cap::Admin),
     ("GET", "/audio-lab/api/voices", Cap::Admin),
@@ -519,6 +558,21 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/image-lab/api/groups", Cap::Admin),
     ("POST", "/image-lab/api/groups/edit", Cap::Admin),
     ("POST", "/image-lab/api/groups/{id}/run", Cap::Admin),
+    ("GET", "/voice-lab/api/model", Cap::Admin),
+    ("GET", "/voice-lab/api/sentences", Cap::Admin),
+    ("POST", "/voice-lab/api/sentences", Cap::Admin),
+    ("GET", "/voice-lab/api/rounds", Cap::Admin),
+    ("POST", "/voice-lab/api/rounds", Cap::Admin),
+    ("POST", "/voice-lab/api/rounds/clear", Cap::Admin),
+    ("POST", "/voice-lab/api/rounds/{id}/delete", Cap::Admin),
+    (
+        "GET",
+        "/voice-lab/api/rounds/{id}/candidates/{n}",
+        Cap::Admin,
+    ),
+    ("GET", "/voice-lab/api/samples", Cap::Admin),
+    ("POST", "/voice-lab/api/samples", Cap::Admin),
+    ("POST", "/voice-lab/api/clone-check", Cap::Admin),
     ("GET", "/decision-lab/api/models", Cap::Admin),
     ("POST", "/decision-lab/api/count", Cap::Admin),
     ("POST", "/decision-lab/api/groups", Cap::Admin),
@@ -555,6 +609,38 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/labs/api/{lab}/presets/{id}", Cap::Admin),
     ("POST", "/labs/api/{lab}/presets/{id}/delete", Cap::Admin),
     ("GET", "/labs/api/artifacts/{id}", Cap::Admin),
+    // -- Transfers between devices (device transfers design §9, §10) -----
+    // `Transfer`: the owner and paired devices, on both listeners. Who of
+    // them does what is the handlers' (§1).
+    ("GET", "/transfers/api/targets", Cap::Transfer),
+    ("GET", "/transfers/api/transfers", Cap::Transfer),
+    ("POST", "/transfers/api/transfers", Cap::Transfer),
+    ("GET", "/transfers/api/transfers/{id}", Cap::Transfer),
+    (
+        "GET",
+        "/transfers/api/transfers/{id}/content",
+        Cap::Transfer,
+    ),
+    (
+        "PUT",
+        "/transfers/api/transfers/{id}/content",
+        Cap::Transfer,
+    ),
+    (
+        "POST",
+        "/transfers/api/transfers/{id}/received",
+        Cap::Transfer,
+    ),
+    (
+        "POST",
+        "/transfers/api/transfers/{id}/decline",
+        Cap::Transfer,
+    ),
+    (
+        "POST",
+        "/transfers/api/transfers/{id}/cancel",
+        Cap::Transfer,
+    ),
     // -- Service mode's reverse proxy --------------------------------------
     // The UI face is not here: it is an origin now (origins §4.2), dispatched
     // on `Host` above the router, with no principal resolved and no capability
@@ -746,6 +832,10 @@ pub async fn chat_upkeep(state: &crate::state::AppState) {
             // device's session closed — before the open feeds read the
             // records (client-apps design §2.2, §1.6's close-code note).
             state.chat_live.purged(&purged).await;
+            // And their running image and audio calls stop.
+            for id in &purged {
+                state.media_calls.thread_gone(*id);
+            }
             state.chat_feed.wake();
             // Their open MCP tasks owe a cancel now (MCP Tasks design §1.5).
             state.mcp.resume_tasks().await;
@@ -796,20 +886,13 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
         }
     });
 
+    // The downloads the last shutdown cut go on from their `.part`, unless
+    // the connection is metered (find-a-model design D122); then the gets
+    // that waited for them go on from waiting.
     let st = state.clone();
     tokio::spawn(async move {
-        let rows = crate::store::list_hf_models(&st.db)
-            .await
-            .unwrap_or_default();
-        for row in rows
-            .into_iter()
-            .filter(|r| r.status == "queued" || r.status == "downloading")
-        {
-            tracing::info!("resuming hf download {}/{}", row.repo, row.file);
-            if let Err(e) = crate::jobs::hf_download::start(&st, &row).await {
-                tracing::warn!("resuming hf download {}/{}: {e}", row.repo, row.file);
-            }
-        }
+        crate::jobs::hf_download::resume_at_boot(&st).await;
+        crate::jobs::model_get::reattach_at_boot(&st).await;
     });
 
     // Reconcile MCP southbound connections once on boot (§9): connect enabled
@@ -837,6 +920,13 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     let st = state.clone();
     tokio::spawn(async move { crate::runtime::lifecycle::boot(&st).await });
 
+    // The machine check at boot (machine-check design §2.6), then lmgw's own
+    // CDI spec where an NVIDIA card's driver works (§3.6.2). Only reads,
+    // apart from that spec in lmgw's own runtime dir; spawned so a slow
+    // podman or NVML never holds up the server.
+    let st = state.clone();
+    tokio::spawn(async move { crate::machine::boot(&st).await });
+
     // Agent-container reconciliation and the run-dir sweep (container-runtime
     // §6.4), beside the model runtime's boot and for the same reasons. Here
     // rather than in `AppState::init`: both act on `container_prefix`, and a
@@ -851,6 +941,12 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     // container younger than this process is never a leftover.
     let st = state.clone();
     tokio::spawn(async move { crate::mcp::container::boot_sweep(&st).await });
+
+    // The fallbacks migration 0095 could not type without the upstream
+    // catalogs (openai egress design §14.10): once, after the start that ran
+    // it, in the background, as `/v1/models` fetches them.
+    let st = state.clone();
+    tokio::spawn(async move { crate::ops::fallback::first_start_type_check(&st).await });
 
     // The idle reaper (§3.7). Its own task rather than a rider on the 5 s
     // status tick: it is the one background job that *stops containers*, and
@@ -927,6 +1023,17 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
                 Ok(n) => tracing::info!("evicted {n} stored responses"),
                 Err(e) => tracing::warn!("response GC failed: {e}"),
             }
+            // The records of native responses (openai egress design §6), by
+            // the same retention hours: the upstream keeps its own for its
+            // own time, and a record older than lmgw's retention is evicted
+            // like a stored response would be.
+            match crate::store::gc_native_responses(&st.db, settings.responses_retention_hours)
+                .await
+            {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("evicted {n} native response records"),
+                Err(e) => tracing::warn!("native response GC failed: {e}"),
+            }
             // Finished background-job rows (§9c). Same two visible knobs as the
             // request log above; both `0` keeps every job ever run.
             match crate::store::prune_jobs(
@@ -941,6 +1048,10 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
                 Err(e) => tracing::warn!("job pruning failed: {e}"),
             }
             chat_upkeep(&st).await;
+            // Transfers between devices (device transfers design §7, §8):
+            // expiry, a device that went, the ended rows' retention, stray
+            // files.
+            crate::transfers::upkeep(&st).await;
         }
     });
 
@@ -1226,31 +1337,62 @@ async fn responses(
         }
     };
     let ctx = ctx_of(Some(ctx));
-    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_openai_json) {
+    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_openai_json)
+        .or_else(|| background_or_400(&ctx, GatewayError::to_openai_json))
+    {
         return r;
     }
     crate::responses::handle_responses(state, ctx, body).await
 }
 
+/// `POST /v1/responses/input_tokens` — the Responses body and error
+/// dialect, the reasoning headers judged as on `/v1/responses` (their tier
+/// shapes what is counted), then [`proxy::handle_responses_input_tokens`].
+async fn responses_input_tokens(
+    State(state): State<SharedState>,
+    axum::Extension(ctx): axum::Extension<RequestCtx>,
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            let err = body_error(&state, e);
+            return (err.http_status(), Json(err.to_responses_json())).into_response();
+        }
+    };
+    let ctx = ctx_of(Some(ctx));
+    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_responses_json)
+        .or_else(|| background_or_400(&ctx, GatewayError::to_responses_json))
+    {
+        return r;
+    }
+    proxy::handle_responses_input_tokens(state, ctx, body).await
+}
+
 async fn response_get(
     State(state): State<SharedState>,
+    axum::Extension(ctx): axum::Extension<RequestCtx>,
     id: axum::extract::Path<String>,
+    uri: axum::http::Uri,
 ) -> Response {
-    crate::responses::get_response(state, id).await
+    crate::responses::get_response(state, ctx, id, uri.query()).await
 }
 
 async fn response_delete(
     State(state): State<SharedState>,
+    axum::Extension(ctx): axum::Extension<RequestCtx>,
     id: axum::extract::Path<String>,
 ) -> Response {
-    crate::responses::delete_response(state, id).await
+    crate::responses::delete_response(state, ctx, id).await
 }
 
 async fn response_input_items(
     State(state): State<SharedState>,
+    axum::Extension(ctx): axum::Extension<RequestCtx>,
     id: axum::extract::Path<String>,
+    uri: axum::http::Uri,
 ) -> Response {
-    crate::responses::list_input_items(state, id).await
+    crate::responses::list_input_items(state, ctx, id, uri.query()).await
 }
 
 async fn chat_completions(
@@ -1266,7 +1408,9 @@ async fn chat_completions(
         }
     };
     let ctx = ctx_of(Some(ctx));
-    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_openai_json) {
+    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_openai_json)
+        .or_else(|| background_or_400(&ctx, GatewayError::to_openai_json))
+    {
         return r;
     }
     proxy::handle_chat(state, ClientProto::OpenaiChat, ctx, body).await
@@ -1285,7 +1429,9 @@ async fn anthropic_messages(
         }
     };
     let ctx = ctx_of(Some(ctx));
-    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_anthropic_json) {
+    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_anthropic_json)
+        .or_else(|| background_or_400(&ctx, GatewayError::to_anthropic_json))
+    {
         return r;
     }
     proxy::handle_chat(state, ClientProto::AnthropicMessages, ctx, body).await
@@ -1303,6 +1449,9 @@ async fn legacy_completions(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_legacy_completions(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1318,6 +1467,9 @@ async fn embeddings(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_embeddings(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1333,6 +1485,9 @@ async fn rerank(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_rerank(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1352,7 +1507,9 @@ async fn messages_count_tokens(
         }
     };
     let ctx = ctx_of(Some(ctx));
-    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_anthropic_json) {
+    if let Some(r) = reasoning_or_400(&ctx, GatewayError::to_anthropic_json)
+        .or_else(|| background_or_400(&ctx, GatewayError::to_anthropic_json))
+    {
         return r;
     }
     proxy::handle_messages_count_tokens(state, ctx, body).await
@@ -1370,6 +1527,9 @@ async fn count_tokens(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_count_tokens(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1389,6 +1549,9 @@ async fn audio_speech(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_audio_speech(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1399,6 +1562,9 @@ async fn audio_transcriptions(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     req: Request,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_audio_upload(
         state,
         ctx_of(Some(ctx)),
@@ -1416,6 +1582,9 @@ async fn audio_transcription_details(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     req: Request,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_audio_upload(
         state,
         ctx_of(Some(ctx)),
@@ -1432,6 +1601,9 @@ async fn audio_alignments(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     req: Request,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_audio_upload(state, ctx_of(Some(ctx)), req, proxy::AudioUpload::Alignment).await
 }
 
@@ -1451,6 +1623,9 @@ async fn image_generations(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_image_generation(state, ctx_of(Some(ctx)), body).await
 }
 
@@ -1462,6 +1637,9 @@ async fn image_edits(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     req: Request,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     proxy::handle_image_edit(state, ctx_of(Some(ctx)), req).await
 }
 
@@ -1483,10 +1661,16 @@ pub(crate) struct VoicesQuery {
 }
 
 /// `GET /v1/audio/voices?model=<alias>` — voice ids/presets of a TTS model.
+/// `?probe=engine` admits a local model, so `x-lmgw-background` is read here
+/// too (per-request background design §3).
 async fn audio_voices(
     State(state): State<SharedState>,
+    axum::Extension(ctx): axum::Extension<RequestCtx>,
     axum::extract::Query(q): axum::extract::Query<VoicesQuery>,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     if q.model.trim().is_empty() {
         let err = GatewayError::BadRequest("missing 'model' query parameter".into());
         return (err.http_status(), Json(err.to_openai_json())).into_response();
@@ -1498,7 +1682,7 @@ async fn audio_voices(
             return (err.http_status(), Json(err.to_openai_json())).into_response();
         }
     };
-    proxy::handle_audio_voices(state, q.model.trim(), probe).await
+    proxy::handle_audio_voices(state, q.model.trim(), probe, ctx.origin()).await
 }
 
 /// Shared body decode for the two `/v1/tasks/*` routes.
@@ -1521,6 +1705,9 @@ async fn task_run(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     match task_body(body) {
         Ok(body) => proxy::handle_task_run(state, ctx_of(Some(ctx)), body).await,
         Err(resp) => resp,
@@ -1533,6 +1720,9 @@ async fn task_stream(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    if let Some(r) = background_or_400(&ctx, GatewayError::to_openai_json) {
+        return r;
+    }
     match task_body(body) {
         Ok(body) => proxy::handle_task_stream(state, ctx_of(Some(ctx)), body).await,
         Err(resp) => resp,
@@ -1591,7 +1781,8 @@ fn openai_model_object(e: &ExposedEntry) -> Value {
 /// The Anthropic-shaped model object (design §2.2): the Anthropic top level
 /// plus that SDK's typed names as **aliases** over the same numbers —
 /// `max_input_tokens` beside `context_window`, `max_tokens` beside
-/// `max_output_tokens`. One capability schema, whichever SDK the caller holds.
+/// `max_output_tokens`. The capability object is the OpenAI shape's, plus
+/// Anthropic's ten capability blocks (`capabilities::anthropic_blocks`).
 fn anthropic_model_object(e: &ExposedEntry) -> Value {
     let created_at = chrono::DateTime::from_timestamp(e.created, 0)
         .unwrap_or_default()
@@ -1601,6 +1792,9 @@ fn anthropic_model_object(e: &ExposedEntry) -> Value {
         "id": e.name,
         "display_name": e.name,
         "created_at": created_at,
+        // Required on Anthropic's ModelInfo: a model lmgw lists is one it
+        // serves.
+        "lifecycle": "active",
     });
     if let Some(ctx) = e.context_length {
         obj["context_window"] = json!(ctx);
@@ -1613,8 +1807,10 @@ fn anthropic_model_object(e: &ExposedEntry) -> Value {
     if let Some(p) = &e.pricing {
         obj["pricing"] = json!({"prompt": p.prompt, "completion": p.completion});
     }
+    // lmgw's own object with Anthropic's blocks merged in (§2.2.1);
+    // absent, as in the OpenAI shape, when the facts could not be read.
     if let Some(caps) = &e.capabilities {
-        obj["capabilities"] = serde_json::to_value(caps).unwrap_or(Value::Null);
+        obj["capabilities"] = crate::capabilities::anthropic_blocks::anthropic_capabilities(caps);
     }
     if !e.notes.is_empty() {
         obj["notes"] = json!(e.notes);
@@ -1652,6 +1848,14 @@ fn lmgw_block() -> Value {
             "A 503 whose error code is gpu_benchmark means a benchmark run has the GPU to \
              itself; local models come back when it finishes or is canceled, cloud aliases \
              still work. Do not retry in a loop.",
+            "A 503 whose error code is gpu_deferred means a background request \
+             (x-lmgw-background: on, or a background candidate alias) was deferred because \
+             the GPU is busy with other work; retry later.",
+            "A 503 whose error code is gpu_setup means a local model could not start because \
+             the graphics card is not ready on the computer lmgw runs on (its driver, or the \
+             piece that lets models use it); the message says what, and it is fixed there, in \
+             lmgw's own window, not by retrying. Cloud aliases still work. A 502 whose code is \
+             engine_download means the engine a local model runs in could not be downloaded.",
             "Local models start on first request; the first response after idle can take tens of \
              seconds (weights load).",
             "Local tool calling assumes llama-server's default --jinja; lmgw never passes \

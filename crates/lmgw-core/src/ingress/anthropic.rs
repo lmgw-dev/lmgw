@@ -4,11 +4,15 @@ use serde_json::{json, Value};
 
 use crate::error::GatewayError;
 use crate::ingress::{rand_id, ClientStreamEncoder};
+use crate::ir::structured::DEFAULT_SCHEMA_NAME;
 use crate::ir::{
-    ChatRequest, Completion, ContentPart, ImageSource, Message, Params, ReasoningControl, Role,
+    AnthropicBlock, BlockEvent, ChatRequest, Compaction, CompactionEvent, Completion, ContentPart,
+    ImageSource, JsonSchemaFormat, Message, Params, ReasoningControl, ResponseFormat, Role, Seal,
     StreamDelta, ToolChoice, ToolDef, ToolResultBlock, Usage,
 };
 use crate::sse::frame;
+
+mod compaction;
 
 /// Parse an Anthropic `/v1/messages` request body into the IR.
 pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError> {
@@ -97,6 +101,9 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
                     .get("input_schema")
                     .cloned()
                     .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                // The client's own, else Anthropic's default: not strict
+                // (ToolDef::strict).
+                strict: Some(t.get("strict").and_then(Value::as_bool).unwrap_or(false)),
             });
         }
     }
@@ -142,7 +149,11 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
                     .collect()
             })
             .unwrap_or_default(),
-        reasoning: parse_reasoning(body),
+        reasoning: parse_reasoning(body)?,
+        // A send's own, set by what the provider taught it.
+        reasoning_summary_refused: false,
+        // Anthropic's thinking has no summary choice.
+        reasoning_summary: None,
     };
 
     Ok(ChatRequest {
@@ -151,15 +162,73 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
         params,
         tools,
         tool_choice,
+        response_format: parse_output_format(body)?,
         stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
-        // Anthropic has no `response_format`/`grammar` equivalents; nothing to
-        // carry through (these only matter on the OpenAI→OpenAI route).
+        // Anthropic has no `grammar` or sampler-extension equivalents; nothing
+        // to carry through (these only matter on the OpenAI→OpenAI route).
         passthrough: Default::default(),
         // No template kwargs in this dialect.
         llama_kwargs_enabled: None,
         // A header, not a body field: the handler fills it from the request.
         anthropic_beta: Vec::new(),
+        // Anthropic's own field, kept whole for an Anthropic upstream, which
+        // answers for it; every other route names it ignored
+        // (`ChatRequest::fields_ignored`). A `null` is no request for it.
+        context_management: body
+            .get("context_management")
+            .filter(|v| !v.is_null())
+            .cloned(),
+        // On-demand compaction: kept whole for an Anthropic upstream, which
+        // answers it with a `compaction` block; every other route names it
+        // ignored.
+        compaction: body.get("compaction").filter(|v| !v.is_null()).cloned(),
+        // How Anthropic returns the thinking text: sent only to Anthropic,
+        // beside a type that takes it (`ChatRequest::fields_ignored`).
+        thinking_display: body
+            .pointer("/thinking/display")
+            .filter(|v| !v.is_null())
+            .cloned(),
     })
+}
+
+/// Anthropic's structured output (structured-output design §5):
+/// `output_config.format`, else the deprecated top-level `output_format`
+/// Anthropic still accepts (§11.12). Its one type, `json_schema`, carries a
+/// bare schema: the IR names it `response` (OpenAI requires a name, §11.4) and
+/// records `strict: true`, OpenAI's spelling of the constrained decoding
+/// Anthropic always applies. A format that is not an object, or has no string
+/// `type`, is malformed (`400 bad_request`); any other type has no
+/// translation and is refused by name (§11.19).
+fn parse_output_format(body: &Value) -> Result<Option<ResponseFormat>, GatewayError> {
+    let (at, f) = match (
+        body.pointer("/output_config/format"),
+        body.get("output_format"),
+    ) {
+        (Some(f), _) if !f.is_null() => ("output_config.format", f),
+        (_, Some(f)) if !f.is_null() => ("output_format", f),
+        _ => return Ok(None),
+    };
+    let o = f
+        .as_object()
+        .ok_or_else(|| GatewayError::BadRequest(format!("'{at}' must be an object")))?;
+    let t = o
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::BadRequest(format!("'{at}' has no string 'type'")))?;
+    match t {
+        "json_schema" => Ok(Some(ResponseFormat::JsonSchema(JsonSchemaFormat {
+            name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+            schema: o.get("schema").filter(|s| !s.is_null()).cloned(),
+            strict: Some(true),
+            ..Default::default()
+        }))),
+        other => Err(GatewayError::ResponseFormatUnsupported {
+            message: format!(
+                "'{at}' asks for type '{other}', which lmgw does not translate — json_schema is \
+                 the one type Anthropic defines"
+            ),
+        }),
+    }
 }
 
 /// Anthropic's own reasoning controls (§5.2): the `thinking` block and
@@ -170,9 +239,13 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
 /// `pub(crate)` for `POST /v1/messages/count_tokens` (api-docs design §5.2):
 /// its Anthropic route passes the body through, so it reads this tier on its
 /// own rather than through a full parse that would refuse a server tool.
-pub(crate) fn parse_reasoning(body: &Value) -> Option<ReasoningControl> {
+///
+/// Every `thinking` type Messages defines is read; one lmgw does not know is
+/// refused by name (`400`) rather than dropped, which would send the request
+/// without the thinking the client chose.
+pub(crate) fn parse_reasoning(body: &Value) -> Result<Option<ReasoningControl>, GatewayError> {
     let mut c = ReasoningControl::default();
-    if let Some(t) = body.get("thinking") {
+    if let Some(t) = body.get("thinking").filter(|t| !t.is_null()) {
         match t.get("type").and_then(Value::as_str) {
             Some("disabled") => c.enabled = Some(false),
             Some("enabled") => {
@@ -182,7 +255,24 @@ pub(crate) fn parse_reasoning(body: &Value) -> Option<ReasoningControl> {
             // `adaptive` is "think as much as you judge necessary" — enabled
             // with no budget, which is exactly the neutral triple.
             Some("adaptive") => c.enabled = Some(true),
-            _ => {}
+            // No up-front thinking, notes between tool calls: an off in
+            // Anthropic's own spelling, which its egress sends as written
+            // and every other route renders as its own off.
+            Some("between_tools") => {
+                c.enabled = Some(false);
+                c.between_tools = true;
+            }
+            Some(other) => {
+                return Err(GatewayError::BadRequest(format!(
+                    "thinking type {other:?} is not one lmgw knows (adaptive, between_tools, \
+                     disabled, enabled)"
+                )))
+            }
+            None => {
+                return Err(GatewayError::BadRequest(
+                    "'thinking' needs a string 'type'".into(),
+                ))
+            }
         }
     }
     if let Some(e) = body
@@ -191,7 +281,7 @@ pub(crate) fn parse_reasoning(body: &Value) -> Option<ReasoningControl> {
     {
         c.effort = Some(e.to_string());
     }
-    (!c.is_empty()).then_some(c)
+    Ok((!c.is_empty()).then_some(c))
 }
 
 fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
@@ -205,8 +295,16 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
         Some(Value::Array(blocks)) => {
             for b in blocks {
                 match b.get("type").and_then(Value::as_str) {
-                    Some("text") => parts.push(ContentPart::text(
+                    // A cited text block of an earlier answer keeps its
+                    // citations, for an Anthropic upstream to read again:
+                    // the client's own, with no scope.
+                    Some("text") => parts.push(ContentPart::cited(
                         b.get("text").and_then(Value::as_str).unwrap_or_default(),
+                        b.get("citations")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                        None,
                     )),
                     Some("image") => {
                         let src = b.get("source").cloned().unwrap_or_default();
@@ -233,10 +331,20 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                                     .to_string();
                                 parts.push(crate::ingress::openai::parse_image_url(&url));
                             }
-                            other => {
-                                return Err(GatewayError::Unsupported(format!(
-                                    "image source type {other:?}"
-                                )))
+                            // Any other source (a Files API `file`, a type
+                            // lmgw does not know) names what only Anthropic
+                            // holds: the block goes to an Anthropic-protocol
+                            // upstream as the client wrote it, as a document
+                            // with that source does, and every other upstream
+                            // is sent none of it, named `content.image`
+                            // (`ir::AnthropicBlock`).
+                            Some(_) => parts.push(ContentPart::AnthropicBlock(
+                                AnthropicBlock::from_client(b.clone()),
+                            )),
+                            None => {
+                                return Err(GatewayError::Unsupported(
+                                    "an image block without a source type".into(),
+                                ))
                             }
                         }
                     }
@@ -269,34 +377,59 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                     Some("thinking") => {
                         // The trace of an earlier assistant turn, replayed.
                         // Signed when Anthropic produced it; unsigned when this
-                        // gateway did (see `serialize_completion`), in which
-                        // case it is bound for an OpenAI-shaped upstream as
-                        // `reasoning_content` — llama-server's
-                        // `--reasoning-preserve` needs exactly this.
+                        // gateway did from a model without a seal (see
+                        // `serialize_completion`), in which case it is bound
+                        // for an OpenAI-shaped upstream as `reasoning_content`
+                        // — llama-server's `--reasoning-preserve` needs exactly
+                        // this. A signature this gateway wrote for an OpenAI
+                        // reasoning item (`lmgw-openai:…`, openai egress
+                        // design §7.3.2) is that item's seal again, kept with
+                        // an empty trace too: the seal is what the platform
+                        // reads. So is Anthropic's own signature: an omitted
+                        // display's block has no text, and its signature is
+                        // the thinking Anthropic reads back.
                         let text = b
                             .get("thinking")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        if !text.is_empty() {
+                        let signature = b
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty());
+                        let sealed = match signature.and_then(Seal::from_carrier) {
+                            Some(read) => Some(read.map_err(GatewayError::BadRequest)?),
+                            None => None,
+                        };
+                        if !text.is_empty() || signature.is_some() {
+                            // The client's own signature: no signer, it
+                            // goes as the client wrote it.
                             parts.push(ContentPart::Reasoning {
                                 text: text.to_string(),
-                                signature: b
-                                    .get("signature")
-                                    .and_then(Value::as_str)
-                                    .filter(|s| !s.is_empty())
-                                    .map(String::from),
+                                signature: signature.filter(|_| sealed.is_none()).map(String::from),
+                                sealed,
+                                signature_scope: None,
                             });
                         }
                     }
-                    // Encrypted by Anthropic, readable by Anthropic alone, and
-                    // only produced with extended thinking on — which this
-                    // gateway's Anthropic egress never requests. Nothing to
-                    // carry.
-                    Some("redacted_thinking") => {}
-                    other => {
-                        return Err(GatewayError::Unsupported(format!(
-                            "content block type {other:?}"
-                        )))
+                    // Anthropic's summary of the conversation before it,
+                    // kept whole for Anthropic and read as its summary
+                    // everywhere else (`ir::compaction`).
+                    Some(crate::ir::compaction::BLOCK_TYPE) => {
+                        parts.push(ContentPart::Compaction(Compaction::from_block(b)));
+                    }
+                    // Every other block, `redacted_thinking` (encrypted by
+                    // Anthropic, readable by Anthropic alone) and a type
+                    // this gateway does not know included, goes to an
+                    // Anthropic-protocol upstream as the client wrote it;
+                    // every other upstream is sent none of it, and
+                    // `x-lmgw-params-ignored` names it (`ir::AnthropicBlock`).
+                    Some(_) => parts.push(ContentPart::AnthropicBlock(
+                        AnthropicBlock::from_client(b.clone()),
+                    )),
+                    None => {
+                        return Err(GatewayError::BadRequest(
+                            "a content block without a string 'type' is no Anthropic block".into(),
+                        ))
                     }
                 }
             }
@@ -311,9 +444,17 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
 /// this is where that fidelity enters the IR — previously every block but
 /// `text` was dropped on the floor here.
 ///
-/// An unrecognized block is kept as [`ToolResultBlock::Json`] rather than
-/// rejected: a new Anthropic block type should reach the model as *something*
-/// instead of 400-ing an otherwise valid conversation, and nothing is lost.
+/// The content takes `text`, `image`, `document` and `search_result`
+/// blocks (<https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls>,
+/// a browser use member's result a `browser_state` too). Every block but
+/// `text` and an image the IR reads ([`tool_result_image`]) is
+/// [`ToolResultBlock::AnthropicBlock`] (gateway design §6.1, changed
+/// 2026-11-06; it used to be kept as JSON, which went to Anthropic as a
+/// text block and to every other row inlined, a document's file id and
+/// all): an Anthropic-protocol row is sent it as the client wrote it, every
+/// other row what of it reads as text ([`AnthropicBlock::tool_text`]), and
+/// a type this gateway does not know reaches the model there as its JSON,
+/// rather than 400-ing an otherwise valid conversation.
 fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
     match v {
         Some(Value::String(s)) => ToolResultBlock::one(s.clone()),
@@ -324,7 +465,7 @@ fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
                     ToolResultBlock::text(b.get("text").and_then(Value::as_str).unwrap_or_default())
                 }
                 Some("image") => tool_result_image(b),
-                _ => ToolResultBlock::Json { value: b.clone() },
+                _ => ToolResultBlock::AnthropicBlock(AnthropicBlock::from_client(b.clone())),
             })
             .collect(),
         // A `tool_result` with structured output and no content blocks.
@@ -340,8 +481,11 @@ fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
 /// ingress names its URL images ([`crate::ingress::responses::url_image_resource`]):
 /// the IR's tool image carries bytes, and an image block with none used to
 /// reach every egress as an empty image. Any other source (a Files API
-/// `file`) is kept as the block's JSON, as every block this ingress does not
-/// read is.
+/// `file`) names what only Anthropic holds: the block goes to an
+/// Anthropic-protocol row as the client wrote it, as a message's does, and
+/// every other row is sent none of it, named `content.image`
+/// ([`ToolResultBlock::AnthropicBlock`], changed 2026-11-06; it used to be
+/// kept as JSON, which an OpenAI-shaped egress inlined, file id and all).
 fn tool_result_image(b: &Value) -> ToolResultBlock {
     let src = b.get("source");
     let field = |k: &str| src.and_then(|s| s.get(k)).and_then(Value::as_str);
@@ -354,7 +498,7 @@ fn tool_result_image(b: &Value) -> ToolResultBlock {
             Some(url) => crate::ingress::responses::url_image_resource(url),
             None => ToolResultBlock::Json { value: b.clone() },
         },
-        Some(_) => ToolResultBlock::Json { value: b.clone() },
+        Some(_) => ToolResultBlock::AnthropicBlock(AnthropicBlock::from_client(b.clone())),
     }
 }
 
@@ -366,14 +510,48 @@ fn content_json(content: &[ContentPart]) -> Vec<Value> {
     let mut out = Vec::new();
     for p in content {
         match p {
-            ContentPart::Text { text } => {
+            // Anthropic's wire has no refusal of its own: the model's words
+            // are its text.
+            ContentPart::Refusal { text } => {
                 if !text.is_empty() {
                     out.push(json!({"type": "text", "text": text}));
+                }
+            }
+            // A cited block with its citations, as Anthropic answered it.
+            ContentPart::Text {
+                text, citations, ..
+            } => {
+                if !text.is_empty() {
+                    out.push(crate::egress::anthropic::text_block(text, citations));
                 }
             }
             ContentPart::ToolUse { id, name, args } => {
                 out.push(json!({"type": "tool_use", "id": id, "name": name, "input": args}));
             }
+            // A reasoning item in place (an answer whose reasoning came
+            // sealed or signed): its thinking block, its seal as the
+            // `signature` (openai egress design §7.3.2, decision 17's
+            // prefix), or Anthropic's own signature as it came, beside the
+            // block's text, which an omitted display leaves empty.
+            // An unsigned one beside them has the empty `signature` the
+            // `ThinkingBlock` shape requires, which reads back as none.
+            ContentPart::Reasoning {
+                text,
+                signature,
+                sealed,
+                ..
+            } => {
+                let signature = match (sealed, signature) {
+                    (Some(seal), _) => seal.carrier(),
+                    (None, Some(sig)) => sig.clone(),
+                    (None, None) => String::new(),
+                };
+                out.push(json!({"type": "thinking", "thinking": text, "signature": signature}));
+            }
+            // As the Anthropic upstream answered it.
+            ContentPart::Compaction(c) => out.push(c.to_block()),
+            // A block the IR does not model, where it stood, as it came.
+            ContentPart::AnthropicBlock(b) => out.push(b.block.clone()),
             _ => {}
         }
     }
@@ -382,23 +560,36 @@ fn content_json(content: &[ContentPart]) -> Vec<Value> {
 
 pub fn serialize_completion(alias: &str, c: &Completion) -> Value {
     let mut blocks = content_json(&c.content);
-    // Surface reasoning as a leading `thinking` block. No signature — it came
-    // from a non-Anthropic upstream — and when the client sends it back,
-    // `parse_content` turns it into the unsigned reasoning part an
-    // OpenAI-shaped upstream replays as `reasoning_content`.
-    if !c.reasoning.is_empty() {
-        blocks.insert(0, json!({"type": "thinking", "thinking": c.reasoning}));
+    // Surface reasoning as a leading `thinking` block. Its signature is empty
+    // — it came from a non-Anthropic upstream — and when the client sends it
+    // back, `parse_content` turns it into the unsigned reasoning part an
+    // OpenAI-shaped upstream replays as `reasoning_content`. An answer whose
+    // reasoning came sealed, or signed by an Anthropic upstream, has its
+    // thinking blocks in place instead, each carrying its seal or signature
+    // ([`content_json`]).
+    if !c.reasoning.is_empty() && !c.reasoning_in_place() {
+        blocks.insert(
+            0,
+            json!({"type": "thinking", "thinking": c.reasoning, "signature": ""}),
+        );
     }
-    json!({
+    let mut out = json!({
         "id": format!("msg_{}", rand_id()),
         "type": "message",
         "role": "assistant",
         "model": alias,
         "content": Value::Array(blocks),
         "stop_reason": c.finish_reason.to_anthropic(),
-        "stop_sequence": null,
-        "usage": anthropic_usage(&c.usage),
-    })
+        // The sequence the model stopped at, when its upstream named it
+        // (`FinishReason::StopSequence`); `null` otherwise, as Anthropic's.
+        "stop_sequence": c.finish_reason.stop_sequence(),
+        "usage": anthropic_usage(&c.usage, c.usage_iterations.as_ref()),
+    });
+    // The edits an Anthropic upstream applied, as it reported them.
+    if let Some(cm) = &c.context_management {
+        out["context_management"] = cm.clone();
+    }
+    out
 }
 
 /// The IR's usage, back in Anthropic's three-disjoint-counters shape.
@@ -409,7 +600,13 @@ pub fn serialize_completion(alias: &str, c: &Completion) -> Value {
 /// as `input_tokens` would inflate what an Anthropic client sees by the cache
 /// counts and drop the cache fields entirely — so the sum is undone here, and
 /// the round trip is exact.
-fn anthropic_usage(u: &crate::ir::Usage) -> Value {
+///
+/// `iterations` is an Anthropic answer's `usage.iterations`
+/// ([`Completion::usage_iterations`]): relayed verbatim, and its compaction
+/// entries, which the IR's usage counts in, taken out of the top-level
+/// counts again ([`compaction::top_level`]).
+fn anthropic_usage(u: &crate::ir::Usage, iterations: Option<&crate::ir::UsageIterations>) -> Value {
+    let u = &compaction::top_level(u, iterations);
     let cached = u.cached_input_tokens;
     let written = u.cache_write_tokens;
     let plain = u
@@ -429,6 +626,9 @@ fn anthropic_usage(u: &crate::ir::Usage) -> Value {
     if let Some(v) = written {
         usage["cache_creation_input_tokens"] = json!(v);
     }
+    if let Some(it) = iterations {
+        usage["iterations"] = it.list.clone();
+    }
     usage
 }
 
@@ -438,6 +638,9 @@ enum OpenBlock {
     Text,
     Tool,
     Thinking,
+    Compaction,
+    /// A block the IR does not model ([`AnthropicBlock`]).
+    Verbatim,
 }
 
 /// Streaming encoder implementing the Anthropic event sequence:
@@ -450,7 +653,24 @@ pub struct AnthropicStreamEncoder {
     /// IR tool-call ordinal → SSE content block index.
     tool_blocks: std::collections::HashMap<usize, usize>,
     stop_reason: Option<String>,
+    /// The stop sequence the upstream said the model stopped at.
+    stop_sequence: Option<String>,
     usage: Usage,
+    /// The `context_management` an Anthropic upstream's stream reported,
+    /// relayed on the closing `message_delta`, where Anthropic's own sits.
+    context_management: Option<Value>,
+    /// The `usage.iterations` an Anthropic upstream's stream reported,
+    /// relayed on the closing `message_delta`'s usage.
+    usage_iterations: Option<crate::ir::UsageIterations>,
+    /// The answer ended in an `error` event, as Anthropic's own streams
+    /// can: nothing follows it, no clean `message_delta`/`message_stop`.
+    errored: bool,
+    /// How the last reasoning item closed: `None` before any, `Some(true)`
+    /// for Anthropic's own signature. Only a block that follows unsigned or
+    /// sealed reasoning loses the blank line a joined trace put ahead of it
+    /// ([`StreamDelta::ReasoningDelta`]'s arm); Anthropic's thinking is never
+    /// joined, and its text passes as it came, which its signature covers.
+    last_signed: Option<bool>,
 }
 
 impl AnthropicStreamEncoder {
@@ -462,7 +682,86 @@ impl AnthropicStreamEncoder {
             open: OpenBlock::None,
             tool_blocks: std::collections::HashMap::new(),
             stop_reason: None,
+            stop_sequence: None,
             usage: Usage::default(),
+            context_management: None,
+            usage_iterations: None,
+            errored: false,
+            last_signed: None,
+        }
+    }
+
+    /// A verbatim block's event, as the Anthropic upstream sent it: its
+    /// `content_block_start` opens a block of its own with the block as it
+    /// began, a delta at it goes out as it came, and its stop closes it when
+    /// the upstream's came (else where the next block starts or the answer
+    /// ends, as every block does). A delta or stop with no verbatim block
+    /// open has nowhere to go and is dropped.
+    fn verbatim(&mut self, ev: &BlockEvent) -> String {
+        match ev {
+            BlockEvent::Start(b) => {
+                let mut out = self.close_open_block();
+                let idx = self.next_block_index;
+                self.next_block_index += 1;
+                self.open = OpenBlock::Verbatim;
+                out.push_str(&frame(
+                    Some("content_block_start"),
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": b.block,
+                    })
+                    .to_string(),
+                ));
+                out
+            }
+            BlockEvent::Delta(d) if self.open == OpenBlock::Verbatim => frame(
+                Some("content_block_delta"),
+                &json!({
+                    "type": "content_block_delta",
+                    "index": self.next_block_index - 1,
+                    "delta": d,
+                })
+                .to_string(),
+            ),
+            BlockEvent::Delta(_) => String::new(),
+            BlockEvent::Stop if self.open == OpenBlock::Verbatim => self.close_open_block(),
+            BlockEvent::Stop => String::new(),
+        }
+    }
+
+    /// A compaction block's event, as the Anthropic upstream sent it: its
+    /// `content_block_start` opens a block of its own with the block as it
+    /// began, a delta at it goes out as it came. A delta with no
+    /// compaction block open has nowhere to go and is dropped.
+    fn compaction(&mut self, ev: &CompactionEvent) -> String {
+        match ev {
+            CompactionEvent::Start(c) => {
+                let mut out = self.close_open_block();
+                let idx = self.next_block_index;
+                self.next_block_index += 1;
+                self.open = OpenBlock::Compaction;
+                out.push_str(&frame(
+                    Some("content_block_start"),
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": c.to_block(),
+                    })
+                    .to_string(),
+                ));
+                out
+            }
+            CompactionEvent::Delta(d) if self.open == OpenBlock::Compaction => frame(
+                Some("content_block_delta"),
+                &json!({
+                    "type": "content_block_delta",
+                    "index": self.next_block_index - 1,
+                    "delta": d,
+                })
+                .to_string(),
+            ),
+            CompactionEvent::Delta(_) => String::new(),
         }
     }
 
@@ -511,10 +810,30 @@ impl AnthropicStreamEncoder {
             &json!({
                 "type": "content_block_start",
                 "index": idx,
-                "content_block": {"type": "thinking", "thinking": ""},
+                // As Anthropic's own stream starts one: the signature, empty
+                // here, comes as a `signature_delta` when the block has one.
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
             })
             .to_string(),
         ));
+        out
+    }
+
+    /// The open thinking block's `signature_delta`, which closes it; with
+    /// none open, a block of its own opens for it.
+    fn sign_thinking(&mut self, signature: &str) -> String {
+        let mut out = self.ensure_thinking_block();
+        let idx = self.next_block_index - 1;
+        out.push_str(&frame(
+            Some("content_block_delta"),
+            &json!({
+                "type": "content_block_delta",
+                "index": idx,
+                "delta": {"type": "signature_delta", "signature": signature},
+            })
+            .to_string(),
+        ));
+        out.push_str(&self.close_open_block());
         out
     }
 }
@@ -544,7 +863,9 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
 
     fn delta(&mut self, d: &StreamDelta) -> String {
         match d {
-            StreamDelta::TextDelta(t) => {
+            // Anthropic's wire has no refusal of its own: the model's words
+            // are its text.
+            StreamDelta::TextDelta(t) | StreamDelta::RefusalDelta(t) => {
                 if t.is_empty() {
                     return String::new();
                 }
@@ -563,7 +884,20 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
             }
             // Map reasoning to a native Anthropic `thinking` block so Anthropic
             // clients (e.g. Claude Code pointed at lmgw) render the thoughts.
+            // A block that opens here starts without the blank line the
+            // platform's decoder puts between two reasoning items' summaries
+            // (`egress/openai/responses/decode.rs`): that line joins a whole
+            // trace, and this block is one item's, as a whole answer's
+            // thinking block is. Only reasoning of that kind is joined so:
+            // after Anthropic's own signed block, or as the answer's first,
+            // the text is the block's as it came (`last_signed`).
             StreamDelta::ReasoningDelta(r) => {
+                let joined = self.last_signed == Some(false);
+                let r = match self.open == OpenBlock::Thinking || !joined {
+                    true => r.as_str(),
+                    false => r.trim_start_matches('\n'),
+                };
+                self.last_signed = Some(false);
                 if r.is_empty() {
                     return String::new();
                 }
@@ -606,6 +940,14 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
                     .get(index)
                     .copied()
                     .unwrap_or(self.next_block_index.saturating_sub(1));
+                // Only the open tool block takes a delta: a block already
+                // closed gets none (an event after its `content_block_stop`
+                // is invalid), which is where the `{}` filler of an
+                // argument-less call lands, and that call's start already
+                // carries `input: {}`.
+                if self.open != OpenBlock::Tool || idx + 1 != self.next_block_index {
+                    return String::new();
+                }
                 frame(
                     Some("content_block_delta"),
                     &json!({
@@ -622,30 +964,93 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
             }
             StreamDelta::Stop(reason) => {
                 self.stop_reason = Some(reason.to_anthropic().to_string());
+                self.stop_sequence = reason.stop_sequence().map(str::to_string);
                 String::new()
             }
             // Internal-only (Chat tab stats); never part of the public wire.
             StreamDelta::Timings(_) => String::new(),
-            StreamDelta::Error(msg) => frame(
-                Some("error"),
-                &json!({
-                    "type": "error",
-                    "error": {"type": "api_error", "message": msg},
-                })
-                .to_string(),
-            ),
+            // Anthropic's `service_tier` has its own vocabulary: nothing is
+            // mapped onto it (openai egress design §5.7).
+            StreamDelta::ServiceTier(_) => String::new(),
+            // lmgw's own record of the answer, not the client's.
+            StreamDelta::UpstreamItems(_) => String::new(),
+            StreamDelta::ContextManagement(cm) => {
+                self.context_management = Some(cm.clone());
+                String::new()
+            }
+            StreamDelta::Compaction(ev) => self.compaction(ev),
+            StreamDelta::UsageIterations(it) => {
+                self.usage_iterations = Some(it.clone());
+                String::new()
+            }
+            // The item's seal is its thinking block's `signature`, as
+            // Anthropic's own streams end a thinking block with a
+            // `signature_delta` (openai egress design §7.3.2); the block
+            // closes with it, the next reasoning is another item's. An item
+            // that streamed no summary opens its block for it.
+            StreamDelta::ReasoningSeal(seal) => {
+                self.last_signed = Some(false);
+                self.sign_thinking(&seal.carrier())
+            }
+            // Anthropic's own signature, as its stream ended the block; a
+            // block that streamed no thinking (an omitted display) opens
+            // for it, as Anthropic's own stream has it.
+            StreamDelta::ReasoningSignature { signature, .. } => {
+                self.last_signed = Some(true);
+                self.sign_thinking(signature)
+            }
+            // A block the IR does not model, as Anthropic streamed it.
+            StreamDelta::AnthropicBlock(ev) => self.verbatim(ev),
+            // A text block's end: its citations, one `citations_delta`
+            // each, and its stop, so the text after it is another block's,
+            // as the upstream's was.
+            StreamDelta::TextBlockEnd { citations: c, .. } => {
+                if c.is_empty() && self.open != OpenBlock::Text {
+                    return String::new();
+                }
+                let mut out = self.ensure_text_block();
+                let idx = self.next_block_index - 1;
+                for citation in c {
+                    out.push_str(&frame(
+                        Some("content_block_delta"),
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {"type": "citations_delta", "citation": citation},
+                        })
+                        .to_string(),
+                    ));
+                }
+                out.push_str(&self.close_open_block());
+                out
+            }
+            StreamDelta::Error(msg) => {
+                self.errored = true;
+                frame(
+                    Some("error"),
+                    &json!({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": msg},
+                    })
+                    .to_string(),
+                )
+            }
         }
     }
 
     fn finish(&mut self) -> String {
+        if self.errored {
+            return String::new();
+        }
         let mut out = self.close_open_block();
         let stop_reason = self
             .stop_reason
             .clone()
             .unwrap_or_else(|| "end_turn".into());
-        let mut usage = json!({"output_tokens": self.usage.completion_tokens.unwrap_or(0)});
+        let iterations = self.usage_iterations.take();
+        let full = anthropic_usage(&self.usage, iterations.as_ref());
+        let mut usage = json!({"output_tokens": full["output_tokens"]});
         if self.usage.prompt_tokens.is_some() {
-            let full = anthropic_usage(&self.usage);
             for k in [
                 "input_tokens",
                 "cache_read_input_tokens",
@@ -656,15 +1061,18 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
                 }
             }
         }
-        out.push_str(&frame(
-            Some("message_delta"),
-            &json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": usage,
-            })
-            .to_string(),
-        ));
+        if let Some(it) = iterations {
+            usage["iterations"] = it.list;
+        }
+        let mut delta = json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": self.stop_sequence},
+            "usage": usage,
+        });
+        if let Some(cm) = self.context_management.take() {
+            delta["context_management"] = cm;
+        }
+        out.push_str(&frame(Some("message_delta"), &delta.to_string()));
         out.push_str(&frame(
             Some("message_stop"),
             &json!({"type": "message_stop"}).to_string(),

@@ -1,0 +1,598 @@
+{
+  "about": "Hugging Face's answers to the reads lmgw's finder made for the 28 queries of the find-a-model design's section 4.4 and the later ones the regression test names, on a 24 GiB and an 8 GiB card, recorded without a token by scripts/hf-find-record.sh. Each entry of answers.zip is one answer: its status, rate-limit headers, Link and body, a listing's repos trimmed to the fields and tags the finder reads.",
+  "recorded": "2026-11-04, reads added 2026-11-06",
+  "answers": {
+    "/api/models/KimChen/bge-m3-GGUF/tree/main?recursive=true": {
+      "entry": "0000.json",
+      "status": 200
+    },
+    "/api/models/MaziyarPanahi/Mistral-7B-Instruct-v0.3-GGUF/tree/main?recursive=true": {
+      "entry": "0001.json",
+      "status": 200
+    },
+    "/api/models/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF/tree/main?recursive=true": {
+      "entry": "0002.json",
+      "status": 200
+    },
+    "/api/models/NousResearch/Hermes-3-Llama-3.1-8B-GGUF/tree/main?recursive=true": {
+      "entry": "0003.json",
+      "status": 200
+    },
+    "/api/models/QuantFactory/Meta-Llama-3-8B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0004.json",
+      "status": 200
+    },
+    "/api/models/Qwen/Qwen2.5-7B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0005.json",
+      "status": 200
+    },
+    "/api/models/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0006.json",
+      "status": 200
+    },
+    "/api/models/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0007.json",
+      "status": 200
+    },
+    "/api/models/Qwen/Qwen3-1.7B-GGUF/tree/main?recursive=true": {
+      "entry": "0008.json",
+      "status": 200
+    },
+    "/api/models/Qwen/Qwen3-Embedding-0.6B-GGUF/tree/main?recursive=true": {
+      "entry": "0009.json",
+      "status": 200
+    },
+    "/api/models/bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF/tree/main?recursive=true": {
+      "entry": "0010.json",
+      "status": 200
+    },
+    "/api/models/bartowski/Llama-3.2-3B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0011.json",
+      "status": 200
+    },
+    "/api/models/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0012.json",
+      "status": 200
+    },
+    "/api/models/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF/tree/main?recursive=true": {
+      "entry": "0013.json",
+      "status": 200
+    },
+    "/api/models/ggml-org/Kimi-VL-A3B-Thinking-2506-GGUF/tree/main?recursive=true": {
+      "entry": "0014.json",
+      "status": 200
+    },
+    "/api/models/ggml-org/SmolLM3-3B-GGUF/tree/main?recursive=true": {
+      "entry": "0015.json",
+      "status": 200
+    },
+    "/api/models/ibm-granite/granite-docling-258M-GGUF/tree/main?recursive=true": {
+      "entry": "0016.json",
+      "status": 200
+    },
+    "/api/models/microsoft/phi-4-gguf/tree/main?recursive=true": {
+      "entry": "0017.json",
+      "status": 200
+    },
+    "/api/models/mistralai/Ministral-3-14B-Reasoning-2512-GGUF/tree/main?recursive=true": {
+      "entry": "0018.json",
+      "status": 200
+    },
+    "/api/models/mistralai/Ministral-3-3B-Reasoning-2512-GGUF/tree/main?recursive=true": {
+      "entry": "0019.json",
+      "status": 200
+    },
+    "/api/models/mradermacher/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-GGUF/tree/main?recursive=true": {
+      "entry": "0020.json",
+      "status": 200
+    },
+    "/api/models/nomic-ai/nomic-embed-text-v1.5-GGUF/tree/main?recursive=true": {
+      "entry": "0021.json",
+      "status": 200
+    },
+    "/api/models/unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/tree/main?recursive=true": {
+      "entry": "0022.json",
+      "status": 200
+    },
+    "/api/models/unsloth/GLM-4.1V-9B-Thinking-GGUF/tree/main?recursive=true": {
+      "entry": "0023.json",
+      "status": 200
+    },
+    "/api/models/unsloth/GLM-4.7-Flash-GGUF/tree/main?recursive=true": {
+      "entry": "0024.json",
+      "status": 200
+    },
+    "/api/models/unsloth/Olmo-3-32B-Think-GGUF/tree/main?recursive=true": {
+      "entry": "0025.json",
+      "status": 200
+    },
+    "/api/models/unsloth/Olmo-3-7B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0026.json",
+      "status": 200
+    },
+    "/api/models/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main?recursive=true": {
+      "entry": "0027.json",
+      "status": 200
+    },
+    "/api/models/unsloth/Qwen3.8-27B-GGUF/tree/main?recursive=true": {
+      "entry": "0028.json",
+      "status": 200
+    },
+    "/api/models/unsloth/embeddinggemma-2-GGUF/tree/main?recursive=true": {
+      "entry": "0029.json",
+      "status": 200
+    },
+    "/api/models/unsloth/gemma-3-27b-it-GGUF/tree/main?recursive=true": {
+      "entry": "0030.json",
+      "status": 200
+    },
+    "/api/models/unsloth/gemma-3-4b-it-GGUF/tree/main?recursive=true": {
+      "entry": "0031.json",
+      "status": 200
+    },
+    "/api/models/unsloth/gemma-4-31B-it-GGUF/tree/main?recursive=true": {
+      "entry": "0032.json",
+      "status": 200
+    },
+    "/api/models/unsloth/gemma-4-E4B-it-GGUF/tree/main?recursive=true": {
+      "entry": "0033.json",
+      "status": 200
+    },
+    "/api/models/unsloth/gpt-oss-20b-GGUF/tree/main?recursive=true": {
+      "entry": "0034.json",
+      "status": 200
+    },
+    "/api/models/ymcki/Kimi-Linear-48B-A3B-Instruct-GGUF/tree/main?recursive=true": {
+      "entry": "0035.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3ABAAI%2Fbge-m3&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0036.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AHuggingFaceTB%2FSmolLM3-3B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0037.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3ANousResearch%2FHermes-3-Llama-3.1-8B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0038.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen2.5-7B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0039.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen2.5-Coder-32B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0040.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen2.5-Coder-7B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0041.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen3-1.7B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0042.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen3-Embedding-0.6B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0043.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen3.6-35B-A3B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0044.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3AQwen%2FQwen3.8-27B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0045.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Aallenai%2FOlmo-3-32B-Think&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0046.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Aallenai%2FOlmo-3-7B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0047.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Adeepseek-ai%2FDeepSeek-R1-Distill-Qwen-1.5B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0048.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Adeepseek-ai%2FDeepSeek-R1-Distill-Qwen-32B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0049.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Agoogle%2Fembeddinggemma-2&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0050.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Agoogle%2Fgemma-3-27b-it&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0051.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Agoogle%2Fgemma-3-4b-it&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0052.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Agoogle%2Fgemma-4-31B-it&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0053.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Agoogle%2Fgemma-4-E4B-it&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0054.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Aibm-granite%2Fgranite-docling-258M&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0055.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Ameta-llama%2FLlama-3.1-8B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0056.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Ameta-llama%2FLlama-3.2-3B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0057.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Ameta-llama%2FMeta-Llama-3-8B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0058.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amicrosoft%2Fphi-4&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0059.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amistralai%2FMinistral-3-14B-Reasoning-2512&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0060.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amistralai%2FMinistral-3-3B-Reasoning-2512&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0061.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amistralai%2FMistral-7B-Instruct-v0.3&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0062.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amistralai%2FMistral-Small-3.1-24B-Instruct-2503&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0063.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amoonshotai%2FKimi-Linear-48B-A3B-Instruct&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0064.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amoonshotai%2FKimi-VL-A3B-Thinking&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0065.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Amoonshotai%2FKimi-VL-A3B-Thinking-2506&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0066.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Anomic-ai%2Fnomic-embed-text-v1.5&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0067.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Anvidia%2FNVIDIA-Nemotron-3-Nano-30B-A3B-BF16&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0068.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Anvidia%2FNemotron-Orchestrator-8B&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0069.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Aopenai%2Fgpt-oss-20b&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0070.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Atomaszki%2Fnous-gemma-four&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0071.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Azai-org%2FGLM-4.1V-9B-Thinking&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0072.json",
+      "status": 200
+    },
+    "/api/models?filter=base_model%3Aquantized%3Azai-org%2FGLM-4.7-Flash&filter=gguf&sort=likes&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=tags": {
+      "entry": "0073.json",
+      "status": 200
+    },
+    "/api/models?search=bge+m3&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0074.json",
+      "status": 200
+    },
+    "/api/models?search=bge+m3&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0075.json",
+      "status": 200
+    },
+    "/api/models?search=deepseek&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0076.json",
+      "status": 200
+    },
+    "/api/models?search=deepseek&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0077.json",
+      "status": 200
+    },
+    "/api/models?search=deepseek+v4+flash&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0078.json",
+      "status": 200
+    },
+    "/api/models?search=deepseek+v4+flash&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0079.json",
+      "status": 200
+    },
+    "/api/models?search=embeddinggemma&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0080.json",
+      "status": 200
+    },
+    "/api/models?search=embeddinggemma&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0081.json",
+      "status": 200
+    },
+    "/api/models?search=gemma&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0082.json",
+      "status": 200
+    },
+    "/api/models?search=gemma&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0083.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+3&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0084.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+3&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0085.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+4&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0086.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+4&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0087.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+four&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0088.json",
+      "status": 200
+    },
+    "/api/models?search=gemma+four&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0089.json",
+      "status": 200
+    },
+    "/api/models?search=glm&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0090.json",
+      "status": 200
+    },
+    "/api/models?search=glm&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0091.json",
+      "status": 200
+    },
+    "/api/models?search=gpt+oss&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0092.json",
+      "status": 200
+    },
+    "/api/models?search=gpt+oss&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0093.json",
+      "status": 200
+    },
+    "/api/models?search=granite&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0094.json",
+      "status": 200
+    },
+    "/api/models?search=granite&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0095.json",
+      "status": 200
+    },
+    "/api/models?search=hermes&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0096.json",
+      "status": 200
+    },
+    "/api/models?search=hermes&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0097.json",
+      "status": 200
+    },
+    "/api/models?search=kimi&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0098.json",
+      "status": 200
+    },
+    "/api/models?search=kimi&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0099.json",
+      "status": 200
+    },
+    "/api/models?search=llama&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0100.json",
+      "status": 200
+    },
+    "/api/models?search=llama&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0101.json",
+      "status": 200
+    },
+    "/api/models?search=llama+3+8b&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0102.json",
+      "status": 200
+    },
+    "/api/models?search=llama+3+8b&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0103.json",
+      "status": 200
+    },
+    "/api/models?search=llama+3.2+3b&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0104.json",
+      "status": 200
+    },
+    "/api/models?search=llama+3.2+3b&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0105.json",
+      "status": 200
+    },
+    "/api/models?search=ministral&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0106.json",
+      "status": 200
+    },
+    "/api/models?search=ministral&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0107.json",
+      "status": 200
+    },
+    "/api/models?search=mistral&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0108.json",
+      "status": 200
+    },
+    "/api/models?search=mistral&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0109.json",
+      "status": 200
+    },
+    "/api/models?search=mistral+small&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0110.json",
+      "status": 200
+    },
+    "/api/models?search=mistral+small&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0111.json",
+      "status": 200
+    },
+    "/api/models?search=nemotron&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0112.json",
+      "status": 200
+    },
+    "/api/models?search=nemotron&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0113.json",
+      "status": 200
+    },
+    "/api/models?search=nomic+embed&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0114.json",
+      "status": 200
+    },
+    "/api/models?search=nomic+embed&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0115.json",
+      "status": 200
+    },
+    "/api/models?search=olmo&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0116.json",
+      "status": 200
+    },
+    "/api/models?search=olmo&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0117.json",
+      "status": 200
+    },
+    "/api/models?search=phi+4&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0118.json",
+      "status": 200
+    },
+    "/api/models?search=phi+4&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0119.json",
+      "status": 200
+    },
+    "/api/models?search=qwen&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0120.json",
+      "status": 200
+    },
+    "/api/models?search=qwen&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0121.json",
+      "status": 200
+    },
+    "/api/models?search=qwen+2.5+coder&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0122.json",
+      "status": 200
+    },
+    "/api/models?search=qwen+2.5+coder&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0123.json",
+      "status": 200
+    },
+    "/api/models?search=qwen+3.6&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0124.json",
+      "status": 200
+    },
+    "/api/models?search=qwen+3.6&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0125.json",
+      "status": 200
+    },
+    "/api/models?search=qwen3+1.7b&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0126.json",
+      "status": 200
+    },
+    "/api/models?search=qwen3+1.7b&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0127.json",
+      "status": 200
+    },
+    "/api/models?search=qwen3+embedding&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0128.json",
+      "status": 200
+    },
+    "/api/models?search=qwen3+embedding&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0129.json",
+      "status": 200
+    },
+    "/api/models?search=smollm&sort=downloads&direction=-1&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0130.json",
+      "status": 200
+    },
+    "/api/models?search=smollm&sort=downloads&direction=-1&filter=gguf&expand%5B%5D=author&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated&expand%5B%5D=private&expand%5B%5D=baseModels&expand%5B%5D=pipeline_tag&expand%5B%5D=tags&expand%5B%5D=safetensors": {
+      "entry": "0131.json",
+      "status": 200
+    },
+    "/api/organizations/BAAI/overview": {
+      "entry": "0132.json",
+      "status": 200
+    },
+    "/api/organizations/HuggingFaceTB/overview": {
+      "entry": "0133.json",
+      "status": 200
+    },
+    "/api/organizations/NousResearch/overview": {
+      "entry": "0134.json",
+      "status": 200
+    },
+    "/api/organizations/Qwen/overview": {
+      "entry": "0135.json",
+      "status": 200
+    },
+    "/api/organizations/allenai/overview": {
+      "entry": "0136.json",
+      "status": 200
+    },
+    "/api/organizations/deepseek-ai/overview": {
+      "entry": "0137.json",
+      "status": 200
+    },
+    "/api/organizations/google/overview": {
+      "entry": "0138.json",
+      "status": 200
+    },
+    "/api/organizations/ibm-granite/overview": {
+      "entry": "0139.json",
+      "status": 200
+    },
+    "/api/organizations/meta-llama/overview": {
+      "entry": "0140.json",
+      "status": 200
+    },
+    "/api/organizations/microsoft/overview": {
+      "entry": "0141.json",
+      "status": 200
+    },
+    "/api/organizations/mistralai/overview": {
+      "entry": "0142.json",
+      "status": 200
+    },
+    "/api/organizations/moonshotai/overview": {
+      "entry": "0143.json",
+      "status": 200
+    },
+    "/api/organizations/nomic-ai/overview": {
+      "entry": "0144.json",
+      "status": 200
+    },
+    "/api/organizations/nvidia/overview": {
+      "entry": "0145.json",
+      "status": 200
+    },
+    "/api/organizations/openai/overview": {
+      "entry": "0146.json",
+      "status": 200
+    },
+    "/api/organizations/zai-org/overview": {
+      "entry": "0147.json",
+      "status": 200
+    }
+  }
+}

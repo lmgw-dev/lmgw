@@ -37,8 +37,7 @@
 use std::convert::Infallible;
 use std::time::Instant;
 
-use axum::response::sse::{KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -96,9 +95,7 @@ pub(crate) fn speaking_turn(
         let f = tee.next().await?;
         Some((Ok::<_, Infallible>(f.into_sse()), tee))
     });
-    Sse::new(caller.sse(state, events))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    caller.sse_response(state, events)
 }
 
 /// The tee's state (module doc).

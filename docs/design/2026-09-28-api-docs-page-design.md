@@ -112,7 +112,7 @@ Checked against the `feat/api-docs` branch. Each finding says what this design d
    - `LocalHold::class`, `LocalHold::gate_facts` (`vram/local_hold.rs:258–271`), and `send_local` (`:403`).
 6. **Anthropic ingress:** `ingress::anthropic::parse_messages_request` (`ingress/anthropic.rs:14`).
    - Refuses server tools (a tool without `input_schema`) as `Unsupported`.
-   - Drops `redacted_thinking`.
+   - Drops `redacted_thinking`. *Changed 2026-11-05*: carries it, and every block type it does not model, verbatim (gateway design §6.1, "Anthropic blocks lmgw does not model").
    - Carries no passthrough keys.
 7. **The op dispatcher** (`web/api.rs:742–1042`):
    - `agent_*` and `agents_restore` go to `api_agents::op` (`api_agents.rs:2093`).
@@ -350,7 +350,7 @@ pub(crate) struct DocRoute {
 - **The generator:**
   - `SchemaSettings::draft2020_12().for_deserialize()`, with `meta_schema = None` and `definitions_path = "/components/schemas"`, so refs read `#/components/schemas/Name`.
   - It is the dashboard's reading contract: `#[serde(default)]` fields are optional, and unknown keys are allowed unless `deny_unknown_fields`.
-  - Worker: verify the setter names against schemars 1.2.
+  - To check: the setter names against schemars 1.2.
 - **Hand-written schemas** register through `schemas::named(g, "Name", json_schema!({...}))`. It panics on a name that already exists with different content, so every component name is unique.
 - **Untyped:** `schemas::untyped(why)` = `{"type":"object","x-lmgw-untyped": why}`.
 - **The v1 document** is the admin document filtered to `x-lmgw-capability == "inference"` operations, then `prune_components` drops schemas nothing reaches. *Changed, 2026-10-10 (the owner's decision):* the v1 document is the developer document: every operation a non-owner credential reaches (inference, chat, agent-self, ledger) and GET /api/version; the browser session routes and the admin plane stay in the admin document only. The project site's API reference is built from it.
@@ -513,7 +513,7 @@ pub(crate) struct OpDoc { name, tag, summary, description: Option<&str> /* None 
 | `agent_token_get` | Hand `{id*}` | — (reveals secret) |
 | `agent_pull`, `agent_reimport`, `agent_reset`, `agent_run_cancel`, `agent_token_rotate`, `agent_service_start`, `agent_service_stop` | Hand `{id*}` | ✓ |
 
-(`*` = required.) A worker writing a Hand schema reads the arm or function body and documents exactly the keys it reads.
+(`*` = required.) Whoever writes a Hand schema reads the arm or function body and documents exactly the keys it reads.
 
 **`writes`:**
 
@@ -663,7 +663,7 @@ The route is in the `json_api` group, so the `max_body_mb` bound applies.
 
 **Details:**
 
-- **IR parse errors** (a server tool on a non-Anthropic backend, or an unknown block) are 400 in the Anthropic dialect, before admission, with the headers the resolve settled (a hold's fallback).
+- **IR parse errors** (a server tool on a non-Anthropic backend, or an unknown block; *changed 2026-11-05*: an unknown block type is carried verbatim, only a block without a type is refused) are 400 in the Anthropic dialect, before admission, with the headers the resolve settled (a hold's fallback).
 - **`flatten_for_count(ir)`** joins these with `"\n\n"`, in order:
   - the system text;
   - each tool as `name\ndescription\n<schema JSON>`;
@@ -1062,7 +1062,7 @@ Added after review R1 (§12 entries 15–18): `a_spent_budget_never_refuses_a_co
 
 **Parallel lanes after WP1:** A = 2 → 3 → 6, B = 4 → 5, C = 7. No two lanes touch the same file: `server.rs`, `recording.rs` and `models_endpoint.rs` are lane A only; `web/*.rs` lane B only; `lmgw-ui` lane C only; test files and plane files were pre-created.
 
-## 10. Spec choices (veto if wrong)
+## 10. Spec choices
 
 1. **The struct the dispatcher parses into is the op's documented shape.** The catalog supplies the words. Where they differ, the page shows what `/api/op` really takes; the tool keeps its flat projection.
 2. **An op not in `op_names` is unreachable.** Adding an op means adding it to the list, which forces it into the docs.
@@ -1094,8 +1094,8 @@ Added after review R1 (§12 entries 15–18): `a_spent_budget_never_refuses_a_co
 
 ## 12. Decisions taken during implementation
 
-§10 is the design-time list, offered for veto before any code existed. These
-are the calls a worker actually had to make while building against the real
+§10 is the design-time list, written before any code existed. These
+are the calls that had to be made while building against the real
 source — kept here for the same reason: wrong, they are one line to revert.
 
 1. **The internal drop (owner decision, 2026-09-28).** The three mini-APIs —

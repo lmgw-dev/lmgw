@@ -103,6 +103,10 @@ fn default_true() -> bool {
 }
 /// Two weeks of job history: long enough to see what ran overnight and why it
 /// failed, short enough that the table stays small on a desktop gateway.
+fn default_quota_recheck_seconds() -> u64 {
+    300
+}
+
 fn default_jobs_retention_days() -> i64 {
     14
 }
@@ -148,6 +152,12 @@ pub struct Settings {
     pub global_budget_micro: i64,
     #[serde(default)]
     pub global_budget_period: BudgetPeriod,
+    /// Seconds before an upstream remembered out of quota is asked again
+    /// when its answer carried no `Retry-After` (openai egress design
+    /// §14.6). Until then a model with a fallback on it answers with the
+    /// fallback.
+    #[serde(default = "default_quota_recheck_seconds")]
+    pub quota_recheck_seconds: u64,
     pub router: RouterSettings,
     /// The aux class: the small stateless model kinds — embeddings,
     /// rerankers and decision models (§8). A separate class rather than a
@@ -297,7 +307,7 @@ pub struct Settings {
     /// comment, so this bounds how long a stream whose device vanished
     /// silently can stay open. A request past it is refused, naming this
     /// setting. Applies to feeds opened after a change. At least 1, at most
-    /// `lmgw_api_types::chat_feed::MAX_KEEPALIVE_S` (a day).
+    /// `lmgw_api_types::chat_feed::MAX_KEEPALIVE_S` (32 767, the kernel's limit for a TCP keep-alive timer).
     #[serde(default = "default_chat_feed_keepalive_max_s")]
     pub chat_feed_keepalive_max_s: u32,
     /// Records the Chat feed reads per query while a client catches up
@@ -383,6 +393,19 @@ pub struct Settings {
     /// knowledge base and then never let it say anything.
     #[serde(default = "default_chat_kb_budget_tokens")]
     pub chat_kb_budget_tokens: u32,
+    /// The image and audio tools' default models (chat-media-tools design
+    /// §3.8): what `image__generate`, `image__edit`, `audio__speak` and
+    /// `audio__transcribe` use when a call leaves out `model`, and the
+    /// voice the default speech model speaks with. An absent field is no
+    /// default. A Chat folder and a thread can override each; `/mcp`,
+    /// `/v1/responses` and agent runs use these. Read tolerantly: the type
+    /// is strict on input, and a key a newer build added must not fail the
+    /// whole settings blob.
+    #[serde(
+        default,
+        deserialize_with = "lmgw_api_types::chat_media::MediaDefaults::deserialize_stored"
+    )]
+    pub chat_media_defaults: lmgw_api_types::chat_media::MediaDefaults,
     /// The system prompt a new Chat thread starts with, when the owner wrote
     /// their own; `None` = the built-in one
     /// ([`BUILTIN_CHAT_SYSTEM_PROMPT`](super::BUILTIN_CHAT_SYSTEM_PROMPT)),
@@ -523,6 +546,7 @@ impl Default for Settings {
             retention_days: default_retention_days(),
             retention_max_rows: default_retention_max_rows(),
             jobs_retention_days: default_jobs_retention_days(),
+            quota_recheck_seconds: default_quota_recheck_seconds(),
             usage_retention_months: 0,
             currency: default_currency(),
             local_reference_alias: String::new(),
@@ -568,6 +592,7 @@ impl Default for Settings {
             chat_turn_detection: default_chat_turn_detection(),
             chat_voice_audio_input: default_chat_voice_audio_input(),
             chat_kb_budget_tokens: default_chat_kb_budget_tokens(),
+            chat_media_defaults: Default::default(),
             docs_ingest_reply_tokens: default_docs_ingest_reply_tokens(),
             docs_embed_batch: default_docs_embed_batch(),
             docs_fetch_delay_ms: default_docs_fetch_delay_ms(),

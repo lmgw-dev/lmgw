@@ -15,6 +15,7 @@ mod reads;
 mod routing;
 mod runtime;
 mod sources;
+mod voice_lab;
 
 use super::Builtin;
 
@@ -24,6 +25,7 @@ pub(super) fn catalog() -> Vec<Builtin> {
     all.extend(routing::tools());
     all.extend(models::tools());
     all.extend(audio::tools());
+    all.extend(voice_lab::tools());
     all.extend(sources::tools());
     all.extend(runtime::tools());
     all.extend(prices::tools());

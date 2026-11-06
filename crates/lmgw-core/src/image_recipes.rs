@@ -50,6 +50,7 @@
 //! 1024² size, and the guidance-distilled families carry `cfg_scale = 1.0`
 //! because for them the server default is actively wrong.
 
+use lmgw_api_types::chat_media::PromptStyle;
 use serde_json::{Map, Value};
 
 /// One alternative file for a component — the quantizations a repo actually
@@ -131,6 +132,10 @@ pub struct ImageRecipe {
     pub modes: &'static [&'static str],
     /// Takes reference images — may serve `/v1/images/edits` (§4).
     pub edit: bool,
+    /// How the family's prompts are written (chat-media-tools design §3.4):
+    /// what a row with no `prompt_style` of its own is described with to a
+    /// chat model.
+    pub prompt_style: PromptStyle,
     /// Measured VRAM, or the word that says nobody measured it. Never a
     /// number derived from file sizes: §12.4 found the file-size estimate 12 %
     /// under the idle figure and 2.2× under the 1024² peak.
@@ -335,6 +340,31 @@ pub fn match_path(rel: &str) -> Option<(&'static ImageRecipe, &'static ImageReci
         }
     }
     None
+}
+
+/// The recipe whose pipeline-loading file (`model` or `diffusion_model`)
+/// is `rel` — a row's own weights, not a VAE or encoder it shares with
+/// other families. What a row's derived prompt style comes from.
+pub fn match_primary(rel: &str) -> Option<&'static ImageRecipe> {
+    match_path(rel)
+        .filter(|(r, c)| c.role == r.primary_role())
+        .map(|(r, _)| r)
+}
+
+/// A row's prompt style: its own, else the recipe its weights match
+/// ([`match_primary`]), else none — said as "not set" rather than guessed.
+pub fn prompt_style_of(row: &crate::config::ImageModel) -> Option<PromptStyle> {
+    row.prompt_style.or_else(|| derived_prompt_style(row))
+}
+
+/// The prompt style the recipe matching `row`'s weights gives it, whatever
+/// the row's own column says.
+pub fn derived_prompt_style(row: &crate::config::ImageModel) -> Option<PromptStyle> {
+    ["diffusion_model", "model"]
+        .iter()
+        .filter_map(|k| row.files.get(*k).and_then(Value::as_str))
+        .find_map(match_primary)
+        .map(|r| r.prompt_style)
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +575,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Measured on a 24 GiB card (§12.4): 7.1 GiB resident when idle, 13.7 GiB \
                     peak during a 1024² generation — the compute buffers are allocated per \
                     job and freed after it. 4.7 s warm for 1024²/8 steps, 0.23 s for 256²/4. \
@@ -615,6 +646,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet. Both companions are Turbo's, so a box that \
                     already has Turbo downloads one file for this. The 5.0 cfg-scale is the \
                     upstream docs' — a base model wants real guidance, which is the whole \
@@ -673,7 +705,8 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
-        vram_note: "Not measured yet. The default file set is 23 GB on disk, most of it \
+        prompt_style: PromptStyle::Natural,
+        vram_note: "Not measured yet. The default file set is 21 GiB on disk, most of it \
                     the q8_0 transformer and the fp16 T5 — pick the smaller alternatives, or \
                     set args.offload_to_cpu, if the card is shared.",
     },
@@ -744,6 +777,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet. Steps stay at sd-server's own default of 20 and \
                     the distilled guidance at 3.5 — dev wants no classifier-free CFG, which \
                     is what cfg_scale 1.0 says.",
@@ -808,6 +842,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: true,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet. Same file set as FLUX.1 dev apart from the \
                     transformer, so a box that already ran dev downloads one file for this.",
     },
@@ -816,7 +851,7 @@ static RECIPES: &[ImageRecipe] = &[
         key: "flux2-klein-4b",
         display_name: "FLUX.2 klein 4B",
         description: "Black Forest Labs' small FLUX.2: four steps to a picture, and it takes \
-                      reference images — so one 7 GB pipeline both draws and edits.",
+                      reference images — so one 6.5 GiB pipeline both draws and edits.",
         components: &[
             ImageRecipeComponent {
                 role: "diffusion_model",
@@ -875,8 +910,9 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: true,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet, and the smallest edit-capable pipeline here — \
-                    7 GB of files against Kontext's 23. The distilled four steps and 1.0 \
+                    6.5 GiB of files against Kontext's 21. The distilled four steps and 1.0 \
                     cfg-scale are the upstream docs'; klein *base* is the same files with \
                     twenty steps and cfg-scale 4.0, which is an args edit on the row rather \
                     than a second download.",
@@ -898,7 +934,7 @@ static RECIPES: &[ImageRecipe] = &[
                 gated: false,
                 note: "city96's GGUF re-quantization of BFL's gated weights, so no token is \
                        needed — the FLUX.2-dev non-commercial licence still applies to what \
-                       you make with it. Q2_K exists at 12.9 GB if RAM is the binding \
+                       you make with it. Q2_K exists at 12.0 GiB if RAM is the binding \
                        constraint",
                 alternatives: &[
                     ImageRecipeAlternative {
@@ -996,13 +1032,14 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: true,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet, and the only row that ships offload_to_cpu as a \
-                    default rather than as advice. Its two halves — a 19 GB DiT and a \
-                    14 GB Mistral encoder — never have to be resident together: \
+                    default rather than as advice. Its two halves — an 18 GiB DiT and a \
+                    13 GiB Mistral encoder — never have to be resident together: \
                     --offload-to-cpu holds the weights in RAM and loads each module into \
                     VRAM when it is needed, so the card sees one at a time instead of their \
-                    sum, which is what puts a 34 GB pipeline on a 24 GiB card. The cost \
-                    moves to RAM — the default file set wants ~34 GB of it — and to time, \
+                    sum, which is what puts a 32 GiB pipeline on a 24 GiB card. The cost \
+                    moves to RAM — the default file set wants ~32 GiB of it — and to time, \
                     since every module crosses the bus per job (§12.4 measured +0.4 s per \
                     image on Z-Image, a pipeline a tenth this size; expect more here). \
                     Clear offload_to_cpu only on a card that can hold both halves at once.",
@@ -1048,6 +1085,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet. Two of its three files are the FLUX rows', so a \
                     box with FLUX.1 already downloads one. Chroma is de-distilled, which is \
                     why the 4.0 cfg-scale of the upstream docs replaces the 1.0 its schnell \
@@ -1094,6 +1132,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Keywords,
         vram_note: "Not measured yet. The only arg SDXL needs is its native 1024² size \
                     — sd-server's own defaults (20 steps, cfg-scale 7.0, euler_a) are this \
                     family's, unlike the distilled ones above.",
@@ -1137,6 +1176,7 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: PromptStyle::Natural,
         vram_note: "Not measured yet. CLIP-L and T5 are pointed at the \
                     comfyanonymous/flux_text_encoders copies the FLUX rows already use \
                     rather than at this repo's own text_encoders/, whose files are the same \
@@ -1158,7 +1198,7 @@ static RECIPES: &[ImageRecipe] = &[
                 file: "Qwen_Image-Q4_K_M.gguf",
                 size_bytes: 13_065_746_976,
                 gated: false,
-                note: "a 20B transformer, so even Q4_K_M is 13 GB — the larger quants need a \
+                note: "a 20B transformer, so even Q4_K_M is 12 GiB — the larger quants need a \
                        card this one will not fit beside its encoder",
                 alternatives: &[
                     ImageRecipeAlternative {
@@ -1203,7 +1243,8 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: false,
-        vram_note: "Not measured yet, and one of the two largest rows here: 18 GB of \
+        prompt_style: PromptStyle::Natural,
+        vram_note: "Not measured yet, and one of the two largest rows here: 17 GiB of \
                     files at the default quants. Qwen-Image is not guidance-distilled, so \
                     sd-server's own cfg-scale default applies rather than the 1.0 the FLUX \
                     and Z-Image rows carry.",
@@ -1222,7 +1263,7 @@ static RECIPES: &[ImageRecipe] = &[
                 file: "qwen_image_2.1-Q4_K.gguf",
                 size_bytes: 4_197_494_816,
                 gated: false,
-                note: "the 2.1 transformer — 4 GB at Q4_K against the first generation's 13, \
+                note: "the 2.1 transformer — 3.7 GiB at Q4_K against the first generation's 12, \
                        which is what makes this the Qwen row a 24 GiB card runs comfortably",
                 alternatives: &[
                     ImageRecipeAlternative {
@@ -1311,7 +1352,8 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: true,
-        vram_note: "Not measured yet. 11 GB of files. Both the 6.0 cfg-scale and the \
+        prompt_style: PromptStyle::Natural,
+        vram_note: "Not measured yet. 10 GiB of files. Both the 6.0 cfg-scale and the \
                     explicit euler are the upstream docs': sd-server's sampler default is \
                     euler_a for everything outside Flux/SD3/Wan, so this family has to say \
                     so. Upstream also asks for dimensions divisible by 32.",
@@ -1393,7 +1435,8 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["img_gen"],
         edit: true,
-        vram_note: "Not measured yet, and the largest row here: 18 GB at the default \
+        prompt_style: PromptStyle::Natural,
+        vram_note: "Not measured yet, and the largest row here: 17 GiB at the default \
                     quants, of which the VAE and the encoder are shared with qwen-image. All \
                     four args are the upstream docs' — 2.5 cfg-scale, euler, flow-shift 3, \
                     flash attention.",
@@ -1474,7 +1517,8 @@ static RECIPES: &[ImageRecipe] = &[
         ],
         modes: &["vid_gen"],
         edit: false,
-        vram_note: "Not measured yet. 9 GB of files, none of them shared with any \
+        prompt_style: PromptStyle::Natural,
+        vram_note: "Not measured yet. 8.4 GiB of files, none of them shared with any \
                     other row. Every arg is the upstream docs' 1.3B example — 33 frames at \
                     832×480, cfg-scale 6.0, flow-shift 3.0 — and upstream's own example also \
                     passes a long Chinese negative prompt that a row cannot carry, so set \

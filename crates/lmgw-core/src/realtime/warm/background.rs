@@ -1,6 +1,7 @@
 //! The Background warm of one stage (module doc of [`super`]): started only
 //! into room there is, never evicting, no claim kept.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::config::Snapshot;
@@ -89,6 +90,14 @@ async fn run(
     }
     let mut loading = Loading::default();
     if !up {
+        // A stage the machine check says this computer cannot start, whose
+        // fallback answers (machine-check design §2.5, D98): said as that
+        // fallback, as the hold's swap is, and nothing is started.
+        if crate::machine::problem_at_resolve(state, &snap, &target).is_some() {
+            if let Some(answered_by) = crate::gate::gpu_setup_fallback(&snap, &target) {
+                return Ok(WarmOutcome::Fallback { answered_by });
+            }
+        }
         if let Err(out) = start(
             state,
             label,
@@ -147,27 +156,48 @@ async fn start(
 ) -> Result<(), WarmOutcome> {
     let (class, model_id) = (target.class, target.model_id.as_str());
     let alias = warm.alias();
-    let permit = match state
-        .vram
-        .check_background_start(state, snap, class, model_id)
-        .await
-    {
-        Fit::Full(why) => {
-            return Err(WarmOutcome::Skipped {
-                reason: SkipReason::Full,
-                message: why,
-                sizes: None,
-            })
+    // The snapshot and the row as they are after a download of the engine
+    // image (machine-check design §5, `Fit::Downloaded`): it can take
+    // minutes, and the row may have been edited, disabled or removed.
+    let mut reread: Option<(Arc<Snapshot>, ModelRuntime)> = None;
+    let permit = loop {
+        let snap = reread.as_ref().map_or(snap, |(s, _)| &**s);
+        match state
+            .vram
+            .check_background_start(state, snap, class, model_id)
+            .await
+        {
+            Fit::Full(why) => {
+                return Err(WarmOutcome::Skipped {
+                    reason: SkipReason::Full,
+                    message: why,
+                    sizes: None,
+                })
+            }
+            Fit::Held(why) => {
+                let cause = snap
+                    .gpu_block_for(class, model_id)
+                    .map_or(HeldCause::GpuHold, |b| HeldCause::of(&b));
+                return Err(held_or_fallback(snap, alias, cause, why));
+            }
+            Fit::Failed(why) => return Err(WarmOutcome::failed(why)),
+            Fit::Downloaded => {
+                let now = state.snapshot();
+                match model_runtime(&now, class, model_id).filter(|r| r.enabled) {
+                    Some(r) => reread = Some((now, r)),
+                    None => {
+                        return Err(WarmOutcome::failed(format!(
+                            "{class} model '{model_id}' was removed or disabled while its \
+                             engine image downloaded"
+                        )))
+                    }
+                }
+            }
+            Fit::Go(permit) => break Some(permit),
+            Fit::Unchecked => break None,
         }
-        Fit::Held(why) => {
-            let cause = snap
-                .gpu_block_for(class, model_id)
-                .map_or(HeldCause::GpuHold, |b| HeldCause::of(&b));
-            return Err(held_or_fallback(snap, alias, cause, why));
-        }
-        Fit::Go(permit) => Some(permit),
-        Fit::Unchecked => None,
     };
+    let (snap, runtime) = reread.as_ref().map_or((snap, runtime), |(s, r)| (&**s, r));
     loading.mark(report, warm);
     let started_at = Instant::now();
     let spec = acquire_spec(state, snap, runtime);
@@ -182,11 +212,26 @@ async fn start(
                 started_at.elapsed().as_millis()
             );
             state.vram.cache_pids(state);
+            crate::machine::after_start(state, runtime);
             Ok(())
         }
-        Err(e) => Err(WarmOutcome::failed(format!(
-            "starting {class} '{model_id}' failed: {e}"
-        ))),
+        // A start that failed on the graphics card is blamed by the
+        // machine check (machine-check design §2.5); when it names what on
+        // this computer is in the way and the row's fallback answers, the
+        // stage is said as that fallback, as a request would be answered
+        // (D98).
+        Err(e) => {
+            let e = crate::vram::start_error(state, runtime, e).await;
+            if matches!(e, crate::error::GatewayError::GpuSetup { .. }) {
+                if let Some(answered_by) = crate::gate::gpu_setup_fallback(snap, target) {
+                    tracing::info!("{label}: '{alias}' could not start: {e}");
+                    return Err(WarmOutcome::Fallback { answered_by });
+                }
+            }
+            Err(WarmOutcome::failed(format!(
+                "starting {class} '{model_id}' failed: {e}"
+            )))
+        }
     }
 }
 

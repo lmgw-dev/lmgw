@@ -1978,7 +1978,7 @@ First `podman run -d` runs to completion — **including a cold `--pull=missing`
 download, which nothing here bounds**; a pull takes as long as the image is big,
 and a clock over it would turn a slow network into a lie about the registry.
 Only once podman has returned does the clock start on the probe. So a first
-request against a 2 GB image that is not on the box can sit far longer than
+request against a 2 GiB image that is not on the box can sit far longer than
 `start_timeout_seconds` before it either succeeds or reports a probe timeout.
 A Stop interrupts either step.
 
@@ -2334,12 +2334,13 @@ Every piece above is one of §5's or §7's rules made concrete:
   retrieval depths (`k_fts`, `k_vec`, `rrf_k`, `k_rerank`) are in every
   answer's notes, in `/api/status` and in the MCP `search` description.
 - **Keeping it local.** File text goes only to the three aliases the owner
-  picked. A GPU-hold fallback on one of them routes the next request there
-  before the agent can see it: an embedding batch answered by a fallback
-  (`x-lmgw-fallback`) stops the sync unstored, a rerank is dropped with a
-  note saying the question's excerpts reached the fallback, and a chat
-  answer is labelled with the fallback's name. A folder that must stay on
-  the machine needs aliases without a cloud fallback.
+  picked. A fallback on one of them (each model and alias has its own)
+  routes the next request there before the agent can see it: an embedding
+  batch answered by a fallback (`x-lmgw-fallback`) stops the sync unstored,
+  a rerank is dropped with a note saying the question's excerpts reached the
+  fallback, and a chat answer is labelled with the fallback's name. A folder
+  that must stay on the machine needs aliases with no cloud model anywhere
+  along their chain of fallbacks.
 - **Stopping.** `POST /api/sync/stop` — the Sync card's **Stop sync** button,
   behind the same four rules — stops a running sync where it stands; the run
   ends with an `aborted` event of kind `stopped`, reason "stopped by the

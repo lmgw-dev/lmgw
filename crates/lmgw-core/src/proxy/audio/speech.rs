@@ -52,7 +52,7 @@ pub async fn handle_audio_speech(state: SharedState, ctx: RequestCtx, body: Valu
     {
         return r;
     }
-    let spoken = speech_call(&state, &body, started).await;
+    let spoken = speech_call(&state, &body, started, ctx.origin()).await;
     let mut resp = finish_audio(&state, &ctx, alias, started, spoken.result).await;
     if let Some(v) = spoken.report.header_value() {
         resp.headers_mut().insert(SPEECH_HEADER, v);
@@ -77,8 +77,14 @@ struct Spoken {
 /// ([`ShapeReport::header_value`]); absent when the body went as it came.
 pub const SPEECH_HEADER: &str = "x-lmgw-speech";
 
-/// The speech call's gate, shaping and send.
-async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spoken {
+/// The speech call's gate, shaping and send, as `origin`'s traffic
+/// (per-request background design §3).
+async fn speech_call(
+    state: &SharedState,
+    body: &Value,
+    started: Instant,
+    origin: crate::runtime::registry::Origin,
+) -> Spoken {
     let refused = |failed: Failed| Spoken {
         result: Err(failed),
         report: ShapeReport::default(),
@@ -89,10 +95,11 @@ async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spo
         return refused((None, GateHeaders::default(), e));
     };
     // Resolve: the hold swap and the audio routes' protocol check.
-    let routed = match crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio).await {
-        Ok(r) => r,
-        Err(f) => return refused((f.route, f.headers, f.error)),
-    };
+    let routed =
+        match crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio, origin).await {
+            Ok(r) => r,
+            Err(f) => return refused((f.route, f.headers, f.error)),
+        };
     // Preflight: what the engine of the resolved route would refuse is
     // refused here, before anything is started for it.
     let resolved = local_speech(state, routed.resolved()).await;
@@ -184,7 +191,7 @@ async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spo
     if let Some(hold) = admission.as_ref() {
         hold.note_sending();
     }
-    let sent = audio_send(admission.as_ref(), &route, |r| {
+    let sent = audio_send(state, admission.as_ref(), &route, |r| {
         let url = format!("{}/audio/speech", r.upstream.base());
         Ok(apply_bearer_auth(
             state.http.post(url).json(&out),

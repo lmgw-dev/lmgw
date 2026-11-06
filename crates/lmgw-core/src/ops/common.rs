@@ -116,7 +116,11 @@ pub fn parse_capabilities_override(v: &Value) -> Result<Option<Value>, String> {
     };
     // The protocol only picks a changed task's routes, which a shape check
     // does not keep.
-    capabilities::apply_owner_override(check_base, &obj, crate::config::Protocol::Openai)?;
+    capabilities::apply_owner_override(
+        check_base,
+        &obj,
+        crate::config::Protocol::OpenaiCompatible,
+    )?;
     Ok(Some(obj))
 }
 
@@ -159,7 +163,7 @@ pub fn check_rel_path(path: &str, what: &str) -> Result<(), String> {
 /// Whole names, never substrings: `clear=extra_run_args` must not also empty
 /// `args`, which is exactly what a `contains` test read it as — one patch
 /// field's name is another's suffix in three of the four model patches.
-pub(super) fn clear_names(clear: Option<&str>) -> impl Iterator<Item = &str> {
+pub(crate) fn clear_names(clear: Option<&str>) -> impl Iterator<Item = &str> {
     clear
         .unwrap_or_default()
         .split([',', ' ', '\n', '\t', '\r'])

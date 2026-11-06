@@ -51,6 +51,9 @@ pub(crate) fn of_blocks(blocks: &[ToolResultBlock]) -> Vec<Value> {
                 "type": "text",
                 "text": serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
             }),
+            // A client's verbatim Anthropic block, as the JSON block of a
+            // type MCP does not know is.
+            ToolResultBlock::AnthropicBlock(b) => b.block.clone(),
         })
         .collect()
 }

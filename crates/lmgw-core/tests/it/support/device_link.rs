@@ -24,33 +24,64 @@ use crate::common::{self, Gw};
 /// A device's TLS identity: its certificate and its key.
 pub type Identity = (CertificateDer<'static>, PrivateKeyDer<'static>);
 
+/// The ports this process has claimed through [`free_port`]; the abstract
+/// sockets in it are the claims, released when the process ends.
+static CLAIMS: std::sync::Mutex<Vec<std::os::unix::net::UnixListener>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// A port free on both loopback addresses now, for TCP and for UDP (the
 /// calls' device socket group binds the device listener's addresses and
-/// port too): the OS's pick for TCP on `127.0.0.1`, checked free on the
-/// other three. Released before it is returned, so another socket could
-/// take it meanwhile; the window is a few microseconds and the suites bind
-/// it at once.
+/// port too), that no other test takes before the code under test binds it.
+///
+/// The OS cannot hand over a port number without binding it, and the code
+/// under test binds its own. So the port comes from below the kernel's
+/// ephemeral range, where a `bind(0)` of any test never lands, and it is
+/// claimed across processes (nextest runs each test in its own) by an
+/// abstract unix socket named after the port, held until this process
+/// ends: two `free_port` callers never get the same number. The port is
+/// also checked free on the four loopback sockets when claimed.
 pub fn free_port() -> u16 {
-    for _ in 0..32 {
-        let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = v4.local_addr().unwrap().port();
-        let udp4 = match std::net::UdpSocket::bind(("127.0.0.1", port)) {
-            Ok(s) => s,
-            Err(_) => continue,
+    use std::os::linux::net::SocketAddrExt;
+    const FIRST: u16 = 20_000;
+    const LAST: u16 = 32_000;
+    let span = u32::from(LAST - FIRST);
+    // Each process starts its scan elsewhere, so concurrent ones rarely meet.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let start = nanos
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(std::process::id())
+        % span;
+    for i in 0..span {
+        let port = FIRST + ((start + i) % span) as u16;
+        let name = format!("lmgw-test-port-{port}");
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let Ok(claim) = std::os::unix::net::UnixListener::bind_addr(&addr) else {
+            continue;
+        };
+        let tcp4 = std::net::TcpListener::bind(("127.0.0.1", port));
+        let udp4 = std::net::UdpSocket::bind(("127.0.0.1", port));
+        let (tcp4, udp4) = match (tcp4, udp4) {
+            (Ok(t), Ok(u)) => (t, u),
+            _ => continue,
         };
         let v6 = (
             std::net::TcpListener::bind(("::1", port)),
             std::net::UdpSocket::bind(("::1", port)),
         );
-        drop(udp4);
+        drop((tcp4, udp4));
         match v6 {
-            (Ok(_), Ok(_)) => return port,
+            (Ok(_), Ok(_)) => {}
             (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
             // No IPv6 loopback: the device listener serves 127.0.0.1 alone.
-            _ => return port,
+            _ => {}
         }
+        CLAIMS.lock().unwrap().push(claim);
+        return port;
     }
-    panic!("no port free on both loopback addresses, TCP and UDP, in 32 tries");
+    panic!("no port in {FIRST}..{LAST} free on both loopback addresses, TCP and UDP");
 }
 
 /// A device row and its certificate.

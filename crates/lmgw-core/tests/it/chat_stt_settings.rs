@@ -20,7 +20,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
         &state.db,
         &NewUpstream {
             name: "audiocpp".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::AudioCpp,
             base_url: format!("{}/v1", upstream_base.trim_end_matches('/')),
             api_key: Some("sk-up".into()),
@@ -47,6 +47,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
                 capabilities_override: Some(json!({ "capabilities": {
                     "task": task, "endpoints": ["/v1/audio/transcriptions"], "source": "owner"
                 } })),
+                fallback: None,
             },
         )
         .await

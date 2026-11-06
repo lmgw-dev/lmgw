@@ -473,7 +473,7 @@ async fn a_token_answer_carries_the_token_and_the_scope_and_never_prints_it() {
 
 #[tokio::test]
 async fn a_cancel_answers_the_agent_and_what_the_job_registry_said() {
-    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::Openai).await;
+    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let (source, release) = held_source().await;
     register_held(&state, &source).await;
     let gw = serve(state.clone()).await;
@@ -543,7 +543,7 @@ async fn an_open_chat_answers_the_thread_and_what_is_off_about_it() {
     assert!(opened.warnings[2].contains("top_p, seed are not applied"));
 
     // Served and nothing amiss: the warnings are an empty list, not absent.
-    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::Openai).await;
+    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let gw = serve(state).await;
     put(&gw, &chat("calm", "m1")).await;
     let (status, live) = op(&gw, "agent_open_chat", json!({ "id": "calm" })).await;

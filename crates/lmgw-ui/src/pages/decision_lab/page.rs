@@ -217,7 +217,7 @@ impl Lab {
             return None;
         }
         if m.held {
-            return Some(match m.hold_fallback {
+            return Some(match m.fallback {
                 Some(f) => format!("held: {f} answers"),
                 None => "held: no fallback, it answers 503".into(),
             });

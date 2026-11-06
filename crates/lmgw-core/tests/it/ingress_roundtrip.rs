@@ -71,9 +71,10 @@ fn openai_parses_tools_and_tool_results() {
 
 #[test]
 fn openai_carries_unmodeled_fields_through_passthrough() {
-    // `response_format` (both forms), `grammar`, and extra llama.cpp samplers
-    // are not modeled in the IR. Without passthrough they were silently dropped
-    // before reaching llama-server, so structured output was never constrained.
+    // `grammar` and extra llama.cpp samplers are not modeled in the IR.
+    // Without passthrough they were silently dropped before reaching
+    // llama-server. `response_format` is modelled now (structured-output
+    // design §4): the IR's own field, not passthrough.
     let body = json!({
         "model": "m",
         "messages": [{"role": "user", "content": "hi"}],
@@ -89,12 +90,12 @@ fn openai_carries_unmodeled_fields_through_passthrough() {
     assert!(!ir.passthrough.contains_key("messages"));
     assert!(!ir.passthrough.contains_key("temperature"));
     assert_eq!(ir.params.temperature, Some(0.2));
-    // Unmodeled fields are captured verbatim.
-    assert_eq!(ir.passthrough["response_format"]["type"], "json_schema");
+    assert!(!ir.passthrough.contains_key("response_format"));
     assert_eq!(
-        ir.passthrough["response_format"]["json_schema"]["name"],
-        "out"
+        ir.response_format.as_ref().map(|f| f.to_openai()),
+        Some(body["response_format"].clone())
     );
+    // Unmodeled fields are captured verbatim.
     assert_eq!(ir.passthrough["typical_p"], 0.05);
     assert_eq!(ir.passthrough["grammar"], "root ::= \"x\"");
 }
@@ -213,6 +214,10 @@ fn openai_serializes_completion_with_tool_calls() {
         },
         model: "upstream-name".into(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     };
     let v = openai::serialize_completion("alias-x", &c);
     assert_eq!(v["model"], "alias-x");
@@ -286,6 +291,10 @@ fn anthropic_serializes_completion() {
         },
         model: "x".into(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     };
     let v = anthropic::serialize_completion("alias-y", &c);
     assert_eq!(v["type"], "message");
@@ -562,13 +571,15 @@ fn anthropic_keeps_thinking_blocks_with_their_signature() {
         ]
     });
     let ir = anthropic::parse_messages_request(&body).unwrap();
+    // The client's own blocks: no row's scope; `redacted_thinking` is
+    // carried as it came (`ir::AnthropicBlock`).
     assert_eq!(
         ir.messages[1].content,
         vec![
-            ContentPart::Reasoning {
-                text: "teal is unusual".into(),
-                signature: Some("sig-1".into()),
-            },
+            ContentPart::signed_reasoning("teal is unusual", "sig-1", None),
+            ContentPart::AnthropicBlock(AnthropicBlock::from_client(
+                json!({"type": "redacted_thinking", "data": "opaque"})
+            )),
             ContentPart::text("Teal"),
         ]
     );
@@ -811,6 +822,7 @@ fn reasoning_control_merges_and_normalises() {
         enabled: Some(true),
         effort: Some("high".into()),
         budget_tokens: Some(0),
+        ..Default::default()
     }
     .normalised();
     assert_eq!(n.enabled, Some(false));
@@ -943,6 +955,10 @@ fn completion_with(usage: Usage) -> Completion {
         usage,
         model: "m".into(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     }
 }
 

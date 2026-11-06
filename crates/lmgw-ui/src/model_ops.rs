@@ -481,10 +481,26 @@ pub fn ContainerStatusRow(
         })
     };
     let state = move || row().map(|r| r.state);
+    // A start waiting for its download has no container yet (machine-check
+    // design §5): that is what the row says instead of "stopped".
+    let dl = Signal::derive(move || {
+        let mid = model_id.get();
+        live.vram.with(|v| {
+            v.as_ref()
+                .and_then(|v| crate::gpu_download::for_model(v, class, &mid))
+        })
+    });
+    let downloading = Memo::new(move |_| dl.with(Option::is_some));
     view! {
         <div class="row" style="align-items:center; flex-wrap:nowrap">
             <span class="dim">"container:"</span>
             {move || {
+                if downloading.get() && state().is_none() {
+                    return view! {
+                        <crate::gpu_download::DlChip dl=Signal::derive(move || dl.get().unwrap_or_default())/>
+                    }
+                    .into_any();
+                }
                 let (cls, label) = match state().as_deref() {
                     Some("ready") => ("chip ok", "ready"),
                     Some("starting") => ("chip live", "starting"),
@@ -497,6 +513,7 @@ pub fn ContainerStatusRow(
                         {label}
                     </span>
                 }
+                .into_any()
             }}
             // Ladder design §6: the rung this container runs, the gguf file
             // name a hover away; a row without a ladder has no `rung` at all,

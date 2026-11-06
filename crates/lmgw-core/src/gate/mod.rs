@@ -49,6 +49,10 @@
 //!   them: placeholders, decided once per send at the top of
 //!   [`fit`](crate::gate::fit) (the owner's ruling, 2026-10-06: a configured
 //!   fallback is always used).
+//! - `machine_setup` — a local model this computer cannot start
+//!   (machine-check design §2.5): the fallback at admission for `gpu_setup`
+//!   and `engine_download`, and the resolve-time stop while the last machine
+//!   check says the card is not ready.
 //!
 //! Rows the gate does not apply to — not guarded, not (later) a ladder, or
 //! not local at all — pass through both halves exactly as they did before it
@@ -56,18 +60,23 @@
 //! (unified-KV design §7 item 14).
 
 pub mod candidate;
+pub mod chain;
 pub mod clamp;
 pub mod count;
 pub mod facts;
 pub mod fallback_images;
 pub mod fit;
+mod guest;
 pub mod ladder;
+mod machine_setup;
 pub mod open;
 pub mod pool;
 pub mod send;
+pub(crate) mod structured;
 pub mod tool_images;
 
 pub use candidate::{legacy_facets, request_facets, CandidateCtx};
+pub use chain::Chain;
 pub use clamp::clamp_max_tokens;
 pub use count::{
     count_chat_prompt, count_text_prompt, image_token_bound, media_parts, ImageBound, MediaParts,
@@ -77,9 +86,10 @@ pub use facts::GateFacts;
 pub use fit::{attribute, fit_chat, fit_text, planned_clamp, planned_rung, FitRefusal, TurnLease};
 pub(crate) use fit::{guard_facts, on_running_server};
 pub use ladder::{RungTag, RUNG_HEADER};
+pub(crate) use machine_setup::gpu_setup_fallback;
 pub use open::{
-    open, open_pinned, resolve, usable_fallback, AdmissionPolicy, FallbackReason, GateHeaders,
-    OpenFailed, Opened, RouteCheck, Routed,
+    open, open_pinned, resolve, resolve_pinned, usable_fallback, AdmissionPolicy, FallbackReason,
+    GateHeaders, OpenFailed, Opened, RouteCheck, Routed,
 };
 pub(crate) use send::rebuild;
 pub use send::{send_gated, send_gated_marked, CountInput, Sent};

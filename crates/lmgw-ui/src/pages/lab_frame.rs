@@ -305,6 +305,21 @@ pub(super) fn TaskMenu(
     }
 }
 
+/// What a lab that keeps its results by its own means says about them
+/// (`LabFrame`'s `own_keep`).
+#[derive(Clone, Copy)]
+pub(super) struct OwnKeep {
+    /// The results head's note ("kept until discarded · 2.1 MiB").
+    pub note: Signal<String>,
+    /// Its tooltip: where they are kept.
+    pub title: &'static str,
+    /// The empty column's text.
+    pub empty: &'static str,
+    /// What Clear asks before it deletes them all.
+    pub clear_confirm: Signal<String>,
+    pub clear_title: &'static str,
+}
+
 /// The shared lab layout. Everything lab-specific comes in as a slot or a
 /// signal; the columns, the action bar, the results head and the narrow seg
 /// are the frame's.
@@ -347,6 +362,16 @@ pub(super) fn LabFrame(
     /// Export menu).
     #[prop(optional, into)]
     results_tools: Option<ViewFn>,
+    /// A lab that keeps its results on the server by its own means (the
+    /// Voices lab's rounds), not in the lab store: what its results head, its
+    /// empty column and its Clear say.
+    #[prop(optional)]
+    own_keep: Option<OwnKeep>,
+    /// The main pane's floor beside the open reference panel, when the lab
+    /// needs its panel beside the results rather than over them (the
+    /// Voices lab's library); [`SIDE_FOLDS_BELOW`] otherwise.
+    #[prop(optional)]
+    side_folds_below: Option<u32>,
 ) -> impl IntoView {
     let is_kept = kept.is_some();
     let usage = move || kept.and_then(|k| k.get());
@@ -367,7 +392,7 @@ pub(super) fn LabFrame(
                 persist=persist
                 label=side_label
                 badge=side_badge
-                auto_collapse_below=SIDE_FOLDS_BELOW
+                auto_collapse_below=side_folds_below.unwrap_or(SIDE_FOLDS_BELOW)
                 side_view=side
             >
                 <div class="lab-body">
@@ -447,7 +472,14 @@ pub(super) fn LabFrame(
                             <div class="results-head">
                                 <span class="results-title">"Results"</span>
                                 <span class="count">{shown_n}</span>
-                                {if is_kept {
+                                {if let Some(own) = own_keep {
+                                    view! {
+                                        <span class="results-note dim" title=own.title>
+                                            {move || own.note.get()}
+                                        </span>
+                                    }
+                                        .into_any()
+                                } else if is_kept {
                                     view! {
                                         <span
                                             class="results-note dim"
@@ -468,7 +500,18 @@ pub(super) fn LabFrame(
                                 <span class="results-tools">
                                 {results_tools.map(|t| t.run())}
                                 <Show when=any_held>
-                                    {if is_kept {
+                                    {if let Some(own) = own_keep {
+                                        view! {
+                                            <ConfirmButton
+                                                label="Clear"
+                                                confirm=move || own.clear_confirm.get()
+                                                class="btn ghost sm"
+                                                title=own.clear_title
+                                                on_confirm=on_clear
+                                            />
+                                        }
+                                            .into_any()
+                                    } else if is_kept {
                                         // The server's copy goes: the confirm
                                         // names the runs and the files.
                                         view! {
@@ -503,7 +546,9 @@ pub(super) fn LabFrame(
                             </div>
                             <div class="results-list">
                                 <Show when=move || shown_n() == 0>
-                                    {if is_kept {
+                                    {if let Some(own) = own_keep {
+                                        view! { <div class="empty">{own.empty}</div> }.into_any()
+                                    } else if is_kept {
                                         view! {
                                             <div class="empty">
                                                 "Every ask lands here, newest first, and is kept on "

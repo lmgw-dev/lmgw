@@ -123,10 +123,13 @@ impl McpServer {
     /// Final `(program, args)` to spawn a stdio server. Podman-isolated when
     /// [`container_image`](Self::container_image) is set (the default): env is
     /// passed as `-e K=V` flags and `extra_run_args` (GPU/CDI/`:Z`) precede the
-    /// image. A bare subprocess returns `command`/`args` verbatim — its env is
-    /// applied by the spawner, not the argv.
-    pub fn stdio_argv(&self) -> (String, Vec<String>) {
-        match self.podman_argv("run", &[], &self.extra_run_args) {
+    /// image, and `globals` (Podman's global options, lmgw's CDI spec dir for
+    /// a server whose args name the graphics card, from
+    /// `runtime::cdi::ready_globals`) precede `run`. A bare subprocess
+    /// returns `command`/`args` verbatim — its env is applied by the
+    /// spawner, not the argv — and takes no globals.
+    pub fn stdio_argv(&self, globals: &[String]) -> (String, Vec<String>) {
+        match self.podman_argv(globals, "run", &[], &self.extra_run_args) {
             Some(argv) => ("podman".to_string(), argv),
             None => (self.command.clone().unwrap_or_default(), self.args.clone()),
         }
@@ -140,31 +143,39 @@ impl McpServer {
     /// [`container_start_argv`](Self::container_start_argv), so that only
     /// the start and the MCP handshake count against `timeout_ms` (MCP
     /// gateway design §9). The run flags only `podman start` takes
-    /// (`--sig-proxy`, `--detach-keys`) go there instead. `None` for a bare
+    /// (`--sig-proxy`, `--detach-keys`) go there instead. `globals` go before
+    /// `create`, as in [`stdio_argv`](Self::stdio_argv). `None` for a bare
     /// subprocess.
-    pub fn container_create_argv(&self, labels: &[(String, String)]) -> Option<Vec<String>> {
+    pub fn container_create_argv(
+        &self,
+        globals: &[String],
+        labels: &[(String, String)],
+    ) -> Option<Vec<String>> {
         let (create, _) = split_start_flags(&self.extra_run_args);
-        self.podman_argv("create", labels, &create)
+        self.podman_argv(globals, "create", labels, &create)
     }
 
     /// The `podman start` argv of the container
     /// [`container_create_argv`](Self::container_create_argv) made, `id`:
     /// attached to its stdio, with the run flags `podman create` refuses and
-    /// `podman start` takes.
-    pub fn container_start_argv(&self, id: &str) -> Vec<String> {
+    /// `podman start` takes. `globals` go before `start` too: Podman resolves
+    /// a CDI device when it initialises the container, which `start` does,
+    /// so the start has to read the spec dir the create named.
+    pub fn container_start_argv(&self, globals: &[String], id: &str) -> Vec<String> {
         let (_, start) = split_start_flags(&self.extra_run_args);
-        let mut argv: Vec<String> = ["start", "--attach", "--interactive"]
-            .map(String::from)
-            .to_vec();
+        let mut argv: Vec<String> = globals.to_vec();
+        argv.extend(["start", "--attach", "--interactive"].map(String::from));
         argv.extend(start);
         argv.push(id.to_string());
         argv
     }
 
-    /// `podman <verb>` of a Podman-isolated server (`run` or `create`), its
-    /// labels, flags, image and command; `None` for a bare subprocess.
+    /// `podman <globals> <verb>` of a Podman-isolated server (`run` or
+    /// `create`), its labels, flags, image and command; `None` for a bare
+    /// subprocess.
     fn podman_argv(
         &self,
+        globals: &[String],
         verb: &str,
         labels: &[(String, String)],
         extra_run_args: &[String],
@@ -173,12 +184,13 @@ impl McpServer {
         if image.is_empty() {
             return None;
         }
-        let mut argv = vec![
+        let mut argv = globals.to_vec();
+        argv.extend([
             verb.to_string(),
             "--rm".to_string(),
             "-i".to_string(),
             "--quiet".to_string(),
-        ];
+        ]);
         for (k, v) in labels {
             argv.push("--label".to_string());
             argv.push(format!("{k}={v}"));

@@ -37,8 +37,20 @@ use lmgw_core::config::dev_instance_override;
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::{server, store};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The machine check's NVML probe (`--machine-probe nvml`): this runner
+    // starts itself for it, as the tray app does, and answers before the
+    // async runtime and its worker threads start.
+    if let Some(code) = lmgw_core::machine::probe::run_if_asked() {
+        std::process::exit(code);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

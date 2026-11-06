@@ -1,0 +1,10 @@
+[
+  {"nav": "/models/find?q=qwen3%200.6b"},
+  {"until": "document.querySelector('.mf-card .mf-mark') || document.querySelector('.mf-notice')", "timeout": 60, "label": "the live hub answers (no token)"},
+  {"until": "!(document.querySelector('.mf-mark') || {textContent: ''}).textContent.includes('checking')", "timeout": 120, "label": "the header's marks come in"},
+  {"expect": "!!document.querySelector('.mf-card')", "label": "a card"},
+  {"click": ".mf-fold > summary"},
+  {"wait": 0.3},
+  {"js": "document.querySelector('.mf-card').innerText"},
+  {"shot": "17-live-card"}
+]

@@ -57,6 +57,12 @@ pub(super) fn cost_line(r: &RequestRow) -> Option<String> {
             "nothing billed — refused or failed before it spent anything".to_string()
         });
     }
+    // A row whose reason is its own (a service tier with no price row, an
+    // answer that never reported usage) says so in its price note, which
+    // the detail shows beside this line (openai egress design §5.6).
+    if r.price_note.is_some() {
+        return Some("unpriced — the price note says why, which is not zero".to_string());
+    }
     if !has_rate(p) {
         return Some("unpriced — no price on file for it, which is not zero".to_string());
     }
@@ -321,6 +327,8 @@ mod tests {
             audio_in_ms: None,
             chars_in: None,
             images_out: None,
+            service_tier: None,
+            price_note: None,
             pricing: None,
         }
     }
@@ -535,5 +543,26 @@ mod tests {
             "0.005 per answered request — no fee: the upstream did not answer"
         );
         assert!(cost_line(&refused).unwrap().starts_with("nothing billed"));
+    }
+
+    /// A row its service tier left unpriced has no rate on file at that
+    /// tier, but a price on file at another: the cost line points at the
+    /// price note instead of saying no price exists.
+    #[test]
+    fn a_row_with_a_price_note_points_at_it() {
+        let r = RequestRow {
+            class: "chat".into(),
+            service_tier: Some("flex".into()),
+            price_note: Some("served at service tier flex; no flex price on file".into()),
+            pricing: pricing(|p| {
+                p.source = Some("unknown".into());
+                p.in_remainder = true;
+            }),
+            ..row()
+        };
+        assert_eq!(
+            cost_line(&r).as_deref(),
+            Some("unpriced — the price note says why, which is not zero")
+        );
     }
 }

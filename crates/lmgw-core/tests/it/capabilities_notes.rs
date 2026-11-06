@@ -53,8 +53,7 @@ fn row(model_id: &str, params: LlamaParams) -> LocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -272,8 +271,7 @@ fn aux(model_id: &str, kind: AuxKind, args: &[&str]) -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -350,8 +348,7 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         residency: None,
     }
 }
@@ -399,7 +396,7 @@ fn openai_protocol_catalog_notes() {
         lmgw_core::catalog::parse_openai_entry(&catalog_entry("kilo_anthropic_variants.json"))
             .expect("parses");
     assert_notes(
-        &capabilities::for_catalog(&info, Protocol::Openai, "kilo").notes,
+        &capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo").notes,
         &["Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max); x-lmgw-reasoning: off is sent upstream as reasoning_effort: \"none\". The catalog does not state the default state."],
     );
 }
@@ -416,7 +413,7 @@ fn openai_protocol_catalog_notes_without_an_off_level() {
         .remove("none");
     let info = lmgw_core::catalog::parse_openai_entry(&entry).expect("parses");
     assert_notes(
-        &capabilities::for_catalog(&info, Protocol::Openai, "kilo").notes,
+        &capabilities::for_catalog(&info, Protocol::OpenaiCompatible, "kilo").notes,
         &["Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max); x-lmgw-reasoning: off is sent upstream as reasoning_effort: \"low\", since its capabilities list the effort levels it takes, and none of them is off. The catalog does not state the default state."],
     );
 }
@@ -438,7 +435,7 @@ fn gemini_catalog_notes() {
 }
 
 /// The Anthropic arm: effort is the control that works, the budget is the one
-/// current Claude models reject.
+/// this model's catalog says it does not take.
 #[test]
 fn anthropic_catalog_notes() {
     let envelope = catalog_entry("anthropic_models_list.json");
@@ -454,7 +451,7 @@ fn anthropic_catalog_notes() {
         &capabilities::for_catalog(&info, Protocol::Anthropic, "anthropic").notes,
         &[
             "Reasoning: header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max) becomes output_config.effort with thinking type adaptive, and x-lmgw-reasoning: on becomes thinking type adaptive. x-lmgw-reasoning: off is sent upstream as thinking: {type: \"disabled\"}; should the provider refuse it, lmgw retries with what the refusal says the model takes and, failing that, with no reasoning control (the model then reasons as it does by default), and keeps what answered for the model.",
-            "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, which current Claude models reject — use an effort level instead.",
+            "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, which this model's catalog says it does not take — use an effort level instead.",
             "Non-streaming requests without max_tokens are sent with max_tokens 4096 (the provider refuses larger non-streamed caps); streaming requests get the published maximum; either way the response carries x-lmgw-max-tokens-defaulted. Set max_tokens yourself to control it.",
         ],
     );
@@ -477,11 +474,12 @@ fn image(model_id: &str) -> ImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         peak_extra_bytes: None,
         peak_learned_at: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 

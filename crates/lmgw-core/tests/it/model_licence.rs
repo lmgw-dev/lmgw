@@ -4,7 +4,7 @@
 //! there, leaves it null.
 
 use lmgw_api_types as dto;
-use lmgw_core::config::{AuxKind, HoldFallbackMode, LlamaParams, Settings};
+use lmgw_core::config::{AuxKind, LlamaParams, Settings};
 use lmgw_core::gguf::synth;
 use lmgw_core::state::AppState;
 use lmgw_core::store::{self, NewAuxModel, NewLocalModel};
@@ -24,8 +24,7 @@ fn chat_row(model_id: &str) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -49,8 +48,7 @@ fn aux_row(model_id: &str, kind: AuxKind) -> NewAuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
     }
 }
 

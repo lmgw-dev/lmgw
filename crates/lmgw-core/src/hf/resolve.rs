@@ -32,11 +32,53 @@ fn commit_header(headers: &reqwest::header::HeaderMap) -> Option<String> {
 /// first answer off it — reqwest's own default cap for a whole chain.
 const MAX_HUB_HOPS: usize = 10;
 
-/// GET `url` (a resolve URL on the hub) and the commit the hub resolved it
-/// to. `direct` must not follow redirects; `follow` does the rest of the
-/// chain once it leaves the hub. The token goes to the hub only: along
-/// redirects that stay on the hub's origin, never to the CDN — the rule
-/// reqwest applies itself.
+/// What the hub's own hops said about the file, beside the response
+/// (find-a-model design §2.1). Each is read from a success or a redirect on
+/// the hub, the last hop that names one winning, as the commit always was;
+/// the CDN repeats none of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HubHop {
+    /// `X-Repo-Commit`: the commit the revision resolved to.
+    pub commit: Option<String>,
+    /// `X-Linked-Etag`, unquoted: an LFS file's sha256, the tree listing's
+    /// `lfs.oid` (D4). The CDN's own `ETag` is another hash (the xet one).
+    pub linked_etag: Option<String>,
+    /// `X-Linked-Size`: the LFS file's bytes.
+    pub linked_size: Option<u64>,
+}
+
+impl HubHop {
+    fn read(&mut self, headers: &reqwest::header::HeaderMap) {
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        };
+        self.commit = commit_header(headers).or(self.commit.take());
+        if let Some(etag) = text("x-linked-etag").map(super::normalize_etag) {
+            self.linked_etag = Some(etag)
+                .filter(|e| !e.is_empty())
+                .or(self.linked_etag.take());
+        }
+        if let Some(size) = text("x-linked-size").and_then(|v| v.parse().ok()) {
+            self.linked_size = Some(size);
+        }
+    }
+}
+
+/// GET `url` (a resolve URL on the hub), and what the hub's hops said about
+/// the file ([`HubHop`]). `direct` must not follow redirects; `follow` does
+/// the rest of the chain once it leaves the hub. The token goes to the hub
+/// only: along redirects that stay on the hub's origin, never to the CDN —
+/// the rule reqwest applies itself.
+///
+/// `cdn_headers` ride the first request off the hub only (find-a-model
+/// design §2.1, D40): a `Range` for a header read or a resumed download.
+/// The hub's own hops get none, so a hub that answers the file itself (a
+/// small file, a mirror) answers it whole, and a caller that sent a `Range`
+/// reads a `200` as the whole file.
 ///
 /// Every hop on the hub is taken with `direct` and its header read, the way
 /// `huggingface_hub` follows relative redirects itself: a renamed repo
@@ -45,35 +87,49 @@ const MAX_HUB_HOPS: usize = 10;
 /// earlier one named — the last answer on the hub is the one that resolved
 /// the file. The first `Location` off the hub's origin goes to `follow`.
 ///
+/// Every hop asks for the file as it is, `Accept-Encoding: identity` (the
+/// `cdn_headers` may say otherwise): reqwest's gzip decoding (find-a-model
+/// design D141) asks for gzip on every request it isn't told about, a
+/// `Range` included, and a decoded answer has no `Content-Length`, which a
+/// download and a header read measure the file by.
+///
 /// The response may be a failure status; reading it is the caller's
-/// business, as it was before. The commit is read only from a success or a
-/// redirect: the hub echoes a requested revision on a 404 too.
+/// business, as it was before. The hop's facts are read only from a success
+/// or a redirect: the hub echoes a requested revision on a 404 too.
 pub async fn get_with_commit(
     direct: &reqwest::Client,
     follow: &reqwest::Client,
     token: &str,
     url: &str,
-) -> Result<(reqwest::Response, Option<String>), String> {
+    cdn_headers: &reqwest::header::HeaderMap,
+) -> Result<(reqwest::Response, HubHop), String> {
     let origin = reqwest::Url::parse(url).map_err(|e| format!("GET {url}: {e}"))?;
+    let identity = reqwest::header::HeaderValue::from_static("identity");
+    let mut cdn_headers = cdn_headers.clone();
+    cdn_headers
+        .entry(reqwest::header::ACCEPT_ENCODING)
+        .or_insert(identity.clone());
     let mut at = origin.clone();
     let mut seen: Vec<reqwest::Url> = Vec::new();
-    let mut commit = None;
+    let mut hop = HubHop::default();
     while seen.len() < MAX_HUB_HOPS {
         if seen.contains(&at) {
             return Err(format!("GET {url}: the hub's redirects loop back to {at}"));
         }
         seen.push(at.clone());
-        let mut rb = direct.get(at.clone());
+        let mut rb = direct
+            .get(at.clone())
+            .header(reqwest::header::ACCEPT_ENCODING, identity.clone());
         if !token.is_empty() {
             rb = rb.bearer_auth(token);
         }
         let resp = rb.send().await.map_err(|e| format!("GET {at}: {e}"))?;
         let status = resp.status();
         if status.is_success() || status.is_redirection() {
-            commit = commit_header(resp.headers()).or(commit);
+            hop.read(resp.headers());
         }
         if !status.is_redirection() {
-            return Ok((resp, commit));
+            return Ok((resp, hop));
         }
         let Some(location) = resp
             .headers()
@@ -81,19 +137,21 @@ pub async fn get_with_commit(
             .and_then(|v| v.to_str().ok())
         else {
             // A redirect with nowhere to go: the caller reports the status.
-            return Ok((resp, commit));
+            return Ok((resp, hop));
         };
         let next = at
             .join(location)
             .map_err(|e| format!("GET {at}: redirect to {location}: {e}"))?;
         if !same_origin(&next, &origin) {
-            // Off the hub (the CDN): no token, and reqwest follows the rest.
+            // Off the hub (the CDN): no token, the caller's headers, and
+            // reqwest follows the rest.
             let resp = follow
                 .get(next.clone())
+                .headers(cdn_headers)
                 .send()
                 .await
                 .map_err(|e| format!("GET {next}: {e}"))?;
-            return Ok((resp, commit));
+            return Ok((resp, hop));
         }
         at = next;
     }
@@ -131,9 +189,104 @@ mod tests {
     fn clients() -> (reqwest::Client, reqwest::Client) {
         let direct = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .no_gzip()
             .build()
             .unwrap();
         (direct, reqwest::Client::new())
+    }
+
+    /// [`get_with_commit`] with no headers for the CDN, and the commit only.
+    async fn get(
+        direct: &reqwest::Client,
+        follow: &reqwest::Client,
+        token: &str,
+        url: &str,
+    ) -> Result<(reqwest::Response, Option<String>), String> {
+        let none = reqwest::header::HeaderMap::new();
+        get_with_commit(direct, follow, token, url, &none)
+            .await
+            .map(|(resp, hop)| (resp, hop.commit))
+    }
+
+    /// The hub's 302 as it answered an anonymous GET of a public projector on
+    /// 2026-11-03 (the repo and the bridge path renamed): the hop's facts are
+    /// the sha256, the size and the commit, the CDN's `ETag` is the xet hash.
+    const RECORDED_SHA256: &str =
+        "eacf610d1ee4bd5ed0197a0777dd8f4fceb8eefa27009067c7d496cb68fbde45";
+    const RECORDED_XET: &str = "11191dd055c48c57d4074b57ece43a2661ebd6daf5fa5c7b1f9be7c1df03ddd6";
+    const RECORDED_SIZE: u64 = 927_607_360;
+    const RECORDED_COMMIT: &str = "82d411acf4a06cfb8d9b073a5211bf410bfc29bf";
+
+    /// A `Range` given for the CDN rides the CDN's request only: the hub's
+    /// hop gets none and the token, the CDN gets the Range and no token, and
+    /// both ask for the file as it is (`identity`, D141). The
+    /// hub hop's `x-linked-etag`, `x-linked-size` and `x-repo-commit` come
+    /// back beside the CDN's `206` (find-a-model design §2.1, D40).
+    #[tokio::test]
+    async fn a_range_goes_to_the_cdn_hop_only_and_the_hub_hops_headers_come_back() {
+        let hub = MockServer::start().await;
+        let cdn = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/demo-org/demo-model-GGUF/resolve/main/mmproj-F16.gguf",
+            ))
+            .and(header("authorization", "Bearer tok"))
+            .and(header("accept-encoding", "identity"))
+            .and(|r: &Request| !r.headers.contains_key("range"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("x-repo-commit", RECORDED_COMMIT)
+                    .insert_header("x-linked-etag", format!("\"{RECORDED_SHA256}\"").as_str())
+                    .insert_header("x-linked-size", RECORDED_SIZE.to_string().as_str())
+                    .insert_header("x-xet-hash", RECORDED_XET)
+                    .insert_header("accept-ranges", "bytes")
+                    .insert_header(
+                        "location",
+                        format!("{}/xet-bridge-us/demo/{RECORDED_XET}?Expires=1", cdn.uri())
+                            .as_str(),
+                    ),
+            )
+            .expect(1)
+            .mount(&hub)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/xet-bridge-us/demo/{RECORDED_XET}")))
+            .and(header("range", "bytes=500000000-"))
+            // The file as it is, though the client decodes gzip (D141).
+            .and(header("accept-encoding", "identity"))
+            .and(|r: &Request| !r.headers.contains_key("authorization"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("etag", format!("\"{RECORDED_XET}\"").as_str())
+                    .insert_header(
+                        "content-range",
+                        format!("bytes 500000000-500000003/{RECORDED_SIZE}").as_str(),
+                    )
+                    .set_body_bytes(b"tail".to_vec()),
+            )
+            .expect(1)
+            .mount(&cdn)
+            .await;
+        let (direct, follow) = clients();
+        let url = format!(
+            "{}/demo-org/demo-model-GGUF/resolve/main/mmproj-F16.gguf",
+            hub.uri()
+        );
+        let mut range = reqwest::header::HeaderMap::new();
+        range.insert(reqwest::header::RANGE, "bytes=500000000-".parse().unwrap());
+        let (resp, hop) = get_with_commit(&direct, &follow, "tok", &url, &range)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 206);
+        assert_eq!(
+            hop,
+            HubHop {
+                commit: Some(RECORDED_COMMIT.into()),
+                linked_etag: Some(RECORDED_SHA256.into()),
+                linked_size: Some(RECORDED_SIZE),
+            }
+        );
+        assert_eq!(resp.bytes().await.unwrap().as_ref(), b"tail");
     }
 
     /// The hub's 302 names the commit and points at a CDN that does not:
@@ -162,9 +315,7 @@ mod tests {
             .await;
         let (direct, follow) = clients();
         let url = format!("{}/o/r/resolve/main/m.gguf", hub.uri());
-        let (resp, commit) = get_with_commit(&direct, &follow, "tok", &url)
-            .await
-            .unwrap();
+        let (resp, commit) = get(&direct, &follow, "tok", &url).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(commit.as_deref(), Some(COMMIT));
         assert_eq!(resp.bytes().await.unwrap().as_ref(), b"GGUF");
@@ -204,18 +355,14 @@ mod tests {
             .await;
         let (direct, follow) = clients();
         let url = |f: &str| format!("{}/o/r/resolve/main/{f}", hub.uri());
-        let (resp, commit) = get_with_commit(&direct, &follow, "tok", &url("config.json"))
+        let (resp, commit) = get(&direct, &follow, "tok", &url("config.json"))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(commit.as_deref(), Some(COMMIT));
-        let (_, commit) = get_with_commit(&direct, &follow, "", &url("plain.gguf"))
-            .await
-            .unwrap();
+        let (_, commit) = get(&direct, &follow, "", &url("plain.gguf")).await.unwrap();
         assert_eq!(commit, None, "no header, no commit — never a guess");
-        let (resp, commit) = get_with_commit(&direct, &follow, "", &url("gone.gguf"))
-            .await
-            .unwrap();
+        let (resp, commit) = get(&direct, &follow, "", &url("gone.gguf")).await.unwrap();
         assert_eq!(resp.status(), 404);
         assert_eq!(commit, None, "a 404 echoes what was asked, not a commit");
     }
@@ -266,17 +413,13 @@ mod tests {
         }
         let (direct, follow) = clients();
         let url = format!("{}/old/r/resolve/main/m.gguf", hub.uri());
-        let (resp, commit) = get_with_commit(&direct, &follow, "tok", &url)
-            .await
-            .unwrap();
+        let (resp, commit) = get(&direct, &follow, "tok", &url).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(commit.as_deref(), Some(COMMIT), "from the second hub hop");
         assert_eq!(resp.bytes().await.unwrap().as_ref(), b"GGUF");
 
         let looped = format!("{}/a/r/resolve/main/x", hub.uri());
-        let err = get_with_commit(&direct, &follow, "", &looped)
-            .await
-            .unwrap_err();
+        let err = get(&direct, &follow, "", &looped).await.unwrap_err();
         assert!(err.contains("loop back to"), "{err}");
     }
 
@@ -303,7 +446,7 @@ mod tests {
         // Bounded, so a cap that went missing fails here instead of hanging.
         let err = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            get_with_commit(&direct, &follow, "", &url),
+            get(&direct, &follow, "", &url),
         )
         .await
         .expect("the hop cap ends the chain")

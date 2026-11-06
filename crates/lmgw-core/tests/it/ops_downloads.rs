@@ -185,13 +185,28 @@ fn required(name: &str) -> Vec<String> {
 async fn the_document_names_the_type_each_download_op_answers_with() {
     let doc = lmgw_core::openapi::admin_doc();
     // What every answer sends is required; `note` and the new add keys too.
-    assert_eq!(required("RepoFiles"), ["files", "note", "repo", "target"]);
+    assert_eq!(
+        required("RepoFiles"),
+        [
+            "card",
+            "files",
+            "fit_notes",
+            "header_bytes_read",
+            "metered",
+            "note",
+            "picks",
+            "recommended",
+            "repo",
+            "target"
+        ]
+    );
     assert_eq!(
         required("HfAddResult"),
         [
             "companions",
             "dest_prefix",
             "downloads",
+            "engine",
             "files_queued",
             "gguf_path",
             "message",
@@ -259,7 +274,21 @@ async fn a_repo_listing_carries_a_note_and_whole_byte_counts() {
 
     let live = get(&f.gw, "/api/hf/repo?repo=p/chat").await;
     let listed = common::round_trips::<dto::RepoFiles>("GET /api/hf/repo", &live);
-    assert_keys(&live, &["repo", "target", "files", "note"]);
+    assert_keys(
+        &live,
+        &[
+            "repo",
+            "target",
+            "files",
+            "note",
+            "recommended",
+            "picks",
+            "card",
+            "header_bytes_read",
+            "fit_notes",
+            "metered",
+        ],
+    );
     assert_eq!(listed.target, "chat");
     assert!(listed.note.contains("lmgw__hf_add"), "{}", listed.note);
     let by_file = |name: &str| {
@@ -284,7 +313,16 @@ async fn a_repo_listing_carries_a_note_and_whole_byte_counts() {
     );
     assert_keys(
         row,
-        &["file", "role", "quant", "parts", "size_bytes", "size"],
+        &[
+            "file",
+            "role",
+            "quant",
+            "parts",
+            "size_bytes",
+            "size",
+            "fit",
+            "estimated_from",
+        ],
     );
     assert_eq!(row["quant"], "Q8_0");
     // A split GGUF is one entry: the first part, the parts' total.
@@ -359,6 +397,7 @@ async fn an_add_names_what_it_queued_what_came_with_it_and_what_to_look_out_for(
             "dest_prefix",
             "target",
             "message",
+            "engine",
         ],
     );
     let companions: Vec<(&str, &str)> = added
@@ -573,6 +612,7 @@ async fn the_download_list_and_the_job_list_keep_their_nulls_and_their_counts() 
                 "job_id",
                 "requested_revision",
                 "resolved_commit",
+                "kept_bytes",
             ],
         );
     }

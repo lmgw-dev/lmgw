@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use lmgw_api_types::PriceUnit;
+pub use lmgw_api_types::{PriceTier, PriceUnit};
 
 /// One row of `prices`: what a scope costs in one unit (billable-units design
 /// §2.2).
@@ -27,6 +27,10 @@ pub struct PriceRow {
     /// The rate of a unit other than tokens ([`PriceUnit::scale`]); `None` on
     /// a `per_mtok` row.
     pub price: Option<f64>,
+    /// The OpenAI service tier the row prices (openai egress design §5.3):
+    /// [`PriceTier::Standard`] for every other provider and every catalog
+    /// row.
+    pub service_tier: PriceTier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

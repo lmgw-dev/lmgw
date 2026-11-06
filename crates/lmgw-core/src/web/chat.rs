@@ -12,12 +12,14 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::chat::{Ack, ThreadList};
 use lmgw_api_types::chat_frames as frames;
-use lmgw_api_types::chat_threads::{ArchiveRequest, PinRequest, ThreadCreate, ThreadDetail};
+use lmgw_api_types::chat_threads::{
+    ArchiveRequest, PinRequest, ThreadCreate, ThreadDetail, TitleRequest,
+};
 use lmgw_api_types::chat_turn::SendRequest;
 use lmgw_api_types::ApiError;
 use serde::Deserialize;
@@ -304,6 +306,38 @@ pub async fn pin_thread(
     respond_with_thread(&state, &caller, id).await
 }
 
+/// `POST /chat/api/threads/{id}/title` — rename by hand. Cosmetic like pin:
+/// no steer or toolset check. The first send names only a thread still
+/// called "New chat", so a title set here is never replaced.
+pub async fn rename_thread(
+    State(state): State<SharedState>,
+    caller: Caller,
+    ChatPath(id): ChatPath<i64>,
+    ChatJson(req): ChatJson<TitleRequest>,
+) -> Response {
+    let repo = ChatRepo::of(id);
+    let held = match reach_held(&state, &caller, id).await {
+        Ok(held) => held,
+        Err(r) => return r,
+    };
+    if repo.is_temp() {
+        return temporary_refusal("renamed");
+    }
+    let title = req.title.trim();
+    if title.is_empty() {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "the title is empty after trimming",
+        );
+    }
+    if let Err(e) = repo.set_title(&state, id, title, &caller).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string());
+    }
+    drop(held);
+    respond_with_thread(&state, &caller, id).await
+}
+
 /// The thread's reach for `caller`, checked twice (review W6-6): first
 /// without the thread's lock, so an id out of reach is the 404 of a
 /// missing thread at once (the answer's timing says nothing of a thread a
@@ -560,13 +594,16 @@ pub async fn delete_attachment(
     }
 }
 
-/// `GET /chat/api/attachments/{id}` — the raw bytes. `nosniff` +
-/// `sandbox` so nothing uploaded can execute on the dashboard's own origin
-/// (design §2) even though it is served from it.
+/// `GET /chat/api/attachments/{id}` — the raw bytes, whole or the one
+/// `Range` a player asks (a spoken result plays from here:
+/// [`super::ranged`]). `nosniff` + `sandbox` so nothing uploaded can execute
+/// on the dashboard's own origin (design §2) even though it is served from
+/// it.
 pub async fn get_attachment(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
+    ask: super::ranged::RangeAsk,
 ) -> Response {
     if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
         return refused;
@@ -581,20 +618,12 @@ pub async fn get_attachment(
     } else {
         att.mime.clone()
     };
-    let mut resp = (StatusCode::OK, att.data).into_response();
-    let headers = resp.headers_mut();
-    if let Ok(v) = HeaderValue::from_str(&content_type) {
-        headers.insert(header::CONTENT_TYPE, v);
-    }
-    headers.insert(
-        HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("sandbox"),
-    );
-    resp
+    // `ranged` sends nosniff + sandbox on every answer it builds.
+    super::ranged::bytes(
+        &ask,
+        Bytes::from(att.data),
+        super::ranged::Head::typed(&content_type),
+    )
 }
 
 /// The 404 an attachment route answers when `caller` may not reach the
@@ -653,6 +682,8 @@ pub async fn send(
             "the message is empty",
         );
     }
+    // Where the client says it was written (chat-plane design §9.10).
+    let origin = super::chat_origin::of_request(req.origin);
     let voice = match req.voice.map(store::MessageVoice::dictation_from_input) {
         None => None,
         Some(Ok(v)) => Some(v),
@@ -754,10 +785,13 @@ pub async fn send(
         .append_user_message(
             &state,
             id,
-            &content,
-            &attachment_ids,
-            &kb_refs,
-            voice.as_ref(),
+            store::UserMessage {
+                content: &content,
+                attachment_ids: &attachment_ids,
+                kb_refs: &kb_refs,
+                voice: voice.as_ref(),
+                origin: origin.as_deref(),
+            },
             &caller,
         )
         .await
@@ -852,6 +886,7 @@ async fn open_upstream(
             alias: &ir.model_alias,
             fallback,
         },
+        Some(&proxy::reasoning_fit::Handover::in_process()),
         |r, p| {
             prompt_sent.store(true, Ordering::Relaxed);
             egress.build_chat(&state.http, &r.upstream, &r.upstream_model, ir, p, true)
@@ -866,10 +901,20 @@ async fn open_upstream(
     if !status.is_success() {
         // An error answer: the upstream took no prompt to work on.
         prompt_sent.store(false, Ordering::Relaxed);
+        let answer_headers = resp.headers().clone();
         let bytes = resp.bytes().await.unwrap_or_default();
         return Err((
             status.as_u16(),
-            crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), route),
+            crate::gate::attribute(
+                crate::egress::chat_error(
+                    egress,
+                    status.as_u16(),
+                    &answer_headers,
+                    &bytes,
+                    ir.format_ask(),
+                ),
+                route,
+            ),
         ));
     }
     Ok(crate::gate::Sent::Upstream(resp))
@@ -920,7 +965,12 @@ pub(super) async fn run_send(
     let resolved = turn
         .or_stop(
             &tx,
-            crate::gate::resolve(&state, &ir.model_alias, crate::gate::RouteCheck::None),
+            crate::gate::resolve(
+                &state,
+                &ir.model_alias,
+                crate::gate::RouteCheck::None,
+                crate::runtime::registry::Origin::Owner,
+            ),
         )
         .await;
     let routed = match resolved {
@@ -972,8 +1022,9 @@ pub(super) async fn run_send(
                     None,
                     None,
                     None,
-                    Some((e.kind(), e.to_string())),
+                    Some((e.kind(), e.log_text())),
                     None,
+                    Default::default(),
                     Default::default(),
                 )
                 .await;
@@ -1111,8 +1162,9 @@ where
                 None,
                 None,
                 None,
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
                 None,
+                Default::default(),
                 Default::default(),
             )
             .await;
@@ -1143,6 +1195,23 @@ where
     let route_degraded = crate::degraded::join([turn.degraded(), turn.blind().marker()]);
     let sent = turn
         .or_stop(tx, async {
+            // Flex asked for by a budgeted caller on a scope with no flex
+            // price (openai egress design §13.3), on the route this send
+            // takes, as for every other turn: the send's refusal.
+            crate::proxy::priced_refusal(
+                state,
+                &turn.key(),
+                "chat",
+                &ir.model_alias,
+                &route,
+                crate::telemetry::RequestClass::Chat,
+                ir.requested_service_tier().as_deref(),
+            )
+            .map_err(|error| crate::gate::FitRefusal {
+                error,
+                max_tokens_clamped: None,
+                rung: None,
+            })?;
             let (mut lease, gated) = crate::gate::fit_chat(
                 state,
                 admission.as_ref(),
@@ -1189,8 +1258,9 @@ where
                 None,
                 f.max_tokens_clamped,
                 f.rung.as_ref().map(crate::gate::RungTag::log),
-                Some((f.error.kind(), f.error.to_string())),
+                Some((f.error.kind(), f.error.log_text())),
                 None,
+                Default::default(),
                 Default::default(),
             )
             .await;
@@ -1200,9 +1270,10 @@ where
         Err(why) => {
             if prompt_sent.into_inner() {
                 // Stopped while the upstream had the request: the prompt
-                // it may be working on counts, as on the stock path.
-                let (usage, note) = proxy::unanswered_usage(ir);
-                record_chat_call(
+                // it may be working on counts, as on the stock path (on
+                // the platform, counted locally as a lower bound).
+                let c = proxy::unanswered_cost(&route, ir).await;
+                record_chat_counted(
                     state,
                     turn.key(),
                     &ir.model_alias,
@@ -1211,13 +1282,15 @@ where
                     started,
                     200,
                     None,
-                    usage,
+                    c.usage,
                     None,
                     None,
                     None,
-                    Some(("canceled", note)),
+                    Some(("canceled", c.message)),
                     route_degraded.clone(),
                     Default::default(),
+                    ir.served_tier(&route, None),
+                    c.count,
                 )
                 .await;
             } else {
@@ -1264,8 +1337,9 @@ where
                 None,
                 None,
                 None,
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
                 None,
+                Default::default(),
                 Default::default(),
             )
             .await;
@@ -1286,8 +1360,9 @@ where
                 None,
                 max_tokens_clamped,
                 rung,
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
                 degraded.clone(),
+                Default::default(),
                 Default::default(),
             )
             .await;
@@ -1298,66 +1373,142 @@ where
 
     // Drain the stream: accumulate the assistant text and relay each delta as a
     // client event. Shares the normalized producer with the public proxy.
-    let decoder = egress.new_decoder();
+    let decoder = egress.decoder_for(&route.upstream);
     let mut assistant = String::new();
     let mut reasoning = String::new();
+    // The reasoning items' seals, saved beside the trace (openai egress
+    // design §7.3.2), each where its item stood in the answer's text: a seal
+    // closes its item, so the text so far is the text answered before it.
+    let mut reasoning_seals: Vec<crate::store::ReplySeal> = Vec::new();
+    // An Anthropic thinking block came signed: the model reasoned, though
+    // an omitted display streams no text of it (the off check, below).
+    let mut signed = false;
     // Kept outside the stream's future, which a stop drops (`stopped`).
-    let mut read = stopped::Read::default();
-    let drained = drive_upstream(resp, decoder, timeout, started, &state.telemetry, |delta| {
-        read.note(&delta, started);
-        let frame = match &delta {
-            StreamDelta::TextDelta(t) => {
-                assistant.push_str(t);
-                chat_turn::TurnFrame::of("delta", &frames::TextFrame { text: t.clone() })
+    // The output text too on the platform, which a row without usage is
+    // counted by (openai egress design §13.4).
+    let mut read =
+        stopped::Read::counting(route.upstream.protocol == crate::config::Protocol::Openai);
+    let drained = drive_upstream(
+        resp,
+        decoder,
+        timeout,
+        started,
+        &state.telemetry,
+        false,
+        |delta| {
+            read.note(&delta, started);
+            // The answer's items, recorded under the thread's key like any
+            // send's (`proxy::answer_items`), as they pass: before the stop
+            // that follows them reaches the page, and whether or not the
+            // page's stop wins the race after them.
+            if let StreamDelta::UpstreamItems(i) = &delta {
+                let (st, rt, al, i) = (
+                    state.clone(),
+                    route.clone(),
+                    ir.model_alias.clone(),
+                    i.clone(),
+                );
+                let key = turn.key();
+                return futures::future::Either::Right(futures::future::Either::Left(async move {
+                    proxy::answer_items::remember_in_process(&st, &rt, &key, &al, &i).await;
+                    true
+                }));
             }
-            // Reasoning ("thinking") stream — kept separate from the answer so
-            // the UI can show it in a collapsible block and a reasoning-only
-            // turn (out of token budget) is still recorded, not blank.
-            StreamDelta::ReasoningDelta(r) => {
-                reasoning.push_str(r);
-                chat_turn::TurnFrame::of("reasoning", &frames::TextFrame { text: r.clone() })
-            }
-            StreamDelta::ToolCallStart { index, id, name } => chat_turn::TurnFrame::of(
-                "tool",
-                &frames::ToolFrame::Start(frames::ToolStartFrame {
-                    index: *index,
-                    id: Some(id.clone()),
-                    name: name.clone(),
-                }),
-            ),
-            StreamDelta::ToolCallArgsDelta { index, fragment } => chat_turn::TurnFrame::of(
-                "tool",
-                &frames::ToolFrame::Args(frames::ToolArgsFrame {
-                    index: *index,
-                    fragment: fragment.clone(),
-                }),
-            ),
-            StreamDelta::Usage(u) => chat_turn::TurnFrame::of(
-                "usage",
-                &frames::UsageFrame {
-                    prompt_tokens: u.prompt_tokens,
-                    completion_tokens: u.completion_tokens,
-                },
-            ),
-            StreamDelta::Stop(r) => chat_turn::TurnFrame::of(
-                "stop",
-                &frames::StopFrame {
-                    reason: r.to_openai().to_string(),
-                },
-            ),
-            // Server-measured prefill/decode timings (llama.cpp). Live per token
-            // when `timings_per_token` is on, so the panel updates as it streams.
-            StreamDelta::Timings(t) => chat_turn::TurnFrame::of("stats", &chat_wire::timings(t)),
-            StreamDelta::Error(msg) => chat_turn::TurnFrame::of(
-                "error",
-                &frames::ErrorFrame {
-                    message: msg.clone(),
-                    ..Default::default()
-                },
-            ),
-        };
-        emit(frame)
-    });
+            let frame = match &delta {
+                // The Chat shows a refusal as the reply it is.
+                StreamDelta::TextDelta(t) | StreamDelta::RefusalDelta(t) => {
+                    assistant.push_str(t);
+                    chat_turn::TurnFrame::of("delta", &frames::TextFrame { text: t.clone() })
+                }
+                // Reasoning ("thinking") stream — kept separate from the answer so
+                // the UI can show it in a collapsible block and a reasoning-only
+                // turn (out of token budget) is still recorded, not blank.
+                StreamDelta::ReasoningDelta(r) => {
+                    reasoning.push_str(r);
+                    chat_turn::TurnFrame::of("reasoning", &frames::TextFrame { text: r.clone() })
+                }
+                StreamDelta::ToolCallStart { index, id, name } => chat_turn::TurnFrame::of(
+                    "tool",
+                    &frames::ToolFrame::Start(frames::ToolStartFrame {
+                        index: *index,
+                        id: Some(id.clone()),
+                        name: name.clone(),
+                    }),
+                ),
+                StreamDelta::ToolCallArgsDelta { index, fragment } => chat_turn::TurnFrame::of(
+                    "tool",
+                    &frames::ToolFrame::Args(frames::ToolArgsFrame {
+                        index: *index,
+                        fragment: fragment.clone(),
+                    }),
+                ),
+                StreamDelta::Usage(u) => chat_turn::TurnFrame::of(
+                    "usage",
+                    &frames::UsageFrame {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                    },
+                ),
+                StreamDelta::Stop(r) => chat_turn::TurnFrame::of(
+                    "stop",
+                    &frames::StopFrame {
+                        reason: r.to_openai().to_string(),
+                    },
+                ),
+                // Server-measured prefill/decode timings (llama.cpp). Live per token
+                // when `timings_per_token` is on, so the panel updates as it streams.
+                StreamDelta::Timings(t) => {
+                    chat_turn::TurnFrame::of("stats", &chat_wire::timings(t))
+                }
+                StreamDelta::Error(msg) => chat_turn::TurnFrame::of(
+                    "error",
+                    &frames::ErrorFrame {
+                        message: msg.clone(),
+                        ..Default::default()
+                    },
+                ),
+                // The row's (Logs shows it) and the send's record (above),
+                // not the thread's: no frame.
+                // The OpenAI-encrypted reasoning is for the next turn's
+                // replay, not the page: kept, no frame.
+                StreamDelta::ReasoningSeal(seal) => {
+                    let placed = crate::store::ReplySeal::new(assistant.len(), seal.clone());
+                    reasoning_seals.push(placed);
+                    return futures::future::Either::Right(futures::future::Either::Right(
+                        std::future::ready(true),
+                    ));
+                }
+                // Anthropic's compaction answers a Messages request's
+                // `context_management` or `compaction`, which no Chat turn
+                // carries. An Anthropic thinking signature is not kept for
+                // the next turn's replay yet: the Chat's plain turn stores
+                // its trace as text, which the Anthropic egress drops
+                // unsigned. The block it signed is reasoning all the same,
+                // an omitted display's empty one too (`signed`). Nor is a
+                // verbatim Anthropic block kept yet (the plain turn's record
+                // has no column for one), and the page shows none; nor a
+                // text block's citations yet.
+                StreamDelta::ReasoningSignature { .. } => {
+                    signed = true;
+                    return futures::future::Either::Right(futures::future::Either::Right(
+                        std::future::ready(true),
+                    ));
+                }
+                StreamDelta::AnthropicBlock(_)
+                | StreamDelta::TextBlockEnd { .. }
+                | StreamDelta::ServiceTier(_)
+                | StreamDelta::UpstreamItems(_)
+                | StreamDelta::ContextManagement(_)
+                | StreamDelta::Compaction(_)
+                | StreamDelta::UsageIterations(_) => {
+                    return futures::future::Either::Right(futures::future::Either::Right(
+                        std::future::ready(true),
+                    ))
+                }
+            };
+            futures::future::Either::Left(emit(frame))
+        },
+    );
     // Raced against the stop, not only noticed at the next delta: a long
     // prefill emits nothing, and the GPU should not finish it for nobody.
     let (outcome, stopped) = match turn.or_stop(tx, drained).await {
@@ -1385,29 +1536,50 @@ where
             Reply {
                 text: &assistant,
                 reasoning: &reasoning,
+                reasoning_seals,
                 prompt_tokens: outcome.usage.prompt_tokens.map(|v| v as i64),
                 completion_tokens: outcome.usage.completion_tokens.map(|v| v as i64),
                 ir_messages: None,
                 answered_by: answered_by.clone(),
                 stopped: outcome.aborted,
                 failed: outcome.error.is_some(),
-                // A plain turn calls no tool, so none waits.
+                // A plain turn calls no tool, so none waits, and none made
+                // a file.
                 pending: None,
+                tool_files: Vec::new(),
             },
         )
         .await;
 
     let status = if outcome.error.is_some() { 502 } else { 200 };
     // A stop (the turn's, or a reader gone) is the stock path's `canceled`
-    // row with what the call cost so far (`stopped`).
-    let (row_usage, row_error) = match stopped::usage(&outcome, ir, read.produced) {
-        Some((usage, note)) => (usage, Some(("canceled", note))),
-        None => (
+    // row with what the call cost so far (`stopped`); on the platform, an
+    // answer without usage (a stop, a failure mid-stream) is counted
+    // locally as the budgets' lower bound, as an in-process turn's is.
+    let relayed = read.take_relayed();
+    let (row_usage, row_error, local_count) = if stopped::is_stop(&outcome) {
+        let c = proxy::stopped_cost(
+            &route,
+            outcome.usage,
+            outcome.timings.as_ref(),
+            ir,
+            read.produced,
+            relayed,
+        )
+        .await;
+        (c.usage, Some(("canceled", c.message)), c.count)
+    } else {
+        let count = match outcome.usage.reported() {
+            true => None,
+            false => crate::egress::openai::count_chat(&route, ir, relayed).await,
+        };
+        (
             outcome.usage,
             outcome.error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
-        ),
+            count,
+        )
     };
-    record_chat_call(
+    record_chat_counted(
         state,
         turn.key(),
         &ir.model_alias,
@@ -1425,6 +1597,8 @@ where
         // The stream began: answered, a stop or a failure mid-stream
         // included (billable-units §4.5).
         crate::pricing::Quantities::answered(),
+        ir.served_tier(&route, outcome.service_tier.clone()),
+        local_count,
     )
     .await;
 
@@ -1447,7 +1621,7 @@ where
     // A model that reasoned although off was asked — a local template that
     // cannot stop, a cloud model at its lowest level — keeps its reasoning
     // with the reply, and the turn says so (model-capabilities design §5.6).
-    fitted.observe(&route, !reasoning.is_empty());
+    fitted.observe(&route, !reasoning.is_empty() || signed);
     fitted.report(&mut reasoning_ignored);
     let reasoning_note = fitted.note(answered_by.as_deref().unwrap_or(turn.model()));
     let total_ms = started.elapsed().as_millis() as i64;
@@ -1534,13 +1708,59 @@ async fn record_chat_call(
     error: Option<(&str, String)>,
     degraded: Option<String>,
     quantities: crate::pricing::Quantities,
+    service_tier: crate::pricing::ServedTier,
+) {
+    record_chat_counted(
+        state,
+        key,
+        model,
+        route,
+        fallback,
+        started,
+        status,
+        ttfb_ms,
+        usage,
+        timings,
+        max_tokens_clamped,
+        rung,
+        error,
+        degraded,
+        quantities,
+        service_tier,
+        None,
+    )
+    .await;
+}
+
+/// [`record_chat_call`], with lmgw's own count of an answer whose usage
+/// never came (openai egress design §13.4): the budgets' lower bound, never
+/// the row's tokens.
+#[allow(clippy::too_many_arguments)]
+async fn record_chat_counted(
+    state: &SharedState,
+    key: proxy::KeyRef,
+    model: &str,
+    route: &Route,
+    fallback: Option<crate::gate::FallbackReason>,
+    started: Instant,
+    status: u16,
+    ttfb_ms: Option<i64>,
+    usage: Usage,
+    timings: Option<crate::ir::Timings>,
+    max_tokens_clamped: Option<u32>,
+    rung: Option<i64>,
+    error: Option<(&str, String)>,
+    degraded: Option<String>,
+    quantities: crate::pricing::Quantities,
+    service_tier: crate::pricing::ServedTier,
+    local_count: Option<crate::pricing::LocalCount>,
 ) {
     // The chat *stream* itself can't yet share `proxy::sample_once` (that helper
     // is non-streaming; chat is SSE) — but its **log row** routes through the
     // shared in-process recorder so chat/workflows/sampling write one identical
     // row shape (§8 "one path instead of three copies"). TODO(one-path, §8):
     // unify the streaming call path too if/when sample_once grows a stream mode.
-    proxy::record_in_process(
+    proxy::record_in_process_counted(
         proxy::InProcessLog {
             key,
             ingress_proto: "chat",
@@ -1555,11 +1775,13 @@ async fn record_chat_call(
             rung,
             degraded,
             quantities,
+            service_tier,
         },
         status,
         ttfb_ms,
         usage,
         error,
+        local_count,
         state,
     )
     .await;

@@ -70,3 +70,48 @@ pub(super) fn waiting_stage(l: &Ledger, target: &Target, needs: u64, free: u64) 
     }
     "waiting for a busy model to finish".into()
 }
+
+/// What a wait that evicts says (chat-media-tools design §5.3): what it
+/// needs and what is free, and the model it stops once one is chosen — the
+/// figures stay beside the victim, so the queue's view keeps them while the
+/// victim goes.
+pub(super) fn evicting_stage(needs: u64, free: Option<u64>, victim: Option<&str>) -> String {
+    let free = free
+        .map(|f| format!(", {} free", fmt_bytes(f)))
+        .unwrap_or_default();
+    let victim = victim.map(|v| format!(" {v}")).unwrap_or_default();
+    format!("needs {}{free} — evicting{victim}", fmt_bytes(needs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_eviction_keeps_its_figures_beside_the_victim() {
+        let gib = 1024 * 1024 * 1024;
+        let needs = 7 * gib;
+        let free = 2 * gib;
+        let text = evicting_stage(needs, Some(free), Some("chat/qwen"));
+        assert_eq!(
+            text,
+            format!(
+                "needs {}, {} free — evicting chat/qwen",
+                fmt_bytes(needs),
+                fmt_bytes(free)
+            )
+        );
+        assert_eq!(
+            evicting_stage(needs, Some(free), None),
+            format!(
+                "needs {}, {} free — evicting",
+                fmt_bytes(needs),
+                fmt_bytes(free)
+            )
+        );
+        assert_eq!(
+            evicting_stage(needs, None, Some("chat/qwen")),
+            format!("needs {} — evicting chat/qwen", fmt_bytes(needs))
+        );
+    }
+}

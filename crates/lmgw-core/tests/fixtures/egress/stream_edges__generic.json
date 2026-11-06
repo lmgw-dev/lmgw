@@ -14,7 +14,7 @@
     [
       {
         "tool_call_start": {
-          "id": "call_3",
+          "id": "call_<minted>",
           "index": 3,
           "name": "lookup"
         }

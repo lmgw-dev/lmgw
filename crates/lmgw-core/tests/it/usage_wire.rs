@@ -90,7 +90,17 @@ async fn price_set_answers_the_scope_and_unit_it_wrote_in_every_unit() {
         let (status, live) = op(&gw, "price_set", body.clone()).await;
         assert_eq!(status, 200, "{body}: {live}");
         let saved = common::round_trips::<dto::PriceSaved>(&format!("price_set {body}"), &live);
-        assert_keys(&live, &["ok", "scope_kind", "scope_key", "unit", "source"]);
+        assert_keys(
+            &live,
+            &[
+                "ok",
+                "scope_kind",
+                "scope_key",
+                "unit",
+                "service_tier",
+                "source",
+            ],
+        );
         assert_eq!(
             saved,
             dto::PriceSaved {
@@ -98,6 +108,7 @@ async fn price_set_answers_the_scope_and_unit_it_wrote_in_every_unit() {
                 scope_kind: kind.into(),
                 scope_key: key.into(),
                 unit: unit.into(),
+                service_tier: "standard".into(),
                 source: "manual".into(),
             },
             "{body}"
@@ -226,7 +237,7 @@ async fn cloud_upstream(state: &SharedState, name: &str, server: &MockServer) ->
         &state.db,
         &NewUpstream {
             name: name.into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", server.uri()),
             api_key: None,
@@ -277,6 +288,7 @@ async fn prices_sync_answers_the_totals_and_a_line_per_upstream() {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await

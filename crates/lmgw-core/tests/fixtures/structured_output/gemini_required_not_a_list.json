@@ -1,0 +1,13 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, aistudio/gemini-3.5-flash-lite, json_schema whose required is a string",
+  "upstream": "gemini",
+  "status": 400,
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "value at top-level must be a list",
+      "status": "INVALID_ARGUMENT"
+    }
+  },
+  "expect": "invalid_json_schema"
+}

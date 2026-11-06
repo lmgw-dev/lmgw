@@ -151,8 +151,21 @@ fn do_install(app: AppHandle, info: UpdateInfo) {
             None => return,
         };
 
-        // Fixed basename under the temp dir — never trust the manifest's path.
-        let dest = std::env::temp_dir().join("lmgw-update.rpm");
+        // A fixed basename in a directory only this user can write ($XDG_RUNTIME_DIR/lmgw, 0700;
+        // without XDG_RUNTIME_DIR a checked /tmp/lmgw-<uid>) — never a shared fixed /tmp path,
+        // never the manifest's name.
+        let dest = match lmgw_update::private_dir("lmgw") {
+            Ok(dir) => dir.join("lmgw-update.rpm"),
+            Err(e) => {
+                tracing::error!("update download directory: {e}");
+                app.dialog()
+                    .message(format!("No private place for the download:\n{e}"))
+                    .title("Update failed")
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+                return;
+            }
+        };
         if let Err(e) = update::download_rpm(&state, &info.manifest.rpm, &dest).await {
             tracing::error!("update download failed: {e}");
             app.dialog()

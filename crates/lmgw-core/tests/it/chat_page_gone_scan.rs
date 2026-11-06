@@ -1,13 +1,13 @@
 //! The Chat page's delete-elsewhere path sends nothing (reviews CL-14,
-//! CF-7). When another writer deletes the open conversation, lmgw-ui's
+//! CF-7). When another writer deletes the open conversation, lmgw-chat-ui's
 //! `chat_sync::Gone::run` decides on plain values and sets the page's
 //! signals: a draft waits for a new chat that only the owner's Send makes,
 //! and without one the page falls through as its own delete does. A
 //! request at the delete (a create, as before CL-14) would make a chat for a
 //! draft the owner may never send.
 //!
-//! The scan reads `pages/chat_sync/gone.rs` and every file under
-//! `pages/chat_sync/gone/` as code: comments, literals and test code are
+//! The scan reads `chat_sync/gone.rs` and every file under
+//! `chat_sync/gone/` as code: comments, literals and test code are
 //! left out (`support::rust_source`), so a comment never trips it. It
 //! refuses:
 //! - **A request outside [`REQUESTERS`].** A function requests when its
@@ -50,12 +50,14 @@ const REQUESTERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// What a request looks like in code: the API client, a spawned task, a
-/// fetch, a resource or an action, the folder module's conversation and
-/// chat starts, a callback run.
+/// What a request looks like in code: the API client (its free functions,
+/// or a call on the transport the page was handed, an `Http` named `http`:
+/// chat-plane design WP3a), a spawned task, a fetch, a resource or an
+/// action, the folder module's conversation and chat starts, a callback
+/// run.
 fn request_tokens() -> Regex {
     Regex::new(
-        r"\bapi::[a-z_][A-Za-z0-9_]*|\bspawn[A-Za-z0-9_]*\s*\(|\bfetch\s*\(|\bgloo_net::|\b(Local)?Resource::new\b|\bAction::new\b|\bstart_conversation\b|\bstart_chat_in\b|\.\s*run\s*\(",
+        r"\bapi::[a-z_][A-Za-z0-9_]*|\bhttp\s*\.\s*[a-z_][A-Za-z0-9_]*\s*(::\s*<|\()|\bspawn[A-Za-z0-9_]*\s*\(|\bfetch\s*\(|\bgloo_net::|\b(Local)?Resource::new\b|\bAction::new\b|\bstart_conversation\b|\bstart_chat_in\b|\.\s*run\s*\(",
     )
     .unwrap()
 }
@@ -408,6 +410,16 @@ fn the_scan_finds_a_request_in_a_helper_and_never_in_a_comment() {
         refused[0].starts_with("`run` requests (gone.rs:"),
         "{refused:?}"
     );
+    // The transport the page was handed, called from run.
+    let refused = mutated(
+        "        let step = on_gone(true, note);",
+        "        let _ = self.http.post::<Value, _>(\"/x\", &1);\n        let step = on_gone(true, note);",
+    );
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0].starts_with("`run` requests (gone.rs:"),
+        "{refused:?}"
+    );
     // Gone's fields.
     let refused = mutated(
         "    pub fall_through: Callback<i64>,\n",
@@ -431,7 +443,7 @@ fn the_scan_finds_a_request_in_a_helper_and_never_in_a_comment() {
 #[test]
 fn the_delete_elsewhere_path_sends_no_request() {
     let core = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sync = core.join("../lmgw-ui/src/pages/chat_sync");
+    let sync = core.join("../lmgw-chat-ui/src/chat_sync");
     let mut paths = vec![sync.join("gone.rs")];
     collect_rs(&sync.join("gone"), &mut paths);
     paths.sort();
@@ -450,7 +462,7 @@ fn the_delete_elsewhere_path_sends_no_request() {
     let refused = refusals(&found);
     assert!(
         refused.is_empty(),
-        "the Chat page's delete-elsewhere path (lmgw-ui pages/chat_sync/gone) may request \
+        "the Chat page's delete-elsewhere path (lmgw-chat-ui chat_sync/gone) may request \
          only in {:?}, at the owner's Send (reviews CL-14, CF-7):\n{}",
         REQUESTERS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         refused.join("\n")

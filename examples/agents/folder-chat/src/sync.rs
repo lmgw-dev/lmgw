@@ -561,7 +561,7 @@ pub fn too_large_detail(size: u64, limit: u64, source: &Path) -> String {
         "{:.1} MiB is more than LARGE_FILE_MEMORY_FRACTION ({LARGE_FILE_MEMORY_FRACTION}) of the \
          container's memory limit ({:.1} MiB, from {}), i.e. {:.1} MiB; a file is held in memory \
          whole while it is indexed. Raise the agent's memory limit (run.limits.memory_mb) to at \
-         least {needed_mb} MB, or list the file in the folder's .ignore",
+         least {needed_mb} MiB, or list the file in the folder's .ignore",
         mib(size),
         mib(limit),
         source.display(),
@@ -2229,7 +2229,7 @@ mod tests {
             d.contains("LARGE_FILE_MEMORY_FRACTION (0.25)")
                 && d.contains("2048.0 MiB")
                 && d.contains("run.limits.memory_mb")
-                && d.contains("at least 2400 MB")
+                && d.contains("at least 2400 MiB")
                 && d.contains(".ignore"),
             "{d}"
         );

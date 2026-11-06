@@ -102,9 +102,10 @@ fn image_row(model_id: &str) -> store::NewImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -120,8 +121,7 @@ fn local(model_id: &str, gguf: &str) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -221,7 +221,7 @@ async fn gateway() -> Gateway {
         &state.db,
         &NewUpstream {
             name: "kilo".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -446,6 +446,7 @@ async fn gateway() -> Gateway {
             },
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -492,7 +493,7 @@ async fn gateway() -> Gateway {
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
 
     Gateway {
         base,
@@ -577,9 +578,55 @@ async fn a_local_model_is_served_by_id_in_both_dialects() {
     assert_eq!(anthropic["max_input_tokens"].as_u64(), Some(131_072));
     assert_eq!(anthropic["max_tokens"].as_u64(), Some(32_768));
     assert_eq!(anthropic["max_output_tokens"].as_u64(), Some(32_768));
-    // One capability schema, whichever SDK the caller holds.
-    assert_eq!(anthropic["capabilities"], openai["capabilities"]);
+    // One capability schema, whichever SDK the caller holds: lmgw's own
+    // object unchanged, plus Anthropic's blocks (§2.2.1).
+    assert_lmgw_caps_plus_blocks(&anthropic, &openai);
     assert_eq!(anthropic["notes"], openai["notes"]);
+    // The local fixture's template: levels, an `enable_thinking` switch.
+    let caps = &anthropic["capabilities"];
+    assert_eq!(caps["effort"]["supported"], json!(true), "{caps}");
+    assert_eq!(caps["thinking"]["supported"], json!(true), "{caps}");
+    assert_eq!(
+        caps["thinking"]["types"]["adaptive"]["supported"],
+        json!(true),
+        "{caps}"
+    );
+    assert_eq!(caps["batch"]["supported"], json!(false), "{caps}");
+    assert_eq!(caps["pdf_input"]["supported"], json!(false), "{caps}");
+}
+
+/// `anthropic`'s capabilities are `openai`'s, key for key, plus exactly
+/// Anthropic's blocks.
+#[track_caller]
+fn assert_lmgw_caps_plus_blocks(anthropic: &Value, openai: &Value) {
+    let ours = openai["capabilities"].as_object().expect("capabilities");
+    let theirs = anthropic["capabilities"].as_object().expect("capabilities");
+    for (k, v) in ours {
+        assert_eq!(theirs.get(k), Some(v), "{k}: {anthropic}");
+    }
+    let mut extra: Vec<&str> = theirs
+        .keys()
+        .filter(|k| !ours.contains_key(*k))
+        .map(String::as_str)
+        .collect();
+    extra.sort_unstable();
+    assert_eq!(
+        extra,
+        [
+            "batch",
+            "citations",
+            "code_execution",
+            "compaction",
+            "context_management",
+            "effort",
+            "image_input",
+            "pdf_input",
+            "server_tools",
+            "structured_outputs",
+            "thinking",
+        ],
+        "{anthropic}"
+    );
 }
 
 /// Published per-request context, split vs unified (unified-KV design §3.2,
@@ -675,7 +722,7 @@ async fn a_passthrough_id_containing_slashes_is_addressable() {
     assert_eq!(anthropic["type"].as_str(), Some("model"));
     assert_eq!(anthropic["max_input_tokens"].as_u64(), Some(200_000));
     assert_eq!(anthropic["max_tokens"].as_u64(), Some(64_000));
-    assert_eq!(anthropic["capabilities"], openai["capabilities"]);
+    assert_lmgw_caps_plus_blocks(&anthropic, &openai);
 }
 
 /// An id nobody exposes is a 404 in the caller's *own* error dialect — a
@@ -742,6 +789,7 @@ async fn the_list_carries_the_gateway_block_in_both_dialects() {
             "x-lmgw-fallback",
             "x-lmgw-fallback-reason",
             "x-lmgw-reasoning-ignored",
+            "x-lmgw-params-ignored",
             "x-lmgw-max-tokens-defaulted",
             "x-lmgw-max-tokens-clamped",
             "x-lmgw-rung",

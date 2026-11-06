@@ -29,8 +29,7 @@ pub(super) async fn edit_ladder(f: &Fixture, edit: impl FnOnce(&mut Vec<lmgw_cor
             image: row.image,
             extra_run_args: row.extra_run_args,
             warm_start: row.warm_start,
-            hold_fallback_mode: row.hold_fallback_mode,
-            hold_fallback: row.hold_fallback,
+            fallback: row.fallback,
             capabilities_override: row.capabilities_override,
             ladder,
         },
@@ -210,6 +209,7 @@ async fn a_request_sent_back_by_a_failed_climb_honours_a_hold_engaged_meanwhile(
                 &state,
                 LADDER,
                 lmgw_core::gate::RouteCheck::Text("/v1/chat/completions"),
+                lmgw_core::runtime::registry::Origin::Owner,
             )
             .await
             .map(|o| o.hold.is_some())
@@ -390,8 +390,7 @@ async fn a_rung_is_judged_on_the_slot_its_trained_context_leaves() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![lmgw_core::ladder::Rung {
                 gguf_path: "capped-top.gguf".into(),

@@ -87,6 +87,12 @@ pub(super) struct World {
     /// Every `podman inspect` for container PIDs, as the names it asked
     /// about — so a test can assert that a path asked nothing.
     pub(super) pid_inspects: Vec<Vec<String>>,
+    /// Images `podman image exists` says are not on the machine
+    /// (machine-check design §5); every other image is there.
+    pub(super) missing_images: HashSet<String>,
+    /// Images podman fails to say anything about: `podman image exists`
+    /// exits 125, as on a storage it cannot read.
+    pub(super) unknown_images: HashSet<String>,
     /// Weights file name -> bytes it occupies once loaded. A `run` whose `-m`
     /// names one of these sets its model's [`Self::size`] to it, so the fake
     /// driver's `used` follows the rung a ladder model runs (ladder design
@@ -169,6 +175,11 @@ pub(super) struct World {
     pub(super) extra_ps: Vec<Value>,
     /// Every podman argv, in order.
     pub(super) calls: Vec<Vec<String>>,
+    /// Model id -> bytes its container takes on between two moments the
+    /// driver is read: a load under way. Every process list first adds this
+    /// to the model's [`Self::size`] and then lists it, so a list sees more
+    /// than the device read before it and less than the one after.
+    pub(super) growing: HashMap<String, u64>,
 }
 
 impl World {
@@ -273,9 +284,13 @@ impl GpuProbe for FakeGpu {
     }
 
     fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
-        let w = self.world.lock().unwrap();
+        let mut w = self.world.lock().unwrap();
         if !w.attribution {
             return Err("FakeGPU lists no processes".into());
+        }
+        let growing: Vec<(String, u64)> = w.growing.iter().map(|(m, b)| (m.clone(), *b)).collect();
+        for (m, b) in growing {
+            *w.size.entry(m).or_default() += b;
         }
         let mut out: Vec<ProcessMemory> = w
             .loaded

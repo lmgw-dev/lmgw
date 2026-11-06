@@ -63,6 +63,7 @@ pub(crate) async fn gateway_at(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -226,7 +227,7 @@ fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
 async fn delete_removes_one_message_with_its_attachments_and_nothing_else() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "noted", 3, 1).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let att: Value = gw
         .client()
@@ -300,7 +301,7 @@ async fn delete_removes_one_message_with_its_attachments_and_nothing_else() {
 #[tokio::test]
 async fn editing_a_reply_rewrites_it_in_place_and_drops_what_described_the_old_text() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     seed(&state, tid, "user", "q").await;
     let rid = store::append_chat_message(
@@ -346,7 +347,7 @@ async fn editing_a_reply_rewrites_it_in_place_and_drops_what_described_the_old_t
 async fn editing_a_user_message_cuts_everything_after_it_and_answers_it_again() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "fresh answer", 6, 2).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let att: Value = gw
         .client()
@@ -428,7 +429,7 @@ async fn editing_a_user_message_cuts_everything_after_it_and_answers_it_again() 
 async fn regenerating_a_reply_answers_the_history_before_it() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "another take", 4, 2).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let q1 = seed(&state, tid, "user", "q1").await;
     let a1 = seed(&state, tid, "assistant", "a1").await;
@@ -463,7 +464,7 @@ async fn regenerating_a_reply_answers_the_history_before_it() {
 async fn regenerating_a_user_message_answers_it_again() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "retry", 4, 1).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     seed(&state, tid, "user", "q1").await;
     seed(&state, tid, "assistant", "a1").await;
@@ -498,7 +499,7 @@ async fn regenerating_a_user_message_answers_it_again() {
 #[tokio::test]
 async fn a_reply_with_no_user_message_before_it_cannot_be_regenerated() {
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let lone = seed(&state, tid, "assistant", "hello first").await;
     let r = post(
@@ -680,7 +681,7 @@ async fn continue_on_anthropic_prefills_the_trailing_assistant_turn() {
 async fn continue_is_refused_where_there_is_no_prefill_or_nothing_to_continue() {
     // An OpenAI-compatible cloud route has no prefill.
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let st = continue_state(&gw, tid).await;
     assert_eq!(st["ok"], false);
@@ -771,7 +772,6 @@ async fn continue_is_refused_where_there_is_no_prefill_or_nothing_to_continue() 
 #[tokio::test]
 async fn a_hold_reroute_to_a_route_without_prefill_refuses_the_continue() {
     use crate::support::gpu_world::{Gpu, GIB};
-    use lmgw_core::config::HoldFallbackMode;
     use lmgw_core::store::NewLocalModel;
 
     let g = Gpu::new(24 * GIB, 1, 2).await;
@@ -788,8 +788,7 @@ async fn a_hold_reroute_to_a_route_without_prefill_refuses_the_continue() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud".into()),
+            fallback: Some("cloud".into()),
             capabilities_override: None,
             ladder: vec![],
         },
@@ -1013,7 +1012,6 @@ async fn a_continue_that_calls_a_tool_replays_without_duplication() {
 /// llama-server, which takes the prefill.
 #[tokio::test]
 async fn a_candidate_alias_thread_can_be_continued() {
-    use lmgw_core::config::HoldFallbackMode;
     use lmgw_core::store::NewLocalModel;
 
     let state = AppState::init_for_tests().await.unwrap();
@@ -1031,8 +1029,7 @@ async fn a_candidate_alias_thread_can_be_continued() {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: HoldFallbackMode::Inherit,
-                hold_fallback: None,
+                fallback: None,
                 capabilities_override: None,
                 ladder: vec![],
             },
@@ -1046,7 +1043,6 @@ async fn a_candidate_alias_thread_can_be_continued() {
             alias: "pick".into(),
             candidates: vec!["c1".into(), "c2".into()],
             background: false,
-            fallback_mode: HoldFallbackMode::Inherit,
             fallback: None,
             capabilities_disabled: vec![],
             capabilities_enabled: vec![],
@@ -1093,7 +1089,7 @@ async fn a_user_edit_is_one_write() {
         .unwrap();
 
     assert!(
-        !store::rewrite_chat_user_message(&state.db, tid, r1, "x", &[], None)
+        !store::rewrite_chat_user_message(&state.db, tid, r1, "x", &[], None, None)
             .await
             .unwrap(),
         "a reply is not rewritten as a user message"
@@ -1107,7 +1103,7 @@ async fn a_user_edit_is_one_write() {
     );
 
     assert!(
-        store::rewrite_chat_user_message(&state.db, tid, u1, "one, again", &[4], None)
+        store::rewrite_chat_user_message(&state.db, tid, u1, "one, again", &[4], None, None)
             .await
             .unwrap()
     );
@@ -1127,7 +1123,7 @@ async fn a_user_edit_is_one_write() {
 async fn a_reply_records_its_model() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "hello", 3, 1).await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     post(
         &gw,

@@ -1,0 +1,1 @@
+{"error":{"code":null,"message":"Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","param":"reasoning_effort","type":"invalid_request_error"}}

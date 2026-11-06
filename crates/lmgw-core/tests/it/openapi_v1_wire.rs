@@ -27,7 +27,7 @@ async fn gateway(upstream: &MockServer, native_responses: bool) -> crate::common
         &state.db,
         &NewUpstream {
             name: "up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream.uri().trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -51,6 +51,7 @@ async fn gateway(upstream: &MockServer, native_responses: bool) -> crate::common
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

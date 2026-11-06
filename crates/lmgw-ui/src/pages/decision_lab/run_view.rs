@@ -44,7 +44,11 @@ pub(super) fn failure_line(run: &LabRunView) -> String {
 /// The amber chip's words when a fallback answered: "via jev · hold".
 pub(super) fn via(run: &LabRunView) -> Option<String> {
     (run.answered_by != run.model_asked).then(|| match &run.fallback_reason {
-        Some(r) => format!("via {} · {r}", run.answered_by),
+        Some(r) => format!(
+            "via {} · {}",
+            run.answered_by,
+            crate::pages::traffic::fallback_words(r)
+        ),
         None => format!("via {}", run.answered_by),
     })
 }
@@ -232,5 +236,10 @@ mod tests {
         r.answered_by = "jev".into();
         r.fallback_reason = Some("hold".into());
         assert_eq!(via(&r).unwrap(), "via jev · hold");
+        // In words, as the Traffic badge says them (WP8b, D180).
+        r.fallback_reason = Some("gpu_setup".into());
+        assert_eq!(via(&r).unwrap(), "via jev · graphics card not ready");
+        r.fallback_reason = Some("engine_download".into());
+        assert_eq!(via(&r).unwrap(), "via jev · engine download failed");
     }
 }

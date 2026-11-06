@@ -652,7 +652,7 @@ pub fn send_request(
             Outcome::Sse(raw) => {
                 // Headers are in: show them now, then grow `sse_frames` as
                 // the body streams (§6.7) — the same ReadableStream → chunk
-                // loop `pages::chat_stream` uses, over the generic splitter.
+                // loop lmgw-chat-ui's `chat_stream` uses, over the generic splitter.
                 draft
                     .finished
                     .set(Some(finished(FinishedKind::Sse { error: None }, None)));

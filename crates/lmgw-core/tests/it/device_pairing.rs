@@ -9,12 +9,15 @@
 //!   per address up to the 429;
 //! - `repeat`: the same key asking again for the answer it lost, while the
 //!   token lives (§3.3's note of 2026-10-15);
+//! - `dropped`: a client that hangs up on its enrolment does not cancel it;
 //! - `confirm`: an enrolment waits for the owner's Confirm; a re-pair keeps
 //!   the old key until the new one enrols; a row paired before TLS pairs
 //!   again;
 //! - `plain`: no bearer opens a device (D12), and a row paired before TLS
 //!   is named;
 //! - `ca`: rotating the device CA resets every device and ends every token;
+//! - `self_description`: what an enrolment says of its device belongs to its
+//!   key, a waiting one's until the owner confirms it;
 //! - `logs`: a request row says which listener it came in on.
 
 use lmgw_core::state::{AppState, SharedState};
@@ -25,10 +28,12 @@ use crate::support::device_pair;
 
 mod ca;
 mod confirm;
+mod dropped;
 mod enrol;
 mod logs;
 mod plain;
 mod repeat;
+mod self_description;
 
 /// A gateway with its device listener on, and the store's own lookup of
 /// a certificate's device (no stand-in).

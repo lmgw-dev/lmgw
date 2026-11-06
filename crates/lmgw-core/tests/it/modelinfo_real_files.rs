@@ -84,7 +84,8 @@ async fn planning_a_multimodal_model_finds_its_projector_and_drafter() {
     // The value a published model card got wrong. The drafter's architecture
     // is `dflash`, so nothing else can be correct here.
     assert_eq!(p["spec_type"], "draft-dflash");
-    assert_eq!(p["spec_draft_n_max"], 16);
+    // This drafter's header says dflash.block_size 16; one slot is the anchor.
+    assert_eq!(p["spec_draft_n_max"], 15);
 
     // Every proposed value carries its reason — a caller overriding one needs
     // to know which came from the file and which are defaults.
@@ -513,7 +514,7 @@ async fn the_add_a_model_path_works_over_the_mcp_wire() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let app = build_router(state.clone());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
 
     let http = reqwest::Client::new();
     let rpc = |method: &'static str, params: serde_json::Value, sid: Option<String>| {

@@ -7,6 +7,10 @@
 //! - **`tls_listener`**: [`TlsListener`], which owns those sockets and an
 //!   accept task per socket, aborted when it is dropped or closed, so a move
 //!   rebinds the same port at once (§4.3);
+//! - **`keepalive`**: the TCP keep-alive every accepted connection gets,
+//!   from `chat_feed_keepalive_s`, so a peer that vanished silently is
+//!   noticed by the kernel's probes, and the `TCP_USER_TIMEOUT` a streamed
+//!   chat answer sets while it runs ([`chat_stream_timers`]);
 //! - **`connection`**: one connection, off the accept loop: the server
 //!   certificate and the handshake's configuration picked by the local
 //!   address and the pending tokens, the handshake under
@@ -24,12 +28,14 @@
 
 mod bind;
 mod connection;
+mod keepalive;
 /// The connections without a certificate yet, bounded (§4.3).
 mod preauth;
 mod runner;
 mod tls_listener;
 
 pub use bind::Plan;
+pub(crate) use keepalive::chat_stream as chat_stream_timers;
 pub use preauth::peer_key;
 pub use runner::{Applied, Bound, DeviceListener, OpenedCa};
 pub use tls_listener::TlsListener;

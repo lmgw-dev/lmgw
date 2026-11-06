@@ -4,44 +4,44 @@
   <meta charset="utf-8">
   <title>lmgw</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script>
-    // Theme before first paint; "dark" unless explicitly switched in Settings.
-    try {
-      var t = localStorage.getItem("lmgw-theme");
-      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-    } catch (_) {}
-    // Interface scale, likewise before the app renders anything: real webview
-    // zoom, so a restart comes up scaled instead of snapping when WASM mounts.
-    // Browsers have their own zoom and no __TAURI_INTERNALS__ — see ui_scale.rs,
-    // whose DEFAULT (125) is the fallback here too.
-    try {
-      var api = window.__TAURI_INTERNALS__;
-      var s = parseInt(localStorage.getItem("lmgw-ui-scale"), 10);
-      if (!(s >= 50 && s <= 300)) s = 125;
-      if (api) api.invoke("plugin:webview|set_webview_zoom", { value: s / 100 });
-    } catch (_) {}
-  </script>
+  <!-- No inline script anywhere on this page: it loads under
+       `script-src 'self' 'wasm-unsafe-eval'` too (an extension page,
+       chat-plane design "WP3a: the transport seam"; scripts/csp-check.sh).
+       The theme and the interface scale before first paint: a classic
+       script, so it runs right here, before anything is drawn. -->
+  <script data-trunk src="assets/boot.js" data-no-minify></script>
   <link data-trunk rel="icon" href="assets/favicon.svg">
   <!-- The shared kit's tokens and widget rules, before the dashboard's own. -->
   <link data-trunk rel="css" href="../lmgw-ui-kit/assets/kit.css">
   <link data-trunk rel="css" href="../lmgw-ui-kit/assets/profiles.css">
   <link data-trunk rel="css" href="assets/app.css">
-  <link data-trunk rel="css" href="assets/voice.css">
+  <!-- The Chat (lmgw-chat-ui) brings its own rules and assets: its rules
+       after the dashboard's base ones, its voice rules after them. -->
+  <link data-trunk rel="css" href="../lmgw-chat-ui/assets/chat.css">
+  <link data-trunk rel="css" href="../lmgw-chat-ui/assets/voice.css">
+  <link data-trunk rel="css" href="assets/machine.css">
+  <link data-trunk rel="css" href="assets/finder.css">
   <link data-trunk rel="copy-dir" href="assets/fonts">
   <script data-trunk src="assets/desktop.js" defer data-no-minify></script>
   <!-- Chat code blocks: highlight.js + the copy/preview toolbar. ES module, so
-       it imports its own vendored highlight.js from assets/vendor/. The src
+       it imports its own vendored libraries from vendor/ beside it. The src
        matches Trunk's public_url (same as desktop.js above). -->
-  <link data-trunk rel="copy-dir" href="assets/vendor">
-  <script data-trunk src="assets/codeblocks.js" type="module" data-no-minify></script>
-  <!-- Chat voice: the capture and player AudioWorklets (and later the
-       visualisation module), loaded by URL at runtime, so Trunk copies them
-       as they are and they are served under /voice/ (chat-voice §11.3). -->
-  <link data-trunk rel="copy-dir" href="assets/voice">
-  <!-- data-no-demangle: a debug build keeps its function names as linked;
-       demangled, the monomorphized view types made the name section 0.65 GB
-       (Cargo.toml [profile.dev.package.lmgw-ui]). A release build strips
-       the names anyway. -->
+  <link data-trunk rel="copy-dir" href="../lmgw-chat-ui/assets/vendor">
+  <script data-trunk src="../lmgw-chat-ui/assets/codeblocks.js" type="module" data-no-minify></script>
+  <!-- Chat voice: the capture and player AudioWorklets and the visualisation
+       modules, loaded by URL at runtime under the Chat's asset base (the
+       root here), so Trunk copies them as they are and they are served under
+       /voice/ (chat-voice §11.3). -->
+  <link data-trunk rel="copy-dir" href="../lmgw-chat-ui/assets/voice">
+  <!-- The app's loader as a module file: Trunk.toml's pattern_script puts
+       this build's file names on <meta name="lmgw-wasm"> in place of the
+       inline loader, and start.js reads them. -->
+  <script data-trunk src="assets/start.js" type="module" data-no-minify></script>
+  <!-- data-no-demangle: wasm-bindgen leaves the function names as linked.
+       A debug build has none since 2026-10-20 (crates/lmgw-ui/build.rs strips
+       them at link); before, demangled, the monomorphized view types made the
+       name section 0.65 GB (Cargo.toml [profile.dev.package.lmgw-ui]). A
+       release build's names are dropped by wasm-opt. -->
   <link data-trunk rel="rust" data-wasm-opt="z" data-no-demangle>
 </head>
 <body></body>

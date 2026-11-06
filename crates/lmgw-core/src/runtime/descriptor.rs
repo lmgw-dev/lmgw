@@ -243,6 +243,10 @@ impl ModelRuntime {
         data_dir: &Path,
         create_dirs: bool,
     ) -> std::io::Result<RenderSpec> {
+        // The restart policy (D27) is left out when the globals are set
+        // (`RenderSpec::set_globals`), which is where it is known whether
+        // lmgw's own spec dir is passed.
+        let run_args = self.extra_run_args.clone();
         if let Some(model) = &self.image_model {
             // The LoRA/upscaler directories the unconditional flags point at
             // (§12.2) — created here, where audio writes its `server.json`,
@@ -261,7 +265,8 @@ impl ModelRuntime {
                 host_port,
                 models_dir: models_dir.to_string(),
                 config_mount: None,
-                extra_run_args: self.extra_run_args.clone(),
+                extra_run_args: run_args,
+                globals: Vec::new(),
                 init: true,
                 entrypoint: Some(SD_SERVER_ENTRYPOINT.to_string()),
                 engine: EngineArgs::Image(ImageArgs {
@@ -303,7 +308,8 @@ impl ModelRuntime {
             host_port,
             models_dir: models_dir.to_string(),
             config_mount,
-            extra_run_args: self.extra_run_args.clone(),
+            extra_run_args: run_args,
+            globals: Vec::new(),
             // Both are the image class's business alone: llama-server and
             // audiocpp_server handle SIGTERM themselves and their images'
             // entrypoints are the servers.

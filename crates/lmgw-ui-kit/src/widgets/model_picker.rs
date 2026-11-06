@@ -129,9 +129,17 @@ pub fn ModelPicker(
     /// Remember picks under `lmgw.ui.recent.<key>` and list them first.
     #[prop(optional)]
     recent_key: Option<&'static str>,
+    /// Where to get a model, said in the empty pop when there is none for
+    /// this choice's tasks at all and the other tasks are not shown ("No
+    /// models yet: " and this, or "No chat models yet: " beside "+N other
+    /// tasks"): the Chat's links to Models and Upstreams. Without it the pop
+    /// says "No models to choose from" (or "No chat models yet").
+    #[prop(optional, into)]
+    empty_hint: Option<ViewFn>,
     #[prop(into, default = false.into())] disabled: Signal<bool>,
 ) -> impl IntoView {
     let catalog = use_model_catalog();
+    let empty_hint = StoredValue::new(empty_hint);
     let all: Signal<Vec<CatalogEntry>> = entries.unwrap_or_else(|| catalog.entries.into());
     let own_list = entries.is_some();
     let own_status = move || status.map(|s| s.get()).unwrap_or_default();
@@ -411,6 +419,9 @@ pub fn ModelPicker(
                 if let Some(it) = cur.and_then(|i| items.with_untracked(|v| v.get(i).cloned())) {
                     activate(it);
                 }
+                // The pick is the picker's: no form or modal around it may
+                // take the key as a submit.
+                ev.stop_propagation();
                 ev.prevent_default();
                 return;
             }
@@ -623,6 +634,12 @@ pub fn ModelPicker(
                                     on:click=move |_| {
                                         other.update(|o| *o = !*o);
                                         task_f.set(String::new());
+                                        // A source picked among the other tasks'
+                                        // models may hold none of this choice's,
+                                        // and its chip goes with them: All again.
+                                        if !other.get_untracked() {
+                                            src.set(String::new());
+                                        }
                                         refocus();
                                     }
                                 >
@@ -713,15 +730,32 @@ pub fn ModelPicker(
                         <Show when=move || items.with(Vec::is_empty)>
                             <div class="pop-empty">
                                 {move || {
-                                    if all.with(Vec::is_empty) {
-                                        match (settling(), own_status()) {
-                                            (_, ListStatus::Failed(_)) => "The list did not load",
-                                            (true, _) => "Loading…",
-                                            _ => "No models to choose from",
-                                        }
-                                            .to_string()
+                                    let typed = !query.with(|q| q.trim().is_empty());
+                                    if typed && !all.with(Vec::is_empty) {
+                                        return format!("Nothing matches \u{201c}{}\u{201d}", query.get().trim())
+                                            .into_any();
+                                    }
+                                    // Models of this choice's tasks are listed, or the
+                                    // other tasks' are shown: a chip hides them all.
+                                    if other.get() || scope_len.get() > 0 {
+                                        return "Nothing matches the chosen filters".into_any();
+                                    }
+                                    match (settling(), own_status()) {
+                                        (_, ListStatus::Failed(_)) => return "The list did not load".into_any(),
+                                        (true, _) => return "Loading…".into_any(),
+                                        _ => {}
+                                    }
+                                    // None of this choice's tasks at all: none listed,
+                                    // or only models for other tasks (behind their chip).
+                                    let what = if others.get() == 0 {
+                                        "No models".to_string()
                                     } else {
-                                        format!("Nothing matches \u{201c}{}\u{201d}", query.get().trim())
+                                        format!("No {} models", tasks.join(" or "))
+                                    };
+                                    match empty_hint.get_value() {
+                                        Some(hint) => view! { {what} " yet: " {hint.run()} }.into_any(),
+                                        None if others.get() == 0 => "No models to choose from".into_any(),
+                                        None => format!("{what} yet").into_any(),
                                     }
                                 }}
                             </div>

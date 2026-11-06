@@ -12,6 +12,7 @@
 //! cloud stage holds nothing here; turn detection runs on the CPU.
 
 use lmgw_api_types::realtime as dto;
+use lmgw_api_types::settings_labels as labels;
 
 use crate::config::{BargeInCheck, Snapshot, UpstreamKind};
 use crate::hf::fmt_bytes;
@@ -292,9 +293,12 @@ pub async fn realtime_budget(
             state,
             &snap,
             &mut seen,
-            ("chat", "Chat model"),
+            ("chat", labels::CHAT_MODEL),
             chat,
-            "realtime.default_model is not set: a session that names no chat alias has none",
+            &format!(
+                "no chat model is set ({}): a session that names no chat alias has none",
+                labels::REALTIME_CHAT_MODEL_AT
+            ),
         )
         .await,
     );
@@ -302,15 +306,21 @@ pub async fn realtime_budget(
         state,
         &snap,
         &mut seen,
-        ("asr", "Speech to text"),
+        ("asr", labels::SPEECH_TO_TEXT),
         asr.clone(),
-        "no ASR alias (realtime.asr_alias, or the Chat's transcription model): audio turns \
-         fail at their commit",
+        &format!(
+            "no speech-to-text model ({}, or the Chat's own, {}): audio turns fail at their \
+             commit",
+            labels::REALTIME_ASR_AT,
+            labels::CHAT_STT_AT
+        ),
     )
     .await;
     if asr_from_chat && asr.is_some() {
         asr_stage.note = format!(
-            "the Chat's transcription model (realtime.asr_alias is empty); {}",
+            "the Chat's speech-to-text model ({}), as {} names none; {}",
+            labels::CHAT_STT_AT,
+            labels::REALTIME_ASR_AT,
             asr_stage.note
         );
     }
@@ -338,9 +348,12 @@ pub async fn realtime_budget(
             state,
             &snap,
             &mut seen,
-            ("tts", "Text to speech"),
+            ("tts", labels::TEXT_TO_SPEECH),
             tts,
-            "realtime.tts_alias is not set: audio responses fail before they start",
+            &format!(
+                "no text-to-speech model is set ({}): audio responses fail before they start",
+                labels::REALTIME_TTS_AT
+            ),
         )
         .await,
     );
@@ -357,14 +370,21 @@ pub async fn realtime_budget(
     let (capacity_bytes, capacity_source) = if view.capacity_bytes > 0 {
         let vs = &snap.settings.vram;
         let source = if vs.budget_mb > 0 {
-            format!("vram.budget_mb ({} MiB)", vs.budget_mb)
+            format!(
+                "the declared budget, {} MiB ({})",
+                vs.budget_mb,
+                labels::BUDGET_AT
+            )
         } else {
             format!("the GPU's total, from {}", view.telemetry)
         };
         let source = if vs.enabled {
             source
         } else {
-            format!("{source}; admission is off (vram.enabled), so nothing is refused for it")
+            format!(
+                "{source}; admission is off ({}), so nothing is refused for it",
+                labels::ADMISSION_AT
+            )
         };
         (Some(view.capacity_bytes), source)
     } else {
@@ -458,7 +478,7 @@ mod tests {
 
     #[test]
     fn a_loopback_base_url_is_this_machine() {
-        assert!(loopback("http://127.0.0.1:9292/v1"));
+        assert!(loopback("http://127.0.0.1:9393/v1"));
         assert!(loopback("http://localhost:8080"));
         assert!(loopback("http://[::1]:8080/v1"));
         assert!(!loopback("https://api.openai.com/v1"));

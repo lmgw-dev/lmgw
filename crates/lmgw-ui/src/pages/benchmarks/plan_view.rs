@@ -265,7 +265,7 @@ pub fn Confirmation(plan: BenchPlan) -> impl IntoView {
             </div>
             <div class="notice warn">
                 <b>"While it runs, the GPU is the benchmark's"</b>
-                "Local models of every class are unavailable until the run ends or is canceled: a request for one is answered by its hold fallback where one is configured, and refused with 503 "
+                "Local models of every class are unavailable until the run ends or is canceled: a request for one is answered by its fallback where one is set, and refused with 503 "
                 <code>"gpu_benchmark"</code>
                 " otherwise. The stopped models are not started again afterwards; each loads on its next request."
             </div>

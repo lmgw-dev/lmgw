@@ -123,6 +123,11 @@ pub struct Options {
     /// device's Chat turn (client-apps design L4). `None`: the gateway's own
     /// work, as every search was before.
     pub caller: Option<crate::proxy::RequestCtx>,
+    /// Whose traffic the search's model calls are (per-request background
+    /// design §7): a `kb__search` a `/v1/responses` run's tool makes is the
+    /// run's — a guest's embedder, reranker and counts then defer rather
+    /// than disturb the owner. Default: the owner's.
+    pub origin: crate::runtime::registry::Origin,
 }
 
 /// Search `kb_ids` for `query`. Never fails; see the module doc.
@@ -216,7 +221,7 @@ pub async fn retrieve(
             state,
             pool,
             kbs,
-            (query, opts.caller.as_ref()),
+            (query, opts.caller.as_ref(), opts.origin),
             &params,
             &mut out.notes,
         )
@@ -259,7 +264,11 @@ async fn search_group(
     state: &SharedState,
     pool: &SqlitePool,
     kbs: Vec<Kb>,
-    (query, caller): (&str, Option<&crate::proxy::RequestCtx>),
+    (query, caller, origin): (
+        &str,
+        Option<&crate::proxy::RequestCtx>,
+        crate::runtime::registry::Origin,
+    ),
     params: &SearchParams,
     notes: &mut Vec<String>,
 ) -> Option<(Vec<Hit<KbChunk>>, SearchTrace)> {
@@ -304,7 +313,8 @@ async fn search_group(
             Ok(e) => match refuse_if_held(state, e.alias(), super::ingest::HOLD_WHY) {
                 Ok(()) => {
                     first_alias = Some(e.alias().to_string());
-                    (Some(e.charged_to(caller.cloned()).into_arc()), None)
+                    let e = e.charged_to(caller.cloned()).as_traffic_of(origin);
+                    (Some(e.into_arc()), None)
                 }
                 Err(held) => (None, Some(held.to_string())),
             },
@@ -328,7 +338,14 @@ async fn search_group(
             // A held local reranker is refused up front, like the embedder:
             // its fallback would rank with another model.
             Ok(r) => match refuse_if_held(state, alias, RERANK_HOLD_WHY) {
-                Ok(()) => (Some(r.charged_to(caller.cloned()).into_arc()), None),
+                Ok(()) => (
+                    Some(
+                        r.charged_to(caller.cloned())
+                            .as_traffic_of(origin)
+                            .into_arc(),
+                    ),
+                    None,
+                ),
                 Err(held) => {
                     notes.push(format!("{names}: not reranked — {held}"));
                     (None, Some(held.to_string()))
@@ -347,11 +364,11 @@ async fn search_group(
     // no tokenizer call.
     if embedder.is_some() {
         if let Some(a) = &first_alias {
-            super::fit::prime_ratio(state, &first, a).await;
+            super::fit::prime_ratio(state, &first, a, origin).await;
         }
     }
     if reranker.is_some() {
-        super::fit::prime_ratio(state, &first, alias).await;
+        super::fit::prime_ratio(state, &first, alias, origin).await;
     }
     let guard_notes: Notes = Notes::default();
     let embedder: Option<Arc<dyn Embedder>> = match (embedder, &first_alias) {
@@ -360,6 +377,7 @@ async fn search_group(
             state: state.clone(),
             alias: alias.clone(),
             notes: guard_notes.clone(),
+            origin,
         })),
         (e, _) => e,
     };
@@ -369,6 +387,7 @@ async fn search_group(
             state: state.clone(),
             alias: alias.to_string(),
             notes: guard_notes.clone(),
+            origin,
         }) as Arc<dyn Reranker>
     });
     let mut embed_unavailable = embed_unavailable;

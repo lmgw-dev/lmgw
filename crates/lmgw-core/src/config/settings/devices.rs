@@ -2,7 +2,8 @@
 //! listener's switch, scope and port, and the bounds of its trust — a
 //! pairing token's lifetime, the certificates' validity, the handshake's, a
 //! request head's and an unauthenticated connection's time, and the
-//! failed-enrolment rate. Each bound is visible and stated
+//! failed-enrolment rate; and how long a transfer offer between devices
+//! lasts (device transfers design §7). Each bound is visible and stated
 //! (`lmgw_api_types::device_link`); none is compiled into the code that
 //! uses it.
 
@@ -101,6 +102,9 @@ pub struct DevicesSettings {
     pub unauthenticated_max: u32,
     /// The same, from one peer (an IPv4 address, an IPv6 /64).
     pub unauthenticated_per_peer: u32,
+    /// How long a transfer offer lasts, in days (device transfers design
+    /// §7).
+    pub transfer_expiry_days: u32,
 }
 
 impl Default for DevicesSettings {
@@ -129,6 +133,8 @@ impl Default for DevicesSettings {
             // A household's phones behind one masquerading WireGuard peer
             // still pair; one host cannot take every slot.
             unauthenticated_per_peer: 8,
+            // A week: the owner's (device transfers design, decided 4).
+            transfer_expiry_days: 7,
         }
     }
 }
@@ -146,8 +152,8 @@ pub struct DevicesBound {
     pub field: fn(&mut DevicesSettings) -> &mut u32,
 }
 
-/// The nine bounded numbers, in the settings' order.
-pub const DEVICES_BOUNDS: [DevicesBound; 9] = [
+/// The ten bounded numbers, in the settings' order.
+pub const DEVICES_BOUNDS: [DevicesBound; 10] = [
     DevicesBound {
         key: "token_minutes",
         bound: wire::TOKEN_MINUTES,
@@ -211,6 +217,13 @@ pub const DEVICES_BOUNDS: [DevicesBound; 9] = [
                (IPv6 by /64)",
         applies: "applies to the next connection",
         field: |d| &mut d.unauthenticated_per_peer,
+    },
+    DevicesBound {
+        key: "transfer_expiry_days",
+        bound: wire::TRANSFER_EXPIRY_DAYS,
+        what: "how long a transfer offer between devices lasts in days",
+        applies: "applies to the next transfer offer",
+        field: |d| &mut d.transfer_expiry_days,
     },
 ];
 

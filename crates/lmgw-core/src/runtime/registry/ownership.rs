@@ -60,11 +60,14 @@ use crate::runtime::Class;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
-    /// The owner's: every request that is not a background alias's, every
-    /// warm, operator and boot start, every in-process caller.
+    /// The owner's: every request that is not background traffic, every
+    /// warm, operator and boot start, every in-process caller that does not
+    /// act for a background request.
     #[default]
     Owner,
-    /// A background candidate alias's (§4.3): a guest on the GPU.
+    /// Background traffic (§4.3): a background candidate alias's, or a
+    /// request sent with `x-lmgw-background: on` (per-request background
+    /// design §3). A guest on the GPU.
     Background,
 }
 
@@ -262,7 +265,7 @@ impl Registry {
         model_id: &str,
         generation: u64,
     ) -> Result<(), RuntimeError> {
-        self.stop_where(class, model_id, false, Some(generation), true)
+        self.stop_where(class, model_id, false, Some(generation), true, &[])
             .await
     }
 }
@@ -281,7 +284,7 @@ impl Registry {
         model_id: &str,
         generation: u64,
     ) -> Result<(), RuntimeError> {
-        self.stop_where(class, model_id, true, Some(generation), true)
+        self.stop_where(class, model_id, true, Some(generation), true, &[])
             .await
     }
 }

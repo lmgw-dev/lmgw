@@ -41,7 +41,7 @@ async fn setup(upstream_base: &str, mode: SelfAdmin) -> (SharedState, Gw) {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream_base.trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -65,6 +65,7 @@ async fn setup(upstream_base: &str, mode: SelfAdmin) -> (SharedState, Gw) {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -332,8 +333,9 @@ async fn the_inventory_names_every_tool_and_where_it_comes_from() {
     let labels: Vec<&str> = inv.sources.iter().map(|s| s.label.as_str()).collect();
     assert_eq!(
         labels,
-        vec!["lmgw", "docs", "kb", "stub"],
-        "the built-ins are sources too: {labels:?}"
+        vec!["lmgw", "docs", "kb", "image", "audio", "stub"],
+        "the built-ins are sources too, the media toolsets with no row behind them as \
+         well: {labels:?}"
     );
 
     let admin = entry(&inv, "lmgw__status");

@@ -624,6 +624,10 @@ impl<'a> Relay<'a> {
                 usage: self.usage,
                 model: model.to_string(),
                 timings: None,
+                service_tier: None,
+                upstream_items: None,
+                context_management: None,
+                usage_iterations: None,
             });
         }
         if stop.is_raised() {

@@ -530,7 +530,7 @@ async fn an_agent_tokens_responses_run_gets_only_its_allow_list() {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream.uri().trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -554,6 +554,7 @@ async fn an_agent_tokens_responses_run_gets_only_its_allow_list() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -910,7 +911,7 @@ async fn x_lmgw_run_puts_a_containers_own_call_on_the_runs_meter() {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream.uri().trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -934,6 +935,7 @@ async fn x_lmgw_run_puts_a_containers_own_call_on_the_runs_meter() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

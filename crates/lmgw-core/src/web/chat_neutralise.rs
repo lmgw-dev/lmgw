@@ -1,6 +1,6 @@
 //! The one neutraliser for text that is placed between our own block tags:
-//! attached files (`<file name=…>…</file>`) and knowledge excerpts
-//! (`<context>` / `<excerpt>`).
+//! attached files (`<file name=…>…</file>`), knowledge excerpts
+//! (`<context>` / `<excerpt>`) and a message's origin (`<origin>`).
 //!
 //! Content is kept verbatim, except that it cannot open or close any of the
 //! block elements the chat itself writes: a `<` that starts such a tag (either
@@ -10,10 +10,11 @@
 //! document holding `</FILE>`, `</File >`, `</ file` or a forged
 //! `<file name="x">` can neither end its block early nor pose as another one.
 
-/// The elements the chat writes around untrusted text. Both the file blocks
-/// and the knowledge context neutralise all of them: a file can forge an
-/// excerpt and an excerpt can forge a file.
-pub(super) const BLOCK_TAGS: [&str; 3] = ["file", "excerpt", "context"];
+/// The elements the chat writes around untrusted text. The file blocks, the
+/// knowledge context and a message's origin (`chat_origin`) neutralise all
+/// of them: a file can forge an excerpt, an excerpt a file, and either an
+/// origin.
+pub(super) const BLOCK_TAGS: [&str; 4] = ["file", "excerpt", "context", super::chat_origin::TAG];
 
 /// `text` with every `<` that opens or closes one of [`BLOCK_TAGS`] written
 /// as `&lt;`; everything else is unchanged.

@@ -3,6 +3,30 @@
 
 use serde::{Deserialize, Serialize};
 
+use lmgw_api_types::settings_labels::{self as labels, SettingPath};
+
+/// [`VramSettings::load_timeout_seconds`] as the dashboard names it, for a
+/// message that reaches it (a start that timed out): where it is and its
+/// label, never the settings key. Every `*_LABEL` here is one of
+/// lmgw-api-types' [`labels`] paths, which the Settings page's own table is
+/// built from, so the two cannot name a setting differently.
+pub const LOAD_TIMEOUT_LABEL: SettingPath = labels::LOAD_TIMEOUT_AT;
+
+/// [`VramSettings::unload_timeout_seconds`] as the dashboard names it.
+pub const UNLOAD_TIMEOUT_LABEL: SettingPath = labels::UNLOAD_TIMEOUT_AT;
+
+/// [`VramSettings::queue_timeout_seconds`] as the dashboard names it.
+pub const QUEUE_TIMEOUT_LABEL: SettingPath = labels::QUEUE_TIMEOUT_AT;
+
+/// [`VramSettings::enabled`] as the dashboard names it.
+pub const ADMISSION_LABEL: SettingPath = labels::ADMISSION_AT;
+
+/// [`VramSettings::budget_mb`] as the dashboard names it.
+pub const BUDGET_LABEL: SettingPath = labels::BUDGET_AT;
+
+/// [`VramSettings::fallback_on_external`] as the dashboard names it.
+pub const FALLBACK_ON_EXTERNAL_LABEL: SettingPath = labels::FALLBACK_ON_EXTERNAL_AT;
+
 /// Admission control over the GPU the three managed containers share
 /// (quickdoc §9b).
 ///
@@ -66,15 +90,13 @@ pub struct VramSettings {
 
 /// The manual GPU hold (gpu-hold design §3.1). `#[serde(default)]`d on
 /// [`Settings::hold`](crate::config::Settings::hold) so a blob written before this field existed loads as
-/// `active: false, fallback_alias: None` — hold off, nothing inherited.
+/// `active: false` — hold off. A held model answers with its own fallback
+/// (openai egress design §14.2): there is no global one any more.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HoldSettings {
     /// The switch. Persisted, so a restart mid-game does not lift it.
     pub active: bool,
-    /// Global fallback for chat-class local models. `None` = refuse a held
-    /// chat request that has no per-row override.
-    pub fallback_alias: Option<String>,
 }
 
 impl Default for VramSettings {
@@ -189,7 +211,9 @@ pub struct RouterSettings {
     /// Container image for llama-server (entrypoint `/app/llama-server`).
     /// The class default; a model's `image` column overrides it (§3.1).
     pub image: String,
-    /// Host directory with GGUF files; mounted read-only at /models.
+    /// Host directory with GGUF files; mounted read-only at /models. Empty
+    /// is "none", which refuses downloads and starts; a fresh install stores
+    /// `<data_dir>/models/chat` (aux: `…/aux`) here (`state::fresh_install`).
     pub models_dir: String,
     /// Extra `podman run` args (GPU/CDI flags etc.). The class default; a
     /// model's `extra_run_args` column overrides it (§3.1).
@@ -200,7 +224,10 @@ pub struct RouterSettings {
     /// Per-request ceiling for this class, in seconds — the `timeout_ms` its
     /// synthetic upstream carries ([`Snapshot::synthetic_upstream`](crate::config::snapshot::Snapshot::synthetic_upstream)). **0 =
     /// the maximum possible**: no deadline of lmgw's own, the request ends
-    /// when the container ends it.
+    /// when the container ends it. It bounds the wait for an answer's headers
+    /// (llama-server sends them with its first token, after the prompt is
+    /// read) and each silence of a streamed answer after them
+    /// (`proxy::silence`).
     ///
     /// Per class rather than one shared constant because the four have nothing
     /// in common here: an embedding batch that takes a minute is broken, a
@@ -308,6 +335,8 @@ pub struct AudioSettings {
     /// `full-cuda13`, `full-cpu`.
     pub image: String,
     /// Host directory with the audio models; mounted read-only at /models.
+    /// Empty is "none", as for the other classes; a fresh install stores
+    /// `<data_dir>/models/audio` here (`state::fresh_install`).
     pub models_dir: String,
     /// Inference backend written into server.json (`cuda` | `cpu` | `vulkan`
     /// | `metal` | `hip`) — must match the backend the image was built with.
@@ -494,11 +523,12 @@ pub struct ImageSettings {
     pub image: String,
     /// Host directory with the image weights; mounted read-only at /models.
     ///
-    /// Empty by default — exactly like the three older classes, which also
-    /// ship no path and refuse to start a model until the owner names one.
-    /// The layout this class expects is `<data_dir>/sdcpp`
-    /// (`~/.local/share/lmgw/sdcpp`, where the spike's weights already live),
-    /// with `<owner>/<repo>/<file>` underneath it.
+    /// Empty in the type default — exactly like the three older classes,
+    /// which also refuse to start a model until one is named. A fresh install
+    /// stores `<data_dir>/models/image` here (`state::fresh_install`); an
+    /// install that ran the earlier image spike keeps its weights in
+    /// `<data_dir>/sdcpp`.
+    /// Either way the layout is `<owner>/<repo>/<file>` underneath it.
     pub models_dir: String,
     /// Extra `podman run` args (GPU/CDI flags etc.). Load-bearing beyond the
     /// usual: the sd-server binary links `libcuda.so.1` directly, so even

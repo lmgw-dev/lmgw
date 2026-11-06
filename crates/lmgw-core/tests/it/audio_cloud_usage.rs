@@ -39,7 +39,7 @@ async fn setup(mock: &MockServer, kind: UpstreamKind) -> (SharedState, Gw) {
         &state.db,
         &NewUpstream {
             name: "openai".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind,
             base_url: format!("{}/v1", mock.uri()),
             api_key: Some("sk-up".into()),
@@ -69,6 +69,7 @@ async fn setup(mock: &MockServer, kind: UpstreamKind) -> (SharedState, Gw) {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -86,6 +87,7 @@ async fn setup(mock: &MockServer, kind: UpstreamKind) -> (SharedState, Gw) {
             PriceScope::Alias,
             alias,
             PriceUnit::PerMtok,
+            lmgw_core::config::PriceTier::Standard,
             &sheet,
             None,
             None,
@@ -109,6 +111,7 @@ async fn price(state: &SharedState, alias: &str, unit: PriceUnit, rate: f64) {
         PriceScope::Alias,
         alias,
         unit,
+        lmgw_core::config::PriceTier::Standard,
         &sheet,
         Some(rate),
         None,

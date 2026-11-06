@@ -48,7 +48,7 @@ fn stdio(image: Option<&str>) -> McpServer {
 
 #[test]
 fn stdio_argv_isolated_synthesizes_podman_run() {
-    let (prog, argv) = stdio(Some("ghcr.io/acme/mcp-github")).stdio_argv();
+    let (prog, argv) = stdio(Some("ghcr.io/acme/mcp-github")).stdio_argv(&[]);
     assert_eq!(prog, "podman");
     assert_eq!(
         argv,
@@ -71,7 +71,7 @@ fn stdio_argv_isolated_synthesizes_podman_run() {
 #[test]
 fn stdio_argv_bare_runs_command_verbatim() {
     // No container image ⇒ bare subprocess; env applied by the spawner.
-    let (prog, argv) = stdio(None).stdio_argv();
+    let (prog, argv) = stdio(None).stdio_argv(&[]);
     assert_eq!(prog, "mcp-server-github");
     assert_eq!(argv, vec!["--verbose"]);
 }
@@ -83,13 +83,47 @@ fn stdio_argv_bare_runs_command_verbatim() {
 #[test]
 fn container_create_argv_is_the_run_argv_up_to_the_start() {
     let s = stdio(Some("ghcr.io/acme/mcp-github"));
-    let (_, mut run) = s.stdio_argv();
+    let (_, mut run) = s.stdio_argv(&[]);
     run[0] = "create".to_string();
     run.splice(4..4, ["--label".to_string(), "lmgw.mcp=1".to_string()]);
     let labels = [("lmgw.mcp".to_string(), "1".to_string())];
-    assert_eq!(s.container_create_argv(&labels), Some(run));
-    assert_eq!(stdio(None).container_create_argv(&labels), None);
-    assert_eq!(stdio(Some("  ")).container_create_argv(&labels), None);
+    assert_eq!(s.container_create_argv(&[], &labels), Some(run));
+    assert_eq!(stdio(None).container_create_argv(&[], &labels), None);
+    assert_eq!(stdio(Some("  ")).container_create_argv(&[], &labels), None);
+}
+
+/// An isolated server whose container gets the graphics card carries lmgw's
+/// CDI spec dir before `run`, `create` and `start` (machine-check design
+/// §3.6.4): Podman resolves the device when `start` initialises the
+/// container, so the start needs it as much as the create.
+#[test]
+fn the_podman_globals_go_before_run_create_and_start() {
+    let mut s = stdio(Some("ghcr.io/acme/mcp-github"));
+    s.extra_run_args = ["--device", "nvidia.com/gpu=all", "--sig-proxy=false"]
+        .map(String::from)
+        .to_vec();
+    let globals = ["--cdi-spec-dir", "/run/user/1000/lmgw-machine/lmgw/cdi"].map(String::from);
+    let (_, run) = s.stdio_argv(&globals);
+    assert_eq!(run[..3], [&globals[..], &["run".to_string()]].concat()[..]);
+    let create = s.container_create_argv(&globals, &[]).unwrap();
+    assert_eq!(
+        create[..3],
+        [&globals[..], &["create".to_string()]].concat()[..]
+    );
+    assert_eq!(
+        s.container_start_argv(&globals, "c0ffee"),
+        [
+            "--cdi-spec-dir",
+            "/run/user/1000/lmgw-machine/lmgw/cdi",
+            "start",
+            "--attach",
+            "--interactive",
+            "--sig-proxy=false",
+            "c0ffee",
+        ]
+    );
+    // A bare server's own command takes none.
+    assert_eq!(stdio(None).stdio_argv(&globals).1, vec!["--verbose"]);
 }
 
 /// `podman create` refuses `--sig-proxy` and `--detach-keys`, which `podman
@@ -110,7 +144,7 @@ fn the_run_flags_only_podman_start_takes_go_to_the_start() {
     ]
     .map(String::from)
     .to_vec();
-    let create = s.container_create_argv(&[]).unwrap();
+    let create = s.container_create_argv(&[], &[]).unwrap();
     assert_eq!(
         create,
         [
@@ -128,7 +162,7 @@ fn the_run_flags_only_podman_start_takes_go_to_the_start() {
         ]
     );
     assert_eq!(
-        s.container_start_argv("c0ffee"),
+        s.container_start_argv(&[], "c0ffee"),
         [
             "start",
             "--attach",
@@ -142,7 +176,7 @@ fn the_run_flags_only_podman_start_takes_go_to_the_start() {
         ]
     );
     assert_eq!(
-        stdio(Some("img")).container_start_argv("c0ffee"),
+        stdio(Some("img")).container_start_argv(&[], "c0ffee"),
         ["start", "--attach", "--interactive", "c0ffee"]
     );
 }
@@ -194,9 +228,9 @@ fn exposed_name_applies_prefix() {
     assert_eq!(bare.exposed_name("search"), "search");
 }
 
-// -- Snapshot::hold_fallback_for (gpu-hold design §2) --------------------
+// -- Snapshot::fallback_of (openai egress design §14.2–§14.3) ------------
 
-fn local_row(mode: HoldFallbackMode, fallback: Option<&str>) -> LocalModel {
+fn local_row(fallback: Option<&str>) -> LocalModel {
     LocalModel {
         id: 1,
         model_id: "chat-a".into(),
@@ -209,14 +243,13 @@ fn local_row(mode: HoldFallbackMode, fallback: Option<&str>) -> LocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: mode,
-        hold_fallback: fallback.map(String::from),
+        fallback: fallback.map(String::from),
         capabilities_override: None,
         ladder: vec![],
     }
 }
 
-fn aux_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AuxModel {
+fn aux_row(fallback: Option<&str>) -> AuxModel {
     AuxModel {
         id: 1,
         model_id: "embed-a".into(),
@@ -235,12 +268,11 @@ fn aux_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: mode,
-        hold_fallback: fallback.map(String::from),
+        fallback: fallback.map(String::from),
     }
 }
 
-fn audio_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AudioModel {
+fn audio_row(fallback: Option<&str>) -> AudioModel {
     AudioModel {
         id: 1,
         model_id: "tts-a".into(),
@@ -264,149 +296,108 @@ fn audio_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: mode,
-        hold_fallback: fallback.map(String::from),
+        fallback: fallback.map(String::from),
         residency: None,
     }
 }
 
-/// A snapshot with one row of each class and a settable global fallback,
-/// for the `hold_fallback_for` matrix below.
-fn snap_with(
-    local: LocalModel,
-    aux: AuxModel,
-    audio: AudioModel,
-    global: Option<&str>,
-) -> Snapshot {
-    Snapshot {
+/// A snapshot with one row of each local class (no prefixes), a plain
+/// alias `cloud` and a candidate alias `smart`, each with the given
+/// fallback.
+fn snap_with(local: LocalModel, aux: AuxModel, audio: AudioModel) -> Snapshot {
+    let mut snap = Snapshot {
         local_models: vec![local],
         aux_models: vec![aux],
         audio_models: vec![audio],
-        settings: Settings {
-            hold: HoldSettings {
-                active: true,
-                fallback_alias: global.map(String::from),
-            },
-            ..Settings::default()
-        },
         ..Snapshot::default()
-    }
+    };
+    snap.aliases.insert(
+        "cloud".into(),
+        ModelAlias {
+            id: 7,
+            alias: "cloud".into(),
+            upstream_id: 3,
+            upstream_model_id: "m".into(),
+            param_overrides: Default::default(),
+            enabled: true,
+            capabilities_override: None,
+            fallback: Some("cloud-b".into()),
+        },
+    );
+    snap.candidate_aliases.insert(
+        "smart".into(),
+        CandidateAlias {
+            id: 9,
+            alias: "Smart".into(),
+            candidates: vec!["chat-a".into()],
+            background: false,
+            fallback: Some("cloud".into()),
+            capabilities_disabled: vec![],
+            capabilities_enabled: vec![],
+            enabled: true,
+            notes: String::new(),
+        },
+    );
+    snap
 }
 
 #[test]
-fn hold_fallback_none_mode_refuses_even_with_a_global_set() {
+fn fallback_of_reads_each_kinds_own_field() {
     let snap = snap_with(
-        local_row(HoldFallbackMode::None, None),
-        aux_row(HoldFallbackMode::None, None),
-        audio_row(HoldFallbackMode::None, None),
-        Some("cloud-global"),
+        local_row(Some("cloud-row")),
+        aux_row(Some("cloud-row-aux")),
+        audio_row(Some("cloud-row-audio")),
+    );
+    use crate::runtime::Class;
+    let local = |class, id: &str| HopKey::Local(class, id.to_string());
+    assert_eq!(
+        snap.fallback_of(&local(Class::Chat, "chat-a")),
+        Some("cloud-row")
     );
     assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "chat-a"),
+        snap.fallback_of(&local(Class::Aux, "embed-a")),
+        Some("cloud-row-aux")
+    );
+    assert_eq!(
+        snap.fallback_of(&local(Class::Audio, "tts-a")),
+        Some("cloud-row-audio")
+    );
+    assert_eq!(snap.fallback_of(&HopKey::Alias(7)), Some("cloud-b"));
+    assert_eq!(snap.fallback_of(&HopKey::Candidate(9)), Some("cloud"));
+    // A passthrough model has none, and an unknown row refuses rather than
+    // borrow one.
+    assert_eq!(snap.fallback_of(&HopKey::Passthrough(3, "m".into())), None);
+    assert_eq!(snap.fallback_of(&local(Class::Chat, "no-such-model")), None);
+}
+
+#[test]
+fn a_blank_fallback_is_none() {
+    let snap = snap_with(local_row(None), aux_row(Some("  ")), audio_row(None));
+    use crate::runtime::Class;
+    assert_eq!(
+        snap.fallback_of(&HopKey::Local(Class::Chat, "chat-a".into())),
+        None
+    );
+    assert_eq!(
+        snap.fallback_of(&HopKey::Local(Class::Aux, "embed-a".into())),
         None
     );
 }
 
+/// Hops compare by identity: a candidate alias by its id whatever the case
+/// it is named in, a local row by its class and id whatever prefix names it.
 #[test]
-fn hold_fallback_alias_mode_uses_the_rows_own_alias() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Alias, Some("cloud-row")),
-        aux_row(HoldFallbackMode::Alias, Some("cloud-row-aux")),
-        audio_row(HoldFallbackMode::Alias, Some("cloud-row-audio")),
-        None,
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "chat-a"),
-        Some("cloud-row".to_string())
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Aux, "embed-a"),
-        Some("cloud-row-aux".to_string())
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Audio, "tts-a"),
-        Some("cloud-row-audio".to_string())
-    );
-}
-
-#[test]
-fn hold_fallback_alias_mode_with_no_alias_set_counts_as_no_fallback() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Alias, None),
-        aux_row(HoldFallbackMode::Alias, Some("")),
-        audio_row(HoldFallbackMode::Alias, None),
-        Some("cloud-global"),
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "chat-a"),
-        None
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Aux, "embed-a"),
-        None
-    );
-}
-
-#[test]
-fn hold_fallback_inherit_chat_falls_through_to_the_global() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Inherit, None),
-        aux_row(HoldFallbackMode::Inherit, None),
-        audio_row(HoldFallbackMode::Inherit, None),
-        Some("cloud-global"),
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "chat-a"),
-        Some("cloud-global".to_string())
-    );
-}
-
-#[test]
-fn hold_fallback_inherit_chat_with_no_global_refuses() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Inherit, None),
-        aux_row(HoldFallbackMode::Inherit, None),
-        audio_row(HoldFallbackMode::Inherit, None),
-        None,
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "chat-a"),
-        None
-    );
-}
-
-#[test]
-fn hold_fallback_inherit_never_reaches_aux_or_audio() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Inherit, None),
-        aux_row(HoldFallbackMode::Inherit, None),
-        audio_row(HoldFallbackMode::Inherit, None),
-        Some("cloud-global"),
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Aux, "embed-a"),
-        None,
-        "an aux model must never silently inherit the chat fallback"
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Audio, "tts-a"),
-        None,
-        "an audio model must never silently inherit the chat fallback"
-    );
-}
-
-#[test]
-fn hold_fallback_unknown_model_id_refuses() {
-    let snap = snap_with(
-        local_row(HoldFallbackMode::Alias, Some("cloud-row")),
-        aux_row(HoldFallbackMode::Alias, Some("cloud-row-aux")),
-        audio_row(HoldFallbackMode::Alias, Some("cloud-row-audio")),
-        Some("cloud-global"),
-    );
-    assert_eq!(
-        snap.hold_fallback_for(crate::runtime::Class::Chat, "no-such-model"),
-        None
-    );
+fn hop_keys_name_identities_not_texts() {
+    let mut snap = snap_with(local_row(None), aux_row(None), audio_row(None));
+    assert_eq!(snap.hop_key("SMART"), Some(HopKey::Candidate(9)));
+    assert_eq!(snap.hop_key("smart"), snap.hop_key("Smart"));
+    // Plain aliases resolve as written (case-sensitively), as `resolve` does.
+    assert_eq!(snap.hop_key("cloud"), Some(HopKey::Alias(7)));
+    assert_eq!(snap.hop_key("CLOUD"), None);
+    let before = snap.hop_key("chat-a");
+    snap.settings.router.public_prefix = "local".into();
+    assert_eq!(snap.hop_key("local/chat-a"), before);
+    assert_eq!(snap.hop_key("chat-a"), None);
 }
 
 // -----------------------------------------------------------------------
@@ -734,24 +725,31 @@ fn per_request_ctx_split_is_unchanged_ctx_size_over_parallel() {
 /// Every `Protocol` round-trips through `as_str`, `parse` and serde, and the
 /// three agree: `parse` is a string match the compiler does not check, and
 /// serde's spelling comes from `rename_all` unless a variant overrides it —
-/// `llama_cpp` does (llama.cpp egress design, decision 10).
+/// `llama_cpp` does (llama.cpp egress design, decision 10), and so does
+/// `openai_compatible` (openai egress design, decision 6).
 #[test]
 fn every_protocol_round_trips_through_as_str_parse_and_serde() {
     // Exhaustive on purpose: a new variant fails to compile here until it is
     // listed below as well.
     let index = |p: Protocol| match p {
         Protocol::Openai => 0,
-        Protocol::Anthropic => 1,
-        Protocol::Gemini => 2,
-        Protocol::LlamaCpp => 3,
+        Protocol::OpenaiCompatible => 1,
+        Protocol::Anthropic => 2,
+        Protocol::Gemini => 3,
+        Protocol::LlamaCpp => 4,
     };
     let all = [
         Protocol::Openai,
+        Protocol::OpenaiCompatible,
         Protocol::Anthropic,
         Protocol::Gemini,
         Protocol::LlamaCpp,
     ];
-    assert_eq!(all.map(index), [0, 1, 2, 3], "every variant is listed once");
+    assert_eq!(
+        all.map(index),
+        [0, 1, 2, 3, 4],
+        "every variant is listed once"
+    );
     for p in all {
         assert_eq!(Protocol::parse(p.as_str()), Some(p), "{p:?}");
         let json = serde_json::to_string(&p).unwrap();
@@ -760,6 +758,8 @@ fn every_protocol_round_trips_through_as_str_parse_and_serde() {
     }
     assert_eq!(Protocol::LlamaCpp.as_str(), "llama_cpp");
     assert_eq!(Protocol::parse("llamacpp"), None);
+    assert_eq!(Protocol::OpenaiCompatible.as_str(), "openai_compatible");
+    assert_eq!(Protocol::parse("openaicompatible"), None);
     assert_eq!(
         Protocol::parse("llama_server"),
         None,
@@ -767,17 +767,41 @@ fn every_protocol_round_trips_through_as_str_parse_and_serde() {
     );
 }
 
-/// The OpenAI-shaped HTTP surface: OpenAI's own and llama.cpp's.
+/// `/v1/responses` goes native on the OpenAI platform, on a compatible row
+/// by its flag, and nowhere else (openai egress design §6).
 #[test]
-fn openai_http_is_spoken_by_openai_and_llama_cpp_only() {
+fn responses_are_forwarded_by_the_platform_and_the_compatible_flag() {
+    let mut u = Snapshot::default().aux_upstream();
+    for (protocol, flag, native) in [
+        (Protocol::Openai, false, true),
+        (Protocol::Openai, true, true),
+        (Protocol::OpenaiCompatible, false, false),
+        (Protocol::OpenaiCompatible, true, true),
+        (Protocol::Anthropic, true, false),
+        (Protocol::Gemini, true, false),
+        (Protocol::LlamaCpp, true, false),
+    ] {
+        u.protocol = protocol;
+        u.supports_responses = flag;
+        assert_eq!(u.forwards_responses(), native, "{protocol:?} flag {flag}");
+    }
+}
+
+/// The OpenAI-shaped HTTP surface: OpenAI's own, every compatible
+/// provider's and llama.cpp's.
+#[test]
+fn openai_http_is_spoken_by_the_openai_shaped_protocols_only() {
     assert!(Protocol::Openai.speaks_openai_http());
+    assert!(Protocol::OpenaiCompatible.speaks_openai_http());
     assert!(Protocol::LlamaCpp.speaks_openai_http());
     assert!(!Protocol::Anthropic.speaks_openai_http());
     assert!(!Protocol::Gemini.speaks_openai_http());
 }
 
 /// The synthetic upstreams of the two llama.cpp classes speak `llama_cpp`;
-/// audio.cpp and sd-server stay on `openai` (design §5).
+/// audio.cpp and sd-server speak `openai_compatible`, never the OpenAI
+/// platform's `openai` (llama egress design §5, openai egress design
+/// decision 9).
 #[test]
 fn the_llama_cpp_classes_synthetic_upstreams_speak_llama_cpp() {
     let snap = Snapshot::default();
@@ -789,6 +813,6 @@ fn the_llama_cpp_classes_synthetic_upstreams_speak_llama_cpp() {
             u.name
         );
     }
-    assert_eq!(snap.audio_upstream().protocol, Protocol::Openai);
-    assert_eq!(snap.image_upstream().protocol, Protocol::Openai);
+    assert_eq!(snap.audio_upstream().protocol, Protocol::OpenaiCompatible);
+    assert_eq!(snap.image_upstream().protocol, Protocol::OpenaiCompatible);
 }

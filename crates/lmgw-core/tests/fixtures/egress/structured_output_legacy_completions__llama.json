@@ -1,0 +1,205 @@
+{
+  "legacy_completions": [
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "json_schema": {
+            "name": "answer",
+            "schema": {
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {},
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "text"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok."
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "regex"
+        }
+      },
+      "out": {
+        "refused": "response_format_unsupported"
+      }
+    },
+    {
+      "body": {
+        "grammar": "root ::= \"ok\"",
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "refused": "bad_request"
+      }
+    },
+    {
+      "body": {
+        "grammar": "",
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {},
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": null,
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {},
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": "root ::= \"ok\"",
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok."
+      },
+      "out": {
+        "refused": "bad_request"
+      }
+    }
+  ]
+}

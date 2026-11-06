@@ -26,8 +26,10 @@
 //!     draining for the owner, else started into room that disturbs nobody
 //!     ([`crate::vram::start_background`]), else the first loaded
 //!     alternate, else the alias fallback (reason `background`), else `503
-//!     gpu_hold` logged `gpu_deferred` — or, when the primary's start failed
-//!     or it can never fit, that error (§12 entry 74).
+//!     gpu_deferred` — or, when the primary's start failed or it can never
+//!     fit, that error (§12 entry 74). A request sent with
+//!     `x-lmgw-background: on` walks this way on any alias (per-request
+//!     background design §5).
 //!
 //!   In both modes a primary whose joined start failed, or was stopped, is
 //!   never started again by the same walk (§12 entry 62).
@@ -62,7 +64,7 @@ use std::sync::Arc;
 
 use crate::candidates::FacetSet;
 use crate::config::{CandidateAlias, FallbackRoute, Snapshot};
-use crate::error::GatewayError;
+use crate::error::{Deferred, GatewayError};
 use crate::runtime::registry::Origin;
 use crate::vram::{LocalHold, Target};
 
@@ -95,6 +97,10 @@ pub struct CandidateCtx {
     pub excluded: Vec<String>,
     /// The alias as the walk that picked this request read it.
     pub row: Arc<CandidateAlias>,
+    /// Whose traffic the client said the request is (per-request background
+    /// design §5): a re-pick walks as a guest again when it was sent with
+    /// `x-lmgw-background: on`, whatever the alias row says by then.
+    pub origin: Origin,
 }
 
 impl CandidateCtx {
@@ -120,7 +126,7 @@ impl CandidateCtx {
 /// [`Snapshot::request_fallback`], exactly as before.
 pub(crate) fn request_fallback(snap: &Snapshot, hold: &LocalHold) -> FallbackRoute {
     match ctx(hold) {
-        Some(c) => snap.alias_fallback(c.alias_row(snap)),
+        Some(c) => snap.fallback_named(c.alias_row(snap).fallback.as_deref()),
         None => snap.request_fallback(
             hold.alias(),
             &Target {
@@ -140,15 +146,26 @@ pub(crate) fn fallback_facets(snap: &Snapshot, hold: &LocalHold) -> Option<Facet
 }
 
 /// The `400` for a request that uses a facet the alias does not enable
-/// (§4.6 "Requests", §9): named, and answered before anything starts.
+/// (§4.6 "Requests", §9): named, and answered before anything starts. With
+/// structured output the only missing facet it is
+/// `response_format_unsupported`, the code the early refusal of a plain model
+/// uses (structured-output design §7), so a client steps down the same way
+/// on either; with any other facet missing too it stays `unsupported` — a
+/// client stepping down its format would still be refused (§11.20).
 pub(crate) fn facet_refusal(alias: &str, missing: FacetSet) -> GatewayError {
     let names: Vec<&str> = missing.iter().map(|f| f.label()).collect();
-    GatewayError::Unsupported(format!(
+    let message = format!(
         "'{alias}' does not enable {} — this request uses it, and a candidate alias only takes \
          requests every one of its models (and its fallback) is promised to serve; switch the \
          capability on for the alias, or send the request without it",
         names.join(", ")
-    ))
+    );
+    let structured = FacetSet::EMPTY.insert(crate::candidates::Facet::StructuredOutput);
+    if missing == structured {
+        GatewayError::ResponseFormatUnsupported { message }
+    } else {
+        GatewayError::Unsupported(message)
+    }
 }
 
 /// The candidate context of the request `hold` serves, if it is a candidate
@@ -168,24 +185,42 @@ fn ctx(hold: &LocalHold) -> Option<&CandidateCtx> {
 ///   only a request above the alias's published context, the minimum of its
 ///   candidates, can meet it.
 ///
-/// Never for a hold that is not a candidate alias's: direct names and plain
-/// aliases are byte-for-byte unchanged (§7 item 14).
+/// A plain model's **guest** (per-request background design §4) has no
+/// alternates, so only [`GatewayError::CandidateLost`] sends it elsewhere —
+/// to its row's fallback or the deferral ([`crate::gate::guest::lost`]); a
+/// prompt above its context is the plain `400`.
+///
+/// Never for any other hold: direct names and plain aliases are
+/// byte-for-byte unchanged (§7 item 14).
 pub(crate) fn repicks(hold: Option<&LocalHold>, error: &GatewayError) -> bool {
-    let Some(hold) = hold.filter(|h| ctx(h).is_some()) else {
+    let Some(hold) = hold else {
         return false;
     };
-    match error {
-        GatewayError::CandidateLost { .. } => true,
-        GatewayError::ContextExceeded { .. } => hold.origin() == Origin::Background,
+    let guest = hold.origin() == Origin::Background;
+    match (ctx(hold).is_some(), error) {
+        (true, GatewayError::CandidateLost { .. }) => true,
+        (true, GatewayError::ContextExceeded { .. }) => guest,
+        (false, GatewayError::CandidateLost { .. }) => guest,
         _ => false,
     }
 }
 
-/// Whether the request `hold` serves came through a candidate alias, so the
-/// gate may send it elsewhere before anything is sent (a site that rewrites
-/// its body for the fit keeps the client's copy for that).
+/// Whether the request `hold` serves may be sent elsewhere before anything is
+/// sent — it came through a candidate alias, or it is a plain model's guest
+/// (per-request background design §4) — so a site that rewrites its body for
+/// the fit keeps the client's copy for that.
 pub(crate) fn reroutable(hold: Option<&LocalHold>) -> bool {
-    hold.is_some_and(|h| ctx(h).is_some())
+    hold.is_some_and(|h| ctx(h).is_some() || h.origin() == Origin::Background)
+}
+
+/// What a deferral of the request `hold` serves names to give a fallback to:
+/// its candidate alias, or the model a guest asked for by name.
+pub(crate) fn deferred_on(hold: &LocalHold) -> Deferred {
+    if ctx(hold).is_some() {
+        Deferred::Alias
+    } else {
+        Deferred::Model
+    }
 }
 
 /// Whether a guest's ladder climb that ended in `error` is answered by

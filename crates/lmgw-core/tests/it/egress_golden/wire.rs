@@ -6,7 +6,7 @@
 use lmgw_core::config::Upstream;
 use lmgw_core::egress::{for_protocol, CountPlan};
 use lmgw_core::error::GatewayError;
-use lmgw_core::ir::{EmbeddingsRequest, RerankRequest, StreamDelta};
+use lmgw_core::ir::{CompactionEvent, EmbeddingsRequest, RerankRequest, StreamDelta};
 use lmgw_core::sse::SseDecoder;
 use serde_json::{json, Value};
 
@@ -33,12 +33,25 @@ fn count_plan(up: &Upstream, model: &str, text: &str) -> Value {
     plan_json(for_protocol(up.protocol).build_count_tokens(http(), up, model, text))
 }
 
+/// A call id as the fixture keeps it: one the decoder minted for a call the
+/// upstream sent without one (`call_<12 hex digits><n in hex>`, random per
+/// answer) reads `call_<minted>`.
+fn stable_id(id: &str) -> &str {
+    match id.strip_prefix("call_") {
+        Some(rest) if rest.len() > 12 && rest.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            "call_<minted>"
+        }
+        _ => id,
+    }
+}
+
 fn delta_json(d: &StreamDelta) -> Value {
     match d {
         StreamDelta::TextDelta(t) => json!({"text": t}),
+        StreamDelta::RefusalDelta(t) => json!({"refusal": t}),
         StreamDelta::ReasoningDelta(t) => json!({"reasoning": t}),
         StreamDelta::ToolCallStart { index, id, name } => {
-            json!({"tool_call_start": {"index": index, "id": id, "name": name}})
+            json!({"tool_call_start": {"index": index, "id": stable_id(id), "name": name}})
         }
         StreamDelta::ToolCallArgsDelta { index, fragment } => {
             json!({"tool_call_args": {"index": index, "fragment": fragment}})
@@ -46,6 +59,28 @@ fn delta_json(d: &StreamDelta) -> Value {
         StreamDelta::Usage(u) => json!({"usage": u}),
         StreamDelta::Stop(f) => json!({"stop": f}),
         StreamDelta::Timings(t) => json!({"timings": t}),
+        StreamDelta::ServiceTier(t) => json!({"service_tier": t}),
+        StreamDelta::UpstreamItems(i) => json!({"upstream_items": i}),
+        StreamDelta::ReasoningSeal(s) => json!({"reasoning_seal": s}),
+        StreamDelta::ReasoningSignature { signature, .. } => {
+            json!({"reasoning_signature": signature})
+        }
+        StreamDelta::ContextManagement(c) => json!({"context_management": c}),
+        StreamDelta::Compaction(CompactionEvent::Start(c)) => {
+            json!({"compaction_start": c.to_block()})
+        }
+        StreamDelta::Compaction(CompactionEvent::Delta(d)) => json!({"compaction_delta": d}),
+        StreamDelta::AnthropicBlock(lmgw_core::ir::BlockEvent::Start(b)) => {
+            json!({"anthropic_block_start": b.block})
+        }
+        StreamDelta::AnthropicBlock(lmgw_core::ir::BlockEvent::Delta(d)) => {
+            json!({"anthropic_block_delta": d})
+        }
+        StreamDelta::AnthropicBlock(lmgw_core::ir::BlockEvent::Stop) => {
+            json!({"anthropic_block_stop": true})
+        }
+        StreamDelta::TextBlockEnd { citations, .. } => json!({"text_block_end": citations}),
+        StreamDelta::UsageIterations(i) => json!({"usage_iterations": i.list}),
         StreamDelta::Error(e) => json!({"error": e}),
     }
 }
@@ -284,6 +319,71 @@ pub(super) fn cases() -> Vec<Case> {
                 })).collect::<Vec<_>>()})
             },
         },
+        // OpenAI's own error bodies (openai egress design §8, P4), through
+        // `map_error` and `structured_refusal`. The structured refusals are
+        // a probe's (`fixtures/structured_output/`); the
+        // context, quota and rate bodies are OpenAI's documented shapes; the
+        // flex one is a stand-in until the live probe (WP6) captures it.
+        Case {
+            name: "errors_platform_shapes",
+            run: |up| {
+                let bodies: Vec<(u16, &str)> = vec![
+                    (
+                        400,
+                        r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130021 tokens. Please reduce the length of the messages.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Unrecognized request argument supplied: top_k","type":"invalid_request_error","param":null,"code":null}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low', 'medium', and 'high'.","type":"invalid_request_error","param":"reasoning_effort","code":"unsupported_value"}}"#,
+                    ),
+                    (
+                        429,
+                        r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}"#,
+                    ),
+                    (
+                        429,
+                        r#"{"error":{"message":"Rate limit reached for the-model on tokens per min (TPM): Limit 200000, Used 199000, Requested 2000. Please try again in 300ms.","type":"tokens","param":null,"code":"rate_limit_exceeded"}}"#,
+                    ),
+                    (
+                        429,
+                        r#"{"error":{"message":"Resource Unavailable","type":"invalid_request_error","param":null,"code":"resource_unavailable"}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.","type":"invalid_request_error","param":"response_format","code":null}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.","type":"invalid_request_error","param":null,"code":null}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Invalid value: 'regex'. Supported values are: 'json_object', 'json_schema', and 'text'.","type":"invalid_request_error","param":"response_format.type","code":"invalid_value"}}"#,
+                    ),
+                    (
+                        400,
+                        r#"{"error":{"message":"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.","type":"invalid_request_error","param":"text.format.schema","code":"invalid_json_schema"}}"#,
+                    ),
+                ];
+                let egress = for_protocol(up.protocol);
+                json!({"errors": bodies.iter().map(|(status, body)| json!({
+                    "status": status,
+                    "body": body,
+                    "map_error": error(&egress.map_error(*status, body.as_bytes())),
+                    "structured_refusal": egress
+                        .structured_refusal(*status, body.as_bytes())
+                        .map(|e| error(&e)),
+                })).collect::<Vec<_>>()})
+            },
+        },
         // --- Streams -------------------------------------------------------
         Case {
             name: "stream_llama",
@@ -321,6 +421,26 @@ pub(super) fn cases() -> Vec<Case> {
                     r#"data: {"choices":[{"index":0,"delta":{"content":" scatters."},"finish_reason":"stop","native_finish_reason":"stop"}]}"#,
                     "\n\n",
                     r#"data: {"choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"usage":{"prompt_tokens":30,"completion_tokens":40,"total_tokens":70,"prompt_tokens_details":{"cached_tokens":10},"completion_tokens_details":{"reasoning_tokens":25}}}"#,
+                    "\n\n",
+                    "data: [DONE]\n\n",
+                );
+                decode(up, sse)
+            },
+        },
+        // OpenAI's own stream: `service_tier` on every chunk (one that
+        // changes on the way), and `usage` in the final chunk with cache
+        // reads and writes (openai egress design §5.1, §5.2).
+        Case {
+            name: "stream_service_tier",
+            run: |up| {
+                let sse = concat!(
+                    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"the-model","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}"#,
+                    "\n\n",
+                    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"the-model","service_tier":"priority","system_fingerprint":null,"choices":[{"index":0,"delta":{"content":"ok"},"logprobs":null,"finish_reason":null}],"usage":null}"#,
+                    "\n\n",
+                    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"the-model","service_tier":"priority","system_fingerprint":null,"choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null}"#,
+                    "\n\n",
+                    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"the-model","service_tier":"priority","system_fingerprint":null,"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22,"prompt_tokens_details":{"cached_tokens":8,"cache_write_tokens":4,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}"#,
                     "\n\n",
                     "data: [DONE]\n\n",
                 );
@@ -380,6 +500,13 @@ pub(super) fn cases() -> Vec<Case> {
             name: "completion_openrouter",
             run: |up| {
                 let body = r#"{"id":"gen-1","model":"vendor/model","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Blue light scatters.","reasoning":"Weighing it."}}],"usage":{"prompt_tokens":30,"completion_tokens":40,"total_tokens":70,"prompt_tokens_details":{"cached_tokens":10},"completion_tokens_details":{"reasoning_tokens":25}}}"#;
+                json!({"completion": completion(up, body)})
+            },
+        },
+        Case {
+            name: "completion_service_tier",
+            run: |up| {
+                let body = r#"{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"the-model","service_tier":"flex","system_fingerprint":null,"choices":[{"index":0,"message":{"role":"assistant","content":"ok","refusal":null,"annotations":[]},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22,"prompt_tokens_details":{"cached_tokens":8,"cache_write_tokens":4,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}"#;
                 json!({"completion": completion(up, body)})
             },
         },

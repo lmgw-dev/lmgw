@@ -194,5 +194,7 @@ async fn write(
             audio_in_ms: None,
             chars_in: None,
             images_out: None,
+            service_tier: None,
+            price_note: None,
         });
 }

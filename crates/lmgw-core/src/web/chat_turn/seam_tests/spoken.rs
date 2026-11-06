@@ -100,10 +100,11 @@ async fn spoken_world(base: &str, kind: &str) -> (SharedState, ChatThread) {
     repo.append_user_message(
         &state,
         thread.id,
-        "Wie spät ist es?",
-        &[],
-        &[],
-        Some(&spoken_row()),
+        crate::store::UserMessage {
+            content: "Wie spät ist es?",
+            voice: Some(&spoken_row()),
+            ..Default::default()
+        },
         &crate::web::chat_caller::Caller::default(),
     )
     .await
@@ -112,10 +113,11 @@ async fn spoken_world(base: &str, kind: &str) -> (SharedState, ChatThread) {
     repo.append_user_message(
         &state,
         thread.id,
-        "Und morgen?",
-        &[],
-        &[],
-        Some(&spoken_row()),
+        crate::store::UserMessage {
+            content: "Und morgen?",
+            voice: Some(&spoken_row()),
+            ..Default::default()
+        },
         &crate::web::chat_caller::Caller::default(),
     )
     .await
@@ -292,8 +294,7 @@ async fn held_gemma(state: &SharedState, thread: &mut ChatThread) {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: Some("m".into()),
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "chat", "input_modalities": ["text", "audio"]
             } })),
@@ -304,7 +305,6 @@ async fn held_gemma(state: &SharedState, thread: &mut ChatThread) {
     .unwrap();
     let mut settings = state.snapshot().settings.clone();
     settings.hold.active = true;
-    settings.hold.fallback_alias = Some("m".into());
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
     thread.model_alias = "gemma".into();

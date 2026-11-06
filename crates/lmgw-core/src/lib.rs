@@ -31,6 +31,7 @@ pub mod catalog;
 pub mod child;
 pub mod config;
 pub mod degraded;
+pub(crate) mod detached;
 /// Device keys (client-apps design §1): pairing, open connections, the
 /// revocation signal.
 pub mod devices;
@@ -40,6 +41,7 @@ pub mod egress;
 pub mod erased;
 pub mod error;
 pub mod extract;
+pub mod find;
 /// The request gate (unified-KV design §3.3/§5, ladder design §3.2–3.4): one
 /// module with a per-request half (the hold swap, the candidate pick, the
 /// site's route check, admission) and a per-send half (the max-output clamp,
@@ -54,6 +56,9 @@ pub mod hf;
 /// an audio row switched to the CPU.
 pub mod host;
 pub mod image_recipes;
+/// The image class's ESRGAN upscalers (chat-media-tools design §9): the
+/// files sd-server scans and the shipped entry.
+pub mod image_upscalers;
 pub mod ingress;
 pub mod ir;
 pub mod jobs;
@@ -74,6 +79,9 @@ pub mod llama_caps;
 /// design §3.2, §4.2): the per-send resolver, and the background `/props`
 /// cache of external `llama_cpp` rows with its four invalidations.
 pub mod llama_facts;
+/// The machine check (machine-check design WP4): whether this computer can
+/// run local models, what is missing, and the plan that fixes it.
+pub mod machine;
 pub mod mcp;
 pub mod modelinfo;
 pub mod net;
@@ -103,6 +111,14 @@ pub mod sse;
 pub mod state;
 pub mod store;
 pub mod telemetry;
+/// Device-to-device transfers (device transfers design): a paired device's
+/// file offered to another device of the same app, relayed through lmgw's
+/// disk — the rows, the files, the upload slots and the hourly sweep.
+pub mod transfers;
 pub mod update;
+pub mod upstream_quota;
+/// The Voices lab: candidate rounds from a text-to-speech model, saved to the
+/// voice library as samples with their transcript and how they were made.
+pub mod voice_lab;
 pub mod vram;
 pub mod web;

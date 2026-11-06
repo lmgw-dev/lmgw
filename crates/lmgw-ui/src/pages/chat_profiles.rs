@@ -5,11 +5,9 @@
 //! Speak assemble as that thread would and tests on its model. Leaving the
 //! page with unsaved edits asks first (the dirty guard).
 //!
-//! The Chat page's other profile pieces live beside it: [`dir`] (the list
-//! the pickers read) and [`pick`] (the drawer's field and the header chip).
-
-mod dir;
-mod pick;
+//! The Chat's own profile pieces (the list its pickers read, the drawer's
+//! field and the header chip) are `lmgw-chat-ui`'s; the drawer's "Edit
+//! profiles…" links here through the dashboard's `ChatLocation`.
 
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -17,13 +15,11 @@ use leptos_router::hooks::use_query_map;
 use lmgw_ui_kit::profiles::ProfilesPanel;
 use serde_json::Value;
 
-pub(super) use dir::{use_profile_dir, ProfileDir};
-pub(super) use pick::{ProfileBadge, ProfileField};
-
 use crate::widgets::{use_dirty_guard, PageFrame};
 
 #[component]
 pub fn ChatProfiles() -> impl IntoView {
+    let http = crate::api::use_http();
     let thread =
         use_query_map().with_untracked(|q| q.get("thread").and_then(|v| v.parse::<i64>().ok()));
     // The thread's model, for Test: read once; a thread that is gone just
@@ -32,7 +28,7 @@ pub fn ChatProfiles() -> impl IntoView {
     let ready = RwSignal::new(thread.is_none());
     if let Some(id) = thread {
         leptos::task::spawn_local(async move {
-            if let Ok(v) = crate::api::get::<Value>(format!("/chat/api/threads/{id}")).await {
+            if let Ok(v) = http.get::<Value>(format!("/chat/api/threads/{id}")).await {
                 model.try_set(
                     v["thread"]["model_alias"]
                         .as_str()

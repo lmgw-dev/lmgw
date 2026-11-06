@@ -128,7 +128,7 @@ async fn read_files(state: &SharedState, id: &str) -> ImageGpu {
     run_args.extend(crate::runtime::aux::cpu_run_args(&[]));
     let args: Vec<String> = FIND_ARGS.iter().map(|a| a.to_string()).collect();
     let registry = state.runtime();
-    let run = registry.run_throwaway(&name, id, "find", &run_args, &args);
+    let run = registry.run_throwaway(&prefix, &name, id, "find", &run_args, &args);
     match tokio::time::timeout(LIST_TIMEOUT, run).await {
         Err(_) => {
             // `--rm` covers every run that exits; this one did not.

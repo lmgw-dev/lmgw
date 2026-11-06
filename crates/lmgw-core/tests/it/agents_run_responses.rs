@@ -24,7 +24,7 @@ async fn priced_alias(state: &SharedState, alias: &str, upstream: &MockServer, n
         &state.db,
         &NewUpstream {
             name: format!("{alias}-up"),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream.uri().trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -48,6 +48,7 @@ async fn priced_alias(state: &SharedState, alias: &str, upstream: &MockServer, n
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -57,6 +58,7 @@ async fn priced_alias(state: &SharedState, alias: &str, upstream: &MockServer, n
         PriceScope::Alias,
         alias,
         PriceUnit::PerRequest,
+        lmgw_core::config::PriceTier::Standard,
         &Prices {
             source: PriceSource::Manual,
             ..Default::default()
@@ -169,7 +171,8 @@ async fn a_stamped_responses_call_lands_its_turns_on_the_run() {
 }
 
 /// An upstream that implements `/v1/responses` itself gets the body as it
-/// came, and its row carries no tokens: answered, it pays its fee on the run.
+/// came, and its row carries no tokens (marked `incomplete`, since the
+/// answer reported no usage): answered, it pays its fee on the run.
 #[tokio::test]
 async fn a_stamped_native_passthrough_lands_on_the_run() {
     let upstream = MockServer::start().await;

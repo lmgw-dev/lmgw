@@ -171,7 +171,7 @@ pub async fn add_tts_alias(state: &SharedState, fake: &TtsFake) {
         &state.db,
         &NewUpstream {
             name: "tts-audiocpp".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::AudioCpp,
             base_url: format!("{}/v1", fake.url),
             api_key: None,
@@ -197,6 +197,7 @@ pub async fn add_tts_alias(state: &SharedState, fake: &TtsFake) {
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "tts", "endpoints": ["/v1/audio/speech"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
@@ -231,7 +232,7 @@ async fn add_cloud_tts(state: &SharedState, fake: &TtsFake, alias: &str, speech:
         &state.db,
         &NewUpstream {
             name: format!("{alias}-cloud"),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", fake.url),
             api_key: None,
@@ -255,6 +256,7 @@ async fn add_cloud_tts(state: &SharedState, fake: &TtsFake, alias: &str, speech:
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: Some(json!({ "capabilities": caps })),
+            fallback: None,
         },
     )
     .await

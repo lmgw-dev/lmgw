@@ -1,0 +1,14 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, openai/gpt-4, response_format json_object. The raw body was not logged on this run; the message is OpenAI's, verbatim from the classified answer, in the shape the same refusal of json_schema came in (openai_json_schema_unsupported.json)",
+  "upstream": "openai",
+  "status": 400,
+  "body": {
+    "error": {
+      "message": "Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.",
+      "type": "invalid_request_error",
+      "param": null,
+      "code": null
+    }
+  },
+  "expect": "response_format_unsupported"
+}

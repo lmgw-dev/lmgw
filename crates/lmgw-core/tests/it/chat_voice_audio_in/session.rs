@@ -28,7 +28,6 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
-use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::store::NewCandidateAlias;
 
 use super::fallbacks::{Cloud, CLOUD_SAYS};
@@ -453,7 +452,6 @@ async fn a_cloud_fallback_the_gate_swaps_to_hears_the_turn() {
         alias: "writer".into(),
         candidates: vec!["gemma".into()],
         background: false,
-        fallback_mode: HoldFallbackMode::Alias,
         fallback: Some("cloud".into()),
         capabilities_disabled: vec![],
         capabilities_enabled: vec!["audio".into()],

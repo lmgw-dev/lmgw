@@ -11,11 +11,12 @@
 //! `score` and back gives its options back.
 
 use leptos::prelude::*;
-use lmgw_api_types::decision_lab::form::{elide_data_url, human_bytes};
+use lmgw_api_types::decision_lab::form::elide_data_url;
 use lmgw_api_types::decision_lab::{
     DecisionForm, ImageInput, OptionDraft, QuestionDraft, QuestionKind, StateMode,
 };
 use lmgw_api_types::lab_store::{artifact_ref, LabArtifactView};
+use lmgw_api_types::units::fmt_bytes;
 
 /// A question's type, as the type select names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,13 +125,13 @@ pub(super) struct Img {
 
 impl Img {
     /// The image as the preview names it: a data URL's payload elided
-    /// ("data:image/png;base64,… 1.4 MB"), a kept image the same way from
+    /// ("data:image/png;base64,… 1.4 MiB"), a kept image the same way from
     /// its head and size, or by its ref when it has no head.
     pub fn shown(&self) -> String {
         match (&self.input, &self.head) {
             (ImageInput::DataUrl { url, .. }, _) => elide_data_url(url),
             (ImageInput::Artifact { .. }, Some(head)) => {
-                format!("{head},… {}", human_bytes(self.size))
+                format!("{head},… {}", fmt_bytes(self.size))
             }
             (ImageInput::Artifact { id, .. }, None) => artifact_ref(*id),
         }
@@ -509,7 +510,7 @@ mod tests {
         let row = image_row(input.clone(), std::slice::from_ref(&kept), 2);
         assert_eq!(
             row.shown(),
-            "data:image/x-receipt;name=r.png;base64,… 1.4 MB",
+            "data:image/x-receipt;name=r.png;base64,… 1.3 MiB",
             "the head it is sent with"
         );
         assert_eq!(row.sent(), "lab-artifact:12", "the server sends the bytes");

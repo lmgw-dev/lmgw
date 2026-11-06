@@ -337,15 +337,19 @@ impl ChatRepo {
     /// *before* the insert (and comes back should it fail, or should this
     /// request be dropped halfway), so a second Keep running alongside is
     /// refused rather than storing it twice (review R1 finding 8). A reply
-    /// still being written into it is cancelled.
+    /// still being written into it is cancelled, and so is every image and
+    /// audio call running in it (`MediaCalls::thread_gone`); a file one of them
+    /// stored but did not bind yet stays behind (`TempAttachment::kept`).
     pub(super) async fn keep(s: &AppState, id: i64, by: &Caller) -> DbResult<KeepOutcome> {
         if s.chat_live.voice_bound(id) {
             return Ok(KeepOutcome::VoiceActive);
         }
         let mut _write = s.chat_live.discard(id).await;
-        // A reply still being written into it is cancelled up front: the
-        // thread leaves memory now.
+        // A reply still being written into it is cancelled up front, and
+        // its running image and audio calls stopped: the thread leaves
+        // memory now.
         s.chat_live.discarded(&mut _write);
+        s.media_calls.thread_gone(id);
         let t = match s.chat_temp.take_for_keep(id) {
             TakeForKeep::Taken(t) => t,
             TakeForKeep::Busy => return Ok(KeepOutcome::Busy),
@@ -366,7 +370,7 @@ impl ChatRepo {
         let mut taken = Taken { s, t: Some(t) };
         let t = taken.t.as_ref().expect("just put there");
         let attachments: Vec<store::KeptAttachment> =
-            t.attachments.iter().map(|a| a.kept()).collect();
+            t.attachments.iter().filter_map(|a| a.kept()).collect();
         let by = by.named();
         let new_id =
             store::insert_kept_chat_thread(&s.db, &t.thread, &t.messages, &attachments, Some(&by))
@@ -493,6 +497,7 @@ impl ChatRepo {
                 }
             }
             s.chat_live.discarded(&mut held);
+            s.media_calls.thread_gone(id);
             drop(held);
             Ok(())
         })
@@ -552,21 +557,18 @@ impl ChatRepo {
     }
 
     /// A user turn with its drafts bound to it, all or nothing, naming the
-    /// knowledge bases picked for it alone (`kb_refs`) and, for a spoken
-    /// turn, how it was spoken (`voice`, chat-voice design §3). The MCP
-    /// task results that wait for the thread enter it in the same
+    /// knowledge bases picked for it alone (`kb_refs`), for a spoken turn
+    /// how it was spoken (`voice`, chat-voice design §3), and where its
+    /// client says it was written (`origin`, chat-plane design §9.10). The
+    /// MCP task results that wait for the thread enter it in the same
     /// transaction, before the message (MCP Tasks design §3.1; a turn
-    /// answers every message written here).
-    // The message's own parts, and who writes it (review W4-3).
-    #[allow(clippy::too_many_arguments)]
+    /// answers every message written here). `caller` writes it (review
+    /// W4-3).
     pub(super) async fn append_user_message(
         self,
         s: &AppState,
         thread_id: i64,
-        content: &str,
-        attachment_ids: &[i64],
-        kb_refs: &[i64],
-        voice: Option<&MessageVoice>,
+        message: store::UserMessage<'_>,
         caller: &Caller,
     ) -> DbResult<SendMessageOutcome> {
         let _write = s.chat_live.write(thread_id).await;
@@ -577,18 +579,14 @@ impl ChatRepo {
         match self {
             Self::Temp => s
                 .chat_temp
-                .append_user_by(
-                    thread_id,
-                    (content, attachment_ids, kb_refs, voice),
-                    &caller.decider(),
-                )
+                .append_user_by(thread_id, message, &caller.decider())
                 .ok_or_else(gone),
             Self::Db => recorded(
                 s,
                 store::send_user_message_by(
                     &s.db,
                     thread_id,
-                    (content, attachment_ids, kb_refs, voice),
+                    message,
                     &caller.decider(),
                     Some(&super::chat_tasks::render::result_row),
                 )
@@ -616,24 +614,19 @@ impl ChatRepo {
     ) -> DbResult<SendMessageOutcome> {
         self.still_reachable(s, caller, thread_id).await?;
         let _wake = WakeApprovals(s, thread_id);
+        let message = store::UserMessage {
+            content,
+            voice: Some(voice),
+            ..Default::default()
+        };
         match self {
             Self::Temp => s
                 .chat_temp
-                .append_user_by(
-                    thread_id,
-                    (content, &[], &[], Some(voice)),
-                    &caller.decider(),
-                )
+                .append_user_by(thread_id, message, &caller.decider())
                 .ok_or_else(gone),
             Self::Db => recorded(
                 s,
-                store::append_user_message_by(
-                    &s.db,
-                    thread_id,
-                    (content, &[], &[], Some(voice)),
-                    &caller.decider(),
-                )
-                .await,
+                store::append_user_message_by(&s.db, thread_id, message, &caller.decider()).await,
             ),
         }
     }
@@ -654,7 +647,11 @@ impl ChatRepo {
     ) -> DbResult<i64> {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
-            Self::Temp => s.chat_temp.append_reply(thread_id, r).ok_or_else(gone),
+            Self::Temp => {
+                let id = s.chat_temp.append_reply(thread_id, r).ok_or_else(gone)?;
+                s.chat_temp.bind_tool_files(thread_id, id, &r.tool_files);
+                Ok(id)
+            }
             Self::Db => recorded(
                 s,
                 store::append_chat_reply_by(&s.db, thread_id, r, Some(&caller.named())).await,
@@ -716,7 +713,13 @@ impl ChatRepo {
     ) -> DbResult<bool> {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
-            Self::Temp => Ok(s.chat_temp.resume_reply(thread_id, id, r)),
+            Self::Temp => {
+                let saved = s.chat_temp.resume_reply(thread_id, id, r);
+                if saved {
+                    s.chat_temp.bind_tool_files(thread_id, id, &r.tool_files);
+                }
+                Ok(saved)
+            }
             Self::Db => recorded(
                 s,
                 store::resume_chat_reply(&s.db, thread_id, id, r, Some(&caller.named())).await,
@@ -741,7 +744,13 @@ impl ChatRepo {
     ) -> DbResult<ContinueSave> {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
-            Self::Temp => Ok(s.chat_temp.continue_reply(thread_id, id, prefix, r)),
+            Self::Temp => {
+                let saved = s.chat_temp.continue_reply(thread_id, id, prefix, r);
+                if saved == ContinueSave::Saved {
+                    s.chat_temp.bind_tool_files(thread_id, id, &r.tool_files);
+                }
+                Ok(saved)
+            }
             Self::Db => recorded(
                 s,
                 store::continue_chat_reply(&s.db, thread_id, id, prefix, r, Some(&caller.named()))
@@ -775,15 +784,16 @@ impl ChatRepo {
 
     /// Rewrite user message `id` for a resend, as one write (review R1
     /// finding 9): its text, its knowledge picks, its stored retrieval
-    /// cleared, and every later message deleted. `false` — nothing written —
-    /// when it is not a user message of this thread.
+    /// cleared, and every later message deleted; its origin replaced when
+    /// the edit names one. `false` — nothing written — when it is not a user
+    /// message of this thread.
     pub(super) async fn rewrite_user_message(
         self,
         s: &AppState,
         thread_id: i64,
         id: i64,
         content: &str,
-        kb_refs: &[i64],
+        (kb_refs, origin): (&[i64], Option<&str>),
         caller: &Caller,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
@@ -794,7 +804,7 @@ impl ChatRepo {
         match self {
             Self::Temp => Ok(s
                 .chat_temp
-                .rewrite_user_message(thread_id, id, content, kb_refs)),
+                .rewrite_user_message(thread_id, id, content, kb_refs, origin)),
             Self::Db => recorded(
                 s,
                 store::rewrite_chat_user_message(
@@ -803,6 +813,7 @@ impl ChatRepo {
                     id,
                     content,
                     kb_refs,
+                    origin,
                     Some(&caller.named()),
                 )
                 .await,
@@ -1115,6 +1126,63 @@ impl ChatRepo {
             Self::Temp => Ok(s.chat_temp.attachment(id)),
             Self::Db => store::get_chat_attachment_full(&s.db, id).await,
         }
+    }
+
+    /// Drop the tool files `ids` no reply took (chat-media-tools design
+    /// §6.3): the turn that made them saved nothing.
+    pub(super) async fn drop_tool_files(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        ids: &[i64],
+    ) -> DbResult<()> {
+        match self {
+            Self::Temp => {
+                s.chat_temp.drop_tool_files(thread_id, ids);
+                Ok(())
+            }
+            Self::Db => store::drop_tool_files(&s.db, thread_id, ids).await,
+        }
+    }
+
+    /// Attachments `ids` of thread `thread_id` with their bytes, whatever
+    /// their source: what `att:N` and `lmgw:attachment/N` resolve to.
+    pub(crate) async fn attachments_by_ids(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        ids: &[i64],
+    ) -> DbResult<Vec<ChatAttachmentFull>> {
+        match self {
+            Self::Temp => Ok(s.chat_temp.attachments_by_ids(thread_id, ids)),
+            Self::Db => store::chat_attachments_by_ids(&s.db, thread_id, ids).await,
+        }
+    }
+
+    /// Store a file a tool made, unbound until its reply is saved.
+    pub(crate) async fn insert_tool_file(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        a: &NewAttachment,
+    ) -> DbResult<i64> {
+        self.insert_attachment(s, thread_id, a).await
+    }
+
+    /// Bind card action file `id` to message `message_id` of its thread
+    /// (chat-media-tools design §8.3); `false` when the message is gone.
+    pub(super) async fn bind_action_file(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        message_id: i64,
+        id: i64,
+    ) -> DbResult<bool> {
+        let bound = match self {
+            Self::Temp => Ok(s.chat_temp.bind_action_file(thread_id, message_id, id)),
+            Self::Db => store::bind_action_file(&s.db, thread_id, message_id, id).await,
+        };
+        recorded(s, bound)
     }
 
     /// Delete a draft by its own id; a sent one is refused.

@@ -9,6 +9,7 @@
 use lmgw_api_types as dto;
 
 use crate::config::{McpServer, McpTransport};
+use crate::detached::detached;
 use crate::runtime::argv;
 use crate::state::SharedState;
 use crate::store;
@@ -57,16 +58,26 @@ pub(super) async fn update(
     if timeout_ms == 0 {
         return Err("timeout_ms must be above 0 — it is when lmgw stops waiting for a call".into());
     }
-    store::update_device_server(&state.db, cur.id, enabled, timeout_ms)
-        .await
-        .map_err(|e| e.to_string())?;
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    Ok(dto::McpServerSaved {
-        ok: true,
-        id: cur.id,
-        message: format!("MCP server '{}' {}", cur.name, super::saved_verb(&p.action)),
-        ..Default::default()
+    let id = cur.id;
+    let message = format!("MCP server '{}' {}", cur.name, super::saved_verb(&p.action));
+    // The write and the reload are a task of their own (*changed
+    // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+    // would leave the snapshot serving the old flag and timeout.
+    let st = state.clone();
+    detached("updating the device's MCP server", async move {
+        store::update_device_server(&st.db, id, enabled, timeout_ms)
+            .await
+            .map_err(|e| e.to_string())?;
+        st.reload_snapshot().await.map_err(|e| e.to_string())?;
+        Ok(dto::McpServerSaved {
+            ok: true,
+            id,
+            message,
+            ..Default::default()
+        })
     })
+    .await
+    .map_err(|r| r.message)?
 }
 
 /// The first field `p` would change that a device row does not let change.

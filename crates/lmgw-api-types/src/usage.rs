@@ -210,7 +210,10 @@ pub struct KeysChanged {
     /// its key: the row's code and peer address are in its `pairing`),
     /// `confirmed`, `contested` (a used token came back with another key);
     /// or `resync` (with `key_id` 0) when the event stream could not deliver
-    /// every frame: refetch the keys.
+    /// every frame: refetch the keys. `transfer` (device transfers design
+    /// §11.1, `key_id` the sender's) is no change of a key: a transfer's
+    /// state moved, or an upload wrote (at most once a second) — refetch the
+    /// transfers, not the keys.
     pub what: String,
 }
 
@@ -248,12 +251,22 @@ pub struct KeyRow {
     pub concurrency_limit: i64,
     pub expires_at: Option<String>,
     pub note: String,
-    /// Spend so far in the current budget period.
+    /// Spend so far in the current budget period: what the budget counts.
+    /// That includes the budget floor of three kinds of unpriced request,
+    /// each a lower bound, so the figure can be above what the priced rows
+    /// add up to: one unpriced only for a hosted-tool fee priced nowhere
+    /// (the known part of its cost), an OpenAI answer at a tier above
+    /// Standard with no price for it (the standard price), and a stream cut
+    /// before the upstream reported usage (a local count of its text).
     pub spent_micro: i64,
     /// What that figure does **not** cover — the same obligation every other
     /// money total on this plane carries. Without it the per-key meter would be
-    /// the one number on the page that cannot state its own remainder.
+    /// the one number on the page that cannot state its own remainder. Every
+    /// unpriced request is counted here, those whose floor `spent_micro`
+    /// includes too: their whole cost is still unknown.
     pub spent_unknown_requests: i64,
+    /// The tokens of those unpriced requests, counted as
+    /// [`Self::spent_unknown_requests`] counts them.
     pub spent_unknown_tokens: i64,
     pub requests: i64,
     pub last_used: Option<String>,
@@ -296,6 +309,11 @@ pub struct KeyRow {
     /// contested token, its certificate's dates and its URLs. `null` for
     /// every other kind.
     pub pairing: Option<crate::device_link::DevicePairingView>,
+    /// Devices only: the app id its last enrolment declared
+    /// (`dev.example.storyplayer`), what other devices of the same app
+    /// offer files to; `null` without one, and on every other kind.
+    // The device transfers design record, §2.
+    pub app_id: Option<String>,
 }
 
 /// How many connections of one kind a device holds open.
@@ -338,11 +356,16 @@ pub struct KeysResponse {
     pub currency: String,
     /// The global budget and what has gone against it this period.
     pub global_budget_micro: i64,
+    /// What the global budget counts this period, the budget floors of
+    /// unpriced requests included, as [`KeyRow::spent_micro`] counts them.
     pub global_spent_micro: i64,
     /// `day` | `month` | `total` — what "this period" means, so a projection
     /// to the period's end can aim at the right horizon instead of assuming a
     /// calendar month.
     pub global_budget_period: String,
+    /// The unpriced requests of the period, those whose floor
+    /// [`Self::global_spent_micro`] includes too, as
+    /// [`KeyRow::spent_unknown_requests`] counts them.
     pub global_spent_unknown_requests: i64,
     /// *Require API key* (Settings → Network & access): off, an anonymous
     /// `/v1` call is served — what the Devices card warns of, since a
@@ -371,6 +394,78 @@ pub struct PriceRowView {
     /// per answered request). `None` on a `per_mtok` row, whose rates are the
     /// four above; those four are `None` on every other row.
     pub price: Option<f64>,
+    /// The OpenAI service tier the row prices ([`crate::PriceTier`]):
+    /// `standard`, `flex`, `fast`, `ultrafast` or `scale`. `standard` on
+    /// every other provider's row and every catalog row; a request is priced
+    /// with the rows of the tier its answer reported, and a tier with no row
+    /// leaves it unpriced.
+    pub service_tier: String,
+}
+
+/// Traffic an OpenAI service tier left unpriced: a model that answered at a
+/// tier it has no price row for (openai egress design §5.6). It counts
+/// toward no budget until a row of that tier is entered. Read from the
+/// request log, so its retention bounds how far back `requests` reaches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UnpricedTier {
+    /// The alias the requests asked for.
+    pub name: String,
+    /// The price scope a row for it would take: the alias, or
+    /// `<upstream_id>:<upstream_model_id>`.
+    pub scope_key: String,
+    pub scope_kind: String,
+    /// The price tier with no row (`flex`, `fast`, …). Empty when the
+    /// answers reported no tier a row can be entered for ([`Self::reported`]).
+    pub service_tier: String,
+    /// What the answers reported when that names no price tier: `auto`, or
+    /// empty for an answer that named none. Empty beside a `service_tier`.
+    /// There is no price action for such a group; it is listed so the
+    /// unpriced traffic can be found.
+    pub reported: String,
+    /// The units (`per_mtok`, …) the row to enter has to price: those with
+    /// a row at another tier and none at this one. Empty with no tier.
+    pub missing_units: Vec<String>,
+    /// Requests answered at that tier and left unpriced, since `since`.
+    pub requests: i64,
+    /// When the first of them was logged (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub since: String,
+}
+
+/// Traffic a hosted tool's fees left unpriced (openai egress design §6.1): a
+/// native `/v1/responses` answer whose upstream ran a tool that bills beyond
+/// its tokens (web search, file search, a code-interpreter container, image
+/// generation). lmgw has no price unit for those fees yet, so such a row
+/// costs nothing anyone can name and counts toward no budget; no price row
+/// fixes it. Read from the request log, so its retention bounds how far back
+/// `requests` reaches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UnpricedHostedTool {
+    /// The alias the requests asked for.
+    pub name: String,
+    /// The upstream model that answered: `<upstream_id>:<upstream_model_id>`.
+    pub scope_key: String,
+    /// Each billable call's output item type (`web_search_call`, …) with how
+    /// many of them those requests made.
+    pub calls: Vec<HostedCallCount>,
+    /// Requests left unpriced for their hosted calls, since `since`.
+    pub requests: i64,
+    /// When the first of them was logged (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub since: String,
+}
+
+/// One hosted call type and its count ([`UnpricedHostedTool::calls`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HostedCallCount {
+    /// The output item type: `web_search_call`, `file_search_call`,
+    /// `code_interpreter_call`, `image_generation_call` or `shell_call`.
+    pub item_type: String,
+    pub calls: i64,
 }
 
 /// One model that resolves to no price at all — an entry on the "why is my
@@ -398,6 +493,13 @@ pub struct PricesResponse {
     /// ones a deployment with no configured aliases actually uses. Ordered by the
     /// requests each has already spent unpriced.
     pub unpriced_models: Vec<UnpricedModel>,
+    /// Every model that answered at an OpenAI service tier it has no price
+    /// row for, busiest first: that traffic is unpriced until one is entered.
+    pub unpriced_tiers: Vec<UnpricedTier>,
+    /// Every model whose native answers ran a hosted tool that bills beyond
+    /// its tokens, busiest first: unpriced, since lmgw has no price unit for
+    /// those fees yet.
+    pub unpriced_hosted_tools: Vec<UnpricedHostedTool>,
 }
 
 /// `GET /api/usage/errors` — refusals and errors by kind.
@@ -666,6 +768,8 @@ pub struct PriceSaved {
     pub scope_key: String,
     /// The row's billable unit (`per_mtok` when the call named none).
     pub unit: String,
+    /// The row's OpenAI service tier (`standard` when the call named none).
+    pub service_tier: String,
     /// Always `manual`: the op writes no other source.
     pub source: String,
 }

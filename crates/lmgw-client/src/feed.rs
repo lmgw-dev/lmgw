@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(r.cursor(), Some("e:3:0a1b"));
         let hello = serde_json::json!({"epoch": "e", "cursor": "e:4:77aa", "keepalive_s": 15,
             "retention_days": 7, "principal": {"kind": "device", "name": "desktop"},
-            "hosts_label": null, "hold": {"active": false, "fallback_alias": null},
+            "hosts_label": null, "hold": {"active": false},
             "voice": [], "turns": []});
         let got = r.push(format!("event: hello\ndata: {hello}\n\n").as_bytes());
         let [FeedItem::Event(FeedEvent::Hello(h))] = got.as_slice() else {

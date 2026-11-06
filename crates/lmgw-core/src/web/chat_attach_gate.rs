@@ -18,30 +18,34 @@ pub struct Caps {
     /// (`capabilities::hears`) — its egress has one, its capabilities list
     /// audio, its llama-server did not say otherwise.
     pub audio: Option<bool>,
+    /// The answering egress takes FLAC as audio (Gemini does; the OpenAI
+    /// wire takes `wav` and `mp3` only). `false` while unknown.
+    pub flac: bool,
 }
 
 /// The `audio/*` type an OpenAI `input_audio` part can carry for `mime`
 /// (its format is the subtype), for the three containers that go natively.
+/// The table is the egress's (`openai_wire::audio_format`).
 pub fn native_audio_mime(mime: &str) -> Option<&'static str> {
-    match mime {
-        "audio/wav" | "audio/x-wav" | "audio/wave" => Some("audio/wav"),
-        "audio/mpeg" | "audio/mp3" => Some("audio/mp3"),
-        "audio/flac" | "audio/x-flac" => Some("audio/flac"),
-        _ => None,
+    match crate::egress::openai_wire::audio_format(mime)? {
+        "wav" => Some("audio/wav"),
+        "mp3" => Some("audio/mp3"),
+        _ => Some("audio/flac"),
     }
 }
 
 /// The one native-audio decision: the `audio/*` type this attachment goes as
-/// when the model takes audio *and* its container is one of the native ones;
-/// `None` = it takes the transcript path. Upload, the send gate and the render
-/// all ask this, so they cannot disagree (an Ogg or M4A file on an
-/// audio-capable model is transcribed, at upload).
+/// when the model takes audio *and* its container is one the answering
+/// egress takes (WAV and MP3 everywhere; FLAC only where `caps.flac` says,
+/// since OpenAI's `input_audio.format` takes just `wav` and `mp3`); `None` =
+/// it takes the transcript path. Upload, the send gate and the render all
+/// ask this, so they cannot disagree (an Ogg or M4A file on an audio-capable
+/// model is transcribed, at upload).
 pub fn native_audio(caps: Caps, mime: &str) -> Option<&'static str> {
-    if caps.audio == Some(true) {
-        native_audio_mime(mime)
-    } else {
-        None
+    if caps.audio != Some(true) {
+        return None;
     }
+    native_audio_mime(mime).filter(|m| *m != "audio/flac" || caps.flac)
 }
 
 /// Whether a lookup of the model's capabilities can change anything for these
@@ -178,4 +182,42 @@ async fn blind_hint(state: &SharedState, thread: &ChatThread) -> Option<String> 
     Some(format!(
         "{lead} this goes to {fallback}, which cannot see images"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEARS: Caps = Caps {
+        vision: None,
+        audio: Some(true),
+        flac: false,
+    };
+
+    #[test]
+    fn flac_goes_natively_only_where_the_egress_takes_it() {
+        assert_eq!(native_audio(HEARS, "audio/flac"), None);
+        assert_eq!(native_audio(HEARS, "audio/x-flac"), None);
+        let gemini = Caps {
+            flac: true,
+            ..HEARS
+        };
+        assert_eq!(native_audio(gemini, "audio/flac"), Some("audio/flac"));
+    }
+
+    #[test]
+    fn wav_and_mp3_go_natively_in_any_spelling_and_case() {
+        for m in ["audio/WAV", "audio/x-wav", "audio/wave", "audio/vnd.wave"] {
+            assert_eq!(native_audio(HEARS, m), Some("audio/wav"), "{m}");
+        }
+        for m in ["audio/MPEG", "audio/mp3", "audio/x-mp3", "audio/x-mpeg"] {
+            assert_eq!(native_audio(HEARS, m), Some("audio/mp3"), "{m}");
+        }
+        assert_eq!(native_audio(HEARS, "audio/ogg"), None);
+        let deaf = Caps {
+            audio: Some(false),
+            ..HEARS
+        };
+        assert_eq!(native_audio(deaf, "audio/wav"), None);
+    }
 }

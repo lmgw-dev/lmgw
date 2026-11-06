@@ -8,7 +8,7 @@
 //! `usage_units.rs`'s, the schema drift `openapi_v1_wire.rs`'s.
 
 use axum::http::header;
-use lmgw_core::config::{AuxBackend, AuxKind, HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{AuxBackend, AuxKind, Protocol, UpstreamKind};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewAlias, NewAuxModel, NewUpstream};
 use serde_json::{json, Value};
@@ -67,6 +67,7 @@ async fn add_upstream(
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -220,7 +221,7 @@ async fn a_404_from_an_image_without_the_route_is_a_named_501() {
     assert_eq!(body["error"]["type"], "not_supported_error", "{body}");
     assert_eq!(body["error"]["lmgw_code"], "not_supported", "{body}");
     let msg = body["error"]["message"].as_str().unwrap();
-    for part in [DECISION, image.as_str(), "/v1/systemone", "Backends"] {
+    for part in [DECISION, image.as_str(), "/v1/systemone", "Engines"] {
         assert!(msg.contains(part), "{part}: {msg}");
     }
     let row = row_after(&w.state, 0).await;
@@ -243,7 +244,12 @@ async fn a_cloud_upstreams_404_is_relayed_as_sent() {
         .respond_with(ResponseTemplate::new(404).set_body_raw(UNKNOWN, "application/json"))
         .mount(&up)
         .await;
-    let (state, gw) = cloud(&up.uri(), Protocol::Openai, &[("jev", "typesafe/jev-9")]).await;
+    let (state, gw) = cloud(
+        &up.uri(),
+        Protocol::OpenaiCompatible,
+        &[("jev", "typesafe/jev-9")],
+    )
+    .await;
     let (status, ct, bytes) = post_raw(
         &gw,
         serde_json::to_vec(&ask("jev")).unwrap(),
@@ -282,7 +288,12 @@ async fn a_cloud_429_is_relayed_with_its_retry_after() {
         )
         .mount(&up)
         .await;
-    let (_state, gw) = cloud(&up.uri(), Protocol::Openai, &[("jev", "typesafe/jev-9")]).await;
+    let (_state, gw) = cloud(
+        &up.uri(),
+        Protocol::OpenaiCompatible,
+        &[("jev", "typesafe/jev-9")],
+    )
+    .await;
     let resp = reqwest::Client::new()
         .post(format!("{gw}/v1/systemone"))
         .json(&ask("jev"))
@@ -352,8 +363,7 @@ async fn under_the_hold_a_cpu_decision_row_answers_itself() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -407,7 +417,7 @@ async fn a_cloud_route_is_refused_only_when_its_catalog_rules_the_model_out() {
         ("plain", "plain"),
         ("unlisted", "unlisted"),
     ];
-    let (_state, gw) = cloud(&up.uri(), Protocol::Openai, &models).await;
+    let (_state, gw) = cloud(&up.uri(), Protocol::OpenaiCompatible, &models).await;
 
     let (status, body) = post(&gw, ask("chatty")).await;
     assert_eq!(status, 501, "{body}");
@@ -452,7 +462,7 @@ async fn a_held_decision_row_falls_back_only_to_a_model_that_answers_system_one(
     add_upstream(
         &w.state,
         &up.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         &[("chatty", "chatty"), ("jev", "jev")],
     )
     .await;
@@ -476,8 +486,7 @@ async fn a_held_decision_row_falls_back_only_to_a_model_that_answers_system_one(
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: HoldFallbackMode::Alias,
-                hold_fallback: Some(fallback.into()),
+                fallback: Some(fallback.into()),
             },
         )
         .await
@@ -506,9 +515,15 @@ async fn a_held_decision_row_falls_back_only_to_a_model_that_answers_system_one(
     assert_eq!(resp.text().await.unwrap(), TYPESAFE_ANSWERS[0]);
 
     let (status, body) = post(&w.gw, ask(&w.name("laya-chatty"))).await;
-    assert_eq!(status, 501, "{body}");
+    // The walk judges the fallback by the endpoint's check (openai egress
+    // design §14.3): the hold's refusal, with the check's own reason.
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["lmgw_code"], "gpu_hold", "{body}");
     let msg = body["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("'chatty'") && msg.contains("text"), "{msg}");
+    assert!(
+        msg.contains("(fallback 'chatty' cannot serve this endpoint: ") && msg.contains("text"),
+        "{msg}"
+    );
 
     let sent = forwarded(&up).await;
     assert_eq!(sent.len(), 1, "{sent:?}");
@@ -516,11 +531,12 @@ async fn a_held_decision_row_falls_back_only_to_a_model_that_answers_system_one(
     assert_eq!(w.podman.runs(), 0);
 }
 
-/// Neither an Anthropic nor a Gemini upstream serves the wire (§2.2): a 501
-/// that names the protocol, and nothing is sent.
+/// Neither an Anthropic nor a Gemini upstream serves the wire (§2.2), and
+/// neither does the OpenAI platform (openai egress design §1.1): a 501 that
+/// names the protocol, and nothing is sent.
 #[tokio::test]
-async fn anthropic_and_gemini_upstreams_are_refused() {
-    for protocol in [Protocol::Anthropic, Protocol::Gemini] {
+async fn anthropic_gemini_and_openai_platform_upstreams_are_refused() {
+    for protocol in [Protocol::Anthropic, Protocol::Gemini, Protocol::Openai] {
         let up = MockServer::start().await;
         let (_state, gw) = cloud(&up.uri(), protocol, &[("m", "m")]).await;
         let (status, body) = post(&gw, ask("m")).await;
@@ -558,7 +574,7 @@ async fn an_upstream_401_or_403_is_a_502_and_its_other_errors_are_relayed() {
         .await;
     let (_state, gw) = cloud(
         &up.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         &[("a401", "m401"), ("a403", "m403"), ("a422", "m422")],
     )
     .await;
@@ -600,7 +616,7 @@ async fn an_openrouter_answer_is_relayed_byte_for_byte() {
         .await;
     let (state, gw) = cloud(
         &format!("{}/api/v1", up.uri()),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         &[("jev", "typesafe/jev-1.13")],
     )
     .await;

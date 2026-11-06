@@ -534,7 +534,7 @@ lmgw-pair:?v=2&name=phone&url=https%3A%2F%2F192.0.2.1%3A8788&url=https%3A%2F%2F1
   cannot count on: down interfaces, loopback and link-local addresses, IPv6 temporary (privacy)
   and deprecated addresses (the kernel's flags in `/proc/net/if_inet6`), and container and VM
   bridges and links (podman, CNI, docker with its `br-<12 hex>` networks, libvirt's `virbr` and
-  `vnet`, LXC, LXD, Incus, `veth`); a bridge the owner named (`br0`) is a LAN's. The stable LAN
+  `vnet`, LXC, LXD, Incus, `veth`); a bridge the owner named (say `br0`) is a LAN's. The stable LAN
   and WireGuard addresses come first (a point-to-point link, an IPv4 private or `100.64/10`
   address, an IPv6 unique local one), then the rest, IPv4 before IPv6 (`devices::propose`, a unit
   test over an injected list).
@@ -639,6 +639,7 @@ Content-Type: application/json           body at most 16 KiB
 
 {"token": "lmgw-enrol-<32 hex>",
  "public_key": "<standard base64 (RFC 4648 §4, padded) of the DER SubjectPublicKeyInfo>",
+ "name": "Anna's phone",
  "client": "Kai mobile 0.1.0 (Android 16)"}
 
 201 Created
@@ -656,6 +657,24 @@ Content-Type: application/json           body at most 16 KiB
   ignored, and so is any credential header: the token decides.
 - **`client`** is free text within the body's limit, shown on the card ("Kai mobile 0.1.0
   (Android 16)"). It is optional and never trusted for anything.
+- **`device_name`** (*added 2026-10-23*) is the device's own name, as its user chose it on the
+  device ("Anna's phone"): free text within the body's limit, optional, never trusted for anything,
+  and handled like `client` throughout (sanitized, an empty one as none, written in the same
+  statement, a waiting key's while one waits). It is `device_name`, not `name`, because the
+  answer's `device.name` is the owner's name for the link. The card shows it beside `client` in
+  the paired line and in the line of a key that waits (`DevicePairingView.device_name`); its title
+  stays the name the owner gave the link, which is the row's identity in logs and on the Keys
+  list. The log line quotes it Debug-escaped, so a name cannot fake the rest of the line.
+- **The task** (*changed 2026-10-23*): the enrolment from its commit on runs as a task of its own,
+  carrying the request's span, and the handler awaits its handle. A client that hangs up (the
+  client app raced one request across the link's URLs and dropped the slower connection)
+  makes hyper drop the handler's future, which would end the work after the commit and before the
+  reload, the pending note and the revocation. A task that was spawned goes on. What comes before
+  the commit (the rate check, the body, the key and app id checks) stays in the handler's future,
+  so the listener's bounds on connections without a certificate (eviction, the timeout, stop's
+  `close_all`) still reach it. The pending note is made right after the commit, before the
+  reload, and only while the row's token is the one the enrolment used (`PendingTokens` keeps the
+  token's hash): a new token minted meanwhile is not annotated.
 - **The steps, in one write transaction:** take the token (§3.3); read its row (a disabled row is
   401 `device_disabled`, and the token stays unused); parse the key (rcgen's
   `SubjectPublicKeyInfo::from_der`) and require EC P-256; refuse a key another device row holds;
@@ -751,7 +770,8 @@ The `api_keys` row of kind `device`, as client-apps §1.1 made it, plus:
 | `key_hash` | `spki:<hex>` once enrolled; `pending:<random>` before; `v1:<old hash>` for a v1 pairing (§12) |
 | `urls` | the device's URL list, JSON, in order (§3.1) |
 | `cert_serial`, `cert_not_after`, `cert_notice_after` | the latest certificate issued (RFC 3339 UTC) |
-| `enrolled_at`, `enrolled_from`, `client_info` | the last enrolment's time, peer address and `client` text |
+| `enrolled_at`, `enrolled_from`, `client_info`, `device_name` | the row's key's last enrolment: time, peer address, `client` text and the device's own `device_name` (0089) |
+| `waiting_enrolled_at`, `waiting_enrolled_from`, `waiting_client_info`, `waiting_device_name` | the same four for a key waiting beside a confirmed one (0089); Confirm moves them onto the columns above, a new token or a cleared key drops them |
 | `confirmed_at` | the owner's confirmation (§3.5); `NULL` refuses the device |
 | `contested_at`, `contested_from` | a used token presented again by another key (§3.3) |
 | `local_only` | paired as "this computer" (§4.1) |
@@ -776,9 +796,12 @@ The `api_keys` row of kind `device`, as client-apps §1.1 made it, plus:
   a new key enrolled beside the row's confirmed one with its certificate (D9's note), unique among
   device rows (`api_keys_device_waiting_spki`). `DeviceLink::waiting` carries it in the snapshot,
   and `StoredKeys` finds a waiting key's row unconfirmed, so its requests get 403
-  `device_unconfirmed` with its code. The `cert_*` columns are the row's key's; `enrolled_*` and
-  `client_info` the last enrolment's, a waiting key's while one waits. A new token clears the
-  waiting key with the token that enrolled it, and an ended key clears it too.
+  `device_unconfirmed` with its code. The `cert_*` columns are the row's key's; `enrolled_*`,
+  `client_info` and `device_name` (*changed 2026-10-23*) the row's key's last enrolment's; a waiting key's own
+  are `waiting_enrolled_at`, `waiting_enrolled_from`, `waiting_client_info` and `waiting_device_name`
+  (0089, as `waiting_app_id` of 0088), so a re-pair nobody confirms leaves the confirmed device's line
+  alone. Confirm moves them onto the main columns. A new token clears the waiting key with the token that
+  enrolled it, and an ended key clears it too.
 
 ## 4. The device listener
 
@@ -910,6 +933,32 @@ The `api_keys` row of kind `device`, as client-apps §1.1 made it, plus:
   outlive the place and the lapse), so its route answers as to a request that cannot upgrade;
   no new code is needed, since the gate refuses such a connection on every upgradable route
   first.
+- *Changed 2026-10-24 (owner-approved follow-up of the first client's work):* a peer that
+  vanished without a FIN or a reset (a phone that lost its Wi-Fi) was noticed only when TCP's
+  retransmissions gave up, many minutes later, so a chat stream it opened kept its model
+  generating. Every accepted connection now gets `SO_KEEPALIVE` at its accept, before the
+  handshake (`server::device_listener::keepalive`), handshakes and connections without a
+  certificate included: the first probe after `chat_feed_keepalive_s` idle seconds and one more
+  every that many seconds, at the kernel's probe count (`TCP_KEEPCNT`, 9 by default), no new
+  setting. At the default 15 s an idle connection to a vanished peer ends after about 150 s.
+  `TCP_USER_TIMEOUT` is **not** set at the accept: since Linux 5.11 a zero receive window that
+  lasts longer than it ends the connection even while the peer acknowledges every probe, so a
+  healthy reader that stops reading for a while — a phone's player whose buffer is full on a long
+  speech or audio download, an app frozen in the background with a large answer pending — would
+  be cut after it. It is set at twice `chat_feed_keepalive_s` only while a streamed chat answer
+  runs on a device listener connection (chat completions, `/v1/messages`, a streamed
+  `/v1/responses`, native or through the tool loop, and the legacy completions stream), whose
+  reader keeps reading as the model writes, so a vanished peer is noticed within 30 s at the
+  default while lmgw sends to it; never on audio, speech or transfer downloads. When the stream
+  ends, the connection's accept-time values are back (`server::TimersOverride`; several streams
+  on one connection lay their values over each other, the newest's winning, and the last one gone
+  restores). The values are read at each accept and each stream's start, so a change of the
+  setting applies from then. The listener's start line states them ("TCP keep-alive after 15 s
+  idle and every 15 s at the kernel's probe count; TCP_USER_TIMEOUT 30 s only while a streamed
+  chat answer runs (chat completions, messages, responses, legacy completions), never on audio,
+  speech or transfer downloads (from chat_feed_keepalive_s)"). A failure to set them is a warn
+  line, and the connection or stream serves on. A device feed sets its own stream's values the
+  same way (§7.1).
 
 ### 4.4 A stop per listener
 
@@ -1196,7 +1245,7 @@ POST /devices/renew        device listener, with the device's certificate; body 
   `Fingerprint`, `PairingToken` (redacted `Debug`, no `Display`), `LinkError`, `normalize_base_url`
   (https only), `PairFacts` and `display_name`, moved from `kai/src/pairing.rs` with its tests. `url`
   2 joins the crate's dependencies; it builds for wasm and is in the lock.
-- **Requests** (sans-IO, as the rest): `requests::enrol(token, spki_der, client)`;
+- **Requests** (sans-IO, as the rest): `requests::enrol(token, spki_der, DeviceSelf { name, client, app_id })` (`name` goes out as `device_name`) (*changed 2026-10-23*);
   `read_enrolment`, which refuses an answer whose `ca_certificate` does not hash to the link's `fp`
   and drops non-`https` URLs, giving `Credentials { device_id, certificate, ca_certificate,
   not_after_ms, notice_after_ms, urls, confirm_code }` and `Credentials::state(now_ms)` (valid,
@@ -1318,7 +1367,7 @@ one:
   included, is the 400 `bad_request` "keepalive_s N is out of range: a feed may ask for a keep-alive
   from 1 to M seconds (chat_feed_keepalive_max_s, Settings → Chat → Change feed → Longest
   keep-alive)"; one that is no number is the query's own 400. The setting's own range is 1 to
-  `lmgw_api_types::chat_feed::MAX_KEEPALIVE_S` (86 400), refused past it by name and clamped on load
+  `lmgw_api_types::chat_feed::MAX_KEEPALIVE_S` (32 767, the kernel's limit for `TCP_KEEPIDLE`/`TCP_KEEPINTVL`; was 86 400), refused past it by name and clamped on load
   like its neighbours, in the dashboard, the tool plane's patch and its schema. A device feed that
   waits for its levels to be published before `hello` (client-apps §2.1's 2026-10-08 note) waits
   up to one gateway keep-alive, as the snapshot-behind wait does. **Not built:** `TCP_USER_TIMEOUT`,
@@ -1330,6 +1379,14 @@ one:
   requests carry none, so an owner's feed sets nothing). A failure is logged, never a refusal. The
   option exists on Linux and Android; elsewhere the call is a no-op behind `cfg`. A test finds the
   sockets of the process whose option is the stream's value.
+- *Changed 2026-10-24:* since every device listener connection gets a TCP keep-alive at its
+  accept (§4.3's note of the same day), a device feed's `open` also moves the connection's
+  keep-alive idle time and probe interval to the stream's `keepalive_s`, beside its
+  `TCP_USER_TIMEOUT`: a phone in the background that asked 120 s is then not woken by probes at
+  the gateway's 15 s. Both hold for as long as the feed stream does; when it ends, the
+  connection has its accept-time values again (keep-alive at `chat_feed_keepalive_s`, no
+  `TCP_USER_TIMEOUT`), so a later download on the same connection is not cut by the feed's
+  timeout.
 
 ### 7.2 Reconnect and catch-up: what lmgw guarantees
 
@@ -1536,7 +1593,7 @@ New, in Settings → Network & access → Devices unless noted:
 | `devices.header_timeout_s` | 30 | 1–3600 | a request's headers, and an idle kept-alive connection's wait for the next (§4.3) | next connection |
 | `devices.unauthenticated_timeout_s` | 10 | 1–300 | a whole connection without a certificate (§4.3) | next connection |
 | `devices.enrol_refuse_per_min` | 120 | 1–100000 | failed enrolments per address (IPv6 /64) per minute before a 429 (§3.3) | at once |
-| `chat_feed_keepalive_max_s` (Settings → Chat → Change feed) | 900 | 1–86400 | the largest keep-alive a stream may ask (§7.1) | next feed |
+| `chat_feed_keepalive_max_s` (Settings → Chat → Change feed) | 900 | 1–32767 | the largest keep-alive a stream may ask (§7.1) | next feed |
 
 The save (one patch for the dashboard and the tool plane) refuses a value out of range by name, and
 its answer says when the change applies. The `/devices/*` body limit (16 KiB) is a stated constant
@@ -1618,8 +1675,8 @@ unconfirmed devices are each row's `pairing` in the Keys list (§9.3), not the s
 
 *Changed 2026-10-15 (WP3, as built):* the Keys list's device rows carry `pairing`
 (`DevicePairingView`): `state` (`waiting`, `enrolled`, `confirmed`, `v1`), the latest `token`
-(created, expires, used at and from, ended, alive), `enrolled_at`, `enrolled_from`, `client`,
-`confirm_code`, `confirmed_at`, `contested_at`, `contested_from`, the certificate's dates, `urls` and
+(created, expires, used at and from, ended, alive), `enrolled_at`, `enrolled_from`, `client`, `device_name` (*added 2026-10-23*; a waiting
+key's while one waits, the working key's otherwise), `confirm_code`, `confirmed_at`, `contested_at`, `contested_from`, the certificate's dates, `urls` and
 `local_only`. The `keys` frame's `what` gains `token`, `enrolled`, `confirmed` and `contested`; the
 card refetches the list on it, so the frame carries no code or address of its own. The card itself
 is WP4's. Until it lands, the Devices card's form pairs "this computer" for a loopback address and
@@ -1632,7 +1689,8 @@ contested row says where the code came back from and asks for the code the devic
 and while the row's pairing code lives, **End pairing code** (`device_token_end`). `pairing` gains
 `kept_code`: with a key waiting beside a kept one, `state` is `enrolled`, `confirm_code` is the
 waiting key's, `kept_code` the kept key's, and `confirmed_at` and the certificate's dates the
-kept key's.
+kept key's. *Added 2026-10-23:* `kept_device_name` and `kept_client` are the kept key's own, which
+`device_name` and `client` no longer show while a key waits.
 
 *Changed 2026-10-15 (WP4, as built):* the card is `pages/usage/devices.rs` with children in
 `devices/` (the pure decisions in `logic.rs`, held by unit tests). It replaces WP3's interim card:

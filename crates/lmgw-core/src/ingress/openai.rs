@@ -4,9 +4,11 @@ use serde_json::{json, Value};
 
 use crate::error::GatewayError;
 use crate::ingress::{now_unix, rand_id, ClientStreamEncoder};
+use crate::ir::structured::DEFAULT_SCHEMA_NAME;
 use crate::ir::{
-    ChatRequest, Completion, ContentPart, ImageSource, Message, Params, ReasoningControl, Role,
-    StreamDelta, ToolChoice, ToolDef, ToolResultBlock, Usage,
+    ChatRequest, Completion, ContentPart, ImageSource, JsonSchemaFormat, Message, Params,
+    ReasoningControl, ResponseFormat, Role, StreamDelta, ToolChoice, ToolDef, ToolResultBlock,
+    Usage,
 };
 use crate::sse::frame;
 
@@ -47,6 +49,9 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
                     .get("parameters")
                     .cloned()
                     .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                // Chat Completions' own default where the client said
+                // none: not strict (ToolDef::strict).
+                strict: Some(f.get("strict").and_then(Value::as_bool).unwrap_or(false)),
             });
         }
     }
@@ -98,7 +103,18 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
         seed: body.get("seed").and_then(Value::as_i64),
         stop,
         reasoning: parse_reasoning(body),
+        // A send's own, set by what the provider taught it.
+        reasoning_summary_refused: false,
+        // Chat Completions has no summary choice.
+        reasoning_summary: None,
     };
+
+    let (response_format, top_level) = parse_response_format(body)?;
+    let mut passthrough = passthrough_fields(body);
+    if top_level {
+        // llama.cpp's own top-level spelling, now in the field (§11.1).
+        passthrough.remove("json_schema");
+    }
 
     Ok(ChatRequest {
         model_alias: model,
@@ -106,14 +122,65 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
         params,
         tools,
         tool_choice,
+        response_format,
         stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
-        passthrough: passthrough_fields(body),
+        passthrough,
         llama_kwargs_enabled: body
             .pointer("/chat_template_kwargs/enable_thinking")
             .and_then(Value::as_bool),
         // A header, not a body field: the handler fills it from the request.
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     })
+}
+
+/// The structured output a chat body asks for (structured-output design §5),
+/// and whether it is llama.cpp's own top-level `json_schema`: that one is
+/// the field wherever `response_format` asks for nothing more than text —
+/// absent, `null` or `{"type": "text"}`, which llama-server reads as no
+/// format and applies the top-level schema (§11.18). Every OpenAI-shaped
+/// egress then writes it as a `json_schema` response format, which
+/// llama-server and ik_llama.cpp read alike (§11.1). With a JSON or other
+/// `response_format` beside it, that is the field and `json_schema` stays in
+/// passthrough, so llama-server applies its own precedence.
+///
+/// llama-server refuses its top-level `json_schema` next to a `grammar`
+/// (`Cannot use both json_schema and grammar`, `oaicompat_chat_params_parse`
+/// in `tools/server/server-common.cpp`, ik_llama.cpp's too): that refusal is
+/// lmgw's now, a `400` before anything is sent, since the egress no longer
+/// sends the top-level key llama-server checks (§11.1).
+fn parse_response_format(body: &Value) -> Result<(Option<ResponseFormat>, bool), GatewayError> {
+    let stated = ResponseFormat::from_openai(body.get("response_format"))?;
+    let schema = body.get("json_schema").filter(|s| !s.is_null());
+    // Whatever `response_format` says, llama-server throws on the pair (§11.23).
+    if schema.is_some()
+        && body
+            .get("grammar")
+            .is_some_and(|g| !g.is_null() && g.as_str() != Some(""))
+    {
+        return Err(GatewayError::BadRequest(
+            "Cannot use both json_schema and grammar — llama.cpp's server refuses its top-level \
+             'json_schema' next to a 'grammar'; send one of them"
+                .into(),
+        ));
+    }
+    if stated
+        .as_ref()
+        .is_some_and(|f| !matches!(f, ResponseFormat::Text { .. }))
+    {
+        return Ok((stated, false));
+    }
+    let Some(schema) = schema else {
+        return Ok((stated, false));
+    };
+    let f = ResponseFormat::JsonSchema(JsonSchemaFormat {
+        name: Some(DEFAULT_SCHEMA_NAME.to_string()),
+        schema: Some(schema.clone()),
+        ..Default::default()
+    });
+    Ok((Some(f), true))
 }
 
 /// OpenAI's `stream_options.include_usage`: whether a streamed answer shows
@@ -130,7 +197,10 @@ pub fn stream_include_usage(body: &Value) -> bool {
 /// Top-level request keys consumed by the parser above and re-emitted from the
 /// modeled IR. Everything *not* in this set is carried through verbatim (see
 /// [`passthrough_fields`]) so OpenAI-compatible upstreams still receive
-/// `response_format`, `grammar`, extra sampler params, etc. `stream_options`
+/// `grammar`, extra sampler params, etc. `response_format` is the IR's
+/// structured output (structured-output design §4); llama.cpp's top-level
+/// `json_schema` leaves passthrough only when it became that field
+/// ([`parse_response_format`]). `stream_options`
 /// is listed here because the egress builder manages it itself; the client's
 /// own `include_usage` is read by [`stream_include_usage`].
 ///
@@ -162,6 +232,7 @@ const MODELED_KEYS: &[&str] = &[
     "seed",
     "stop",
     "reasoning_effort",
+    "response_format",
 ];
 
 /// Read every OpenAI-dialect spelling of the reasoning control (§5.2). All of
@@ -281,6 +352,17 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
                     Some("input_audio") => {
                         content.push(parse_input_audio(p.get("input_audio"))?);
                     }
+                    // An assistant turn's refusal part, sent back; OpenAI
+                    // takes it on an assistant message only.
+                    Some("refusal") if role != Role::Assistant => {
+                        return Err(super::refusal_part_misplaced(role))
+                    }
+                    Some("refusal") => {
+                        let text = p.get("refusal").and_then(Value::as_str).unwrap_or_default();
+                        if !text.is_empty() {
+                            content.push(ContentPart::Refusal { text: text.into() });
+                        }
+                    }
                     other => {
                         return Err(GatewayError::Unsupported(format!(
                             "content part type {other:?}"
@@ -305,12 +387,19 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
         if let Some(r) = reasoning {
             content.insert(0, ContentPart::reasoning(r));
         }
+        // The turn's refusal, as the model gave it (`message.refusal`).
+        if let Some(r) = m
+            .get("refusal")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+        {
+            content.push(ContentPart::Refusal { text: r.into() });
+        }
         if let Some(calls) = m.get("tool_calls").and_then(Value::as_array) {
             for c in calls {
                 let f = c.get("function").cloned().unwrap_or_default();
                 let args_raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-                let args = serde_json::from_str(args_raw)
-                    .unwrap_or_else(|_| Value::String(args_raw.to_string()));
+                let args = crate::ir::parse_call_args(args_raw);
                 content.push(ContentPart::ToolUse {
                     id: c
                         .get("id")
@@ -461,7 +550,10 @@ fn joined_text(content: &[ContentPart]) -> String {
     content
         .iter()
         .filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
+            // Chat Completions has no compaction block: its summary is text,
+            // as every route without one reads it (`ir::compaction`).
+            ContentPart::Compaction(c) => c.summary.as_deref(),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -471,17 +563,30 @@ fn joined_text(content: &[ContentPart]) -> String {
 pub fn serialize_completion(alias: &str, c: &Completion) -> Value {
     let text = joined_text(&c.content);
     let tool_calls = tool_calls_json(&c.content);
+    let refusal: String = c
+        .content
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Refusal { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let none_else = !tool_calls.is_empty() || !refusal.is_empty();
     let mut message = json!({
         "role": "assistant",
-        "content": if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { Value::String(text) },
+        "content": if text.is_empty() && none_else { Value::Null } else { Value::String(text) },
     });
+    // Chat Completions' own field for the model's refusal.
+    if !refusal.is_empty() {
+        message["refusal"] = Value::String(refusal);
+    }
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
     }
     if !c.reasoning.is_empty() {
         message["reasoning_content"] = Value::String(c.reasoning.clone());
     }
-    json!({
+    let mut body = json!({
         "id": format!("chatcmpl-{}", rand_id()),
         "object": "chat.completion",
         "created": now_unix(),
@@ -489,10 +594,21 @@ pub fn serialize_completion(alias: &str, c: &Completion) -> Value {
         "choices": [{
             "index": 0,
             "message": message,
+            // Required by OpenAI's schema, `null` when none were asked for,
+            // as OpenAI's own answer has it; lmgw relays no log probabilities
+            // yet.
+            "logprobs": Value::Null,
             "finish_reason": c.finish_reason.to_openai(),
         }],
         "usage": usage_json(&c.usage),
-    })
+    });
+    // The tier that served it, as OpenAI's own body says, when an `openai`
+    // row reported one (openai egress design §5.7); nothing is invented for
+    // any other upstream.
+    if let Some(tier) = &c.service_tier {
+        body["service_tier"] = json!(tier);
+    }
+    body
 }
 
 fn usage_json(u: &Usage) -> Value {
@@ -522,6 +638,17 @@ fn usage_json(u: &Usage) -> Value {
     out
 }
 
+/// The frame an OpenAI-shaped stream ends in when its upstream failed
+/// mid-way: OpenAI's error object, `param` included (null: no field of the
+/// request is at fault). The chat encoder's, and the legacy completions
+/// relay's; `[DONE]` follows it on both.
+pub(crate) fn stream_error_frame(msg: &str) -> String {
+    let body = json!({"error": {
+        "message": msg, "type": "api_error", "param": null, "code": "upstream",
+    }});
+    frame(None, &body.to_string())
+}
+
 /// Streaming encoder: IR deltas → `chat.completion.chunk` SSE frames.
 pub struct OpenaiStreamEncoder {
     id: String,
@@ -534,6 +661,12 @@ pub struct OpenaiStreamEncoder {
     /// the SDK loop that reads `chunk.choices[0]` holds to the end.
     include_usage: bool,
     usage: Option<Usage>,
+    /// The `service_tier` an `openai` row's stream reported
+    /// ([`StreamDelta::ServiceTier`]): on every chunk from then on, as
+    /// OpenAI's own stream has it (openai egress design §5.7). The role
+    /// chunk goes out before the upstream has said anything, so it never
+    /// has it.
+    service_tier: Option<String>,
 }
 
 impl OpenaiStreamEncoder {
@@ -546,7 +679,16 @@ impl OpenaiStreamEncoder {
             sent_finish: false,
             include_usage,
             usage: None,
+            service_tier: None,
         }
+    }
+
+    /// `body` with the reported tier on it, when there is one.
+    fn with_tier(&self, mut body: Value) -> Value {
+        if let Some(tier) = &self.service_tier {
+            body["service_tier"] = json!(tier);
+        }
+        body
     }
 
     fn chunk(&self, delta: Value, finish_reason: Option<&str>) -> String {
@@ -566,7 +708,7 @@ impl OpenaiStreamEncoder {
         if self.include_usage {
             body["usage"] = Value::Null;
         }
-        frame(None, &body.to_string())
+        frame(None, &self.with_tier(body).to_string())
     }
 
     fn role_chunk(&mut self) -> String {
@@ -592,6 +734,22 @@ impl ClientStreamEncoder for OpenaiStreamEncoder {
                 }
                 out.push_str(&self.role_chunk());
                 out.push_str(&self.chunk(json!({"content": t}), None));
+            }
+            // No compaction block on Chat Completions: its summary is text
+            // (`ir::compaction`), as on a whole answer.
+            StreamDelta::Compaction(c) => {
+                if let Some(t) = c.summary().filter(|t| !t.is_empty()) {
+                    out.push_str(&self.role_chunk());
+                    out.push_str(&self.chunk(json!({"content": t}), None));
+                }
+            }
+            // Chat Completions' own field for it: `delta.refusal`.
+            StreamDelta::RefusalDelta(t) => {
+                if t.is_empty() {
+                    return out;
+                }
+                out.push_str(&self.role_chunk());
+                out.push_str(&self.chunk(json!({"refusal": t}), None));
             }
             // Forward reasoning as the OpenAI/DeepSeek `reasoning_content` delta
             // field. Previously dropped, so reasoning-model output was lost on
@@ -639,10 +797,45 @@ impl ClientStreamEncoder for OpenaiStreamEncoder {
             }
             // Internal-only (Chat tab stats); never part of the public wire.
             StreamDelta::Timings(_) => {}
+            StreamDelta::ServiceTier(t) => self.service_tier = Some(t.clone()),
+            // lmgw's own record of the answer, not the client's; a seal
+            // has no field on Chat Completions (decision 17), nor has an
+            // Anthropic thinking signature, nor has
+            // Anthropic's context management, which no Chat Completions
+            // request asks for.
+            StreamDelta::UpstreamItems(_)
+            | StreamDelta::ReasoningSeal(_)
+            | StreamDelta::ReasoningSignature { .. }
+            | StreamDelta::ContextManagement(_)
+            | StreamDelta::UsageIterations(_) => {}
+            // A block Anthropic answered that the IR does not model has no
+            // Chat Completions field. The headers have left by now, so the
+            // drop is a log line (`anthropic_block::ignored_names` names a
+            // whole answer's in `x-lmgw-params-ignored`).
+            StreamDelta::AnthropicBlock(crate::ir::BlockEvent::Start(b)) => {
+                tracing::info!(
+                    kind = b.kind(),
+                    "a streamed Anthropic block has no chat completions field; not relayed"
+                );
+            }
+            StreamDelta::AnthropicBlock(
+                crate::ir::BlockEvent::Delta(_) | crate::ir::BlockEvent::Stop,
+            ) => {}
+            // Nor have an Anthropic text block's citations one yet (a whole
+            // answer's are `answer.citations` in `x-lmgw-params-ignored`).
+            StreamDelta::TextBlockEnd { citations: c, .. } if c.is_empty() => {}
+            StreamDelta::TextBlockEnd { citations: c, .. } => {
+                tracing::info!(
+                    citations = c.len(),
+                    "a streamed Anthropic text block's citations have no chat completions field \
+                     yet; not relayed"
+                );
+            }
             StreamDelta::Error(msg) => {
-                let body =
-                    json!({"error": {"message": msg, "type": "api_error", "code": "upstream"}});
-                out.push_str(&frame(None, &body.to_string()));
+                out.push_str(&stream_error_frame(msg));
+                // An answer that ended in an error did not finish: no clean
+                // `stop` chunk follows it at the end (`finish`).
+                self.sent_finish = true;
             }
         }
         out
@@ -666,7 +859,7 @@ impl ClientStreamEncoder for OpenaiStreamEncoder {
                 "choices": [],
                 "usage": usage_json(u),
             });
-            out.push_str(&frame(None, &body.to_string()));
+            out.push_str(&frame(None, &self.with_tier(body).to_string()));
         }
         out.push_str("data: [DONE]\n\n");
         out

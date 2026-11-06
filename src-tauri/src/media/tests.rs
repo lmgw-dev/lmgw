@@ -1,6 +1,6 @@
 use super::{
-    decide, document_at_gateway, is_gateway_origin, mock_capture_requested, running_after, Ask,
-    Decision, Load,
+    decide, document_at_gateway, is_gateway_origin, mock_capture_requested, new_document,
+    running_after, Ask, Decision, Load,
 };
 use crate::WindowOrigin;
 
@@ -218,6 +218,28 @@ fn the_running_document_moves_on_commit_and_on_an_idle_finish_only() {
         doc(),
         "a finish reported after another load started names that load"
     );
+}
+
+/// A document's number moves with a commit (a reload of the same URL too)
+/// and with the first document seen, never with a started load or a finish
+/// of the document that runs (machine-check design D140).
+#[test]
+fn a_new_document_is_a_commit_or_the_first_one_seen() {
+    let doc = Some("http://127.0.0.1:8001/");
+    let other = Some("http://127.0.0.1:8001/settings/gpu");
+    assert!(new_document(Load::Committed, doc, doc), "a reload");
+    assert!(new_document(Load::Committed, doc, other));
+    assert!(
+        new_document(Load::Finished, None, doc),
+        "the first one seen"
+    );
+    assert!(!new_document(Load::Provisional, doc, doc));
+    assert!(!new_document(Load::Finished, doc, doc));
+    assert!(
+        !new_document(Load::Finished, doc, other),
+        "the router moved the same document"
+    );
+    assert!(!new_document(Load::Provisional, None, None));
 }
 
 #[test]

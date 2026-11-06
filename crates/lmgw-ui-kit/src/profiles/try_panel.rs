@@ -29,6 +29,7 @@ pub(super) fn StaticPart(
     /// The model Count runs on; the host's choice survives a profile change.
     count_model: RwSignal<String>,
 ) -> impl IntoView {
+    let http = crate::http::use_http();
     let shown = RwSignal::new(None::<Shown>);
     let busy = RwSignal::new(false);
     let err = RwSignal::new(None::<String>);
@@ -45,7 +46,7 @@ pub(super) fn StaticPart(
         busy.set(true);
         err.set(None);
         scope.spawn(async move {
-            let res = api::preview(draft.clone(), thread_id, model).await;
+            let res = api::preview(http, draft.clone(), thread_id, model).await;
             busy.set(false);
             match res {
                 Ok(answer) => {
@@ -122,6 +123,7 @@ pub(super) fn TestPanel(
     /// The last reply, for Speak's starting text.
     last_reply: RwSignal<Option<String>>,
 ) -> impl IntoView {
+    let http = crate::http::use_http();
     let text = RwSignal::new(String::new());
     let voice = RwSignal::new(false);
     let busy = RwSignal::new(false);
@@ -138,7 +140,7 @@ pub(super) fn TestPanel(
         busy.set(true);
         err.set(None);
         scope.spawn(async move {
-            let res = api::test(draft, thread_id, m, t, v).await;
+            let res = api::test(http, draft, thread_id, m, t, v).await;
             busy.set(false);
             match res {
                 Ok(a) => {
@@ -242,6 +244,7 @@ pub(super) fn SpeakPanel(
     thread_id: Option<i64>,
     last_reply: RwSignal<Option<String>>,
 ) -> impl IntoView {
+    let http = crate::http::use_http();
     let text = RwSignal::new(String::new());
     // Once the owner has typed, the starting text stops following the
     // examples and the last reply; emptying the box hands it back.
@@ -274,7 +277,7 @@ pub(super) fn SpeakPanel(
         busy.set(true);
         err.set(None);
         scope.spawn(async move {
-            let res = api::speak(draft, thread_id, t).await;
+            let res = api::speak(http, draft, thread_id, t).await;
             busy.set(false);
             match res {
                 Ok((bytes, kind)) => match object_url(&bytes, &kind) {

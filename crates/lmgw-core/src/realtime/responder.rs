@@ -65,6 +65,7 @@ use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 use crate::vram::LocalHold;
 
+mod hand;
 mod speech;
 mod tools;
 
@@ -374,7 +375,9 @@ async fn stream(
         // and the client can cancel it at any time.
         Duration::MAX,
         sink,
-        None,
+        // Handed on at the send as the session's request: the realtime
+        // route's check, along the chain its route was opened with.
+        Some((&hand::Session::opened(headers), None)),
     )
     .await;
     drop(hold);
@@ -387,11 +390,16 @@ async fn open(
     alias: &str,
     ir: &ChatRequest,
 ) -> Result<crate::gate::Opened, crate::gate::OpenFailed> {
-    crate::gate::resolve(state, alias, crate::gate::RouteCheck::Text(super::PATH))
-        .await?
-        .using(crate::gate::request_facets(ir, None))?
-        .admit(state)
-        .await
+    crate::gate::resolve(
+        state,
+        alias,
+        crate::gate::RouteCheck::Text(super::PATH),
+        crate::runtime::registry::Origin::Owner,
+    )
+    .await?
+    .using(crate::gate::request_facets(ir, None))?
+    .admit(state)
+    .await
 }
 
 /// Forwards the deltas the listener gets, as they arrive, and carries the
@@ -404,6 +412,8 @@ struct Forward<'a> {
 
 impl DeltaSink for Forward<'_> {
     fn on_delta(&mut self, d: &StreamDelta) {
+        // A spoken answer has no refusal of its own: the model's words.
+        let d = &*d.refusal_as_text();
         let keep = matches!(
             d,
             StreamDelta::TextDelta(_)

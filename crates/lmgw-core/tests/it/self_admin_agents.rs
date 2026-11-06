@@ -2,7 +2,7 @@
 //! `lmgw__agent_set`, `lmgw__agent_install`, `lmgw__agent_delete`,
 //! `lmgw__agent_run`): each tool's text is read into its type and written out
 //! again, and the two texts are equal byte for byte. The text is the answer's
-//! pretty JSON with sorted keys, so a key a type adds, drops, renames or turns
+//! compact JSON with sorted keys, so a key a type adds, drops, renames or turns
 //! from absent into `null` shows up here.
 //!
 //! The container runtime is a fake `podman` and a run reads an MCP stub that
@@ -330,7 +330,7 @@ async fn the_agent_delete_tool_answers_what_it_removed() {
 
 #[tokio::test]
 async fn the_agent_run_tool_answers_the_job_and_points_at_agent_get_for_its_outcome() {
-    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::Openai).await;
+    let state = crate::agents_runs::gateway("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let (source, release) = held_source().await;
     register_held(&state, &source).await;
     let admin = Admin::new(&state).await;

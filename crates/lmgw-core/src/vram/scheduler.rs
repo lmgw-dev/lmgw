@@ -11,6 +11,7 @@ use crate::state::SharedState;
 use super::amdgpu::AmdSysfsProbe;
 use super::attribution::{PidCache, ProcFs, ProcTree};
 use super::nvml::{GpuMemory, GpuProbe, NvmlProbe};
+use super::stage_watch::{self, StageWatch, WaitPhase};
 use super::{background, broadcast, plan, residency, Target, WaiterView};
 
 /// The telemetry source for this host, picked once at startup.
@@ -69,6 +70,12 @@ pub(super) struct Waiter {
     pub(super) needs: u64,
     pub(super) since: Instant,
     pub(super) stage: String,
+    /// `stage` typed (chat-media-tools design §5.3); `None` for a stage
+    /// only words say (a climb's).
+    pub(super) phase: Option<WaitPhase>,
+    /// The caller that follows this wait's phases
+    /// ([`stage_watch::follow`]).
+    pub(super) watch: Option<StageWatch>,
     /// Whose wait it is: every start's admission is the owner's; a climb's
     /// is its hold's. Only the owner's make a guest give way
     /// ([`VramScheduler::owner_waiting`], candidate-aliases §12 entry 91).
@@ -89,6 +96,9 @@ pub(super) struct Reservation {
 pub(super) struct Live {
     pub(super) queue: Vec<Waiter>,
     pub(super) reservations: Vec<Reservation>,
+    /// Starts waiting for their engine image's download, before admission
+    /// (machine-check design §5, [`super::download`]): no place in `queue`.
+    pub(super) downloads: Vec<Waiter>,
 }
 
 pub struct VramScheduler {
@@ -127,6 +137,12 @@ pub struct VramScheduler {
     /// Which audio containers have loaded their model (realtime design §9.4,
     /// [`residency`]): the ledger charges the others' load as pending.
     pub(super) residency: residency::Residency,
+    /// The pooled devices' total as the last ledger read measured it, 0
+    /// before any did ([`Self::known_total`]): what a guest's start judges
+    /// `vram_too_large` by where a busy card would answer it before its own
+    /// reading, without a device read of its own (per-request background
+    /// design §11.14).
+    pub(super) device_total: AtomicU64,
 }
 
 impl Default for VramScheduler {
@@ -154,6 +170,7 @@ impl VramScheduler {
             boot_settled: AtomicBool::new(false),
             guest_turns: background::GuestTurns::default(),
             residency: residency::Residency::default(),
+            device_total: AtomicU64::new(0),
         }
     }
 
@@ -240,6 +257,7 @@ impl VramScheduler {
                 needs_bytes: w.needs,
                 waiting_ms: w.since.elapsed().as_millis() as u64,
                 stage: w.stage.clone(),
+                phase: w.phase.clone(),
             })
             .collect()
     }
@@ -264,11 +282,37 @@ impl VramScheduler {
         self.live.lock().unwrap().queue.retain(|w| w.id != id);
     }
 
+    /// Set waiter `id`'s stage to words no phase types (a climb's, the look
+    /// for lost containers, the moment before a victim is chosen): its
+    /// phase is cleared with it, so the view never pairs these words with
+    /// the phase before them.
     pub(super) fn set_stage(&self, id: u64, stage: &str) {
         let mut live = self.live.lock().unwrap();
         if let Some(w) = live.queue.iter_mut().find(|w| w.id == id) {
             w.stage = stage.to_string();
+            w.phase = None;
         }
+    }
+
+    /// Set waiter `id`'s phase, and its words: `stage`, else the phase's own
+    /// ([`stage_watch::words`]). The caller that follows the wait is told
+    /// of a phase that changed since it was last told one
+    /// ([`StageWatch`]).
+    pub(super) fn set_phase(&self, id: u64, phase: WaitPhase, stage: Option<&str>) {
+        let mut live = self.live.lock().unwrap();
+        let Some(w) = live.queue.iter_mut().find(|w| w.id == id) else {
+            return;
+        };
+        if let Some(text) = stage
+            .map(str::to_string)
+            .or_else(|| stage_watch::words(&phase))
+        {
+            w.stage = text;
+        }
+        if let Some(watch) = &w.watch {
+            watch.send(&phase);
+        }
+        w.phase = Some(phase);
     }
 
     /// What a waiter waits for, once it knows better than when it queued — a

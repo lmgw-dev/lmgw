@@ -349,3 +349,24 @@ async fn the_csv_has_a_row_per_run_and_question_quoted_as_rfc_4180_says() {
     );
     assert_eq!(text.matches("\r\n").count(), 1, "{text}");
 }
+
+/// WP13: an export holds stored runs and artifacts, so it sends nosniff and
+/// the sandbox policy next to its `Content-Disposition: attachment`.
+#[tokio::test]
+async fn an_export_is_sandboxed() {
+    let state = AppState::init_for_tests().await.unwrap();
+    let gw = serve(state.clone()).await;
+    group(&state, "first", &["decide/laya"], vec![]).await;
+    let resp = gw
+        .client()
+        .get(format!("{gw}/labs/api/decision/export"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment"));
+    crate::support::stored::assert_sandboxed(resp.headers(), "labs export");
+}

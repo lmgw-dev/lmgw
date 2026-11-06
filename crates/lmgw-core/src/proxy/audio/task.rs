@@ -21,6 +21,7 @@ use crate::error::GatewayError;
 use crate::gate::GateHeaders;
 use crate::proxy::synthesize::CharsSeen;
 use crate::proxy::Failed;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 /// What [`task_call`] produced: its outcome, and what shaping changed.
@@ -29,12 +30,14 @@ pub(super) struct Tasked {
     pub report: ShapeReport,
 }
 
-/// Resolve → shape-check → admit → shape → send, for a task body.
+/// Resolve → shape-check → admit → shape → send, for a task body, as
+/// `origin`'s traffic (per-request background design §3).
 pub(super) async fn task_call(
     state: &SharedState,
     endpoint: &str,
     body: &Value,
     started: Instant,
+    origin: Origin,
 ) -> Tasked {
     let refused = |failed: Failed, report: ShapeReport| Tasked {
         result: Err(failed),
@@ -44,10 +47,11 @@ pub(super) async fn task_call(
         let e = GatewayError::BadRequest("missing 'model'".into());
         return refused((None, GateHeaders::default(), e), ShapeReport::default());
     };
-    let routed = match crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio).await {
-        Ok(r) => r,
-        Err(f) => return refused((f.route, f.headers, f.error), ShapeReport::default()),
-    };
+    let routed =
+        match crate::gate::resolve(state, alias, crate::gate::RouteCheck::Audio, origin).await {
+            Ok(r) => r,
+            Err(f) => return refused((f.route, f.headers, f.error), ShapeReport::default()),
+        };
     // A text the resolved row would be sent nothing of is refused before
     // anything starts for it.
     let resolved = profile_on(state, routed.resolved()).await;

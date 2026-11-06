@@ -14,8 +14,9 @@ use crate::telemetry::RequestClass;
 use crate::vram::LocalHold;
 
 use super::super::{record, record_in_process, InProcessLog, KeyRef, LogParams, RequestCtx};
-use super::refusal::{self, Retry};
-use super::{Fitted, Lesson};
+use super::quota::Handover;
+use super::refusal::Carried;
+use super::{params, Fitted, OffRetry, Spelling};
 
 /// Whom a refused attempt's own request row is written as — the request's
 /// own identity and label, as its final row has them.
@@ -38,7 +39,22 @@ pub(crate) enum RowAs<'a> {
 
 /// [`crate::gate::send_gated_marked`] for a chat send whose params went
 /// through [`super::fit`], with `build` rendering the request for the params
-/// it is handed.
+/// it is handed. `hand` is what the request carries to be handed on at the
+/// send — an exhausted quota, an unreachable upstream ([`super::quota`]);
+/// `None` keeps every answer as it came.
+///
+/// A `400` to an `openai` send on the Responses wire that refuses its
+/// reasoning summary is learned for the route and sent once more without
+/// it, its own row saying so ([`super::summary`]); that send counts on its
+/// own, beside the off's retries below.
+///
+/// A `400` (or `422`) to a cloud send whose words refuse one of the
+/// parameters it carried (`temperature`, `top_p`, … — [`super::params`]) is
+/// sent once more without exactly that parameter, its own row saying which
+/// and why; one more per further parameter refused, each at most once. When
+/// the retry answers, the parameters are remembered for the route and left
+/// out of its later sends, which `fitted` reports
+/// ([`Fitted::params_refused`], `x-lmgw-params-refused`).
 ///
 /// When a cloud route sent an off in some form and the provider refuses the
 /// request with a `400` (or `422`), the send is made again
@@ -51,7 +67,11 @@ pub(crate) enum RowAs<'a> {
 /// - an INFO line says it, and `fitted` reports it (`enabled` ignored);
 /// - an answer that is not an error makes the form that answered what this
 ///   route gets from now on ([`super::Learned`]), so the provider is not
-///   asked again.
+///   asked again — unless a refusal it retried was not about the control
+///   alone (`super::off_retry`, [`carried`]): a request's tools, tool choice,
+///   format or own keys named beside the control are that request's, and
+///   its retry teaches the route nothing. A bare refusal is held against the
+///   client's own keys only, not function tools, a tool choice or a format.
 ///
 /// A refusal lmgw can tell is about something else — the prompt does not fit
 /// the context — is handed back as it came, its body intact; any other is
@@ -71,22 +91,35 @@ pub(crate) async fn send_chat<F>(
     prompt_sent: Option<&AtomicBool>,
     fitted: &mut Fitted,
     rows: RowAs<'_>,
+    hand: Option<&Handover>,
     build: F,
 ) -> Result<Sent, GatewayError>
 where
     F: Fn(&Route, &Params) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    // An upstream remembered out of quota hands a hop with a fallback on
+    // before anything is sent (openai egress design §14.4, §14.6).
+    if let Some(r) = super::quota::before(state, hold, route, hand, &rows).await {
+        return r;
+    }
     let protocol = route.upstream.protocol;
-    // What a lesson learned here says was refused: the form this route's
-    // decision gives without one — the one sent first, or, when that came
-    // from an earlier lesson, what that lesson said was refused.
-    let first = match fitted.learned() {
-        true => state.reasoning_learned.get(route).map(|l| l.refused),
-        false => fitted.retryable().cloned(),
-    };
+    let mut off_retry = OffRetry::open(state, route, fitted, Spelling::Chat);
     let mut current = params.clone();
-    let mut guided_left = true;
-    let mut retried = false;
+    // A route that refused a reasoning summary is not asked for one again
+    // (`super::summary`).
+    let mut summary_refused = state.reasoning_learned.summary_refused(route);
+    current.reasoning_summary_refused = summary_refused;
+    // Nor a parameter its model refused (`super::params`): left out, and
+    // said so.
+    let mut left_out = params::carried(&params::on_record(state, route), params);
+    for s in &left_out {
+        s.clear(&mut current);
+    }
+    if !left_out.is_empty() {
+        params::say_left_out(route, &left_out);
+    }
+    fitted.params_refused = left_out.clone();
+    let mut params_retried = false;
     loop {
         let started = Instant::now();
         // Boxed: 111 KB of poll frame in a debug build, on the turn -> gate chain.
@@ -106,82 +139,121 @@ where
             prompt_sent,
         ))
         .await;
-        let sent = crate::llama_facts::observe(state, hold, route, sent).await?;
+        let sent = crate::llama_facts::observe(state, hold, route, sent).await;
+        // An exhausted quota or an unreachable upstream on a cloud send
+        // (§14.4): handed to the hop's fallback, or its error with a note.
+        let sent = super::quota::after(
+            state,
+            hold,
+            route,
+            hand,
+            &rows,
+            ir,
+            started,
+            stream,
+            prompt_sent,
+            sent,
+        )
+        .await?;
         let Sent::Upstream(resp) = sent else {
             return Ok(sent);
         };
         let status = resp.status();
-        if status.is_success() && retried {
-            if let (Some(refused), Some((instead, fallback))) = (first.clone(), fitted.sent()) {
-                let now = instead.describe(protocol);
-                state.reasoning_learned.remember(
-                    route,
-                    Lesson {
-                        refused,
-                        instead,
-                        fallback,
-                    },
-                );
-                tracing::info!(
-                    upstream = %route.upstream.name,
-                    model = %route.upstream_model,
-                    "reasoning off on this model goes out as {now} from now on"
-                );
-            }
+        if status.is_success() && params_retried {
+            params::remember(state, route, &left_out);
         }
-        let Some(off) = fitted.retryable().filter(|_| hold.is_none()).cloned() else {
-            return Ok(Sent::Upstream(resp));
-        };
-        if !matches!(status.as_u16(), 400 | 422) {
+        if status.is_success() {
+            off_retry.answered(state, route, fitted);
+        }
+        let off = hold.is_none() && fitted.retryable().is_some();
+        let summary = status.as_u16() == 400 && super::summary::asked(route, ir, &current);
+        let param = hold.is_none() && params::any_set(&current);
+        if !matches!(status.as_u16(), 400 | 422) || (!off && !summary && !param) {
             return Ok(Sent::Upstream(resp));
         }
         let (version, headers) = (resp.version(), resp.headers().clone());
         let bytes = resp.bytes().await.map_err(GatewayError::from)?;
-        let refused = crate::egress::for_protocol(protocol).map_error(status.as_u16(), &bytes);
+        // Read as the send site reads it (structured-output design §9): a
+        // classified structured-output refusal is not `Upstream`, so it is
+        // never retried without the off.
+        let refused = crate::egress::chat_error(
+            crate::egress::for_protocol(protocol),
+            status.as_u16(),
+            &headers,
+            &bytes,
+            ir.format_ask(),
+        );
         let message = refused.to_string();
-        // A refusal lmgw can tell is about something else — one it maps to an
-        // error of its own (llama-server's context refusal), or a prompt too
-        // long for the context — stands as it came: without the off it would
-        // be refused again, the prompt sent twice for nothing.
-        let elsewhere = !matches!(refused, GatewayError::Upstream { .. })
-            || refusal::about_the_context(&message);
-        let next = match elsewhere {
-            true => None,
-            false => refusal::next_after_refusal(protocol, &off, &message, guided_left),
-        };
-        let Some((instead, how)) = next else {
+        // A parameter the model refuses is left out of one more send, and
+        // that one alone (`super::params`).
+        if let Some(gone) = param.then(|| params::refused(&refused, &current)).flatten() {
+            params::say_retrying(route, gone, &message);
+            if let Some(p) = prompt_sent {
+                p.store(false, Ordering::Relaxed);
+            }
+            let note = params::refused_note(&message, gone);
+            record_refused(
+                state,
+                rows.again(),
+                route,
+                started,
+                stream,
+                status.as_u16(),
+                (refused.kind(), note),
+            )
+            .await;
+            gone.clear(&mut current);
+            left_out.insert(gone);
+            fitted.params_refused = left_out.clone();
+            params_retried = true;
+            continue;
+        }
+        // A refused summary is asked for no more on this route, and the
+        // send goes once more without it (`super::summary`).
+        if summary && super::summary::refused(&refused, super::summary::only(&current)) {
+            state.reasoning_learned.remember_summary_refused(route);
+            tracing::info!(
+                upstream = %route.upstream.name,
+                model = %route.upstream_model,
+                "the provider refused a reasoning summary ({message}); retrying without one, \
+                 and asking for none on this model from now on"
+            );
+            if let Some(p) = prompt_sent {
+                p.store(false, Ordering::Relaxed);
+            }
+            let note = format!(
+                "{message} — lmgw asked for a reasoning summary; it retried without one, and \
+                 asks for none on this model from now on"
+            );
+            record_refused(
+                state,
+                rows.again(),
+                route,
+                started,
+                stream,
+                status.as_u16(),
+                (refused.kind(), note),
+            )
+            .await;
+            summary_refused = true;
+            current.reasoning_summary_refused = true;
+            continue;
+        }
+        // The off's retry (`super::off_retry`): once with what the refusal
+        // names, else with no control; a refusal about something else lmgw
+        // can tell, or with nothing of the off left to drop, stands.
+        let retried = off
+            .then(|| off_retry.after(route, fitted, &refused, &carried(ir)))
+            .flatten();
+        let Some(super::Retried { instead, note }) = retried else {
             return Ok(Sent::Upstream(crate::gate::rebuild(
                 status, version, headers, bytes,
             )));
         };
-
-        let (was, now) = (off.describe(protocol), instead.describe(protocol));
-        let why = match how {
-            Retry::Guided => "retrying once with what it says the model takes".to_string(),
-            Retry::Fallback => "retrying with no reasoning control, so the model reasons as it \
-                 does by default — the last resort"
-                .to_string(),
-        };
-        tracing::info!(
-            upstream = %route.upstream.name,
-            model = %route.upstream_model,
-            "reasoning off: the provider refused {was} ({message}); {why}: {now}"
-        );
         // The refused attempt ran nothing upstream.
         if let Some(p) = prompt_sent {
             p.store(false, Ordering::Relaxed);
         }
-        let note = match how {
-            Retry::Guided => format!(
-                "{message} — reasoning off was sent as {was}; lmgw retried once with {now}, and \
-                 keeps that for this model when it answers"
-            ),
-            Retry::Fallback => format!(
-                "{message} — reasoning off was sent as {was}; lmgw retried with {now} (the model \
-                 then reasons as it does by default), and keeps that for this model when it \
-                 answers"
-            ),
-        };
         record_refused(
             state,
             rows.again(),
@@ -194,16 +266,60 @@ where
         .await;
 
         current = params.clone();
+        current.reasoning_summary_refused = summary_refused;
         instead.apply(&mut current);
-        fitted.retried(instead, how);
-        guided_left = false;
-        retried = true;
+        for s in &left_out {
+            s.clear(&mut current);
+        }
     }
 }
 
+/// What a chat request carries besides the control and its messages that a
+/// refusal of its off could be about, for whether its lesson is kept
+/// ([`OffRetry::after`]): its tools, tool choice and response format, by
+/// the words a provider names them with (ordinary: a refusal naming one is
+/// about it, one naming nothing is not held against them), and the client's
+/// own top-level keys (`web_search_options`, `verbosity`, …), which block a
+/// bare refusal's lesson.
+fn carried(ir: &ChatRequest) -> Carried {
+    let mut out = Carried::default();
+    if !ir.tools.is_empty() {
+        out.ordinary
+            .extend(["tools", "functions"].map(String::from));
+    }
+    if ir.tool_choice.is_some() {
+        out.ordinary.push("tool_choice".into());
+    }
+    if ir.response_format.is_some() {
+        out.ordinary
+            .extend(["response_format", "json_schema"].map(String::from));
+    }
+    out.blocking.extend(ir.passthrough.keys().cloned());
+    out
+}
+
 impl RowAs<'_> {
+    /// The name the request asked for.
+    pub(super) fn alias(&self) -> &str {
+        match self {
+            RowAs::Public { alias, .. } | RowAs::InProcess { alias, .. } => alias,
+        }
+    }
+
+    /// Whether the request came in on `/v1/messages`, whose exhausted quota
+    /// is Anthropic's `402`.
+    pub(super) fn anthropic(&self) -> bool {
+        matches!(
+            self,
+            RowAs::Public {
+                proto: ClientProto::AnthropicMessages,
+                ..
+            }
+        )
+    }
+
     /// The same identity again, for one more refused attempt's row.
-    fn again(&self) -> RowAs<'_> {
+    pub(super) fn again(&self) -> RowAs<'_> {
         match self {
             RowAs::Public {
                 proto,
@@ -233,7 +349,7 @@ impl RowAs<'_> {
 
 /// The refused attempt's own row, written like the request's final one. Its
 /// own in-flight count too: the request's is closed by its final row.
-async fn record_refused(
+pub(super) async fn record_refused(
     state: &SharedState,
     rows: RowAs<'_>,
     route: &Route,
@@ -266,6 +382,7 @@ async fn record_refused(
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 status,
                 None,
@@ -295,6 +412,7 @@ async fn record_refused(
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 status,
                 None,

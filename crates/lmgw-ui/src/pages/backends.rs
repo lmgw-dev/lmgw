@@ -582,7 +582,7 @@ pub fn Backends() -> impl IntoView {
             .map(|at| format!("Last full check {} ({}).", ago(&at), local_ts(&at)))
             .unwrap_or_else(|| "No full check has run yet.".to_string());
         format!(
-            "Ask the remotes now: every build's ref and unpinned extras, and the registry images in use. {last} The schedule is in Settings → Backends."
+            "Ask the remotes now: every build's ref and unpinned extras, and the registry images in use. {last} The schedule is in Settings → Engines."
         )
     };
     let new_build = move |_| {
@@ -592,7 +592,7 @@ pub fn Backends() -> impl IntoView {
 
     view! {
         <PageFrame
-            title="Backends"
+            title="Engines"
             sub=summary
             mode=PageMode::Fill
             class="backends"

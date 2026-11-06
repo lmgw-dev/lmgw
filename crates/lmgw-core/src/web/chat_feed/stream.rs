@@ -228,6 +228,11 @@ pub(super) struct FeedStream {
     /// A level record waiting for the published snapshot to say it, and
     /// since when ([`Self::snapshot_behind`]).
     pub waiting: Option<(i64, tokio::time::Instant)>,
+    /// The stream's keep-alive and `TCP_USER_TIMEOUT` on a device's
+    /// connection, put back when the stream goes (`super::stream_timers`).
+    /// Held for its drop alone.
+    #[allow(dead_code)]
+    pub timers: Option<crate::server::TimersOverride>,
 }
 
 /// How many reads in a row a record may fail to render before the stream
@@ -1130,6 +1135,7 @@ mod tests {
             ended: false,
             stalled: None,
             waiting: None,
+            timers: None,
         }
     }
 

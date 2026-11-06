@@ -324,6 +324,7 @@ fn no_shipped_recipe_needs_a_token_and_the_refusal_still_names_the_component() {
         args: &[],
         modes: &["img_gen"],
         edit: false,
+        prompt_style: lmgw_api_types::chat_media::PromptStyle::Natural,
         vram_note: "Unmeasured.",
     };
     let msg = GATED.gated_refusal(None, false).expect("a refusal");
@@ -415,7 +416,7 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
         .await
         .unwrap_err();
     assert!(
-        err.contains("image.models_dir") && err.contains("not configured"),
+        err.contains("Settings → Runtimes → Image → Models dir") && err.contains("not set"),
         "{err}"
     );
     let view = wire(lmgw_core::ops::image_recipes(&state).await).unwrap();
@@ -504,6 +505,17 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     assert!(
         added["message"].as_str().unwrap().contains("hf_downloads"),
         "the message teaches the next step: {added}"
+    );
+    // The image class's image (machine-check design §5, D37): a test state
+    // has no podman to ask, so whether it is here is not known — said, with
+    // why, and nothing fetched.
+    assert_eq!(added["engine"]["state"], "not_known", "{added}");
+    assert_eq!(added["engine"]["job_id"], Value::Null, "{added}");
+    assert!(
+        added["engine"]["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("no container runtime")),
+        "{added}"
     );
     let bad = lmgw_core::ops::image_recipe_add(&state, "nope", None)
         .await

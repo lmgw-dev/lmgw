@@ -322,3 +322,41 @@ async fn with_no_token_alive_an_enrolment_meets_the_ended_link() {
         Some(lmgw_client::tls::TlsRefusal::Unproven)
     );
 }
+
+/// The device's own name (*added 2026-10-23*) is stored where the `client`
+/// text is, sanitized the same way: the Keys list shows it beside the
+/// owner's name for the link, and an empty one is none.
+#[tokio::test]
+async fn the_device_s_own_name_is_stored_with_the_client_text_and_sanitized() {
+    let w = world().await;
+    let (id, link) = w.waiting("phone").await;
+    let (spki, _) = device_pair::key();
+    let named = lmgw_client::requests::DeviceSelf {
+        name: Some("  Anna\u{202E}'s\nPhone\u{200B} "),
+        client: Some("Kai mobile"),
+        ..Default::default()
+    };
+    let (s, body) = device_pair::post_enrol_with(&link, &spki, named).await;
+    assert_eq!(s, 201, "{body}");
+    let row = w.row("phone").await;
+    let pairing = &row["pairing"];
+    assert_eq!(pairing["device_name"], json!("Anna'sPhone"), "{pairing}");
+    assert_eq!(pairing["client"], json!("Kai mobile"), "{pairing}");
+
+    // An empty name is none, and a later enrolment replaces the stored one
+    // as it replaces the client text.
+    let (s, token) = w.op("device_token", json!({ "id": id })).await;
+    assert_eq!(s, 200, "{token}");
+    let (spki, _) = device_pair::key();
+    let blank = lmgw_client::requests::DeviceSelf {
+        name: Some(" \u{200B}"),
+        ..Default::default()
+    };
+    let link = token["link"].as_str().unwrap();
+    let (s, body) = device_pair::post_enrol_with(link, &spki, blank).await;
+    assert_eq!(s, 201, "{body}");
+    let row = w.row("phone").await;
+    let pairing = &row["pairing"];
+    assert_eq!(pairing["device_name"], Value::Null, "{pairing}");
+    assert_eq!(pairing["client"], Value::Null, "{pairing}");
+}

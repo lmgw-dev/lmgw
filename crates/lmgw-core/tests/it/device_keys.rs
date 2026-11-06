@@ -63,7 +63,7 @@ async fn gateway() -> (SharedState, Gw) {
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('nowhere', 'openai', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 0, '',
+         VALUES ('nowhere', 'openai_compatible', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 0, '',
                  datetime('now'), datetime('now'), 0)",
     )
     .execute(&state.db)

@@ -20,7 +20,7 @@
   "label": "image: the generation lands as a kept group, its picture served from the lab store"
  },
  {
-  "expect": "(async()=>{const u=await (await fetch('/labs/api/image/usage')).json();return u.groups===1 && u.runs===1 && u.artifact_files===1 && /1 run · 1 file · [\\d.]+ MB/.test(document.querySelector('.results-note').textContent)})()",
+  "expect": "(async()=>{const u=await (await fetch('/labs/api/image/usage')).json();return u.groups===1 && u.runs===1 && u.artifact_files===1 && /1 run · 1 file · [\\d.]+ (KiB|MiB)/.test(document.querySelector('.results-note').textContent)})()",
   "label": "image: the size line names the file"
  },
  {"shot": "image-kept"},

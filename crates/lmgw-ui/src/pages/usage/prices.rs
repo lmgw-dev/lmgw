@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    IdAck, KeysResponse, PriceRowView, PriceSaved, PriceSyncSummary, PriceUnit, PricesResponse,
-    UpstreamsResponse,
+    IdAck, KeysResponse, PriceRowView, PriceSaved, PriceSyncSummary, PriceTier, PriceUnit,
+    PricesResponse, UpstreamsResponse,
 };
 use serde_json::json;
 
@@ -14,6 +14,8 @@ use crate::widgets::{
     PageFrame, PageMode, Select,
 };
 
+use super::price_hosted::{HostedFeeLine, HostedFeeRow};
+use super::price_tiers::{TierGapLine, TierGapRow};
 use super::price_units;
 use super::*;
 
@@ -68,6 +70,8 @@ pub fn UsagePrices() -> impl IntoView {
     // A unit other than tokens has one rate (§8.1).
     let p_price = RwSignal::new(String::new());
     let unit = RwSignal::new(PriceUnit::PerMtok.as_str().to_string());
+    // The OpenAI service tier the row is for (openai egress design §5.7).
+    let tier = RwSignal::new(PriceTier::Standard.as_str().to_string());
     // A new row's unit follows its model's task until the owner picks one.
     let unit_picked = RwSignal::new(false);
     let edit_id = RwSignal::new(0i64);
@@ -108,11 +112,13 @@ pub fn UsagePrices() -> impl IntoView {
                 p_cw.set(num(r.price_cache_write));
                 p_price.set(num(r.price));
                 unit.set(r.unit);
+                tier.set(r.service_tier);
                 unit_picked.set(true);
             }
             None => {
                 edit_id.set(0);
                 scope_kind.set("alias".into());
+                tier.set(PriceTier::Standard.as_str().into());
                 unit.set(task_unit(&key));
                 unit_picked.set(false);
                 scope_key.set(key);
@@ -136,6 +142,16 @@ pub fn UsagePrices() -> impl IntoView {
         }
     });
     let price_it = Callback::new(move |name: String| load(None, name));
+    // A model that answered at a tier with no row: a new row on the scope
+    // the gateway named, at that tier, in tokens.
+    // The unit is the first the gateway named as missing at that tier.
+    let price_tier = Callback::new(move |(kind, key, t, u): (String, String, String, String)| {
+        load(None, key);
+        scope_kind.set(kind);
+        tier.set(t);
+        unit.set(u);
+        unit_picked.set(true);
+    });
     let delete = Callback::new(move |id: i64| {
         spawn_local(async move {
             match crate::api::post::<IdAck, _>("/api/op/price_delete", &json!({ "id": id })).await {
@@ -180,6 +196,13 @@ pub fn UsagePrices() -> impl IntoView {
             ));
             return;
         };
+        let Some(t) = PriceTier::parse(&tier.get_untracked()) else {
+            toasts.err(format!(
+                "service tier \u{201c}{}\u{201d} is not one this dashboard can write",
+                tier.get_untracked()
+            ));
+            return;
+        };
         // Empty clears that price; anything else has to be one. Text that is
         // not a number used to go out as null — clearing the price — and
         // toast "Price saved". Only the boxes the unit shows are read.
@@ -212,6 +235,7 @@ pub fn UsagePrices() -> impl IntoView {
             &scope_kind.get_untracked(),
             &scope_key.get_untracked(),
             u,
+            t,
             tokens,
             price,
         );
@@ -306,6 +330,8 @@ pub fn UsagePrices() -> impl IntoView {
         let narrowed = Signal::derive(move || !query.with(String::is_empty));
         let rows = StoredValue::new(g.rows);
         let unpriced = StoredValue::new(g.unpriced);
+        let gaps = StoredValue::new(g.tier_gaps);
+        let hosted = StoredValue::new(g.hosted_fees);
         let meta = g.meta;
         view! {
             <GroupRow
@@ -318,6 +344,12 @@ pub fn UsagePrices() -> impl IntoView {
             <Show when=move || open.get() || narrowed.get()>
                 <For each=move || unpriced.get_value() key=|u| u.clone() let:u>
                     <UnpricedRow u=u price=price_it/>
+                </For>
+                <For each=move || gaps.get_value() key=|g| g.clone() let:g>
+                    <TierGapRow g=g price=price_tier/>
+                </For>
+                <For each=move || hosted.get_value() key=|h| h.clone() let:h>
+                    <HostedFeeRow h=h/>
                 </For>
                 <For each=move || rows.get_value() key=|r| r.clone() let:r>
                     <PriceRow r=r edit=edit delete=delete/>
@@ -369,7 +401,13 @@ pub fn UsagePrices() -> impl IntoView {
                 "input audio, input characters, generated images, requests — one row each, and a "
                 "request costs the sum of its rows. Leave a field empty and it stays unknown rather "
                 "than becoming a zero. Sync prices re-reads every catalog; it never overwrites a "
-                "manual row."
+                "manual row. The OpenAI platform prices one model at several service tiers "
+                "(Standard, Flex, Fast, …): its answers say which tier served them, and are priced "
+                "with that tier's rows — a tier with no row stays unpriced rather than charged at "
+                "Standard, and is listed at the top until it has one. A hosted tool the upstream "
+                "runs itself (web search, file search, a code container, image generation) bills "
+                "beyond its tokens; lmgw does not price those fees yet, so such a request stays "
+                "unpriced and is listed under Hosted tool fees."
             </Explain>
             <CardErr err=prices.err/>
             <div class="fill-pane card pad0" class:stale=move || prices.stale()>
@@ -378,6 +416,7 @@ pub fn UsagePrices() -> impl IntoView {
                         <tr>
                             {sort_th("Model", "model", "")}
                             {sort_th("Unit", "unit", "")}
+                            {sort_th("Tier", "tier", "")}
                             {sort_th("In", "in", "num-h")}
                             {sort_th("Out", "out", "num-h")}
                             {sort_th("Cache read", "cr", "num-h col-p2")}
@@ -460,7 +499,7 @@ pub fn UsagePrices() -> impl IntoView {
                         <span class="dim mini-note price-unit-note">
                             {move || {
                                 if edit_id.get() != 0 {
-                                    "scope and unit are fixed for an existing row — Add price writes another beside it"
+                                    "scope, unit and tier are fixed for an existing row — Add price writes another beside it"
                                         .to_string()
                                 } else {
                                     price_units::parse(&unit.get())
@@ -468,6 +507,19 @@ pub fn UsagePrices() -> impl IntoView {
                                         .unwrap_or_default()
                                 }
                             }}
+                        </span>
+                    </div>
+                    <div class="row price-unit-row">
+                        <span class="lbl">"tier"</span>
+                        // Part of the row's key too (openai egress design
+                        // §5.3): a flex row stands beside the standard one.
+                        <Select
+                            value=tier
+                            options=Signal::derive(price_units::tier_options)
+                            disabled=Signal::derive(move || edit_id.get() != 0)
+                        />
+                        <span class="dim mini-note price-unit-note">
+                            "OpenAI's service tier; every other provider's rows are Standard"
                         </span>
                     </div>
                     {move || {
@@ -506,7 +558,7 @@ pub fn UsagePrices() -> impl IntoView {
                                 _ => format!("Per 1M tokens, in {cur}. "),
                             }
                         }}
-                        "A manual row always wins over a catalog row for the same scope and unit; leave a field empty and it stays unknown rather than becoming a zero."
+                        "A manual row always wins over a catalog row for the same scope, unit and tier; leave a field empty and it stays unknown rather than becoming a zero."
                     </div>
                     <ModalFooter>
                         <button class="btn ghost" on:click=move |_| open.set(false)>
@@ -522,7 +574,7 @@ pub fn UsagePrices() -> impl IntoView {
     }
 }
 
-const PRICE_COLS: u32 = 8;
+const PRICE_COLS: u32 = 9;
 
 /// The toast a price sync answers with: rows written, models that
 /// advertise no price, catalog fee rows removed because the catalog stopped
@@ -637,6 +689,10 @@ struct PriceLine {
     /// What the row counts ([`PriceUnit::label`]), and its scale in full.
     unit: String,
     unit_title: String,
+    /// The row's service tier, labelled, and whether it is Standard (shown
+    /// quieter, as the one tier every provider has).
+    tier: String,
+    standard: bool,
     /// A unit other than tokens: its one rate and what it is per. `None` on
     /// a token row, whose four rates follow.
     rate: Option<(String, &'static str)>,
@@ -663,6 +719,8 @@ struct PriceGroup {
     count: String,
     meta: String,
     unpriced: Vec<UnpricedLine>,
+    tier_gaps: Vec<TierGapLine>,
+    hosted_fees: Vec<HostedFeeLine>,
     rows: Vec<PriceLine>,
 }
 
@@ -739,6 +797,7 @@ impl PriceSheet {
             None => (sort, false),
         };
         let unit_rank = |r: &PriceRowView| price_units::rank(&r.unit);
+        let tier_rank = |r: &PriceRowView| price_units::tier_rank(&r.service_tier);
         let num_key = |r: &PriceRowView| match key {
             "in" => r.price_in,
             "out" => r.price_out,
@@ -769,6 +828,56 @@ impl PriceSheet {
                     grouped(reqs as u64)
                 ),
                 unpriced,
+                tier_gaps: Vec::new(),
+                hosted_fees: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+        // Then what answered at an OpenAI service tier with no row: priced
+        // at no tier, so outside every budget until one is set (§5.6).
+        let gaps: Vec<TierGapLine> = p
+            .unpriced_tiers
+            .iter()
+            .filter(|u| {
+                matches(&[
+                    &u.name,
+                    &u.service_tier,
+                    &u.reported,
+                    &u.scope_key,
+                    "unpriced",
+                ])
+            })
+            .map(TierGapLine::of)
+            .collect();
+        if !gaps.is_empty() && source.is_empty() {
+            groups.push(PriceGroup {
+                id: "unpriced-tiers".into(),
+                label: "Unpriced tiers".into(),
+                count: crate::fmt::of(gaps.len(), p.unpriced_tiers.len()),
+                meta: super::price_tiers::band_meta(&gaps),
+                unpriced: Vec::new(),
+                tier_gaps: gaps,
+                hosted_fees: Vec::new(),
+                rows: Vec::new(),
+            });
+        }
+        // Then what a hosted tool's fees left unpriced: no unit prices
+        // them yet, so no action fixes it (openai egress design §6.1).
+        let hosted: Vec<HostedFeeLine> = p
+            .unpriced_hosted_tools
+            .iter()
+            .filter(|u| matches(&[&u.name, &u.scope_key, "unpriced", "hosted"]))
+            .map(HostedFeeLine::of)
+            .collect();
+        if !hosted.is_empty() && source.is_empty() {
+            groups.push(PriceGroup {
+                id: "unpriced-hosted".into(),
+                label: "Hosted tool fees".into(),
+                count: crate::fmt::of(hosted.len(), p.unpriced_hosted_tools.len()),
+                meta: super::price_hosted::band_meta(&hosted),
+                unpriced: Vec::new(),
+                tier_gaps: Vec::new(),
+                hosted_fees: hosted,
                 rows: Vec::new(),
             });
         }
@@ -789,20 +898,24 @@ impl PriceSheet {
                     },
                     "source" => a.source.cmp(&b.source),
                     "unit" => unit_rank(a).cmp(&unit_rank(b)),
+                    "tier" => tier_rank(a).cmp(&tier_rank(b)),
                     _ => Equal,
                 };
                 let o = if desc { o.reverse() } else { o };
                 o.then_with(|| {
                     let o = band(a).2.to_lowercase().cmp(&band(b).2.to_lowercase());
-                    if desc && !matches!(key, "in" | "out" | "cr" | "cw" | "source" | "unit") {
+                    if desc
+                        && !matches!(key, "in" | "out" | "cr" | "cw" | "source" | "unit" | "tier")
+                    {
                         o.reverse()
                     } else {
                         o
                     }
                 })
                 // One scope's rows sit together, tokens first: parts that
-                // add up (§8.1).
+                // add up (§8.1); within a unit, Standard first.
                 .then_with(|| unit_rank(a).cmp(&unit_rank(b)))
+                .then_with(|| tier_rank(a).cmp(&tier_rank(b)))
             });
             // The kind every row of the band shares goes in its head, with
             // the currency; each row says its own unit (§8.1).
@@ -835,12 +948,19 @@ impl PriceSheet {
                     PriceLine {
                         id: r.id,
                         title: format!(
-                            "{} · {} · {} · {} · updated {}",
-                            r.scope_key, r.scope_kind, r.unit, r.source, r.updated_at
+                            "{} · {} · {} · {} · {} · updated {}",
+                            r.scope_key,
+                            r.scope_kind,
+                            r.unit,
+                            r.service_tier,
+                            r.source,
+                            r.updated_at
                         ),
                         model,
                         unit,
                         unit_title,
+                        tier: price_units::tier_label(&r.service_tier),
+                        standard: r.service_tier == PriceTier::Standard.as_str(),
                         rate,
                         price_in: fmt(r.price_in),
                         price_out: fmt(r.price_out),
@@ -856,6 +976,8 @@ impl PriceSheet {
                 count: crate::fmt::of(lines.len(), total),
                 meta: format!("{kind} · rates in {}", p.currency),
                 unpriced: Vec::new(),
+                tier_gaps: Vec::new(),
+                hosted_fees: Vec::new(),
                 rows: lines,
             });
         }
@@ -900,6 +1022,7 @@ fn PriceRow(r: PriceLine, edit: Callback<i64>, delete: Callback<i64>) -> impl In
         <tr>
             <td class="clip mono-sm" title=r.title>{r.model}</td>
             <td class="dim price-unit" title=r.unit_title>{r.unit}</td>
+            <td class="price-tier" class:dim=r.standard>{r.tier}</td>
             {rates}
             <td class="dim col-p3">{r.source}</td>
             <td class="actions">
@@ -929,6 +1052,7 @@ fn UnpricedRow(u: UnpricedLine, price: Callback<String>) -> impl IntoView {
             <td class="clip mono-sm" title=format!("{} — no price sheet covers it", u.name)>
                 {u.name.clone()}
             </td>
+            <td></td>
             <td></td>
             <td class="num" colspan="2">
                 <span class="chip warn">

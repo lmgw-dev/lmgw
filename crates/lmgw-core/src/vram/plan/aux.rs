@@ -100,7 +100,7 @@ pub(crate) fn footprint(
     batches: Batches,
 ) -> Footprint {
     let fp = no_cache_for_an_encoder(kv_footprint(files, gguf_path, ctx, bits.0, bits.1), files);
-    match placement {
+    let fp = match placement {
         Placement::Cpu | Placement::HostNoDevice => cpu_only(fp),
         Placement::HostWithDevice => {
             let projector = if files.companion_bytes > 0 {
@@ -117,7 +117,10 @@ pub(crate) fn footprint(
             with_compute(on_card, files, Weights::Host, batches)
         }
         Placement::Gpu => with_compute(fp, files, Weights::Device, batches),
-    }
+    };
+    // A split GGUF with parts missing is charged short by them, wherever
+    // the row runs, and cannot load: said first.
+    files.flag(fp)
 }
 
 /// `fp` without its KV cache when the header says the model is an encoder
@@ -283,8 +286,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         }
     }
 

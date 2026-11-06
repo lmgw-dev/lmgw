@@ -1,0 +1,79 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, kilo/openai/gpt-4.1-nano (an OpenRouter-shaped aggregator relaying OpenAI), json_schema strict without additionalProperties: false",
+  "upstream": "openai_compatible",
+  "status": 400,
+  "body": {
+    "error": {
+      "message": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+      "type": "AI_APICallError",
+      "param": {
+        "error": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+        "statusCode": 400,
+        "name": "AI_APICallError",
+        "message": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+        "isRetryable": false,
+        "type": "AI_APICallError"
+      }
+    },
+    "providerMetadata": {
+      "gateway": {
+        "routing": {
+          "originalModelId": "openai/gpt-4.1-nano",
+          "resolvedProvider": "openai",
+          "fallbacksAvailable": [
+            "azure"
+          ],
+          "canonicalSlug": "openai/gpt-4.1-nano",
+          "modelAttemptCount": 1,
+          "modelAttempts": [
+            {
+              "canonicalSlug": "openai/gpt-4.1-nano",
+              "success": false,
+              "providerAttemptCount": 3,
+              "providerAttempts": [
+                {
+                  "provider": "openai",
+                  "credentialType": "byok",
+                  "success": false,
+                  "error": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+                  "startTime": 0,
+                  "endTime": 0,
+                  "providerRequestId": "req_scrubbed",
+                  "statusCode": 400
+                },
+                {
+                  "provider": "openai",
+                  "credentialType": "system",
+                  "success": false,
+                  "error": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+                  "startTime": 0,
+                  "endTime": 0,
+                  "providerRequestId": "req_scrubbed",
+                  "statusCode": 400
+                },
+                {
+                  "provider": "azure",
+                  "credentialType": "system",
+                  "success": false,
+                  "error": "Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.",
+                  "startTime": 0,
+                  "endTime": 0,
+                  "providerRequestId": "req_scrubbed",
+                  "statusCode": 400
+                }
+              ]
+            }
+          ],
+          "totalProviderAttemptCount": 3,
+          "affinity": {
+            "outcome": "skipped_below_min_prefix"
+          },
+          "clientSessionId": "scrubbed",
+          "clientSessionIdSource": "fingerprint"
+        },
+        "generationId": "gen_scrubbed"
+      }
+    }
+  },
+  "expect": "invalid_json_schema"
+}

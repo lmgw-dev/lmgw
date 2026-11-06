@@ -937,17 +937,19 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "quickdoc.db".into());
     match staged.bytes() {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "application/vnd.sqlite3".to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{name}\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => super::stored::sandboxed(
+            (
+                [
+                    (header::CONTENT_TYPE, "application/vnd.sqlite3".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{name}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response(),
+        ),
         Err(e) => api_error(format!("reading the export: {e}")),
     }
 }

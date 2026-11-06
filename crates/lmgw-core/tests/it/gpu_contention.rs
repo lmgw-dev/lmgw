@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use lmgw_core::config::{AuxKind, HoldFallbackMode};
+use lmgw_core::config::AuxKind;
 use lmgw_core::runtime::descriptor::{model_runtime, RungPos};
 use lmgw_core::runtime::registry::{Marked, Origin, RuntimeState, RuntimeView};
 use lmgw_core::runtime::{Class, Placement};
@@ -40,11 +40,6 @@ fn alias(
         alias: name.into(),
         candidates: candidates.iter().map(|c| c.to_string()).collect(),
         background,
-        fallback_mode: if fallback.is_some() {
-            HoldFallbackMode::Alias
-        } else {
-            HoldFallbackMode::None
-        },
         fallback: fallback.map(str::to_string),
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],

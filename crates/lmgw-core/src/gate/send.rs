@@ -411,7 +411,7 @@ where
                 known.filter(|&p| p.saturating_add(self.plan.max_output) > tag.per_slot)
             {
                 // Boxed: the climb's poll frame is 111 KB in a debug build.
-                match Box::pin(self.climb(&tag, prompt)).await? {
+                match Box::pin(self.climb(&tag, prompt, &mut lease.turn)).await? {
                     Some(fallback) => return Ok(fallen_back(lease, fallback)),
                     None => continue,
                 }
@@ -448,8 +448,10 @@ where
                         return Err(GatewayError::Transport(why));
                     }
                     recovered = true;
-                    self.hold
-                        .recover(attempt)
+                    // Boxed: the restart is a whole admission (a failed
+                    // start's read of the machine check included), and this
+                    // loop sits on the turn's chain of frames.
+                    Box::pin(self.hold.recover(attempt))
                         .await
                         .map_err(|e| restart_failed(self.hold, &why, e))?;
                 }
@@ -466,7 +468,9 @@ where
                     known = Some(prompt);
                     // Boxed: the climb's poll frame is 111 KB in a debug build (chain of
                     // frames from the turn to the climb, 2 MiB test stack).
-                    if let Some(fallback) = Box::pin(self.climb(&tag, prompt)).await? {
+                    if let Some(fallback) =
+                        Box::pin(self.climb(&tag, prompt, &mut lease.turn)).await?
+                    {
                         return Ok(fallen_back(lease, fallback));
                     }
                 }
@@ -592,7 +596,16 @@ where
     /// the max output. `Ok(None)`: judge again on whatever runs now — a
     /// climb's `Done` does not promise the rung it asked for (another
     /// trigger's climb, a failed one). `Ok(Some)`: a fallback answers.
-    async fn climb(&self, running: &RungTag, prompt: u64) -> Result<Option<Sent>, GatewayError> {
+    ///
+    /// `turn` is the send's turn on the hold (`TurnLease::turn`): it ends
+    /// before the walk to another model, which the send leaves this one for
+    /// (openai egress design §14.3).
+    async fn climb(
+        &self,
+        running: &RungTag,
+        prompt: u64,
+        turn: &mut Option<crate::vram::HoldTurn>,
+    ) -> Result<Option<Sent>, GatewayError> {
         let max_output = self.plan.max_output;
         let model = self.hold.model_id();
         let to = {
@@ -635,6 +648,7 @@ where
             // yet, and the walk goes on without this model, as for a denial —
             // ending in the climb's own error when nothing else answers.
             Err(e) if candidate::repicks_climb(self.hold, &e) => {
+                *turn = None;
                 return Ok(Some(Sent::Rerouted(
                     candidate::repick_failed_climb(self.state, self.hold, e).await,
                 )));
@@ -643,24 +657,38 @@ where
         };
         match climbed {
             Climbed::Done => Ok(None),
+            // Along the chain the hold was admitted with (openai egress
+            // design §14.3): a local fallback is admitted in turn.
             Climbed::Fallback {
                 alias,
+                key,
                 route,
                 reason,
-            } => Ok(Some(Sent::Rerouted(Ok(Opened {
-                route,
-                hold: None,
-                headers: GateHeaders::falling_back(alias, reason),
-            })))),
+            } => {
+                let model = self.hold.model_id().to_string();
+                let next = crate::config::FallbackRoute::Usable { alias, key, route };
+                *turn = None;
+                Ok(Some(Sent::Rerouted(
+                    super::chain::from_hold(self.state, self.hold, next, reason, |clause| {
+                        GatewayError::Internal(format!(
+                            "'{model}' could not climb, and its fallback could not take the \
+                             request either{clause}"
+                        ))
+                    })
+                    .await,
+                )))
+            }
             // A guest may not make this climb (§9): nothing was sent yet, and
-            // the walk picks again without this model (§12 entry 45). Only a
-            // candidate alias's guest is ever denied; without its context the
-            // deferral is the answer.
+            // the walk picks again without this model (§12 entry 45). A plain
+            // model's guest has nothing to pick: its row's fallback answers,
+            // or the deferral (per-request background design §4 step 6).
             Climbed::Denied { why } => {
                 let cause = GatewayError::GpuDeferred {
                     model: self.hold.alias().to_string(),
                     detail: why,
+                    on: candidate::deferred_on(self.hold),
                 };
+                *turn = None;
                 Ok(Some(Sent::Rerouted(
                     candidate::repick(self.state, self.hold, cause).await,
                 )))

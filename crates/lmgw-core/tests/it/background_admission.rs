@@ -184,6 +184,39 @@ async fn a_background_start_blocked_by_the_owner_names_his_model_and_stops_nothi
     assert_eq!(g.runs(), vec!["mine"]);
 }
 
+/// The VRAM named as outside lmgw is the scheduler's per-process measurement,
+/// the figure admission's external shortfall gives: lmgw's own models using
+/// more than their estimate are not blamed on other applications, a game is
+/// named at the size it holds, and with no per-process reading the clause is
+/// left out rather than guessed.
+#[tokio::test]
+async fn a_blocked_guest_names_the_outside_vram_as_measured_per_process() {
+    let g = Gpu::new(20 * GIB, 3, 2).await;
+    g.model("mine", 12 * GIB).await;
+    g.model("p", 10 * GIB).await;
+    drop(owner_hold(&g, "mine").await);
+
+    g.world().attribution = true;
+    // The container holds 2 GiB more than its estimate: lmgw's, not outside.
+    g.world().size.insert("mine".into(), 14 * GIB);
+    let why = blocked(guest_start(&g, "p", "jobs").await);
+    assert!(why.starts_with("chat/mine ("), "{why}");
+    assert!(!why.contains("applications outside lmgw"), "{why}");
+
+    g.world().outside = 4 * GIB;
+    let why = blocked(guest_start(&g, "p", "jobs").await);
+    assert!(
+        why.contains("applications outside lmgw (about 4.0 GiB)"),
+        "{why}"
+    );
+
+    // No per-process list: nothing is claimed of the outside.
+    g.world().attribution = false;
+    let why = blocked(guest_start(&g, "p", "jobs").await);
+    assert!(why.starts_with("chat/mine ("), "{why}");
+    assert!(!why.contains("applications outside lmgw"), "{why}");
+}
+
 /// A card lmgw cannot measure is not free VRAM to a guest: blocked, saying
 /// how to fix it. A model that is loaded anyway is still used.
 #[tokio::test]
@@ -198,7 +231,7 @@ async fn without_measurement_a_guest_only_uses_what_is_loaded() {
     g.state.reload_snapshot().await.unwrap();
 
     let why = blocked(guest_start(&g, "p", "jobs").await);
-    assert!(why.contains("vram.enabled"), "{why}");
+    assert!(why.contains("Arbitrate GPU memory"), "{why}");
     assert!(g.runs().is_empty());
 
     let mine = owner_hold(&g, "p").await;
@@ -319,10 +352,12 @@ async fn draining_clears_on_a_timeout_and_on_a_dropped_wait() {
     drop(busy);
 }
 
-/// On an install without a background alias nothing drains: there is no
-/// guest to drain for, and the frame stays what it was.
+/// An install without any background alias drains too (per-request
+/// background design §10): any request may be a guest
+/// (`x-lmgw-background: on`), so an owner's wait for room always marks the
+/// residents, and the frame shows it while the wait lasts.
 #[tokio::test]
-async fn without_a_background_alias_an_owner_wait_drains_nothing() {
+async fn without_a_background_alias_an_owner_wait_still_drains() {
     let g = Gpu::new(24 * GIB, 4, 1).await;
     g.model("a", 16 * GIB).await;
     g.model("b", 16 * GIB).await;
@@ -331,11 +366,25 @@ async fn without_a_background_alias_an_owner_wait_drains_nothing() {
         let (state, route) = (g.state.clone(), g.route("b"));
         async move { vram::admit(&state, &route, "b").await }
     });
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(!g.state.runtime().draining_for_owner());
+    let runtime = g.state.runtime();
+    until("the owner's wait drains the card", || {
+        runtime.draining_for_owner()
+    })
+    .await;
     let frame = serde_json::to_value(view(&g, "a").unwrap()).unwrap();
-    assert!(frame.get("draining_for_owner").is_none(), "{frame}");
+    assert_eq!(frame["draining_for_owner"], true, "{frame}");
+    let refused = vram::join(
+        &g.state,
+        &g.route("a"),
+        "a",
+        Origin::Background,
+        Restart::Background,
+    )
+    .await
+    .unwrap();
+    assert!(refused.is_none(), "a per-request guest takes no new work");
     assert!(waiting.await.unwrap().is_err(), "it timed out, as ever");
+    assert!(!g.state.runtime().draining_for_owner(), "cleared after");
     drop(busy);
 }
 

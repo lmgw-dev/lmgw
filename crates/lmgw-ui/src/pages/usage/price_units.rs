@@ -1,11 +1,13 @@
 //! Billable units on the Prices page (billable-units design §8.1): which
 //! unit a new row starts in, how a row's unit and rate read in the table,
-//! and the body the editor posts for each shape.
+//! and the body the editor posts for each shape; and the OpenAI service
+//! tiers a row can be for (openai egress design §5.7).
 //!
 //! The units themselves — their spellings, labels and scales — are
-//! `lmgw_api_types::PriceUnit`'s one table, shared with the gateway.
+//! `lmgw_api_types::PriceUnit`'s one table, shared with the gateway, and the
+//! tiers `PriceTier`'s.
 
-use lmgw_api_types::PriceUnit;
+use lmgw_api_types::{PriceTier, PriceUnit};
 use serde_json::{json, Value};
 
 /// The unit a new price row starts in: the one its model's task is billed
@@ -55,15 +57,39 @@ pub(super) fn rank(unit: &str) -> usize {
         .unwrap_or(PriceUnit::ALL.len())
 }
 
+/// The service-tier picker's options (openai egress design §5.7), standard
+/// first.
+pub(super) fn tier_options() -> Vec<(String, String)> {
+    PriceTier::ALL
+        .iter()
+        .map(|t| (t.as_str().to_string(), t.label().to_string()))
+        .collect()
+}
+
+/// Where a tier sorts among one scope's rows of a unit: standard first.
+pub(super) fn tier_rank(tier: &str) -> usize {
+    PriceTier::ALL
+        .iter()
+        .position(|t| t.as_str() == tier)
+        .unwrap_or(PriceTier::ALL.len())
+}
+
+/// A row's tier as the table names it: its label, or the spelling verbatim
+/// for a tier this build does not know.
+pub(super) fn tier_label(tier: &str) -> String {
+    PriceTier::parse(tier).map_or_else(|| tier.to_string(), |t| t.label().to_string())
+}
+
 /// The editor's boxes as `price_set` takes them: the four token rates for
 /// `per_mtok`, the one `price` for any other unit — never both, which the
 /// op refuses. `id` rides along for the record; the op keys a row on its
-/// scope and unit.
+/// scope, unit and service tier.
 pub(super) fn price_body(
     id: i64,
     scope_kind: &str,
     scope_key: &str,
     unit: PriceUnit,
+    tier: PriceTier,
     tokens: [Option<f64>; 4],
     price: Option<f64>,
 ) -> Value {
@@ -72,6 +98,7 @@ pub(super) fn price_body(
         "scope_kind": scope_kind,
         "scope_key": scope_key,
         "unit": unit.as_str(),
+        "service_tier": tier.as_str(),
         "source": "manual",
     });
     if unit.is_tokens() {
@@ -108,10 +135,12 @@ mod tests {
             "alias",
             "a",
             PriceUnit::PerMtok,
+            PriceTier::Flex,
             [Some(3.0), Some(15.0), None, None],
             Some(1.0),
         );
         assert_eq!(t["unit"], "per_mtok");
+        assert_eq!(t["service_tier"], "flex");
         assert_eq!(t["price_in"], 3.0);
         assert!(t.get("price").is_none(), "{t}");
 
@@ -120,6 +149,7 @@ mod tests {
             "alias",
             "whisper",
             PriceUnit::PerAudioMinute,
+            PriceTier::Standard,
             [Some(3.0), None, None, None],
             Some(0.006),
         );

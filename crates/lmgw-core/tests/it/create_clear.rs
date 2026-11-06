@@ -455,8 +455,7 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
         image: row.image.clone(),
         extra_run_args: Some(Vec::new()),
         warm_start: row.warm_start,
-        hold_fallback_mode: row.hold_fallback_mode,
-        hold_fallback: row.hold_fallback.clone(),
+        fallback: row.fallback.clone(),
     };
     store::update_audio_model(&state.db, tts_id, &save)
         .await

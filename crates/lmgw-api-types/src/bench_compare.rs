@@ -503,7 +503,7 @@ mod tests {
         };
         run.model.gguf_path = "m.gguf".into();
         run.model.gguf_size = 10;
-        run.gpu.name = Some("RTX 4090".into());
+        run.gpu.name = Some("RTX 4080".into());
         run
     }
 

@@ -84,10 +84,7 @@ impl From<&VramSettings> for dto::VramSettingsDto {
 
 impl From<&HoldSettings> for dto::HoldSettingsDto {
     fn from(h: &HoldSettings) -> Self {
-        dto::HoldSettingsDto {
-            active: h.active,
-            fallback_alias: h.fallback_alias.clone(),
-        }
+        dto::HoldSettingsDto { active: h.active }
     }
 }
 

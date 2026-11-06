@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>preview host (test)</title>
+  <!-- The test host's preview page (chat-plane design, "WP3a: the transport
+       seam"): what PreviewFrame::Posted loads as the preview frame's src. It
+       receives the code block by postMessage and shows it in a srcdoc frame
+       of its own. The sidebar's real page (WP8) is listed in sandbox.pages
+       with a policy that allows the previewed page's inline scripts; this
+       one is served under the extension pages' script-src 'self', so only
+       the delivery is tested here. -->
+  <script src="/__csp-check/preview-host.js"></script>
+  <style>html, body { margin: 0; height: 100%; } iframe { border: 0; width: 100%; height: 100%; }</style>
+</head>
+<body></body>
+</html>

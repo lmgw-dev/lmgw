@@ -1,25 +1,26 @@
-//! The profile routes the editor calls (design §3.1); nothing else.
+//! The profile routes the editor calls (design §3.1); nothing else. Each
+//! goes through the transport the caller was handed (`crate::http::use_http`).
 
 use lmgw_api_types::chat_profiles::{
     PreviewAnswer, PreviewRequest, Profile, ProfileCreate, ProfileDeleted, ProfileDraft,
     ProfileList, ProfilePatch, SpeakRequest, TestAnswer, TestRequest,
 };
 
-use crate::http::{self, Result};
+use crate::http::{Http, Result};
 
 const BASE: &str = "/chat/api/profiles";
 
-pub async fn list() -> Result<ProfileList> {
-    http::get(BASE).await
+pub async fn list(http: Http) -> Result<ProfileList> {
+    http.get(BASE).await
 }
 
-pub async fn create(body: &ProfileCreate) -> Result<Profile> {
-    http::post(BASE, body).await
+pub async fn create(http: Http, body: &ProfileCreate) -> Result<Profile> {
+    http.post(BASE, body).await
 }
 
 /// The built-in row again after it was deleted.
-pub async fn create_builtin(key: &str) -> Result<Profile> {
-    http::post(
+pub async fn create_builtin(http: Http, key: &str) -> Result<Profile> {
+    http.post(
         BASE,
         &ProfileCreate {
             builtin: Some(key.to_string()),
@@ -29,22 +30,25 @@ pub async fn create_builtin(key: &str) -> Result<Profile> {
     .await
 }
 
-pub async fn patch(id: i64, body: &ProfilePatch) -> Result<Profile> {
-    http::post(format!("{BASE}/{id}"), body).await
+pub async fn patch(http: Http, id: i64, body: &ProfilePatch) -> Result<Profile> {
+    http.post(format!("{BASE}/{id}"), body).await
 }
 
 /// "Reset to built-in": the gateway makes the row follow the built-in text
 /// again (the store's reset), which a patch of `null`s cannot: on a built-in
 /// row that stores "unset", i.e. empty texts.
-pub async fn reset(id: i64) -> Result<Profile> {
-    http::post(format!("{BASE}/{id}/reset"), &serde_json::json!({})).await
+pub async fn reset(http: Http, id: i64) -> Result<Profile> {
+    http.post(format!("{BASE}/{id}/reset"), &serde_json::json!({}))
+        .await
 }
 
-pub async fn delete(id: i64) -> Result<ProfileDeleted> {
-    http::post(format!("{BASE}/{id}/delete"), &serde_json::json!({})).await
+pub async fn delete(http: Http, id: i64) -> Result<ProfileDeleted> {
+    http.post(format!("{BASE}/{id}/delete"), &serde_json::json!({}))
+        .await
 }
 
 pub async fn preview(
+    http: Http,
     profile: ProfileDraft,
     thread_id: Option<i64>,
     model: Option<String>,
@@ -54,10 +58,11 @@ pub async fn preview(
         thread_id,
         model,
     };
-    http::post(format!("{BASE}/preview"), &body).await
+    http.post(format!("{BASE}/preview"), &body).await
 }
 
 pub async fn test(
+    http: Http,
     profile: ProfileDraft,
     thread_id: Option<i64>,
     model: String,
@@ -71,11 +76,12 @@ pub async fn test(
         text,
         voice,
     };
-    http::post(format!("{BASE}/test"), &body).await
+    http.post(format!("{BASE}/test"), &body).await
 }
 
 /// One WAV, as bytes with the content type the gateway sent.
 pub async fn speak(
+    http: Http,
     profile: ProfileDraft,
     thread_id: Option<i64>,
     text: String,
@@ -85,5 +91,5 @@ pub async fn speak(
         thread_id,
         text,
     };
-    http::post_bytes(format!("{BASE}/speak"), &body).await
+    http.post_bytes(format!("{BASE}/speak"), &body).await
 }

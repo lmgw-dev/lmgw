@@ -89,6 +89,17 @@ jobs:
       - name: Check the tag exists
         run: git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null || { echo "::error::tag ${RELEASE_TAG} does not exist"; exit 1; }
 
+      # A dispatch can name an old tag, and the build below runs that tag's own ci/build.sh:
+      # one from before the RPM guard would build and publish an unchecked RPM as the latest.
+      - name: Check the tag carries the RPM guard
+        run: |
+          for f in ci/rpm_guard.py ci/rpm_guard_test.py ci/rpm-allowlist.toml; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::${RELEASE_TAG} has no $f: it predates the RPM guard and cannot be released"
+              exit 1
+            fi
+          done
+
       # As in ci.yml (GITHUB_ENV, because `github.workspace` is the host path),
       # so ci/build.sh finds the tools the next step installs.
       - name: Keep the cargo home and Trunk's tool cache in the workspace
@@ -102,6 +113,10 @@ jobs:
       # scratch.
       - name: Install build dependencies
         run: bash ci/install-build-deps.sh
+
+      # The guard's own test before the build it protects (rpm-build, python3: install-build-deps).
+      - name: Test the RPM guard
+        run: python3 ci/rpm_guard_test.py
 
       - name: Build the RPM and latest.json
         run: |

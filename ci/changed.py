@@ -13,6 +13,10 @@ plan as shell assignments on stdout, which ci/check.sh evals:
                    checked on its own (for wasm32, and with its tls feature)
   RUN_WORKLET      1 when the audio worklets changed
   RUN_PUBLISH      1 when scripts/publish-github.sh or its helpers changed
+  RUN_RPM_GUARD    1 when ci/rpm_guard.py, its allowlist, the bundle config or the
+                   pinned polkit policy changed
+  RUN_COMPAT       1 when the live compat check (scripts/compat_live*, compat-live.sh)
+                   changed
   NEXTEST_FILTER   the nextest filterset for the selected tests
 
 The it-module half reads ci/it-map.toml; its header says how the naming
@@ -33,6 +37,7 @@ IT_DIR = "crates/lmgw-core/tests/it"
 CORE = "lmgw-core"
 CORE_SRC = "crates/lmgw-core/src/"
 UI_DIR = "crates/lmgw-ui/"
+CHAT_UI_DIR = "crates/lmgw-chat-ui/"
 CLIENT_DIR = "crates/lmgw-client/"
 
 # Files that change how every crate builds: the selection is then everything.
@@ -141,7 +146,7 @@ def dist_stale():
     if not os.path.exists(index):
         return "crates/lmgw-ui/dist/index.html does not exist"
     built = os.path.getmtime(index)
-    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-ui-kit", "crates/lmgw-api-types", "crates/lmgw-client").split("\n")
+    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/lmgw-api-types", "crates/lmgw-client").split("\n")
     newer = [f for f in sources if f and os.path.exists(os.path.join(ROOT, f))
              and os.path.getmtime(os.path.join(ROOT, f)) > built]
     if newer:
@@ -285,7 +290,7 @@ def main():
             clauses.append(f"(package({CORE}) & binary(it) & ({' | '.join(alts)}))")
 
     # --- trunk and worklets ---------------------------------------------------------
-    ui = [f for f in files if f.startswith((UI_DIR, "crates/lmgw-ui-kit/", CLIENT_DIR, "crates/lmgw-api-types/"))]
+    ui = [f for f in files if f.startswith((UI_DIR, CHAT_UI_DIR, "crates/lmgw-ui-kit/", CLIENT_DIR, "crates/lmgw-api-types/"))]
     stale = dist_stale()
     if wide:
         trunk, why = 1, f"{wide[0]} is workspace-wide"
@@ -294,16 +299,24 @@ def main():
     elif stale:
         trunk, why = 1, stale
     else:
-        trunk, why = 0, "no lmgw-ui / lmgw-client / lmgw-api-types change and dist/ is fresh"
+        trunk, why = 0, "no lmgw-ui / lmgw-chat-ui / lmgw-client / lmgw-api-types change and dist/ is fresh"
     say(f"\ntrunk build: {'yes' if trunk else 'skipped'} ({why})")
     client = [f for f in files if f.startswith((CLIENT_DIR, "crates/lmgw-api-types/"))]
     client_wasm = bool(wide or client)
     say(f"lmgw-client wasm32 and tls checks: {'yes (' + (wide or client)[0] + ' changed)' if client_wasm else 'skipped (no lmgw-client / lmgw-api-types change)'}")
-    voice = [f for f in files if f.startswith(UI_DIR + "assets/voice/")
+    voice = [f for f in files if f.startswith(CHAT_UI_DIR + "assets/voice/")
              or f == "scripts/worklet-check.mjs"]
-    say(f"worklet check: {'yes (' + voice[0] + ' changed)' if voice else 'skipped (no change under crates/lmgw-ui/assets/voice/)'}")
+    say(f"worklet check: {'yes (' + voice[0] + ' changed)' if voice else 'skipped (no change under crates/lmgw-chat-ui/assets/voice/)'}")
     publish = [f for f in files if f.startswith(("scripts/publish", "scripts/pre-push-github"))]
     say(f"publish script check: {'yes (' + publish[0] + ' changed)' if publish else 'skipped (no change to scripts/publish*)'}")
+    # The polkit policy's content is pinned in ci/rpm-allowlist.toml.
+    rpm_guard = [f for f in files if f.startswith(("ci/rpm", "src-tauri/icons/",
+                                                   "crates/lmgw-machine-helper/polkit/"))
+                 or f == "src-tauri/tauri.conf.json"]
+    say(f"RPM guard check: {'yes (' + rpm_guard[0] + ' changed)' if rpm_guard else 'skipped (no change to ci/rpm*, src-tauri/tauri.conf.json, its icons or the polkit policy)'}")
+
+    compat = [f for f in files if f.startswith(("scripts/compat_live", "scripts/compat-live"))]
+    say(f"compat rules check: {'yes (' + compat[0] + ' changed)' if compat else 'skipped (no change to scripts/compat_live*)'}")
 
     out = {
         "CHANGED_CRATES": " ".join(sorted(touched)),
@@ -312,6 +325,8 @@ def main():
         "RUN_CLIENT_WASM": "1" if client_wasm else "0",
         "RUN_WORKLET": "1" if voice else "0",
         "RUN_PUBLISH": "1" if publish else "0",
+        "RUN_RPM_GUARD": "1" if rpm_guard else "0",
+        "RUN_COMPAT": "1" if compat else "0",
         "NEXTEST_FILTER": " | ".join(clauses),
     }
     for k, v in out.items():

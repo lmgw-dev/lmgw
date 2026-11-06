@@ -1,0 +1,38 @@
+{
+  "request": {
+    "body": "{\"add_generation_prompt\":false,\"continue_final_message\":true,\"input\":[{\"content\":[{\"text\":\"Tell me a story.\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"content\":\"Once upon a\",\"role\":\"assistant\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "input": [
+        {
+          "content": [
+            {
+              "text": "Tell me a story.",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": "Once upon a",
+          "role": "assistant"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

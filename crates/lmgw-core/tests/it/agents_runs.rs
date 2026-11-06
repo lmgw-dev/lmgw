@@ -103,6 +103,7 @@ async fn gateway_with_timeout(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -344,7 +345,7 @@ async fn an_openai_route_receives_the_response_format_with_the_enum() {
         )
         .mount(&mock)
         .await;
-    let state = gateway(&mock.uri(), Protocol::Openai).await;
+    let state = gateway(&mock.uri(), Protocol::OpenaiCompatible).await;
     let (url, _calls) = mcp_stub().await;
     register_stub(&state, &url).await;
     let base = serve(state.clone()).await;
@@ -402,10 +403,11 @@ async fn an_openai_route_receives_the_response_format_with_the_enum() {
     assert_eq!(tools.len(), 3, "one source call plus one fetch per item");
 }
 
-/// On an Anthropic route the egress drops `response_format`, so the reply is
-/// matched back onto the enum the way the mail workflow did (§4.2).
+/// On an Anthropic route the schema goes as `output_config.format`
+/// (structured-output design §6); a reply that is still not exact is matched
+/// back onto the enum the way the mail workflow did (§4.2).
 #[tokio::test]
-async fn an_anthropic_route_gets_no_response_format_and_the_reply_is_matched() {
+async fn an_anthropic_route_gets_the_schema_as_output_config_format() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -436,9 +438,13 @@ async fn an_anthropic_route_gets_no_response_format_and_the_reply_is_matched() {
     assert_eq!(row.status, "done", "{:?}", row.error);
 
     for body in sent_bodies(&mock).await {
-        assert!(
-            body.get("response_format").is_none(),
-            "the Anthropic egress must drop it: {body}"
+        assert!(body.get("response_format").is_none(), "{body}");
+        let format = &body["output_config"]["format"];
+        assert_eq!(format["type"], json!("json_schema"), "{body}");
+        assert_eq!(
+            format["schema"]["properties"]["category"]["enum"],
+            json!(["Work", "Finance", "Other"]),
+            "{body}"
         );
     }
     let detail = get_json(&base, &format!("/api/agents/runs/{job_id}")).await;
@@ -455,7 +461,7 @@ async fn an_anthropic_route_gets_no_response_format_and_the_reply_is_matched() {
 #[tokio::test]
 async fn a_classify_without_a_model_is_refused_before_any_tool_call() {
     let mock = MockServer::start().await;
-    let state = gateway(&mock.uri(), Protocol::Openai).await;
+    let state = gateway(&mock.uri(), Protocol::OpenaiCompatible).await;
     let (url, calls) = mcp_stub().await;
     register_stub(&state, &url).await;
     let base = serve(state.clone()).await;
@@ -580,7 +586,7 @@ async fn a_second_start_returns_the_run_already_in_flight() {
         )
         .mount(&mock)
         .await;
-    let state = gateway(&mock.uri(), Protocol::Openai).await;
+    let state = gateway(&mock.uri(), Protocol::OpenaiCompatible).await;
     let (url, _calls) = mcp_stub().await;
     register_stub(&state, &url).await;
     let base = serve(state.clone()).await;
@@ -664,7 +670,7 @@ async fn slow_gateway() -> (MockServer, SharedState) {
         )
         .mount(&mock)
         .await;
-    let state = gateway(&mock.uri(), Protocol::Openai).await;
+    let state = gateway(&mock.uri(), Protocol::OpenaiCompatible).await;
     (mock, state)
 }
 
@@ -818,7 +824,7 @@ async fn a_cancel_reaches_a_streaming_model_call_in_flight() {
     let (upstream, hits, closed) = hanging_upstream().await;
     // The two clocks that could also end this run are minutes away, so a prompt
     // finish can only be the cancel.
-    let state = gateway_with_timeout(&upstream, Protocol::Openai, 120_000).await;
+    let state = gateway_with_timeout(&upstream, Protocol::OpenaiCompatible, 120_000).await;
     assert!(
         state.snapshot().settings.responses_timeout_seconds >= 60,
         "this case proves cancel beats the deadline, so the deadline has to be far off"

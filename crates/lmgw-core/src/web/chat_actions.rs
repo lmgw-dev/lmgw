@@ -206,7 +206,8 @@ pub async fn delete_message(
 ///   again for the new one (`kb_refs`, when sent, replaces its `#` picks).
 ///   A dictated message whose text changed becomes a typed turn: its
 ///   `voice` goes, since the text is no longer what was spoken
-///   (chat-voice §3).
+///   (chat-voice §3). Its `origin` stays unless the edit sends one
+///   (chat-plane design §9.10).
 ///   Everything that can refuse or take time — the checks, the model's
 ///   capabilities, which may probe a catalog — happens before anything is
 ///   written, and the rewrite (text, picks, the cut) is one write, so a
@@ -283,9 +284,18 @@ pub async fn edit_message(
                 },
                 None => msg.kb_refs.clone(),
             };
+            // Where the edit was written; none keeps the message's own.
+            let origin = super::chat_origin::of_request(req.origin);
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
             match repo
-                .rewrite_user_message(&state, id, mid, &content, &kb_refs, &caller)
+                .rewrite_user_message(
+                    &state,
+                    id,
+                    mid,
+                    &content,
+                    (&kb_refs, origin.as_deref()),
+                    &caller,
+                )
                 .await
             {
                 Ok(true) => {}

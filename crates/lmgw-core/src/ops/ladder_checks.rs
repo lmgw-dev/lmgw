@@ -425,20 +425,19 @@ pub(super) async fn ladder_footprint_advisories(
             image: m.image.clone(),
             extra_run_args: m.extra_run_args.clone(),
             warm_start: m.warm_start,
-            hold_fallback_mode: m.hold_fallback_mode,
-            hold_fallback: m.hold_fallback.clone(),
+            fallback: m.fallback.clone(),
             capabilities_override: m.capabilities_override.clone(),
             ladder: Vec::new(),
         };
         let fp = plans.local(models_dir, &probe).await;
         if fp.total_bytes > budget {
             out.push(format!(
-                "rung {rung_no}'s estimated footprint ({:.1} GiB: {}) is over the card's \
-                 capacity minus headroom ({:.1} GiB) — it may not fit when the ladder climbs to \
+                "rung {rung_no}'s estimated footprint ({}: {}) is over the card's \
+                 capacity minus headroom ({}) — it may not fit when the ladder climbs to \
                  it; VRAM is measured for real at climb time, this is only an estimate",
-                fp.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                crate::hf::fmt_bytes(fp.total_bytes),
                 r.gguf_path,
-                budget as f64 / (1024.0 * 1024.0 * 1024.0),
+                crate::hf::fmt_bytes(budget),
             ));
         }
     }
@@ -529,8 +528,7 @@ pub async fn ladder_rung_plan(
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: Vec::new(),
     };

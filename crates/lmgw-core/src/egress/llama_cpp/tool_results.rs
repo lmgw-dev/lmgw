@@ -87,6 +87,7 @@ enum Part {
 impl ToolResultRenderer for LlamaToolResults<'_> {
     fn render(&self, id: &str, content: &[ToolResultBlock]) -> Value {
         let mut parts = Vec::with_capacity(content.len());
+        let mut verbatim: Vec<bool> = Vec::with_capacity(content.len());
         let mut dropped = Vec::new();
         for block in content {
             match block {
@@ -99,6 +100,11 @@ impl ToolResultRenderer for LlamaToolResults<'_> {
                         dropped.push(format!("{} ({why})", tool_image_note(mime, data)));
                     }
                 },
+                // What of it reads as text; the request names the rest
+                // (`content.<type>`).
+                ToolResultBlock::AnthropicBlock(b) => {
+                    parts.extend(b.tool_text().text.map(Part::Text))
+                }
                 // One block at a time through the shared flattening: each
                 // block is one of its parts, so joined they are its string.
                 other => {
@@ -107,6 +113,10 @@ impl ToolResultRenderer for LlamaToolResults<'_> {
                     dropped.extend(notes);
                 }
             }
+            verbatim.resize(
+                parts.len(),
+                matches!(block, ToolResultBlock::AnthropicBlock(_)),
+            );
         }
         if !dropped.is_empty() {
             tracing::warn!(
@@ -117,13 +127,10 @@ impl ToolResultRenderer for LlamaToolResults<'_> {
             );
         }
         if !parts.iter().any(|p| matches!(p, Part::Image(_))) {
-            let text: Vec<String> = parts
-                .into_iter()
-                .map(|p| match p {
-                    Part::Text(t) | Part::Image(t) => t,
-                })
-                .collect();
-            return Value::String(text.join("\n"));
+            let text = parts.into_iter().map(|p| match p {
+                Part::Text(t) | Part::Image(t) => t,
+            });
+            return Value::String(crate::ir::join_tool_texts(text.zip(verbatim)));
         }
         Value::Array(
             parts
@@ -171,7 +178,7 @@ impl ImageFormat {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
@@ -182,7 +189,7 @@ impl ImageFormat {
     }
 
     /// The format a declared mime names, case and parameters aside.
-    fn from_mime(mime: &str) -> Option<Self> {
+    pub(crate) fn from_mime(mime: &str) -> Option<Self> {
         match essence(mime).as_str() {
             "image/png" => Some(Self::Png),
             "image/jpeg" | "image/jpg" => Some(Self::Jpeg),
@@ -194,7 +201,7 @@ impl ImageFormat {
     }
 
     /// The format the bytes are, by their magic numbers.
-    fn sniff(head: &[u8]) -> Option<Self> {
+    pub(crate) fn sniff(head: &[u8]) -> Option<Self> {
         if head.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
             Some(Self::Png)
         } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -259,6 +266,13 @@ pub fn image_format(mime: &str, data: &str, webp: bool) -> Result<ImageFormat, S
         .map_err(|why| format!("it is not a {} llama.cpp decodes ({why})", declared.name()))
 }
 
+/// How many images a GIF's bytes hold (`None`: they cannot be walked to
+/// its trailer), for an egress that takes only a still GIF (the OpenAI
+/// platform's Responses wire).
+pub(crate) fn gif_images(bytes: &[u8]) -> Option<u32> {
+    stb::gif_images(bytes)
+}
+
 /// A webp's RIFF container: its size covers a chunk, the data holds it, and
 /// the first chunk is a bitstream (`VP8 `, lossless `VP8L`) or the extended
 /// header (`VP8X`). The rest is ffmpeg's to decode.
@@ -287,7 +301,7 @@ fn essence(mime: &str) -> String {
 
 /// A format's name for a reason: an image mime's subtype without its `x-`,
 /// `vnd.` or `+suffix` (`image/svg+xml` is "svg"), any other mime whole.
-fn format_name(mime: &str) -> String {
+pub(crate) fn format_name(mime: &str) -> String {
     let essence = essence(mime);
     match essence.strip_prefix("image/") {
         Some(sub) => {
@@ -313,7 +327,7 @@ fn plain_base64(data: &str) -> bool {
 
 /// The whole image, padded or not; `None` when the base64 does not decode
 /// (a length one past a whole group of four).
-fn decode(data: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode(data: &str) -> Option<Vec<u8>> {
     const LENIENT: GeneralPurpose = GeneralPurpose::new(
         &base64::alphabet::STANDARD,
         GeneralPurposeConfig::new()

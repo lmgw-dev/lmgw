@@ -66,6 +66,8 @@ pub(crate) struct InProcessLog<'a> {
     /// tokens; `Default::default()` when nothing was measured.
     /// [`record_in_process`] fills `requests` when it is left `None`.
     pub quantities: crate::pricing::Quantities,
+    /// See [`LogParams::service_tier`]: the tier the answer reported.
+    pub service_tier: crate::pricing::ServedTier,
 }
 
 /// Write one `request_logs` row for an in-process model call and broadcast it on
@@ -84,6 +86,21 @@ pub(crate) async fn record_in_process(
     error: Option<(&str, String)>,
     state: &AppState,
 ) -> crate::pricing::RowCost {
+    record_in_process_counted(p, status, ttfb_ms, usage, error, None, state).await
+}
+
+/// [`record_in_process`], with lmgw's own count of an answer whose usage
+/// never came (a platform chat stream cut before its usage chunk, openai
+/// egress design §13.6): the budgets' lower bound, never the row's tokens.
+pub(crate) async fn record_in_process_counted(
+    p: InProcessLog<'_>,
+    status: u16,
+    ttfb_ms: Option<i64>,
+    usage: Usage,
+    error: Option<(&str, String)>,
+    local_count: Option<crate::pricing::LocalCount>,
+    state: &AppState,
+) -> crate::pricing::RowCost {
     let total_ms = p.started.elapsed().as_millis() as i64;
     let q = with_requests_default(p.quantities, true, status, error.as_ref().map(|(k, _)| *k));
     let priced = price_call(
@@ -94,7 +111,16 @@ pub(crate) async fn record_in_process(
         p.ingress_proto,
         &usage,
         &q,
+        &p.service_tier,
+        &crate::pricing::HostedCalls::default(),
+        local_count.as_ref(),
     );
+    // A counted answer is one whose usage never came (§13.6).
+    // A stop here is the consumer's, not a client that left.
+    let price_note = priced.price_note(local_count.map(|_| match error.as_ref() {
+        Some(("canceled", _)) => crate::pricing::STOPPED_NO_USAGE,
+        e => super::no_usage_reason(p.streamed, e, false),
+    }));
     let row = NewRequestLog {
         client_key: priced.client_key,
         ingress_proto: p.ingress_proto.to_string(),
@@ -131,12 +157,15 @@ pub(crate) async fn record_in_process(
         // A model call: no approval decides one.
         approved_by: None,
         via: p.key.via,
+        service_tier: p.service_tier.relayed(),
+        price_note,
+        priced_alias: priced.priced_alias,
     };
     let share = row.row_cost();
     // A caller stamped with a run (`X-Lmgw-Run` on a `/v1/responses` or a
     // realtime request) has its rows on that run's total, as `record` puts
     // a `/v1` request's there (§3.1).
-    note_on_run(state, p.key.run, &row, &usage);
+    note_on_run(state, p.key.run, &row, &usage, q.requests);
     let log_id = store::insert_request_log(&state.db, &row)
         .await
         .unwrap_or_else(|e| {
@@ -216,19 +245,36 @@ pub(crate) async fn sample_once(
 /// the request's fallback, because a ladder climb could not happen (ladder
 /// design §12 entry 8) — `/v1/responses`, whose unary answer leaves after its
 /// last turn and so can still say so (review finding 13). The first such
-/// turn's alias and reason are kept.
+/// turn's chain is kept (openai egress design §14.5).
 #[derive(Debug, Default)]
-pub(crate) struct FallbackNote(std::sync::Mutex<Option<(String, FallbackReason)>>);
+pub(crate) struct FallbackNote(std::sync::Mutex<Option<crate::gate::Chain>>);
 
 impl FallbackNote {
-    fn note(&self, alias: String, reason: FallbackReason) {
+    fn note(&self, chain: crate::gate::Chain) {
         let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        slot.get_or_insert((alias, reason));
+        slot.get_or_insert(chain);
     }
 
-    /// The fallback a turn handed over to, if any did.
-    pub(crate) fn take(&self) -> Option<(String, FallbackReason)> {
+    /// The chain a turn handed over along, if any did.
+    pub(crate) fn take(&self) -> Option<crate::gate::Chain> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+/// A rerouted turn's call to the fallback the gate opened, run with the
+/// claim on the model it left (`hold`, the caller's) counted as freeable by
+/// any eviction it makes (`vram::leaving`, openai egress design §14.3): the
+/// caller keeps that claim for its loop's next turn, and this turn's own
+/// lease on it is gone, so a fallback that climbs, or hands on to one that
+/// needs the left model's room, may take it when this claim is its only
+/// user.
+async fn leaving_for<F: std::future::Future>(
+    hold: Option<&crate::vram::LocalHold>,
+    call: F,
+) -> F::Output {
+    match hold {
+        Some(h) => crate::vram::leaving(h, call).await,
+        None => call.await,
     }
 }
 
@@ -286,11 +332,12 @@ pub(crate) fn sample_once_noting<'a>(
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
                 state,
             )
             .await;
@@ -309,6 +356,21 @@ pub(crate) fn sample_once_noting<'a>(
             Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
         };
         let ir: &ChatRequest = &ir;
+        // Flex asked for by a budgeted caller on a scope with no flex price
+        // (openai egress design §13.3), at each turn's open, on the route
+        // this turn takes: a re-route opens its own turn and checks again.
+        if refused.is_none() {
+            refused = priced_refusal(
+                state,
+                &key,
+                ingress_proto,
+                &own.model_alias,
+                route,
+                crate::telemetry::RequestClass::Chat,
+                ir.requested_service_tier().as_deref(),
+            )
+            .err();
+        }
         let egress = for_protocol(route.upstream.protocol);
         let mut params = ir.params.clone().with_defaults(&route.param_defaults);
         // An off this cloud model cannot take as asked goes out in the form it
@@ -387,6 +449,7 @@ pub(crate) fn sample_once_noting<'a>(
                     alias: &ir.model_alias,
                     fallback,
                 },
+                Some(&handover_of(per_route)),
                 |r, p| {
                     Ok(egress
                         .build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, false)?
@@ -400,6 +463,7 @@ pub(crate) fn sample_once_noting<'a>(
                 crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
             };
             let status = resp.status();
+            let answer_headers = resp.headers().clone();
             // A body that could not be read to its end (a timeout, a reset) drops
             // the lease here unfinished: released once llama-server lets go.
             let bytes = resp.bytes().await.map_err(GatewayError::from)?;
@@ -407,19 +471,43 @@ pub(crate) fn sample_once_noting<'a>(
             lease.complete();
             if !status.is_success() {
                 return Err(crate::gate::attribute(
-                    egress.map_error(status.as_u16(), &bytes),
+                    crate::egress::chat_error(
+                        egress,
+                        status.as_u16(),
+                        &answer_headers,
+                        &bytes,
+                        ir.format_ask(),
+                    ),
                     route,
                 ));
             }
-            egress.parse_completion(&bytes).map(Turn::Answered)
+            let c = egress.parse_completion_from(&route.upstream, &bytes)?;
+            // Recorded before the caller has the answer (`answer_items`).
+            if let Some(items) = &c.upstream_items {
+                super::answer_items::remember_in_process(
+                    state,
+                    route,
+                    &key,
+                    &ir.model_alias,
+                    items,
+                )
+                .await;
+            }
+            Ok(Turn::Answered(c))
         }
         .await;
+        // A hand-over that failed (review B6): its row is on the hop that
+        // gave the error, with that hop's reason, not on the route it left.
+        let mut failed: (Option<Box<Route>>, Option<FallbackReason>) = (None, None);
         let result = match result {
             Ok(Turn::Answered(c)) => Ok(c),
             Err(e) => Err(e),
             // The gate refused instead — a candidate alias's deferral: this
             // turn's row records it, on the candidate it was on.
-            Ok(Turn::Rerouted(Err(f))) => Err(f.error),
+            Ok(Turn::Rerouted(Err(f))) => {
+                failed = (f.route, f.headers.fallback_reason());
+                Err(f.error)
+            }
             // The gate sent the turn elsewhere before anything was sent — the
             // request's fallback after a climb that could not happen (ladder
             // design §12 entry 8), or a candidate alias's next pick (§12 entry
@@ -427,16 +515,12 @@ pub(crate) fn sample_once_noting<'a>(
             // sent nothing and logs nothing.
             Ok(Turn::Rerouted(Ok(opened))) => {
                 state.telemetry.request_abandoned();
-                if let (Some(note), Some(fb), Some(reason)) = (
-                    note,
-                    opened.headers.fallback(),
-                    opened.headers.fallback_reason(),
-                ) {
-                    note.note(fb.to_string(), reason);
+                if let (Some(note), Some(_)) = (note, opened.headers.fallback()) {
+                    note.note(opened.headers.chain().clone());
                 }
                 let left =
                     deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-                return sample_once_noting(
+                let rerouted = sample_once_noting(
                     state,
                     opened.hold.as_ref(),
                     &opened.route,
@@ -447,8 +531,8 @@ pub(crate) fn sample_once_noting<'a>(
                     left,
                     note,
                     per_route.map(|(p, _)| (p, Some(&opened.headers))),
-                )
-                .await;
+                );
+                return leaving_for(hold, rerouted).await;
             }
         };
 
@@ -456,37 +540,58 @@ pub(crate) fn sample_once_noting<'a>(
             p.fitted(&fitted);
         }
         // One shared log row either way — the §8 "logs like any request" guarantee.
+        // A failed whole Response keeps the usage and tier it reported
+        // (decision 22); every other error bills nothing.
+        let failed_answer = result.as_ref().err().and_then(GatewayError::failed_answer);
         let (status, usage, error): (u16, Usage, Option<(&str, String)>) = match &result {
             Ok(c) => (StatusCode::OK.as_u16(), c.usage, None),
             Err(e) => (
                 e.http_status().as_u16(),
-                Usage::default(),
-                Some((e.kind(), e.to_string())),
+                failed_answer.map_or_else(Usage::default, |f| f.usage),
+                Some((e.kind(), e.log_text())),
             ),
         };
-        record_in_process(
+        // A platform answer that reported no usage: counted locally, the
+        // budgets' lower bound (§13.4); a failed one's prompt alike.
+        let local_count = match &result {
+            Ok(c) if !c.usage.reported() => {
+                let output = crate::egress::openai::completion_text(c);
+                crate::egress::openai::count_chat(route, ir, output).await
+            }
+            Err(_) if failed_answer.is_some_and(|f| !f.usage.reported()) => {
+                crate::egress::openai::count_chat(route, ir, String::new()).await
+            }
+            _ => None,
+        };
+        record_in_process_counted(
             InProcessLog {
                 key,
                 ingress_proto,
                 alias: &ir.model_alias,
-                route,
+                route: failed.0.as_deref().unwrap_or(route),
                 started,
                 streamed: false,
                 class: RequestClass::Chat,
                 timings: None,
                 max_tokens_clamped,
-                fallback,
+                fallback: failed.1.or(fallback),
                 rung,
                 degraded: crate::degraded::join([
                     per_route.and_then(|(p, _)| p.degraded()),
                     lease_degraded,
                 ]),
                 quantities: Default::default(),
+                service_tier: match (&result, failed_answer) {
+                    (Ok(c), _) => ir.served_tier(route, c.service_tier.clone()),
+                    (Err(_), Some(f)) => ir.served_tier(route, f.service_tier.clone()),
+                    (Err(_), None) => Default::default(),
+                },
             },
             status,
             Some(started.elapsed().as_millis() as i64),
             usage,
             error,
+            local_count,
             state,
         )
         .await;
@@ -625,6 +730,30 @@ pub(crate) trait PerRoute: Send + Sync {
     fn degraded(&self) -> Option<String> {
         None
     }
+
+    /// What a turn carries to be handed on at the send (an exhausted quota,
+    /// an unreachable upstream, openai egress design §14.4): lmgw's own
+    /// callers' by default ([`super::reasoning_fit::Handover::in_process`]).
+    /// A caller that carries a client's request carries that request's —
+    /// a `/v1/responses` run its route check, whether it is a guest, and
+    /// the chain it was handed along; `rerouted` is the gate's headers when
+    /// the gate chose this turn's route.
+    fn handover(
+        &self,
+        _rerouted: Option<&crate::gate::GateHeaders>,
+    ) -> super::reasoning_fit::Handover {
+        super::reasoning_fit::Handover::in_process()
+    }
+}
+
+/// The hand-over of a turn `per_route` sends ([`PerRoute::handover`]).
+fn handover_of(
+    per_route: Option<(&dyn PerRoute, Option<&crate::gate::GateHeaders>)>,
+) -> super::reasoning_fit::Handover {
+    match per_route {
+        Some((p, rerouted)) => p.handover(rerouted),
+        None => super::reasoning_fit::Handover::in_process(),
+    }
 }
 
 /// The error of a call its consumer stopped before the upstream answered
@@ -686,6 +815,21 @@ pub(crate) fn stream_once_on<'a>(
             Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
         };
         let ir: &ChatRequest = &ir;
+        // Flex asked for by a budgeted caller on a scope with no flex price
+        // (openai egress design §13.3), at each turn's open, on the route
+        // this turn takes: a re-route opens its own turn and checks again.
+        if refused.is_none() {
+            refused = priced_refusal(
+                state,
+                &key,
+                ingress_proto,
+                &own.model_alias,
+                route,
+                crate::telemetry::RequestClass::Chat,
+                ir.requested_service_tier().as_deref(),
+            )
+            .err();
+        }
         let egress = for_protocol(route.upstream.protocol);
         let mut params = ir.params.clone().with_defaults(&route.param_defaults);
         // As in `sample_once`: an off fitted to the model (§5.6) — not for a
@@ -760,6 +904,7 @@ pub(crate) fn stream_once_on<'a>(
             // left was sent is not being worked on.
             // Boxed: this select is a 226 KB poll frame in a debug build when the send
             // sits inline, on the turn -> gate chain (2 MiB test stack).
+            let hand = handover_of(per_route);
             let send = Box::pin(super::reasoning_fit::send_chat(
                 state,
                 hold,
@@ -778,6 +923,7 @@ pub(crate) fn stream_once_on<'a>(
                     alias: &ir.model_alias,
                     fallback,
                 },
+                Some(&hand),
                 |r, p| {
                     prompt_sent.store(true, Ordering::Relaxed);
                     egress.build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, true)
@@ -800,6 +946,7 @@ pub(crate) fn stream_once_on<'a>(
             };
             let status = resp.status();
             if !status.is_success() {
+                let answer_headers = resp.headers().clone();
                 // Raced against the stop like every other wait here: with no
                 // deadline of the caller's (realtime passes `Duration::MAX`) and
                 // an upstream `request_timeout` of 0, an error body that stalls
@@ -820,20 +967,33 @@ pub(crate) fn stream_once_on<'a>(
                 lease.end(bytes.is_ok());
                 let bytes = bytes.unwrap_or_default();
                 return Err(crate::gate::attribute(
-                    egress.map_error(status.as_u16(), &bytes),
+                    crate::egress::chat_error(
+                        egress,
+                        status.as_u16(),
+                        &answer_headers,
+                        &bytes,
+                        ir.format_ask(),
+                    ),
                     route,
                 ));
             }
             outcome = drive_upstream_until(
                 resp,
-                egress.new_decoder(),
+                egress.decoder_for(&route.upstream),
                 Some(effective),
                 started,
                 &state.telemetry,
+                route.upstream.protocol == crate::config::Protocol::Openai,
                 |delta| {
                     acc.on_delta(&delta);
                     produced += super::produced_chars(&delta);
-                    if matches!(&delta, crate::ir::StreamDelta::ReasoningDelta(r) if !r.is_empty()) {
+                    // A signed thinking block is reasoning too, an omitted
+                    // display's that streams no text included.
+                    if matches!(
+                        &delta,
+                        crate::ir::StreamDelta::ReasoningDelta(r) if !r.is_empty()
+                    ) || matches!(&delta, crate::ir::StreamDelta::ReasoningSignature { .. })
+                    {
                         reasoned = true;
                     }
                     sink.on_delta(&delta);
@@ -850,6 +1010,11 @@ pub(crate) fn stream_once_on<'a>(
             // go of the slot after anything else. (A cancelled turn — the agent
             // loop dropping this future — drops the lease unfinished too.)
             lease.end(outcome.completed);
+            // Recorded before the turn returns to its caller (`answer_items`).
+            if let Some(items) = &outcome.upstream_items {
+                super::answer_items::remember_in_process(state, route, &key, &ir.model_alias, items)
+                    .await;
+            }
             Ok(Turn::Answered(()))
         }
         .await;
@@ -857,18 +1022,24 @@ pub(crate) fn stream_once_on<'a>(
         if let Some((p, _)) = per_route {
             p.fitted(&fitted);
         }
+        // A hand-over that failed (review B6): its row is on the hop that
+        // gave the error, with that hop's reason, not on the route it left.
+        let mut failed: (Option<Box<Route>>, Option<FallbackReason>) = (None, None);
         let result = match result {
             Ok(Turn::Answered(())) => Ok(()),
             Err(e) => Err(e),
             // See `sample_once`: a refusal instead is this turn's row.
-            Ok(Turn::Rerouted(Err(f))) => Err(f.error),
+            Ok(Turn::Rerouted(Err(f))) => {
+                failed = (f.route, f.headers.fallback_reason());
+                Err(f.error)
+            }
             // See `sample_once`: the rerouted call is the turn.
             Ok(Turn::Rerouted(Ok(opened))) => {
                 in_flight.logging();
                 state.telemetry.request_abandoned();
                 let left =
                     deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-                return stream_once_on(
+                let rerouted = stream_once_on(
                     state,
                     opened.hold.as_ref(),
                     &opened.route,
@@ -879,8 +1050,8 @@ pub(crate) fn stream_once_on<'a>(
                     left,
                     sink,
                     per_route.map(|(p, _)| (p, Some(&opened.headers))),
-                )
-                .await;
+                );
+                return leaving_for(hold, rerouted).await;
             }
         };
 
@@ -891,21 +1062,35 @@ pub(crate) fn stream_once_on<'a>(
         // estimated where the upstream had not said yet; so is a call stopped
         // before the upstream answered (`stop::row_status`), whose prompt counts
         // once it was sent.
-        let mut usage = acc.usage();
+        // The stream's, not the sink's: a stop at the finish leaves the sink
+        // out of the usage chunk that `drive_upstream_until` still reads.
+        let mut usage = outcome.usage;
         let stopped = result.is_ok() && outcome.error.is_none() && outcome.aborted;
         let stopped_unanswered =
             prompt_sent.into_inner() && matches!(&result, Err(e) if super::is_canceled(e));
+        // On an `openai` row a stop is counted locally, as the budgets'
+        // lower bound, instead of estimated as usage (`stop::stopped_cost`).
+        let mut local_count = None;
         let error: Option<(String, String)> = match &result {
             Err(_) if stopped_unanswered => {
-                let (u, note) = super::unanswered_usage(ir);
-                usage = u;
-                Some(("canceled".to_string(), note))
+                let c = super::unanswered_cost(route, ir).await;
+                (usage, local_count) = (c.usage, c.count);
+                Some(("canceled".to_string(), c.message))
             }
-            Err(e) => Some((e.kind().to_string(), e.to_string())),
+            Err(e) => Some((e.kind().to_string(), e.log_text())),
             Ok(()) if stopped => {
-                let (u, note) = super::stopped_usage(usage, outcome.timings.as_ref(), ir, produced);
-                usage = u;
-                Some(("canceled".to_string(), note))
+                let relayed = std::mem::take(&mut outcome.relayed);
+                let c = super::stopped_cost(
+                    route,
+                    usage,
+                    outcome.timings.as_ref(),
+                    ir,
+                    produced,
+                    relayed,
+                )
+                .await;
+                (usage, local_count) = (c.usage, c.count);
+                Some(("canceled".to_string(), c.message))
             }
             Ok(()) => outcome.error.clone(),
         };
@@ -923,30 +1108,39 @@ pub(crate) fn stream_once_on<'a>(
         } else {
             crate::pricing::Quantities::default()
         };
+        // A platform stream that ended before its usage chunk and was not
+        // stopped (a failure mid-stream): its text, counted locally, bounds
+        // what the budgets see of it (§13.6).
+        if local_count.is_none() && result.is_ok() && !usage.reported() {
+            let relayed = std::mem::take(&mut outcome.relayed);
+            local_count = crate::egress::openai::count_chat(route, ir, relayed).await;
+        }
         in_flight.logging();
-        let share = record_in_process(
+        let share = record_in_process_counted(
             InProcessLog {
                 key,
                 ingress_proto,
                 alias: &ir.model_alias,
-                route,
+                route: failed.0.as_deref().unwrap_or(route),
                 started,
                 streamed: true,
                 class: RequestClass::Chat,
                 timings: outcome.timings,
                 max_tokens_clamped,
-                fallback,
+                fallback: failed.1.or(fallback),
                 rung,
                 degraded: crate::degraded::join([
                     per_route.and_then(|(p, _)| p.degraded()),
                     lease_degraded,
                 ]),
                 quantities,
+                service_tier: ir.served_tier(route, outcome.service_tier.clone()),
             },
             status,
             outcome.ttfb_ms,
             usage,
             error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
+            local_count,
             state,
         )
         .await;
@@ -965,8 +1159,11 @@ pub(crate) fn stream_once_on<'a>(
         // answer, so it fails loudly instead (§14).
         if let Some((kind, msg)) = error {
             return Err(match kind.as_str() {
-                "timeout" => GatewayError::Timeout,
+                // The upstream fell silent, and the message says for how
+                // long (`super::silence`).
+                super::silence::KIND => GatewayError::Stalled(msg),
                 "transport" => GatewayError::Transport(msg),
+                "unreachable" => GatewayError::Unreachable(msg),
                 _ => GatewayError::Upstream {
                     status: 502,
                     message: msg,

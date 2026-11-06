@@ -682,7 +682,7 @@ impl GpuProbe for ScriptedGpu {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
         Ok(vec![GpuMemory {
             index: 0,
-            name: "FakeGPU 4090".into(),
+            name: "FakeGPU 3090".into(),
             total_bytes: 24 << 30,
             used_bytes: 2 << 30,
             free_bytes: 22 << 30,
@@ -710,7 +710,7 @@ impl GpuProbe for ScriptedGpu {
     }
 
     fn driver_version(&self) -> Option<String> {
-        Some("615.71.09".into())
+        Some("600.10.01".into())
     }
 }
 

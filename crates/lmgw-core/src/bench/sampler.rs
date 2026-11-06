@@ -21,7 +21,7 @@
 //! least one whole tick of counter (or power) readings inside it; a point
 //! with a shorter window gets no energy, and says why
 //! ([`EnergyReading::TooShort`]). Prefill's TTFT windows at 512–2048 tokens
-//! (15–60 ms on a 4090) are the ones this catches.
+//! (15–60 ms on a desktop card) are the ones this catches.
 //!
 //! **Sums over devices.** Every device the probe lists counts: VRAM, power and
 //! energy are summed, temperature is the hottest, clock events are OR-ed. A

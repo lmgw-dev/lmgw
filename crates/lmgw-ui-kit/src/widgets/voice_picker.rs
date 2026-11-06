@@ -188,6 +188,7 @@ impl VoiceList {
 /// Each read takes a ticket, so a list still in flight for the model
 /// picked before never lands over this one.
 pub fn use_voices(tts: Signal<String>) -> VoiceList {
+    let http = crate::http::use_http();
     let catalog = use_model_catalog();
     let voices = RwSignal::new(Voices::NoModel);
     let wanted = RwSignal::new(false);
@@ -225,7 +226,7 @@ pub fn use_voices(tts: Signal<String>) -> VoiceList {
                     String::from(js_sys::encode_uri_component(&t))
                 );
                 scope.spawn(async move {
-                    let res = crate::http::get::<Value>(url).await;
+                    let res = http.get::<Value>(url).await;
                     let v = match res {
                         Ok(v) => Voices::Loaded {
                             names: v["voices"]

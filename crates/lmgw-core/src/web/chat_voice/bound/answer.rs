@@ -69,9 +69,9 @@ mod tests {
     #[tokio::test]
     async fn a_continuation_s_refusals_keep_their_meaning() {
         let e = refused(refusal(task_code::NOTHING_TO_ANSWER), true).await;
-        assert_eq!(e.code(), "empty_turn", "{e}");
+        assert_eq!(e.kind(), "empty_turn", "{e}");
         let e = refused(refusal(task_code::TURN_RUNNING), true).await;
-        assert_eq!(e.code(), "turn_running", "{e}");
+        assert_eq!(e.kind(), "turn_running", "{e}");
         // Any other turn's refusal is lmgw's own, as before.
         let e = refused(refusal(task_code::NOTHING_TO_ANSWER), false).await;
         assert!(matches!(e, GatewayError::Internal(_)), "{e}");

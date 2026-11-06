@@ -182,12 +182,13 @@ impl Registry {
         name: &str,
         stop_timeout: Duration,
     ) -> Option<String> {
-        let bound = Duration::from_secs(STOP_GRACE_SECONDS) + stop_timeout;
+        let bound = Duration::from_secs(STOP_GRACE_SECONDS).saturating_add(stop_timeout);
         match tokio::time::timeout(bound, self.remove_unmanaged(name)).await {
             Ok(removed) => removed.err(),
             Err(_) => Some(format!(
-                "removing '{name}' did not finish within {bound:?} (the stop grace plus \
-                 vram.unload_timeout_seconds)"
+                "removing '{name}' did not finish within {bound:?} (the stop grace plus the \
+                 unload timeout, {})",
+                crate::config::UNLOAD_TIMEOUT_LABEL
             )),
         }
     }

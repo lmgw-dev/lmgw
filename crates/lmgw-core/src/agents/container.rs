@@ -260,6 +260,66 @@ pub trait Spawner: Send + Sync {
     }
 }
 
+/// A spawner whose podman calls pass lmgw's CDI check first
+/// ([`OwnSpec::refuse_unpointed`]): one that gives a container the graphics
+/// card without lmgw's spec dir before its subcommand fails with that
+/// sentence instead of starting on the system's spec. What
+/// [`crate::state::AppState::agent_spawner`] hands out, around whichever
+/// spawner is installed.
+///
+/// [`OwnSpec::refuse_unpointed`]: crate::runtime::cdi::OwnSpec::refuse_unpointed
+pub struct CdiChecked {
+    pub inner: Arc<dyn Spawner>,
+    pub cdi: Arc<crate::runtime::cdi::OwnSpec>,
+}
+
+impl CdiChecked {
+    fn check(&self, program: &str, args: &[String]) -> std::io::Result<()> {
+        if program != "podman" {
+            return Ok(());
+        }
+        self.cdi
+            .refuse_unpointed(args)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))
+    }
+}
+
+impl Spawner for CdiChecked {
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            self.check(program, args)?;
+            self.inner.spawn(program, args).await
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.check(program, args)?;
+            self.inner.run(program, args).await
+        })
+    }
+
+    fn spawn_env<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            self.check(program, args)?;
+            self.inner.spawn_env(program, args, env).await
+        })
+    }
+}
+
 /// The real spawner: `podman` as a child process, a
 /// [`crate::child::system_tool`].
 pub struct TokioSpawner;

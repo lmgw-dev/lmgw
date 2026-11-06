@@ -74,7 +74,7 @@
         ]
       },
       {
-        "content": "{\n  \"mcp_servers\": []\n}",
+        "content": "{\"mcp_servers\":[]}",
         "role": "tool",
         "tool_call_id": "c1"
       }

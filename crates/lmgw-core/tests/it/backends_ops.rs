@@ -136,8 +136,7 @@ fn local_model(model_id: &str, image: &str) -> store::NewLocalModel {
         image: Some(image.into()),
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -203,7 +202,7 @@ async fn a_build_is_created_listed_read_updated_duplicated_and_deleted() {
     );
 
     let mut spec = h.spec();
-    spec.notes = "pinned for the 4090".into();
+    spec.notes = "pinned for the 3090".into();
     spec.keep_runs = None;
     let updated = op_ok(
         &gw,
@@ -211,14 +210,14 @@ async fn a_build_is_created_listed_read_updated_duplicated_and_deleted() {
         json!({"action": "update", "id": id, "spec": spec}),
     )
     .await;
-    assert_eq!(updated["build"]["notes"], "pinned for the 4090");
+    assert_eq!(updated["build"]["notes"], "pinned for the 3090");
     assert!(updated["build"]["keep_runs"].is_null());
 
     let copy = op_ok(&gw, "build_set", json!({"action": "duplicate", "id": id})).await;
     let copy_id = copy["build"]["id"].as_i64().unwrap();
     assert_ne!(copy_id, id);
     assert_eq!(copy["build"]["slug"], "official-master-copy");
-    assert_eq!(copy["build"]["notes"], "pinned for the 4090");
+    assert_eq!(copy["build"]["notes"], "pinned for the 3090");
     let named = op_ok(
         &gw,
         "build_set",
@@ -1354,4 +1353,43 @@ async fn full_defines_runs_and_reads_a_build_through_the_tools() {
     )
     .await;
     assert!(deleted["build"].is_null());
+}
+
+#[tokio::test]
+async fn a_run_says_whether_its_image_is_still_on_this_machine() {
+    let h = Harness::new().await;
+    let gw = common::serve(h.state.clone()).await;
+    let id = create(&gw, h.spec()).await;
+    let (here, gone) = ("4".repeat(64), "5".repeat(64));
+    let imm_a = imm(4);
+    h.podman.add_image(&here, &[&imm_a], &[]);
+    let kept = seed_run(&h, id, &here, &[&imm_a], false).await;
+    let lost = seed_run(&h, id, &gone, &[&imm(5)], false).await;
+
+    let got = op_ok(&gw, "build_get", json!({"id": id})).await;
+    let by_id = |run: i64| {
+        got["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == run)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_id(kept)["image_present"], true);
+    // The id stays as history; only the flag changes.
+    assert_eq!(by_id(lost)["image_present"], false);
+    assert_eq!(by_id(lost)["image_id"], gone);
+    // The Builds tab's row reads the same for its newest run.
+    let list = op_ok(&gw, "builds", json!({})).await;
+    assert_eq!(list["builds"][0]["last_run"]["id"], lost);
+    assert_eq!(list["builds"][0]["last_run"]["image_present"], false);
+
+    // Podman cannot be asked: unknown, never "deleted".
+    h.podman.world().fail_images = true;
+    let got = op_ok(&gw, "build_get", json!({"id": id})).await;
+    for r in got["runs"].as_array().unwrap() {
+        assert!(r["image_present"].is_null(), "{r}");
+    }
+    assert!(got["usage_error"].is_string(), "{got}");
 }

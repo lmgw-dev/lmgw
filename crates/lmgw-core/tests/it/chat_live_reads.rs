@@ -2,14 +2,15 @@
 //! (client-apps design §3.6), beyond the frames themselves (`chat_events`):
 //!
 //! - `GET /chat/api/threads/rows?ids=` answers the named rows exactly as the
-//!   list lists them, leaves out what is not there, and is the owner's
-//!   alone (review CL-11);
+//!   list lists them and leaves out what is not there (review CL-11); a
+//!   device reads them too, since a device may host the Chat (chat-plane
+//!   design D2; what L3 hides from it is `device_chat::plane`'s);
 //! - the server's side of a draft whose conversation was deleted elsewhere
 //!   (review CL-14): the page's reads while it waits write nothing and leave
 //!   an ongoing folder's current thread where the other client put it, and
 //!   the folder's own "New conversation" takes the draft. That the page
-//!   makes nothing until Send is pinned by `chat_page_gone_scan` and lmgw-ui
-//!   (`pages/chat_sync/gone/flow.rs`), and driven by
+//!   makes nothing until Send is pinned by `chat_page_gone_scan` and lmgw-chat-ui
+//!   (`chat_sync/gone/flow.rs`), and driven by
 //!   `scripts/drive/chat-live.json`.
 
 use lmgw_core::store;
@@ -131,10 +132,10 @@ async fn the_rows_route_answers_the_named_rows_as_the_list_lists_them() {
     assert_eq!((s, v["code"].as_str()), (400, Some("bad_request")), "{v}");
     assert!(v["message"].as_str().unwrap().contains("'x'"), "{v}");
 
-    // The owner's alone, off the device listener's face (device link
-    // design §4.6): a device's own feed carries rows.
+    // A device's too (chat-plane design D2), the same row.
     let (s, v) = get(&w, &d.client, &format!("/chat/api/threads/rows?ids={a}")).await;
-    assert_eq!(s, 404, "{v}");
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(ids(&v), vec![a], "{v}");
 }
 
 /// The server's side of the rescue, request by request: Kai deletes the

@@ -103,7 +103,7 @@ pub async fn rpc(gw: &Gw, session: Option<&str>, body: Value) -> (Option<String>
 /// Read a tool's text into `T` and write it out again: the same text.
 pub fn read_back<T: DeserializeOwned + Serialize>(text: &str) -> T {
     let typed: T = serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"));
-    let again = serde_json::to_string_pretty(&serde_json::to_value(&typed).unwrap()).unwrap();
+    let again = serde_json::to_string(&serde_json::to_value(&typed).unwrap()).unwrap();
     assert_eq!(again, text, "writing the type back changed the tool's text");
     typed
 }

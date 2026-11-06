@@ -68,11 +68,12 @@ pub(crate) fn refusal(e: &GatewayError, images: bool) -> Option<Refusal> {
         GatewayError::Unsupported(m) if m == crate::gate::count::AUDIO_UNBOUNDED => {
             Some(Refusal::Guard)
         }
-        GatewayError::ContextExceeded { .. } => Some(Refusal::Server),
-        GatewayError::Upstream {
-            status: 400 | 413 | 415 | 422,
-            ..
-        } => Some(Refusal::Server),
+        GatewayError::ContextExceeded { .. } | GatewayError::ContextExceededAsWorded { .. } => {
+            Some(Refusal::Server)
+        }
+        // `Upstream` and the platform's relayed 4xx (`UpstreamRelayed`) alike.
+        e if matches!(e.upstream_status(), Some(400 | 413 | 415 | 422)) => Some(Refusal::Server),
+        // A 500 is never relayed (only a 4xx is), so `Upstream` alone.
         GatewayError::Upstream {
             status: 500,
             message,
@@ -90,7 +91,8 @@ pub(crate) fn refusal(e: &GatewayError, images: bool) -> Option<Refusal> {
 /// whatever the transcript would meet, and kept at once (`super`'s module
 /// doc).
 pub(super) fn names_audio(e: &GatewayError) -> bool {
-    matches!(e, GatewayError::Upstream { message, .. } if message.to_lowercase().contains("audio"))
+    e.upstream_message()
+        .is_some_and(|m| m.to_lowercase().contains("audio"))
 }
 
 /// Whether `e`, ending an audio attempt before anything was said, is the

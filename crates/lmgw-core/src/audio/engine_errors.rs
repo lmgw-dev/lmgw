@@ -60,7 +60,7 @@ pub fn explain_speech(e: GatewayError, model: &str, voice: Option<&str>) -> Gate
             code: ESPEAK_CODE,
             message: format!(
                 "'{model}' needs eSpeak NG, which this audio.cpp image lacks — rebuild the \
-                 audio.cpp image on the Backends page (builds since 2026-10-01 include it), then \
+                 audio.cpp image on the Engines page (builds since 2026-10-01 include it), then \
                  re-apply the audio containers (audio.cpp said: {})",
                 message.trim()
             ),
@@ -94,7 +94,7 @@ mod tests {
     }
 
     fn code(e: &GatewayError) -> &'static str {
-        e.code()
+        e.kind()
     }
 
     #[test]
@@ -159,7 +159,7 @@ mod tests {
         let m = e.to_string();
         assert!(m.starts_with("'audio/sanotts-de' needs eSpeak NG"), "{m}");
         assert!(
-            m.contains("Backends page") && m.contains("2026-10-01"),
+            m.contains("Engines page") && m.contains("2026-10-01"),
             "{m}"
         );
     }

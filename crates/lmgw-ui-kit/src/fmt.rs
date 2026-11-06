@@ -1,22 +1,8 @@
 //! Small display helpers shared across pages.
 
-/// Bytes → "18.6 GB" (decimal units, one decimal below 100).
-pub fn human_bytes(b: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
-    let mut v = b as f64;
-    let mut unit = 0;
-    while v >= 1000.0 && unit < UNITS.len() - 1 {
-        v /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{b} B")
-    } else if v < 100.0 {
-        format!("{v:.1} {}", UNITS[unit])
-    } else {
-        format!("{v:.0} {}", UNITS[unit])
-    }
-}
+/// Sizes in words: binary units through the one shared formatter
+/// (`lmgw_api_types::units`, D160).
+pub use lmgw_api_types::units::{fmt_bytes, fmt_bytes_of, fmt_bytes_so_far};
 
 /// Integer with thin-space thousands grouping: 131072 → "131 072".
 pub fn grouped(n: u64) -> String {

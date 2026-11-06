@@ -5,10 +5,11 @@
 //! `lmgw__local_model_plan` already uses: GGUF metadata plus the section's own
 //! flags. These terms are derivable and are read, never assumed:
 //!
-//! * **weights** — the byte size of the GGUF, plus its projector and its
-//!   speculative drafter, because llama-server loads all three into the same
-//!   device memory; for a chat row less the input embeddings llama.cpp keeps
-//!   in host memory ([`chat`]).
+//! * **weights** — the byte size of the GGUF, every part of a split one
+//!   ([`split`]), plus its projector and its speculative drafter, because
+//!   llama-server loads all three into the same device memory; for a chat
+//!   row less the input embeddings llama.cpp keeps in host memory
+//!   ([`chat`]).
 //! * **KV cache** — over the context the *section* actually asks for (not the
 //!   model's trained maximum, unless that is what the section says) at the
 //!   cache precision it actually asks for. A chat row's is laid out as
@@ -46,6 +47,7 @@ use crate::runtime::argv::flag_value;
 
 pub(crate) mod aux;
 pub(crate) mod chat;
+pub(crate) mod split;
 
 /// One model's GPU footprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -204,25 +206,63 @@ fn cpu_only(fp: Footprint) -> Footprint {
 }
 
 /// What [`plan_gguf`] reads off the disk: the weights file's bytes, its
-/// companions' bytes, and its header (or why it could not be read).
+/// companions' bytes, and its header (or why it could not be read). A split
+/// GGUF's bytes are every part's ([`split`]).
 pub(crate) struct GgufFiles {
     pub main_bytes: u64,
     pub companion_bytes: u64,
     pub summary: Result<ModelSummary, String>,
+    /// One sentence per split GGUF among these files with parts missing
+    /// from the models dir ([`split::MissingParts`]). Its bytes above are
+    /// the parts on disk only, so every footprint built from these files
+    /// leads with it ([`Self::flag`]).
+    pub missing: Vec<String>,
 }
 
 impl GgufFiles {
-    /// Blocking: read `gguf_path` and `companions` under `models_dir`.
+    /// Blocking: read `gguf_path` and `companions` under `models_dir`, a
+    /// split GGUF's header as the whole set's ([`split::summarize`]).
     pub(crate) fn read(models_dir: &str, gguf_path: &str, companions: &[String]) -> Self {
+        let summary = split::summarize(Path::new(models_dir), gguf_path);
+        Self::sized(models_dir, gguf_path, companions, summary)
+    }
+
+    /// Blocking: the bytes of `gguf_path` and `companions` under
+    /// `models_dir`, beside a header the caller already has.
+    pub(crate) fn sized(
+        models_dir: &str,
+        gguf_path: &str,
+        companions: &[String],
+        summary: Result<ModelSummary, String>,
+    ) -> Self {
         let root = PathBuf::from(models_dir);
-        let main = root.join(gguf_path.trim_start_matches('/'));
+        let mut missing = Vec::new();
+        let main_bytes = split::charged(&root, gguf_path, &mut missing);
         let companion_bytes = companions.iter().fold(0u64, |sum, c| {
-            sum.saturating_add(file_size(&root.join(c.trim_start_matches('/'))))
+            sum.saturating_add(split::charged(&root, c, &mut missing))
         });
         Self {
-            main_bytes: file_size(&main),
+            main_bytes,
             companion_bytes,
-            summary: gguf::summarize(&main).map_err(|e| e.to_string()),
+            summary,
+            missing,
+        }
+    }
+
+    /// `fp` with the missing parts of a split GGUF among these files said
+    /// first: the weights it charges are short by them.
+    pub(crate) fn flag(&self, fp: Footprint) -> Footprint {
+        if self.missing.is_empty() {
+            return fp;
+        }
+        let lead = self.missing.join(". ");
+        let note = match fp.note {
+            Some(n) => format!("{lead}. {n}"),
+            None => lead,
+        };
+        Footprint {
+            note: Some(note),
+            ..fp
         }
     }
 }
@@ -368,7 +408,7 @@ impl PlanCache {
     /// [`Self::audio`] applies to a model root.
     ///
     /// **The note is not decoration.** Measured (§12.4): a pipeline whose
-    /// files are 6.2 GB on disk is 7.1 GiB resident when idle and needs
+    /// files are 6.1 GiB on disk is 7.1 GiB resident when idle and needs
     /// 13.7 GiB transiently to render one 1024² image, because the compute
     /// buffers are allocated per job and freed after it. So this figure is
     /// neither an upper nor a lower bound for what the card must have free —
@@ -439,7 +479,7 @@ impl PlanCache {
                  and --params-backend make it an upper bound for the idle figure, \
                  and no file size accounts for the compute buffers one generation \
                  allocates (measured: 7.1 GiB idle vs 13.7 GiB peak at 1024² for a \
-                 6.2 GB pipeline)",
+                 6.1 GiB pipeline)",
             );
             // The transient is learned rather than guessed (§9): what the
             // sampler measured while this row was generating, or nothing at
@@ -506,11 +546,12 @@ mod tests {
             extra_run_args: None,
             warm_start: false,
             idle_seconds: 300,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             peak_extra_bytes: None,
             peak_learned_at: None,
+            prompt_style: None,
+            preview_mode: None,
         };
 
         let plans = PlanCache::default();
@@ -621,8 +662,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         };
 
         let plans = PlanCache::default();
@@ -653,8 +693,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         };

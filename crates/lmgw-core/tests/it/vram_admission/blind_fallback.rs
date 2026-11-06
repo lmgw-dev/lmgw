@@ -246,7 +246,7 @@ async fn native_blind(f: &Fixture, cloud: &MockServer) {
         &f.state.db,
         &store::NewUpstream {
             name: "cloud-native".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -276,6 +276,7 @@ async fn native_blind(f: &Fixture, cloud: &MockServer) {
                 "vision": false,
                 "source": "owner",
             }})),
+            fallback: None,
         },
     )
     .await
@@ -474,6 +475,7 @@ async fn count_tokens_counts_what_a_blind_fallback_is_sent() {
                 "task": "chat", "endpoints": ["/v1/messages"],
                 "input_modalities": ["text"], "vision": false, "source": "owner",
             }})),
+            fallback: None,
         },
     )
     .await

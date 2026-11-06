@@ -8,7 +8,9 @@ use serde_json::Value;
 
 use lmgw_api_types as dto;
 
-use crate::config::HoldFallbackMode;
+use crate::config::HopKey;
+use crate::detached::detached;
+use crate::ops::fallback;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::web::audio;
@@ -78,11 +80,11 @@ pub struct AudioPatch {
     extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch.
     warm_start: Option<bool>,
-    /// GPU-hold fallback mode: `inherit` (default,
-    /// means "no fallback" for audio) | `none` | `alias`.
-    hold_fallback_mode: Option<String>,
-    /// The alias `hold_fallback_mode = "alias"` routes a held request to.
-    hold_fallback: Option<String>,
+    /// The model or alias that answers when this one cannot (openai egress
+    /// design §14.2): a model of the same task (a speech-to-text model for
+    /// one, a text-to-speech model for another). `clear: "fallback"` removes
+    /// it.
+    fallback: Option<String>,
     /// Field names to reset to unset, comma- or space-separated — see
     /// the aux patch's `clear`. `residency` (on `update`) forgets the
     /// learned residency, so the row is charged at its on-disk size until a
@@ -184,13 +186,18 @@ fn overlay_default_preset(p: &Option<Value>, cur: Option<Value>) -> Option<Value
     }
 }
 
+/// Create, update or delete an audio row. Each write is followed, in the task
+/// it runs as, by the reload, the container's hygiene and `/mcp` sessions
+/// told to list again: the image and audio tools list the rows and aliases
+/// that serve them (chat-media-tools design §3.2).
 pub async fn audio_model_set(
     st: &SharedState,
     p: AudioPatch,
 ) -> Result<dto::AudioModelSaved, String> {
     use crate::store;
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = st.routing_write().await;
     let snap = st.snapshot();
-    let reload = || async { st.reload_snapshot().await.map_err(|e| e.to_string()) };
     match p.action.as_str() {
         "create" => {
             let model_id = p
@@ -225,13 +232,16 @@ pub async fn audio_model_set(
             // create, so the overlay's `cur` is unconditionally `None`.
             let default_voice_preset = overlay_default_preset(&p.default_voice_preset, None);
             check_presets(&voice_presets, default_voice_preset.as_ref())?;
-            let (hold_fallback_mode, hold_fallback) = crate::ops::resolve_hold_fallback_text(
-                &st.snapshot(),
-                p.hold_fallback_mode.as_deref(),
-                p.hold_fallback.as_deref(),
-                p.clear.as_deref(),
-                (HoldFallbackMode::Inherit, None),
-            )?;
+            let row_fallback = fallback::patched(p.clear.as_deref(), &p.fallback, None)?;
+            let mut fallback_notes = Vec::new();
+            if let Some(f) = &row_fallback {
+                let owner = fallback::Owner::typed(
+                    None,
+                    snap.audio_public_name(&model_id),
+                    fallback::ModelType::audio(&task),
+                );
+                fallback_notes = fallback::validate(st, &owner, f).await?;
+            }
             let new = store::NewAudioModel {
                 model_id: model_id.clone(),
                 family,
@@ -287,26 +297,55 @@ pub async fn audio_model_set(
                     )
                 },
                 warm_start: p.warm_start.unwrap_or(false),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
             };
             audio::check_voice_refs(st, &new)?;
             check_variant_task(st, &new).await?;
-            let id = store::insert_audio_model(&st.db, &new)
+            // A fallback that holds the new name reaches this row from now
+            // on: checked in a dry run (§14.2, `fallback::referrers`).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            reload().await?;
-            let threads = engine::note(new.threads, crate::host::cpu())
-                .map(|n| format!("; {n}"))
-                .unwrap_or_default();
-            Ok(dto::AudioModelSaved {
-                ok: true,
-                id,
-                message: format!(
-                    "audio model '{model_id}' created — start it to serve it{threads}"
-                ),
-                ..Default::default()
+            let dry = store::insert_audio_model_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::AudioModels, dry);
+            fallback::dry_run(
+                st,
+                &snap,
+                tx,
+                &[fallback::Touch::Row(row.0, dry)],
+                Some(row),
+            )
+            .await?;
+            // The write and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot without the new model.
+            let task_st = st.clone();
+            detached("creating the audio model", async move {
+                let st = &task_st;
+                let id = store::insert_audio_model(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.mcp.notify_tools_changed();
+                let threads = engine::note(new.threads, crate::host::cpu())
+                    .map(|n| format!("; {n}"))
+                    .unwrap_or_default();
+                Ok(dto::AudioModelSaved {
+                    ok: true,
+                    id,
+                    message: format!(
+                        "audio model '{model_id}' created — start it to serve it{threads}"
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" | "enable" | "disable" => {
             let id = p.id.ok_or("pass id")?;
@@ -322,7 +361,7 @@ pub async fn audio_model_set(
                 None => cur.path,
             };
             crate::ops::check_rel_path(&path, "audio models dir")?;
-            let task = p.task.clone().unwrap_or(cur.task);
+            let task = p.task.clone().unwrap_or_else(|| cur.task.clone());
             check_task(&task)?;
             let voice_presets = p.voice_presets.clone().unwrap_or(cur.voice_presets);
             let default_voice_preset =
@@ -333,13 +372,8 @@ pub async fn audio_model_set(
                 "disable" => false,
                 _ => p.enabled.unwrap_or(cur.enabled),
             };
-            let (hold_fallback_mode, hold_fallback) = crate::ops::resolve_hold_fallback_text(
-                &st.snapshot(),
-                p.hold_fallback_mode.as_deref(),
-                p.hold_fallback.as_deref(),
-                p.clear.as_deref(),
-                (cur.hold_fallback_mode, cur.hold_fallback.clone()),
-            )?;
+            let row_fallback =
+                fallback::patched(p.clear.as_deref(), &p.fallback, cur.fallback.clone())?;
             let new_audio_model_id = p
                 .model_id
                 .clone()
@@ -349,6 +383,33 @@ pub async fn audio_model_set(
                 &snap,
                 &snap.audio_public_name(&new_audio_model_id),
             )?;
+            // Checked when it changes, and when the task does (the row's
+            // type is its task, §14.2 item 4).
+            let key = HopKey::Local(Class::Audio, cur_model_id.clone());
+            let (old_name, new_name) = (
+                snap.audio_public_name(&cur_model_id),
+                snap.audio_public_name(&new_audio_model_id),
+            );
+            let mut fallback_notes = Vec::new();
+            let own_checked =
+                row_fallback.is_some() && (row_fallback != cur.fallback || task != cur.task);
+            if row_fallback != cur.fallback || task != cur.task {
+                if let Some(f) = &row_fallback {
+                    let owner = fallback::Owner::typed(
+                        Some(key.clone()),
+                        new_name.clone(),
+                        fallback::ModelType::audio(&task),
+                    )
+                    .renamed_from(Some(old_name.clone()));
+                    fallback_notes = fallback::validate(st, &owner, f).await?;
+                }
+            }
+            // A rename never breaks a chain (decision 27).
+            let rewrites = match new_name != old_name {
+                true => fallback::rename_rewrites(&snap, &[(key.clone(), new_name)], Some(&key)),
+                false => fallback::Rewrites::default(),
+            };
+            fallback_notes.extend(rewrites.notes.iter().cloned());
             let upd = store::NewAudioModel {
                 model_id: new_audio_model_id,
                 family: p
@@ -425,8 +486,7 @@ pub async fn audio_model_set(
                     )
                 },
                 warm_start: p.warm_start.unwrap_or(cur.warm_start),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
             };
             audio::check_voice_refs(st, &upd)?;
             // Enabling or disabling a row saved before this check is never
@@ -434,70 +494,111 @@ pub async fn audio_model_set(
             if p.action == "update" {
                 check_variant_task(st, &upd).await?;
             }
-            store::update_audio_model(&st.db, id, &upd)
+            // What a rename, a task change, an enable or a disable does to
+            // the fallbacks naming this row, in a dry run (§14.2).
+            let mut tx = store::begin_write(&st.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            // The owner's reset of the learned residency (realtime design
-            // §9.4): back to the on-disk charge until a request teaches it
-            // again. A configuration change needs no reset — the figure is
-            // keyed and simply stops being charged.
-            let residency_reset =
-                crate::ops::clear_has(p.clear.as_deref(), "residency") && cur.residency.is_some();
-            if residency_reset {
-                // Under the residency's store lock, so a reading that began
-                // before the reset cannot write its figure back after it.
-                st.vram.reset_audio_residency(st, id, &cur_model_id).await?;
-            }
-            reload().await?;
-            // Container hygiene (per-model-containers §3.4/§3.6). Audio's
-            // per-model `server.json` is rendered fresh at every start, so
-            // stopping the container *is* the apply. A rename is the exception
-            // (see the chat path in `ops::local_model_set`): the old container
-            // — and the old per-model config dir it mounts, which is keyed on
-            // the model id too — belong to a model that no longer exists.
-            let note = if upd.model_id != cur_model_id {
-                lifecycle::drop_model(st, Class::Audio, &cur_model_id).await;
-                Some(format!(
-                    "it was renamed from '{cur_model_id}', so that container was stopped and \
-                     removed — the next request starts '{}' fresh",
-                    upd.model_id
-                ))
-            } else if enabled {
-                lifecycle::stop_for_apply(st, Class::Audio, &cur_model_id).await
-            } else {
-                lifecycle::drop_model(st, Class::Audio, &cur_model_id).await;
-                Some("it is disabled — its container was stopped and removed".to_string())
-            };
-            let mut reset = if residency_reset {
-                "; its learned residency was reset, so it is charged at its on-disk size until a \
-                 request teaches it again"
-                    .to_string()
-            } else {
-                String::new()
-            };
-            if let Some(n) = engine::note(upd.threads, crate::host::cpu()) {
-                reset.push_str(&format!("; {n}"));
-            }
-            Ok(dto::AudioModelSaved {
-                ok: true,
-                id,
-                residency_reset: Some(residency_reset),
-                message: match note {
-                    Some(note) => {
-                        format!(
-                            "audio model '{}' {} — {note}{reset}",
+            store::update_audio_model_in(&mut tx, id, &upd)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::AudioModels, id);
+            fallback::dry_run(
+                st,
+                &snap,
+                tx,
+                &[fallback::Touch::Row(row.0, row.1)],
+                own_checked.then_some(row),
+            )
+            .await?;
+            let clear_residency = crate::ops::clear_has(p.clear.as_deref(), "residency");
+            let verb = super::saved_verb(&p.action);
+            // The write and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot serving the old row and the container on
+            // the old configuration (or, renamed or disabled, running).
+            let task_st = st.clone();
+            detached("updating the audio model", async move {
+                let st = &task_st;
+                let mut tx = crate::store::begin_write(&st.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_audio_model_in(&mut tx, id, &upd)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                // The owner's reset of the learned residency (realtime design
+                // §9.4): back to the on-disk charge until a request teaches it
+                // again. A configuration change needs no reset — the figure is
+                // keyed and simply stops being charged.
+                let residency_reset =
+                    clear_residency && cur.residency.is_some();
+                if residency_reset {
+                    // Under the residency's store lock, so a reading that began
+                    // before the reset cannot write its figure back after it.
+                    st.vram.reset_audio_residency(st, id, &cur_model_id).await?;
+                }
+                st.reload_snapshot_releasing(routing).await.map_err(|e| e.to_string())?;
+                st.mcp.notify_tools_changed();
+                // Container hygiene (per-model-containers §3.4/§3.6). Audio's
+                // per-model `server.json` is rendered fresh at every start, so
+                // stopping the container *is* the apply. A rename is the exception
+                // (see the chat path in `ops::local_model_set`): the old container
+                // — and the old per-model config dir it mounts, which is keyed on
+                // the model id too — belong to a model that no longer exists.
+                let note = if upd.model_id != cur_model_id {
+                    lifecycle::drop_model(st, Class::Audio, &cur_model_id).await;
+                    Some(format!(
+                        "it was renamed from '{cur_model_id}', so that container was stopped and \
+                         removed — the next request starts '{}' fresh",
+                        upd.model_id
+                    ))
+                } else if enabled {
+                    lifecycle::stop_for_apply(st, Class::Audio, &cur_model_id).await
+                } else {
+                    lifecycle::drop_model(st, Class::Audio, &cur_model_id).await;
+                    Some("it is disabled — its container was stopped and removed".to_string())
+                };
+                let mut reset = if residency_reset {
+                    "; its learned residency was reset, so it is charged at its on-disk size until a \
+                     request teaches it again"
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                if let Some(n) = engine::note(upd.threads, crate::host::cpu()) {
+                    reset.push_str(&format!("; {n}"));
+                }
+                Ok(dto::AudioModelSaved {
+                    ok: true,
+                    id,
+                    residency_reset: Some(residency_reset),
+                    fallback_notes,
+                    message: match note {
+                        Some(note) => {
+                            format!(
+                                "audio model '{}' {} — {note}{reset}",
+                                upd.model_id,
+                                verb
+                            )
+                        }
+                        None => format!(
+                            "audio model '{}' {} — it is not running, so the next request \
+                             starts it with the new configuration{reset}",
                             upd.model_id,
-                            super::saved_verb(&p.action)
-                        )
-                    }
-                    None => format!(
-                        "audio model '{}' {} — it is not running, so the next request \
-                         starts it with the new configuration{reset}",
-                        upd.model_id,
-                        super::saved_verb(&p.action)
-                    ),
-                },
+                            verb
+                        ),
+                    },
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let id = p.id.ok_or("pass id")?;
@@ -505,21 +606,37 @@ pub async fn audio_model_set(
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no audio model with id {id}"))?;
-            store::delete_audio_model(&st.db, id)
-                .await
-                .map_err(|e| e.to_string())?;
-            reload().await?;
-            // §3.4: immediately, not at the next boot.
-            lifecycle::drop_model(st, Class::Audio, &cur.model_id).await;
-            Ok(dto::AudioModelSaved {
-                ok: true,
-                id,
-                message: format!(
-                    "audio model '{}' deleted — its container was stopped and removed",
-                    cur.model_id
-                ),
-                ..Default::default()
+            let fallback_notes =
+                fallback::delete_notes(&snap, &HopKey::Local(Class::Audio, cur.model_id.clone()));
+            // The delete and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot serving the deleted row and its container
+            // running.
+            let task_st = st.clone();
+            detached("deleting the audio model", async move {
+                let st = &task_st;
+                store::delete_audio_model(&st.db, id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.mcp.notify_tools_changed();
+                // §3.4: immediately, not at the next boot.
+                lifecycle::drop_model(st, Class::Audio, &cur.model_id).await;
+                Ok(dto::AudioModelSaved {
+                    ok: true,
+                    id,
+                    message: format!(
+                        "audio model '{}' deleted — its container was stopped and removed",
+                        cur.model_id
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!(
             "unknown action '{other}' (create, update, delete, enable, disable)"
@@ -573,8 +690,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Inherit,
-            hold_fallback: None,
+            fallback: None,
         }
     }
 

@@ -3,6 +3,23 @@
 //! Paths are given as the gateway serves them; [`configure`] sets, once at
 //! boot, the prefix put before every request (lmgw's own dashboard is served
 //! from the root, so it sets none) and the hook run on a `401 session_required`.
+//!
+//! Every request can go through a transport its host hands the page
+//! ([`transport`]): the free functions here are the browser's `fetch`
+//! ([`Http::fetch`]); a page that may run in another host (the Chat) takes
+//! the [`Http`] from context ([`use_http`]) and calls the same helpers on it.
+
+pub mod bytes;
+pub mod fake;
+mod fetch;
+pub mod sse;
+pub mod transport;
+
+pub use bytes::file_of;
+pub use fetch::blob_bytes;
+pub use transport::{
+    use_http, Body, ByteStream, Http, Method, Payload, Read, Request, Response, Transport,
+};
 
 use lmgw_api_types::ApiError;
 use serde::de::DeserializeOwned;
@@ -63,39 +80,42 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-async fn decode<T: DeserializeOwned>(resp: gloo_net::http::Response) -> Result<T> {
+/// The non-2xx branch of [`checked`].
+async fn refusal(resp: gloo_net::http::Response) -> Error {
     let status = resp.status();
-    if (200..300).contains(&status) {
-        resp.json::<T>()
-            .await
-            .map_err(|e| Error::Transport(format!("bad response body: {e}")))
-    } else {
-        Err(refusal(resp).await)
-    }
+    let text = resp.text().await.unwrap_or_default();
+    refused(status, &text)
 }
 
-/// The non-2xx branch, shared by [`decode`] and [`post_no_content`].
+/// A non-2xx answer's body read as the refusal it is, whatever the
+/// transport.
 ///
 /// One refusal is not about the request at all: `401 session_required` says
 /// this browser holds no principal (principals §3.9). It raises the global
 /// gate, and the shell swaps the page for the login card (§8) — every caller
 /// still gets its `Err`, so nothing has to learn about sessions to be correct.
-async fn refusal(resp: gloo_net::http::Response) -> Error {
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    let error = parse_error_body(status, &text);
+pub(crate) fn refused(status: u16, text: &str) -> Error {
+    let error = parse_error_body(status, text);
     if status == 401 && error.code == "session_required" {
-        if let Some(hook) = config().on_unauthorized {
-            hook();
-        }
+        session_required();
     }
     Error::Api(error)
 }
 
-/// A response to a request the caller built itself (one a Stop button can
-/// abort, which the JSON helpers here cannot): itself when it is a 2xx,
-/// else its refusal as every helper here reads it, the `401
-/// session_required` hook included.
+/// Run the host's `401 session_required` hook ([`Config::on_unauthorized`]),
+/// for a caller that reads a refusal itself rather than through the helpers
+/// (the Chat's dictation upload, whose answer carries a header they drop).
+pub fn session_required() {
+    if let Some(hook) = config().on_unauthorized {
+        hook();
+    }
+}
+
+/// A response to a request the caller built itself with `gloo_net` (the
+/// Audio lab's run, whose answer it reads as audio, JSON or a stream):
+/// itself when it is a 2xx, else its refusal as every helper here reads it,
+/// the `401 session_required` hook included. A request on the transport
+/// reads its refusal with [`Http::ok`].
 pub async fn checked(resp: gloo_net::http::Response) -> Result<gloo_net::http::Response> {
     if (200..300).contains(&resp.status()) {
         Ok(resp)
@@ -139,11 +159,7 @@ pub fn parse_error_body(status: u16, text: &str) -> ApiError {
 }
 
 pub async fn get<T: DeserializeOwned>(path: impl Into<String>) -> Result<T> {
-    let resp = gloo_net::http::Request::get(&url(path.into()))
-        .send()
-        .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(resp).await
+    Http::fetch().get(path).await
 }
 
 /// GET a plain-text body rather than JSON — `/chat/api/attachments/{id}`,
@@ -151,67 +167,41 @@ pub async fn get<T: DeserializeOwned>(path: impl Into<String>) -> Result<T> {
 /// pin-attachments §2), not wrapped in an envelope. Failures are still the
 /// house [`ApiError`] JSON everything else uses.
 pub async fn get_text(path: impl Into<String>) -> Result<String> {
-    let resp = gloo_net::http::Request::get(&url(path.into()))
-        .send()
-        .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    let status = resp.status();
-    if (200..300).contains(&status) {
-        resp.text()
-            .await
-            .map_err(|e| Error::Transport(format!("bad response body: {e}")))
-    } else {
-        Err(refusal(resp).await)
-    }
+    Http::fetch().get_text(path).await
 }
 
 pub async fn post<T: DeserializeOwned, B: Serialize>(
     path: impl Into<String>,
     body: &B,
 ) -> Result<T> {
-    let resp = gloo_net::http::Request::post(&url(path.into()))
-        .json(body)
-        .map_err(|e| Error::Transport(e.to_string()))?
-        .send()
-        .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(resp).await
+    Http::fetch().post(path, body).await
 }
 
-/// POST whose success is a bare `204` (the dashboard session route), which sets the session
-/// cookie and has nothing else to say. [`decode`] insists on a body, so this
-/// is its own path — the failure side is the same [`ApiError`] as everywhere.
+/// POST whose success is a bare `204` (the dashboard session route), which
+/// sets the session cookie and has nothing else to say. The failure side is
+/// the same [`ApiError`] as everywhere.
 pub async fn post_no_content<B: Serialize>(path: impl Into<String>, body: &B) -> Result<()> {
-    let resp = gloo_net::http::Request::post(&url(path.into()))
-        .json(body)
-        .map_err(|e| Error::Transport(e.to_string()))?
-        .send()
-        .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    if (200..300).contains(&resp.status()) {
-        Ok(())
-    } else {
-        Err(refusal(resp).await)
-    }
+    Http::fetch().post_no_content(path, body).await
 }
 
-/// POST a raw browser body — a `File` picked from an `<input type=file>`.
+/// POST a raw browser body — a `File` picked from an `<input type=file>`,
+/// a `FormData`, a string — through the browser's `fetch`
+/// ([`Http::fetch`]'s, so under the same base, with the same refusals).
 ///
 /// Exists for the docs import route, which takes a corpus **file** rather than
 /// JSON: the SQLite database is the unit of portability (quickdoc §3), so it
 /// goes up as itself and not wrapped in an envelope. The answer is still the
 /// house JSON, so failures arrive as the same [`ApiError`] everything else uses.
+/// A page that may run in another host posts [`Body`] through
+/// [`Http::post_body`] instead.
 pub async fn post_raw<T: DeserializeOwned>(
     path: impl Into<String>,
     body: impl Into<wasm_bindgen::JsValue>,
 ) -> Result<T> {
-    let resp = gloo_net::http::Request::post(&url(path.into()))
-        .body(body)
-        .map_err(|e| Error::Transport(e.to_string()))?
-        .send()
+    let resp = fetch::send_raw(Request::post(path), body.into())
         .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    decode(resp).await
+        .map_err(Error::Transport)?;
+    transport::json_of(transport::admit(resp).await?).await
 }
 
 /// POST JSON and take the answer as bytes with its content type — a route
@@ -221,20 +211,5 @@ pub async fn post_bytes<B: Serialize>(
     path: impl Into<String>,
     body: &B,
 ) -> Result<(Vec<u8>, String)> {
-    let resp = gloo_net::http::Request::post(&url(path.into()))
-        .json(body)
-        .map_err(|e| Error::Transport(e.to_string()))?
-        .send()
-        .await
-        .map_err(|e| Error::Transport(e.to_string()))?;
-    if (200..300).contains(&resp.status()) {
-        let kind = resp.headers().get("content-type").unwrap_or_default();
-        let bytes = resp
-            .binary()
-            .await
-            .map_err(|e| Error::Transport(format!("bad response body: {e}")))?;
-        Ok((bytes, kind))
-    } else {
-        Err(refusal(resp).await)
-    }
+    Http::fetch().post_bytes(path, body).await
 }

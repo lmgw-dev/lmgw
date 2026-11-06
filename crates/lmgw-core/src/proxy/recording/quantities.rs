@@ -22,6 +22,9 @@
 //!   headers, so its row — a client gone mid-stream included — is answered.
 //! - `proxy/legacy.rs`, the streamed `/v1/completions` passthrough relay:
 //!   likewise after the 2xx; answered.
+//! - `responses/native.rs`, the native `/v1/responses` passthrough: its
+//!   stream relay and its whole answer write their rows after the 2xx, a
+//!   client gone included; answered.
 //! - `proxy/in_process.rs`, `stream_once_on` (agent runs, `/v1/responses`
 //!   turns, the realtime responder): answered once the turn's response passed
 //!   its status check, a consumer's stop or a failure mid-stream included; a

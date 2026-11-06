@@ -5,6 +5,10 @@
 //! Field derivation follows
 //! `docs/design/2026-09-17-model-capabilities-design.md` §4: a
 //! field the catalog does not publish is absent (`None`), never defaulted.
+//! An Anthropic entry's `capabilities` tree is read for what lmgw has a fact
+//! for: `thinking` and `effort` (reasoning kind and levels;
+//! `thinking.types` for `can_disable` and the thinking types the model
+//! takes), `image_input`, `structured_outputs` and `context_management`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -15,19 +19,30 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::config::{upstream_scope_key, PriceRow, PriceScope, PriceUnit, Protocol, Upstream};
+use crate::config::{
+    upstream_scope_key, PriceRow, PriceScope, PriceTier, PriceUnit, Protocol, Upstream,
+};
 use crate::pricing::{per_token_to_per_mtok, PriceSource, Prices};
 use crate::state::SharedState;
 use crate::store;
+use read_key::ReadKey;
 
 #[cfg(test)]
 mod openrouter_tests;
 mod price_rules;
+mod read_key;
+#[cfg(test)]
+mod read_tests;
 pub mod request;
 
 /// The price sync's summary is an answer: `lmgw-api-types` owns its shape.
 pub use lmgw_api_types::{PriceSyncSummary, UpstreamPriceSync};
 
+/// How long a read catalog is fresh. Past it, a request is still answered
+/// from it at once, and the read that refreshes it runs in the background
+/// (stale-while-revalidate, the owner's answer of 2026-10-25): a request
+/// waits for a models list only when none is cached, or when what is cached
+/// is a failure past [`ERR_TTL`].
 const TTL: Duration = Duration::from_secs(300);
 
 /// How long a *failed* catalog fetch is remembered (§5.4).
@@ -35,9 +50,11 @@ const TTL: Duration = Duration::from_secs(300);
 /// Much shorter than [`TTL`], because a failure is usually temporary and a
 /// catalog is how `/v1/models` and the Anthropic `max_tokens` default learn
 /// what a provider can do. But not zero: without it, every request on an
-/// upstream whose `/models` is unreachable pays the full fetch timeout again,
-/// turning one provider's outage into per-request latency on a path the client
-/// never asked to be on.
+/// upstream whose `/models` is unreachable pays the fetch's bound again (the
+/// upstream's own `timeout_ms`, none at 0, as its sends have; openai egress
+/// design §14.2), turning one provider's outage into per-request latency on
+/// a path the client never asked to be on. Requests that miss at the same
+/// moment wait on one read between them ([`read_once`]), not one each.
 const ERR_TTL: Duration = Duration::from_secs(60);
 
 /// Canonical reasoning-effort vocabulary, least to most.
@@ -75,6 +92,27 @@ pub struct ModelInfo {
     pub tools: Option<bool>,
     /// Structured-output support (JSON schema / JSON mode).
     pub structured_output: Option<CatalogStructured>,
+    /// Anthropic `capabilities.context_management`, when an Anthropic
+    /// catalog publishes it; no other catalog has it.
+    pub context_management: Option<CatalogContextManagement>,
+}
+
+/// An Anthropic catalog's statement about context management for one model
+/// (`capabilities.context_management`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogContextManagement {
+    /// `context_management.supported`, when it is a bool.
+    pub supported: Option<bool>,
+    /// Every other key of the object whose `supported` is `true`: the edit
+    /// types the model takes (`clear_thinking_20251015`,
+    /// `clear_tool_uses_20250919`, `compact_20260112`, and any newer one),
+    /// sorted.
+    pub edits: Vec<String>,
+    /// The on-demand compaction types the model takes: every key of
+    /// `capabilities.compaction` but `supported` whose `supported` is `true`
+    /// (`summarize`, and any newer one), sorted; none when the object says
+    /// `supported: false` or is absent.
+    pub compaction: Vec<String>,
 }
 
 /// A catalog's statement about reasoning/effort support for one model.
@@ -90,6 +128,10 @@ pub struct CatalogReasoning {
     /// Whether the request can switch thinking off entirely, when a source
     /// states it.
     pub can_disable: Option<bool>,
+    /// The Messages `thinking` types an Anthropic catalog says the model
+    /// takes (`capabilities.thinking.types.<type>.supported`), every one it
+    /// names, sorted. Empty for every other catalog.
+    pub thinking_types: Vec<String>,
 }
 
 /// A catalog's statement about structured-output support for one model.
@@ -149,18 +191,60 @@ pub struct Pricing {
 /// cached too, for [`ERR_TTL`] rather than [`TTL`].
 type CacheEntry = (Instant, Result<Vec<ModelInfo>, String>);
 
+/// One upstream's catalog read in flight, which every request that misses
+/// the cache while it runs awaits ([`read_once`]).
+type Read =
+    futures::future::Shared<futures::future::BoxFuture<'static, Result<Vec<ModelInfo>, String>>>;
+
+/// The catalog cache, by upstream row and the configuration each answer was
+/// read with ([`ReadKey`]): a request finds only an answer of the row as it
+/// holds it.
 #[derive(Default)]
 pub struct CatalogCache {
-    inner: RwLock<HashMap<i64, CacheEntry>>,
-    /// Upstreams whose catalog a background read is fetching now
-    /// ([`cached_only`]): one read each, however many ask.
-    refreshing: std::sync::Mutex<HashSet<i64>>,
+    inner: RwLock<HashMap<ReadKey, CacheEntry>>,
+    /// The catalog read in flight per row and configuration, with its
+    /// number: one read each, however many ask at once, a background one
+    /// ([`cached_only`]) included. The read takes itself out when its task
+    /// ends ([`read_key::Leave`]), and only itself:
+    /// [`CatalogCache::invalidate`] drops it, and a read started after is
+    /// another.
+    reading: std::sync::Mutex<HashMap<ReadKey, (u64, Read)>>,
+    /// The next read's number.
+    reads: std::sync::atomic::AtomicU64,
 }
 
 tokio::task_local! {
     /// Set inside [`cached_only`]: a catalog read is served from the cache
     /// alone, and a read it could not serve is recorded here.
     static CACHED_ONLY: Arc<AtomicBool>;
+    /// Set inside [`peek_only`]: a catalog read is served from the cache
+    /// alone and starts no read of its own, not even in the background.
+    static PEEK_ONLY: ();
+    /// Set inside [`uncached_for`]: the upstreams whose catalog is read
+    /// fresh, past the cache, and never stored in it.
+    static UNCACHED: Arc<HashSet<i64>>;
+}
+
+/// Run `f` with the catalogs of `upstreams` read fresh and never cached
+/// (openai egress design §14.2): the referrer dry run's view of an upstream
+/// row as a write would leave it — a new address, key or kind, or a row the
+/// dry run inserted and rolls back. Its catalog is that configuration's;
+/// the cache, keyed by the row's id and the configuration each answer was
+/// read with ([`ReadKey`]), would keep it under that configuration, which a
+/// dry run that is refused must leave nothing of. Every other upstream reads
+/// through the cache.
+pub async fn uncached_for<F: Future>(upstreams: HashSet<i64>, f: F) -> F::Output {
+    UNCACHED.scope(Arc::new(upstreams), f).await
+}
+
+/// Run `f` with every upstream catalog read served from what is cached, a
+/// stale entry too, and **no read started** for one that is not: `f` sees
+/// it as not read yet. For a listing that runs on every tool list and turn
+/// (the media tools' cloud aliases, chat-media-tools design §3.2), which
+/// must not knock on every provider's door each time; a catalog any other
+/// look reads is used from then on.
+pub async fn peek_only<F: Future>(f: F) -> F::Output {
+    PEEK_ONLY.scope((), f).await
 }
 
 /// Run `f` with every upstream catalog read served from the cache alone
@@ -177,69 +261,129 @@ pub async fn cached_only<F: Future>(f: F) -> (F::Output, bool) {
     (out, missed.load(Ordering::Relaxed))
 }
 
-/// Read `u`'s catalog into the cache behind the caller's back, once at a
-/// time per upstream ([`cached_only`]).
-fn refresh_in_background(state: &SharedState, u: &Upstream) {
-    let fresh = state
-        .catalog
-        .refreshing
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(u.id);
-    if !fresh {
-        return;
+/// `u`'s catalog read into the cache: the one in flight for the same row
+/// and configuration, or one started now (single-flight, openai egress
+/// design §14.2). It runs as a task of its own, so its answer is cached
+/// whether anyone still waits for it or not, and every caller that missed
+/// meanwhile awaits the same answer. No bound of its own: the read has its
+/// upstream's (`fetch_models`).
+fn read_once(state: &SharedState, u: &Upstream) -> Read {
+    let catalog = &state.catalog;
+    let key = ReadKey::of(u);
+    let mut reading = catalog.reading.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, read)) = reading.get(&key) {
+        return read.clone();
     }
-    let (state, u) = (state.clone(), u.clone());
-    tokio::spawn(async move {
-        let fetched = fetch_models(&state, &u).await;
-        state
-            .catalog
-            .inner
-            .write()
-            .await
-            .insert(u.id, (Instant::now(), fetched));
-        state
-            .catalog
-            .refreshing
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&u.id);
+    let n = catalog.reads.fetch_add(1, Ordering::Relaxed);
+    let (st, up, k) = (state.clone(), u.clone(), key.clone());
+    let task = tokio::spawn(async move {
+        // Leaves the read's place however the task ends, a panic included.
+        let _leave = read_key::Leave {
+            state: st.clone(),
+            key: k.clone(),
+            n,
+        };
+        let fetched = fetch_models(&st, &up).await;
+        // Under the cache's lock, as `invalidate` is: a read it dropped
+        // leaves no answer of the configuration it was made for.
+        let mut inner = st.catalog.inner.write().await;
+        let mut reading = st.catalog.reading.lock().unwrap_or_else(|e| e.into_inner());
+        if reading.get(&k).is_some_and(|(m, _)| *m == n) {
+            inner.insert(k.clone(), (Instant::now(), fetched.clone()));
+            reading.remove(&k);
+        }
+        fetched
     });
+    let name = u.name.clone();
+    let read = futures::FutureExt::shared(futures::FutureExt::boxed(async move {
+        task.await
+            .unwrap_or_else(|e| Err(format!("{name}: the models list read failed: {e}")))
+    }));
+    reading.insert(key, (n, read.clone()));
+    read
 }
 
 impl CatalogCache {
+    /// Forget `upstream_id`'s catalog under every configuration, and the
+    /// reads in flight for it: the next look reads the row as it is now.
+    ///
+    /// A request that still holds a snapshot from before the write, and
+    /// misses after this, reads and caches under the old configuration: an
+    /// entry only a request holding that configuration finds, which stays in
+    /// memory (the old key with it, as the snapshot holds it) until the next
+    /// `invalidate` of the row. Not swept yet.
     pub async fn invalidate(&self, upstream_id: i64) {
-        self.inner.write().await.remove(&upstream_id);
+        let mut inner = self.inner.write().await;
+        self.reading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| k.id != upstream_id);
+        inner.retain(|k, _| k.id != upstream_id);
+    }
+
+    /// Age `u`'s cached entry past its time to live, as a read that long ago
+    /// left it (tests of what a stale entry answers).
+    #[cfg(test)]
+    pub(crate) async fn expire_for_tests(&self, u: &Upstream) {
+        let mut inner = self.inner.write().await;
+        let (at, _) = inner.get_mut(&ReadKey::of(u)).expect("an entry to age");
+        *at = Instant::now()
+            .checked_sub(TTL + Duration::from_secs(1))
+            .expect("a clock older than the time to live");
+    }
+
+    /// Whether an answer for `u` as it is configured is cached (tests).
+    #[cfg(test)]
+    pub(crate) async fn holds_for_tests(&self, u: &Upstream) -> bool {
+        self.inner.read().await.contains_key(&ReadKey::of(u))
+    }
+
+    /// Whether a read for `u` as it is configured is in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn reading_for_tests(&self, u: &Upstream) -> bool {
+        self.reading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&ReadKey::of(u))
     }
 }
 
-/// Model catalog served by an upstream, through the cache.
+/// Model catalog served by an upstream, through the cache: a fresh entry
+/// as it is; a stale list at once, refreshed in the background ([`TTL`]);
+/// nothing cached, or a failure past [`ERR_TTL`], by waiting for the read
+/// every request that misses meanwhile shares ([`read_once`]).
 pub async fn upstream_models(state: &SharedState, u: &Upstream) -> Result<Vec<ModelInfo>, String> {
+    if UNCACHED
+        .try_with(|ids| ids.contains(&u.id))
+        .unwrap_or(false)
+    {
+        return fetch_models(state, u).await;
+    }
+    if PEEK_ONLY.try_with(|_| ()).is_ok() {
+        return match state.catalog.inner.read().await.get(&ReadKey::of(u)) {
+            Some((_, cached)) => cached.clone(),
+            None => Err(format!("{}: models list not read yet", u.name)),
+        };
+    }
     let cached_only = CACHED_ONLY.try_with(Arc::clone).ok();
-    if let Some((at, cached)) = state.catalog.inner.read().await.get(&u.id) {
+    if let Some((at, cached)) = state.catalog.inner.read().await.get(&ReadKey::of(u)) {
         let ttl = if cached.is_ok() { TTL } else { ERR_TTL };
         if at.elapsed() < ttl {
             return cached.clone();
         }
-        // Inside `cached_only`: the stale answer now, a fresh one later.
-        if cached_only.is_some() {
-            refresh_in_background(state, u);
+        // A stale list, or inside `cached_only` any stale answer: now, and
+        // a fresh one later.
+        if cached.is_ok() || cached_only.is_some() {
+            drop(read_once(state, u));
             return cached.clone();
         }
     }
     if let Some(missed) = cached_only {
         missed.store(true, Ordering::Relaxed);
-        refresh_in_background(state, u);
+        drop(read_once(state, u));
         return Err(format!("{}: models list not read yet", u.name));
     }
-    let fetched = fetch_models(state, u).await;
-    state
-        .catalog
-        .inner
-        .write()
-        .await
-        .insert(u.id, (Instant::now(), fetched.clone()));
-    fetched
+    read_once(state, u).await
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +454,7 @@ impl PriceUpdates {
         on_file.iter().filter(move |p| {
             p.source == PriceSource::Catalog
                 && p.unit == PriceUnit::PerRequest
+                && p.service_tier == PriceTier::Standard
                 && self
                     .no_fee
                     .iter()
@@ -322,8 +467,9 @@ impl PriceUpdates {
     /// its scope and unit to update.
     ///
     /// The match is exact, as the upsert's conflict key
-    /// `(scope_kind, scope_key, source, unit)` is: a row this skips is one
-    /// the upsert would have created rather than updated.
+    /// `(scope_kind, scope_key, source, unit, service_tier)` is: a row this
+    /// skips is one the upsert would have created rather than updated. The
+    /// catalog writes Standard only (openai egress design §5.3).
     pub fn to_write<'a>(
         &'a self,
         on_file: &'a [PriceRow],
@@ -333,6 +479,7 @@ impl PriceUpdates {
                 || on_file.iter().any(|p| {
                     p.source == PriceSource::Catalog
                         && p.unit == u.unit
+                        && p.service_tier == PriceTier::Standard
                         && p.scope_kind == u.scope_kind
                         && p.scope_key == u.scope_key
                 })
@@ -606,6 +753,8 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
                         pu.scope_kind,
                         &pu.scope_key,
                         pu.unit,
+                        // A catalog states one price per model: Standard's.
+                        PriceTier::Standard,
                         &pu.prices,
                         pu.price,
                         None,
@@ -639,15 +788,23 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
     Ok(summary)
 }
 
-/// One protocol-appropriate models-list call (no cache).
-pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<ModelInfo>, String> {
+/// The beta flag under which Anthropic lists a model's on-demand compaction
+/// (`capabilities.compaction`).
+const ANTHROPIC_CATALOG_BETA: &str = "compact-2026-09-04";
+
+/// The models-list request for `u`. An Anthropic row's carries
+/// [`ANTHROPIC_CATALOG_BETA`] when `beta` is set.
+fn models_request(
+    state: &SharedState,
+    u: &Upstream,
+    asked_all: bool,
+    beta: bool,
+) -> reqwest::RequestBuilder {
     let base = u.base();
     let key = u.api_key.as_deref().filter(|k| !k.is_empty());
-    // OpenRouter lists its non-text models only when asked (`request`).
-    let asked_all = request::asks_all_modalities(&state.snapshot(), u);
-    let rb = match u.protocol {
+    match u.protocol {
         // llama-server lists its models the OpenAI way.
-        Protocol::Openai | Protocol::LlamaCpp => {
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
             let mut rb = state.http.get(request::openai_models_url(base, asked_all));
             if let Some(k) = key {
                 rb = rb.bearer_auth(k);
@@ -660,6 +817,9 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
                 .http
                 .get(format!("{b}/v1/models?limit=1000"))
                 .header("anthropic-version", "2023-06-01");
+            if beta {
+                rb = rb.header("anthropic-beta", ANTHROPIC_CATALOG_BETA);
+            }
             if let Some(k) = key {
                 rb = rb.header("x-api-key", k);
             }
@@ -673,12 +833,31 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
             }
             rb
         }
-    };
+    }
+}
+
+/// One protocol-appropriate models-list call (no cache).
+///
+/// An Anthropic row is asked with [`ANTHROPIC_CATALOG_BETA`]; an
+/// Anthropic-compatible upstream that answers that with a 4xx (one that
+/// refuses a beta flag it doesn't know) is asked once more without it, and
+/// the log says so. Nothing is remembered: the next read asks with the flag
+/// again.
+pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<ModelInfo>, String> {
+    // OpenRouter lists its non-text models only when asked (`request`).
+    let asked_all = request::asks_all_modalities(&state.snapshot(), u);
+    // Bounded by the upstream's own timeout, the one its sends have (none at
+    // `timeout_ms = 0`; the owner's answer of 2026-10-25): no constant of
+    // lmgw's own.
+    //
     // "unreachable" leads when nothing answers at all, so the dashboard can
     // say that in one word instead of reqwest's "error sending request for
     // url (…)"; the detail stays behind it for the tooltip and the logs.
-    let resp = rb
-        .timeout(Duration::from_secs(10))
+    let send = |beta: bool| async move {
+        crate::egress::with_timeout(
+            models_request(state, u, asked_all, beta),
+            u.request_timeout(),
+        )
         .send()
         .await
         .map_err(|e| {
@@ -687,7 +866,19 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
             } else {
                 e.to_string()
             }
-        })?;
+        })
+    };
+    let mut resp = send(true).await?;
+    if u.protocol == Protocol::Anthropic && resp.status().is_client_error() {
+        let refused = resp.status();
+        resp = send(false).await?;
+        tracing::info!(
+            upstream = %u.name,
+            "models list refused with the {ANTHROPIC_CATALOG_BETA} beta flag ({refused}); \
+             asked again without it ({}): its models' on-demand compaction is not listed",
+            resp.status()
+        );
+    }
     if !resp.status().is_success() {
         return Err(format!(
             "{}: models list failed ({}){}",
@@ -699,7 +890,7 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let mut out: Vec<ModelInfo> = match u.protocol {
         // OpenAI (and llama-server): {data: [{id, context_window?, context_length?, ...}]}
-        Protocol::Openai | Protocol::LlamaCpp => body["data"]
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => body["data"]
             .as_array()
             .map(|arr| arr.iter().filter_map(parse_openai_entry).collect())
             .unwrap_or_default(),
@@ -742,6 +933,8 @@ pub fn parse_openai_entry(m: &Value) -> Option<ModelInfo> {
         reasoning: parse_reasoning_openai(m),
         tools: parse_tools_openai(m),
         structured_output: parse_structured_output_openai(m),
+        // Anthropic's own feature; an OpenAI-shaped catalog never states it.
+        context_management: None,
     })
 }
 
@@ -765,9 +958,11 @@ pub fn parse_anthropic_entry(m: &Value) -> Option<ModelInfo> {
         // Tool calling is a base Messages API feature, independent of the
         // (optional) `capabilities` metadata.
         tools: Some(true),
-        // Anthropic egress drops `response_format` today; the catalog says
-        // nothing about structured output either.
-        structured_output: None,
+        // The egress writes a JSON schema as `output_config.format` and has
+        // nothing to write a JSON-object request as (structured-output design
+        // §10).
+        structured_output: Some(parse_structured_output_anthropic(m)),
+        context_management: parse_context_management_anthropic(m),
     })
 }
 
@@ -791,8 +986,12 @@ pub fn parse_gemini_entry(m: &Value) -> Option<ModelInfo> {
         task: Some(parse_task_gemini(m)),
         reasoning: parse_reasoning_gemini(m),
         tools: parse_tools_gemini(m),
-        // Gemini egress drops `response_format` today.
+        // The egress translates both types (structured-output design §6), but
+        // the catalog says nothing per model about either, so neither flag is
+        // published (§10).
         structured_output: None,
+        // Anthropic's own feature; Gemini's catalog never states it.
+        context_management: None,
     })
 }
 
@@ -986,6 +1185,7 @@ fn parse_reasoning_openai(m: &Value) -> Option<CatalogReasoning> {
             enabled: None,
             levels,
             can_disable: had_none.then_some(true),
+            thinking_types: Vec::new(),
         })
     } else {
         Some(CatalogReasoning {
@@ -993,6 +1193,7 @@ fn parse_reasoning_openai(m: &Value) -> Option<CatalogReasoning> {
             enabled: None,
             levels: Vec::new(),
             can_disable: had_none.then_some(true),
+            thinking_types: Vec::new(),
         })
     }
 }
@@ -1007,6 +1208,7 @@ fn parse_reasoning_gemini(m: &Value) -> Option<CatalogReasoning> {
             enabled: None,
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     } else {
         Some(CatalogReasoning {
@@ -1014,15 +1216,19 @@ fn parse_reasoning_gemini(m: &Value) -> Option<CatalogReasoning> {
             enabled: Some(false),
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         })
     }
 }
 
 /// `capabilities.thinking.supported` ⇒ `levels` from
-/// `capabilities.effort.<level>.supported`; no `enabled`, no `can_disable`
-/// (the tree has no `types.disabled`). `thinking.supported == false` (or the
-/// key is simply missing while `capabilities` exists) ⇒ `fixed`,
-/// `enabled: false`. No `capabilities` object at all ⇒ `None` (absent).
+/// `capabilities.effort.<level>.supported`; no `enabled`. `can_disable` is
+/// `thinking.types.disabled.supported` where published (absent otherwise),
+/// and `thinking_types` every one of `thinking.types.{adaptive,
+/// between_tools, disabled, enabled}` that says `supported: true`.
+/// `thinking.supported == false` (or the key is simply missing while
+/// `capabilities` exists) ⇒ `fixed`, `enabled: false`, no types. No
+/// `capabilities` object at all ⇒ `None` (absent).
 fn parse_reasoning_anthropic(m: &Value) -> Option<CatalogReasoning> {
     let caps = m.get("capabilities")?;
     let thinking_supported = caps["thinking"]["supported"].as_bool().unwrap_or(false);
@@ -1032,6 +1238,7 @@ fn parse_reasoning_anthropic(m: &Value) -> Option<CatalogReasoning> {
             enabled: Some(false),
             levels: Vec::new(),
             can_disable: None,
+            thinking_types: Vec::new(),
         });
     }
     let mut levels = Vec::new();
@@ -1055,12 +1262,32 @@ fn parse_reasoning_anthropic(m: &Value) -> Option<CatalogReasoning> {
     } else {
         "levels"
     };
+    // `thinking.types.<type>.supported`, each read where it is a bool.
+    let types = &caps["thinking"]["types"];
+    let takes = |t: &str| -> Option<bool> { types[t]["supported"].as_bool() };
     Some(CatalogReasoning {
         kind: kind.to_string(),
         enabled: None,
         levels,
-        can_disable: None,
+        can_disable: takes("disabled"),
+        thinking_types: supported_types(types),
     })
+}
+
+/// Every key of `thinking.types` whose `supported` is `true`, sorted —
+/// which is Anthropic's own order for the four it defines (`adaptive`,
+/// `between_tools`, `disabled`, `enabled`); a newer type is kept the same
+/// way, so the facts say what the provider says.
+fn supported_types(types: &Value) -> Vec<String> {
+    let mut out: Vec<String> = types
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| v["supported"].as_bool() == Some(true))
+        .map(|(k, _)| k.clone())
+        .collect();
+    out.sort();
+    out
 }
 
 /// `supported_parameters ∋ tools`. `None` when the catalog does not publish
@@ -1092,18 +1319,77 @@ fn parse_structured_output_openai(m: &Value) -> Option<CatalogStructured> {
     })
 }
 
+/// Anthropic's structured output as lmgw serves it (structured-output design
+/// §10): `json_schema` from the catalog's own
+/// `capabilities.structured_outputs.supported` when the entry publishes it,
+/// absent otherwise; `json_object` always `false` — Anthropic has no JSON-object
+/// mode, and the egress refuses one.
+fn parse_structured_output_anthropic(m: &Value) -> CatalogStructured {
+    CatalogStructured {
+        json_schema: m
+            .pointer("/capabilities/structured_outputs/supported")
+            .and_then(Value::as_bool),
+        json_object: Some(false),
+    }
+}
+
+/// `capabilities.context_management`: its own `supported` and every edit
+/// type under it whose `supported` is `true` (Anthropic's schema names
+/// `clear_thinking_20251015`, `clear_tool_uses_20250919` and
+/// `compact_20260112`; a newer key is read the same way), and
+/// `capabilities.compaction`'s types (on-demand compaction, `summarize`)
+/// the same way. Absent when the entry has neither object.
+fn parse_context_management_anthropic(m: &Value) -> Option<CatalogContextManagement> {
+    let cm = m
+        .pointer("/capabilities/context_management")
+        .and_then(Value::as_object);
+    let compaction = m
+        .pointer("/capabilities/compaction")
+        .and_then(Value::as_object);
+    if cm.is_none() && compaction.is_none() {
+        return None;
+    }
+    let supported_keys = |o: Option<&serde_json::Map<String, Value>>| -> Vec<String> {
+        let mut keys: Vec<String> = o
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| *k != "supported" && v["supported"].as_bool() == Some(true))
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.sort();
+        keys
+    };
+    let compaction =
+        compaction.filter(|c| c.get("supported").and_then(Value::as_bool) != Some(false));
+    Some(CatalogContextManagement {
+        supported: cm.and_then(|c| c.get("supported")).and_then(Value::as_bool),
+        edits: supported_keys(cm),
+        compaction: supported_keys(compaction),
+    })
+}
+
 /// `[text, image]` when `capabilities.image_input.supported`; `[text]` when
 /// the key is present and false; absent otherwise (no `capabilities` object,
-/// no `image_input` key, or a non-bool `supported`).
+/// no `image_input` key, or a non-bool `supported`). `pdf` joins a present
+/// list when `capabilities.pdf_input.supported` is true.
 fn parse_input_modalities_anthropic(m: &Value) -> Option<Vec<String>> {
     let caps = m.get("capabilities")?;
     let image_input = caps.get("image_input")?;
     let supported = image_input["supported"].as_bool()?;
-    Some(if supported {
+    let mut out = if supported {
         vec!["text".to_string(), "image".to_string()]
     } else {
         vec!["text".to_string()]
-    })
+    };
+    if caps
+        .get("pdf_input")
+        .and_then(|p| p.get("supported"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        out.push("pdf".to_string());
+    }
+    Some(out)
 }
 
 /// `[text]` when `capabilities` is present (any value); absent otherwise.

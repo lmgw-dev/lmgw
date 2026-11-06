@@ -25,6 +25,48 @@ async fn listed(w: &World, tid: i64) -> std::collections::BTreeMap<i64, Value> {
         .collect()
 }
 
+/// A tool turn's record reaches a device without its reasoning seals, which
+/// are the upstream's to read (WP8 review S-R2), its reasoning text kept.
+#[tokio::test]
+async fn a_record_reaches_a_device_without_its_seals() {
+    let w = world(|_| {}).await;
+    let d = pair(&w, "phone", json!({})).await;
+    let tid = chat_thread(&w, &d.client, "chatty").await;
+    let start = Feed::open(&w, &d.client, "", None).await.cursor();
+    lmgw_core::store::append_chat_reply(
+        &w.state.db,
+        tid,
+        &lmgw_core::store::ChatReply {
+            content: "Done.".into(),
+            ir_messages: Some(crate::platform_seals::sealed_record(
+                &crate::platform_seals::Up {
+                    id: 1,
+                    scope: lmgw_core::ir::SealScope::new(1, "cfg"),
+                },
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Caught up: the write is a store's, which wakes no live feed.
+    let mut feed = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
+    feed.until(10, |f| {
+        message_events(f).iter().any(|f| f.event == "message.added")
+    })
+    .await;
+    let added = message_events(&feed.frames)
+        .into_iter()
+        .find(|f| f.event == "message.added")
+        .unwrap();
+    let record = added.data["messages"][0]["ir_messages"].as_str().unwrap();
+    assert!(record.contains("Use the tool."), "{record}");
+    assert!(
+        !record.contains(crate::platform_seals::SEALED) && !record.contains("sealed"),
+        "{record}"
+    );
+}
+
 /// The stored `message.*` frames of `frames`.
 fn message_events(frames: &[Frame]) -> Vec<&Frame> {
     frames

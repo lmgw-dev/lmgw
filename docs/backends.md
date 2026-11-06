@@ -1,6 +1,6 @@
-# Backends — building your own llama.cpp / ik_llama.cpp / audio.cpp / stable-diffusion.cpp images
+# Engines — building your own llama.cpp / ik_llama.cpp / audio.cpp / stable-diffusion.cpp images
 
-The **Backends** page (`/backends`, *Serve* group in the nav) builds the
+The **Engines** page (`/backends`, *Serve* group in the nav) builds the
 engine images lmgw runs from git — any repo, any ref, PRs/MRs or branches
 from other remotes merged on top — tags them itself, and knows where every
 tag came from. It covers all three engines lmgw runs: **llama.cpp** and
@@ -85,7 +85,7 @@ custom URL), then:
 | `ref` | Branch, tag or full 40-hex commit. A branch/tag is re-resolved on every run; a commit never updates. |
 | `extras` | Ordered list merged on top of `ref`: `{kind: pr, number, pin?}` (a PR/MR of `repo_url`) or `{kind: ref, remote_url, ref, pin?}` (a branch/tag/commit of another remote — a fork branch, or an upstream llama.cpp PR applied on top of ik via `refs/pull/N/head`). No pin follows the head; a pin is a full SHA. |
 | `backend` | **GPU backend** in the UI (labelled that way so it doesn't collide with "backend" meaning the page's own subject): `cuda` (default) \| `vulkan` \| `rocm` \| `cpu`. |
-| `cuda_version` | Default `13.0.0` for every engine (works on a 615-series driver; shares base images across engines so audio/sd don't pull their own 10 GB CUDA base). The editor warns if you ask for more than the driver supports. |
+| `cuda_version` | Default `13.0.0` for every engine (needs a driver with CUDA 13 support; shares base images across engines so audio/sd don't pull their own 10 GiB CUDA base). The editor warns if you ask for more than the driver supports. |
 | `arch` | Default **auto**: this host's GPUs' `compute_cap` values (`89` on an Ada-generation GPU). Settable to another list for a different machine. |
 | `dockerfile`, `target` | Default auto (the preset's candidates for the engine+backend). Chosen **at the base commit**, before any extras are merged — see §16. |
 | `edits` | Starts as the preset's Dockerfile edits, shown and editable (find/replace, `required` flag, a `role` so switches like `ccache` off can drop every edit of that role even if you customized it). |
@@ -200,7 +200,7 @@ Outcomes:
   for a plain build, `lmgw-<engine>-<backend>-<slug>` for one with extras — so
   PR code never writes into the cache a master build reads. A build with
   extras also mounts the plain cache **read-only** and seeds its own from it
-  first (`cp -a -u --reflink=auto`, ~0.2 s on btrfs for llama's 572 MB
+  first (`cp -a -u --reflink=auto`, ~0.2 s on btrfs for llama's 572 MiB
   cache) — so a PR build isn't compiling cold, and it also picks up whatever
   later master builds added.
 - **npm cache** follows the same pattern for llama's web-UI stage
@@ -208,15 +208,15 @@ Outcomes:
 - **`--layers=false` by default** — no multi-GB intermediate stages left
   behind; a rebuild's speed comes from ccache/npm-cache and the up-to-date
   short-circuit, not from podman's layer cache.
-- **Measured (2026-09-26 spike + e2e, sm_89, a 24 GB GPU):** cold builds ~350 s
+- **Measured (2026-09-26 spike + e2e, sm_89, a 24 GiB GPU):** cold builds ~350 s
   (official), ~404 s (ik), ~362 s (audio), ~248 s (sd) — the design doc's
   headline "~4–7 min" cold, "~40–130 s" cache-hit range. A cache-hit rebuild
   of official measured 123 s wall / 13 s compile (609/610 ccache hits); the
   rest was the web UI (47 s), apt (41 s) and the commit. Official master +
   a PR on the same shared cache: 608/610 hits (99.67%), 117 s wall against
   129 s for plain master.
-- Peak RAM added per build: roughly 8–12 GB (minimum available 14–16 GB of
-  62 during the spike).
+- Peak RAM added per build: roughly 8–12 GiB (minimum available 14–16 GiB during
+  the spike).
 
 ## 6. The machine-wide build lock
 
@@ -305,7 +305,7 @@ to.
 
 ## 10. Update detection
 
-A scheduled check (**Settings → Backends**, `build_update_check_hours`,
+A scheduled check (**Settings → Engines**, `build_update_check_hours`,
 default 6 h, `0` = off, at most 8760 = a year) plus **Check now** per build
 or globally (`build_updates_check {id?}`):
 
@@ -343,8 +343,13 @@ or globally (`build_updates_check {id?}`):
   `registry_update` on `container_images`, with a **Pull update** action
   (`container_image_pull {image}`, a background `podman pull` job; it
   answers `{job_id, image}` at once). This is how a stale pulled audio.cpp
-  image (predating a route it needs) gets flagged. A pull is allowed on a
-  dev instance — it only adds an image to the shared store and moves a
+  image (predating a route it needs) gets flagged. Every configured image
+  is checked (a class default as well as a model's own), so the Engines
+  page shows the update and the pull for a class default no model runs; the
+  nav badge counts only images a model row runs (its own, or its class's
+  default while it has none), read from the current rows, so it moves when
+  a row starts or stops running one without a new check. A pull is allowed
+  on a dev instance — it only adds an image to the shared store and moves a
   registry tag, deleting nothing production uses.
   - **Registry references only**: `registry/repository:tag`, optionally
     `docker://`-prefixed (the prefix is stripped). podman's other transports
@@ -410,7 +415,7 @@ class.
   `merged`, `already_in_base`, `merged_upstream`, `squash_applied` or
   `conflict` (with the conflicting files). Takes seconds on a warm pool.
 
-## 13. Settings → Backends
+## 13. Settings → Engines
 
 | Field | Notes |
 |---|---|
@@ -450,8 +455,8 @@ takes the same `offset` / `tail`, and **with neither returns the last 200
 lines** (`ops::backends::TOOL_LOG_TAIL`) — where a run's outcome is — rather
 than the first megabyte.
 
-**Arguments are checked by name.** Every Backends op's args struct refuses
-an unknown field (`deny_unknown_fields`), and the Backends MCP tools enforce
+**Arguments are checked by name.** Every Engines-page op's args struct refuses
+an unknown field (`deny_unknown_fields`), and their MCP tools enforce
 their closed input schema: a typo (`offest`) is an error naming it and the
 arguments the tool takes, never a silent default.
 
@@ -495,14 +500,14 @@ on it, report back": `lmgw__build_set` → `lmgw__build_run` → poll
   start sequence.
 - **audio.cpp images get eSpeak NG** (`runtime-espeak`, not required): the
   three audio profiles append `libespeak-ng1 espeak-ng-data` to upstream's
-  runtime-stage `apt-get install` line, about 10 MB, so Kokoro and the other
+  runtime-stage `apt-get install` line, about 10 MiB, so Kokoro and the other
   phonemizing families load. Upstream's images (ghcr `full-cuda12` too) lack
   it. A build that stores its own edit list (any build saved before this
   edit existed and then customized) keeps that list: reset it to the preset
   or append the edit, then rebuild and re-apply the audio containers.
 - **audio.cpp and stable-diffusion.cpp default to CUDA 13.0.0**, not their
-  own upstream Dockerfile defaults — chosen because 13.0.0 is what works on
-  a 615-series driver for all four engines and shares a base image, at the cost of
+  own upstream Dockerfile defaults — chosen because 13.0.0 works for all four
+  engines (the driver needs CUDA 13 support) and shares a base image, at the cost of
   not matching what a `git clone && docker build` of those repos alone would
   give you.
 

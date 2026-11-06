@@ -35,24 +35,30 @@ const PROTO: ClientProto = ClientProto::OpenaiChat;
 
 /// `GET /audio-lab/api/voices` (module doc).
 pub async fn lab_voices(state: SharedState, alias: &str) -> Response {
-    let routed =
-        match crate::gate::resolve(&state, alias, crate::gate::RouteCheck::AudioVoices).await {
-            Ok(r) => r,
-            Err(f) => {
-                // The hold is a zero VRAM allowance, not a model that is
-                // gone: a config read takes none (the public route's rule).
-                let held = matches!(
-                    f.error,
-                    GatewayError::GpuHold { .. } | GatewayError::GpuBenchmark { .. }
-                );
-                if held {
-                    if let Some(row) = held_row(&state, alias) {
-                        return Json(catalog(&state, &row, true).await).into_response();
-                    }
+    let routed = match crate::gate::resolve(
+        &state,
+        alias,
+        crate::gate::RouteCheck::AudioVoices,
+        crate::runtime::registry::Origin::Owner,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(f) => {
+            // The hold is a zero VRAM allowance, not a model that is
+            // gone: a config read takes none (the public route's rule).
+            let held = matches!(
+                f.error,
+                GatewayError::GpuHold { .. } | GatewayError::GpuBenchmark { .. }
+            );
+            if held {
+                if let Some(row) = held_row(&state, alias) {
+                    return Json(catalog(&state, &row, true).await).into_response();
                 }
-                return f.headers.stamp(error_response(PROTO, &f.error));
             }
-        };
+            return f.headers.stamp(error_response(PROTO, &f.error));
+        }
+    };
     // The gate re-routed the request (the hold's or a busy card's fallback):
     // the alias itself is a local row, whose catalog is the answer. The
     // fallback is only named; asking its provider for a list would be a call

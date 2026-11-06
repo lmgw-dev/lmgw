@@ -1,0 +1,33 @@
+{
+  "request": {
+    "body": "{\"grammar\":\"root ::= \\\"yes\\\" | \\\"no\\\"\",\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "grammar": "root ::= \"yes\" | \"no\"",
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

@@ -28,8 +28,7 @@ use std::convert::Infallible;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures::StreamExt;
 use lmgw_api_types::chat_frames::WarmDone;
 use lmgw_api_types::chat_turn::WarmRequest;
@@ -73,7 +72,7 @@ pub(crate) async fn warm(
                 crate::policy::check_alias(&state.policy, &state.db, &snap, key.as_deref(), alias)
                     .await;
             if let Err(e) = checked {
-                return err_json(e.http_status(), e.code(), e.to_string());
+                return err_json(e.http_status(), e.kind(), e.to_string());
             }
         }
     }
@@ -91,9 +90,7 @@ pub(crate) async fn warm(
     let done = futures::stream::once(async {
         Ok::<_, Infallible>(TurnFrame::of("done", &WarmDone {}).into_sse())
     });
-    Sse::new(caller.sse(&state, frames.chain(done)))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    caller.sse_response(&state, frames.chain(done))
 }
 
 /// The stages named, in their order, each once — or the refusal.

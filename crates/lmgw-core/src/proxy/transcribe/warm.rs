@@ -45,7 +45,7 @@ pub(crate) async fn load(
         ),
     ];
     hold.note_sending();
-    let resp = audio_send(Some(hold), route, |r| {
+    let resp = audio_send(state, Some(hold), route, |r| {
         let url = format!("{}/audio/transcriptions", r.upstream.base());
         Ok(apply_bearer_auth(
             state

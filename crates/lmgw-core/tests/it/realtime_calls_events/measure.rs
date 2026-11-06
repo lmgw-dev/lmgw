@@ -65,6 +65,7 @@ fn result_frame(name: &str, output: &str, content: Vec<Value>) -> String {
         content: Some(content),
         call_id: Some("call_0123456789ab1f".into()),
         task: None,
+        attachments: Vec::new(),
     });
     json!({"event_id": "event_0123456789ab2a", "type": "lmgw.chat.frame",
            "response_id": "resp_0123456789ab1e", "event": "tool",

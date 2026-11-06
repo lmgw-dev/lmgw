@@ -197,11 +197,16 @@ impl ClientHandler for GatewayClientHandler {
         let ir = ir_from_create_message(&params, &alias);
         let uses = crate::gate::request_facets(&ir, None);
         let opened = async {
-            crate::gate::resolve(&state, &alias, crate::gate::RouteCheck::None)
-                .await?
-                .using(uses)?
-                .admit(&state)
-                .await
+            crate::gate::resolve(
+                &state,
+                &alias,
+                crate::gate::RouteCheck::None,
+                crate::runtime::registry::Origin::Owner,
+            )
+            .await?
+            .using(uses)?
+            .admit(&state)
+            .await
         }
         .await
         .map_err(|f| {
@@ -334,8 +339,12 @@ pub fn ir_from_create_message(params: &CreateMessageRequestParams, alias: &str) 
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -375,10 +384,7 @@ fn completion_text(completion: &Completion) -> String {
     completion
         .content
         .iter()
-        .filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
+        .filter_map(ContentPart::answer_text)
         .collect::<Vec<_>>()
         .join("")
 }
@@ -389,6 +395,7 @@ fn completion_text(completion: &Completion) -> String {
 fn sampling_stop_reason(reason: &FinishReason) -> String {
     match reason {
         FinishReason::Stop => CreateMessageResult::STOP_REASON_END_TURN.to_string(),
+        FinishReason::StopSequence(_) => CreateMessageResult::STOP_REASON_END_SEQUENCE.to_string(),
         FinishReason::Length => CreateMessageResult::STOP_REASON_END_MAX_TOKEN.to_string(),
         FinishReason::ToolUse => CreateMessageResult::STOP_REASON_TOOL_USE.to_string(),
         FinishReason::ContentFilter => "contentFilter".to_string(),
@@ -474,6 +481,10 @@ mod tests {
             },
             model: "ignored-here".into(),
             timings: None,
+            service_tier: None,
+            upstream_items: None,
+            context_management: None,
+            usage_iterations: None,
         };
         let result = create_message_result_from(completion, "resolved-model");
 

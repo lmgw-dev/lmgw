@@ -4,7 +4,9 @@ use lmgw_api_types::{self as dto, self_admin};
 
 use crate::candidates;
 use crate::capabilities::{self};
+use crate::detached::detached;
 use crate::mcp::McpStatusView;
+use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store::{self, LogFilter};
 
@@ -44,10 +46,11 @@ pub async fn status(state: &SharedState) -> Result<GatewayStatus, String> {
         // §3.2/§8) — replaces the old fixed three-container list now that a
         // "container" is a per-model, not per-class, concept. Candidate
         // aliases (§4.4) are visible here too: an entry's `owner` names
-        // "background" while a background alias's start owns it and nobody
-        // has claimed it since, and `draining_for_owner` while an owner
-        // admission is waiting on it — both absent (the pre-phase-4 shape)
-        // on every other entry.
+        // "background" while background traffic's start owns it and nobody
+        // has claimed it since; every entry carries `draining_for_owner`
+        // while any owner admission waits for room — one global mark
+        // (per-request background design §10). Both are absent (the
+        // pre-phase-4 shape) otherwise.
         runtime: state.runtime().list(),
         // The GPU those containers share (§9b): what is resident, what it is
         // measured to cost, and anything queued behind it. Reported even when
@@ -71,7 +74,33 @@ pub async fn status(state: &SharedState) -> Result<GatewayStatus, String> {
         // plain listener's and the device listener's, each with its rule
         // and its addresses or its bind error.
         webrtc: state.calls.status(),
+        upstreams_out_of_quota: {
+            let mut ups: Vec<_> = snap.upstreams.values().collect();
+            ups.sort_by_key(|u| u.id);
+            ups.into_iter()
+                .filter_map(|u| {
+                    Some(dto::UpstreamQuotaStatus {
+                        id: u.id,
+                        name: u.name.clone(),
+                        quota: quota_view(state.upstream_quota.get(u.id)?),
+                    })
+                })
+                .collect()
+        },
+        // The machine check's verdict (machine-check design §4.1): absent
+        // until the boot check finished.
+        machine: state.machine.summary(),
     })
+}
+
+/// [`crate::upstream_quota::Exhausted`] as the API shows it.
+fn quota_view(e: crate::upstream_quota::Exhausted) -> dto::UpstreamQuota {
+    dto::UpstreamQuota {
+        since: e.since,
+        code: e.code,
+        message: e.message,
+        next_check: e.next_check,
+    }
 }
 
 /// Candidate aliases (§6), by name: `None` unless at least one is configured,
@@ -143,8 +172,21 @@ pub async fn models(
             max_output_tokens: e.max_output_tokens,
             capabilities: e.capabilities.clone(),
             notes: e.notes.clone(),
+            ..Default::default()
         },
         None => self_admin::ModelFacts::default(),
+    };
+    // Each model's and alias's one fallback beside its facts (openai egress
+    // design §14.11), and whether it names a hop that can stand in now.
+    let with_fallback = |mut f: self_admin::ModelFacts, key: crate::config::HopKey| {
+        if let Some(fb) = snap.fallback_of(&key) {
+            f.fallback_usable = Some(
+                snap.hop_key(fb).is_some()
+                    && !snap.candidate_aliases.contains_key(&fb.to_lowercase()),
+            );
+            f.fallback = Some(fb.to_string());
+        }
+        f
     };
     let kind = kind.unwrap_or("all");
     if !matches!(kind, "all" | "alias" | "local" | "aux" | "audio" | "image") {
@@ -161,6 +203,22 @@ pub async fn models(
 
     let mut out: Vec<self_admin::ModelEntry> = Vec::new();
 
+    // Deferrals over the last 24 h, by the name a request asked for: a
+    // candidate alias's (§6), and a local model's whose background requests
+    // deferred (per-request background design §10). One grouped query for
+    // every name at once. `for_alias` always counts: a real zero is a
+    // number. A query that fails shows zero with a warning, as
+    // `GET /api/models/full` does, rather than failing the whole list over
+    // one column.
+    let deferral_counts = candidates::deferrals::deferrals_24h(&state.db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("deferrals_24h query failed, showing zero for every model: {e}");
+            Default::default()
+        });
+    let deferrals =
+        |name: &str| candidates::deferrals::for_alias(&deferral_counts, name).unwrap_or(0);
+
     if kind == "all" || kind == "alias" {
         for a in snap.aliases.values() {
             if !matches(&a.alias) {
@@ -172,7 +230,7 @@ pub async fn models(
                 enabled: a.enabled,
                 upstream: upstream.map(|u| u.name.clone()),
                 upstream_model: a.upstream_model_id.clone(),
-                facts: facts(&a.alias),
+                facts: with_fallback(facts(&a.alias), crate::config::HopKey::Alias(a.id)),
             }));
         }
         // Candidate aliases (candidate-aliases design §4.1) share the
@@ -181,17 +239,6 @@ pub async fn models(
         // of alias together — but each entry carries its own `"kind":
         // "candidate_alias"` so the two never look interchangeable, and
         // every plain-alias entry above stays byte-identical.
-        //
-        // The deferral count (§6) is one grouped query for every alias, read
-        // once here rather than once per alias below, and skipped entirely
-        // when there are none configured.
-        let deferral_counts = if snap.candidate_aliases.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            candidates::deferrals::deferrals_24h(&state.db)
-                .await
-                .map_err(|e| e.to_string())?
-        };
         for c in snap.candidate_aliases.values() {
             if !matches(&c.alias) {
                 continue;
@@ -204,18 +251,17 @@ pub async fn models(
                     enabled: c.enabled,
                     candidates: c.candidates.clone(),
                     background: c.background,
-                    fallback_mode: c.fallback_mode.as_str().to_string(),
-                    fallback: c.fallback.clone(),
                     enabled_facets: d.enabled.names(),
                     common_facets: d.common.names(),
                     routable_candidates: d.routable,
                     problems: d.problems,
                     advisories: d.advisories,
-                    fallback_usable: d.fallback_usable,
-                    // `for_alias` always counts: a real zero is a number.
-                    deferrals_24h: candidates::deferrals::for_alias(&deferral_counts, &c.alias)
-                        .unwrap_or(0),
-                    facts: facts(&c.alias),
+                    deferrals_24h: deferrals(&c.alias),
+                    facts: self_admin::ModelFacts {
+                        fallback: c.fallback.clone(),
+                        fallback_usable: c.fallback.as_ref().map(|_| d.fallback_usable),
+                        ..facts(&c.alias)
+                    },
                 },
             ));
         }
@@ -231,7 +277,11 @@ pub async fn models(
                 public: m.public,
                 gguf_path: m.gguf_path.clone(),
                 id: m.id,
-                facts: facts(&name),
+                deferrals_24h: deferrals(&name),
+                facts: with_fallback(
+                    facts(&name),
+                    crate::config::HopKey::Local(Class::Chat, m.model_id.clone()),
+                ),
                 name,
             }));
         }
@@ -248,7 +298,11 @@ pub async fn models(
                 id: m.id,
                 gguf_path: m.gguf_path.clone(),
                 pooling: m.pooling.clone(),
-                facts: facts(&name),
+                deferrals_24h: deferrals(&name),
+                facts: with_fallback(
+                    facts(&name),
+                    crate::config::HopKey::Local(Class::Aux, m.model_id.clone()),
+                ),
                 name,
             }));
         }
@@ -272,7 +326,11 @@ pub async fn models(
                 task: m.task,
                 family: m.family,
                 id: m.id,
-                facts: facts(&name),
+                deferrals_24h: deferrals(&name),
+                facts: with_fallback(
+                    facts(&name),
+                    crate::config::HopKey::Local(Class::Audio, m.model_id.clone()),
+                ),
                 name,
             }));
         }
@@ -297,7 +355,11 @@ pub async fn models(
                     .get("model")
                     .or_else(|| m.files.get("diffusion_model"))
                     .cloned(),
-                facts: facts(&name),
+                deferrals_24h: deferrals(&name),
+                facts: with_fallback(
+                    facts(&name),
+                    crate::config::HopKey::Local(Class::Image, m.model_id.clone()),
+                ),
                 name,
             }));
         }
@@ -339,6 +401,8 @@ pub async fn upstreams(state: &SharedState) -> Result<dto::UpstreamsResponse, St
             name: u.name,
             protocol: u.protocol.as_str().to_string(),
             kind: u.kind.as_str().to_string(),
+            // Before `base_url` moves out of the row.
+            host_note: crate::config::openai_host_note(u.protocol, &u.base_url),
             base_url: u.base_url,
             has_api_key: u.api_key.is_some(),
             extra_headers: u
@@ -356,6 +420,7 @@ pub async fn upstreams(state: &SharedState) -> Result<dto::UpstreamsResponse, St
             // router per model (llama egress design §4.2); empty on the
             // other protocols.
             llama_facts: state.llama_facts.view(u.id),
+            quota: state.upstream_quota.get(u.id).map(quota_view),
         })
         .collect();
     Ok(dto::UpstreamsResponse { upstreams })
@@ -501,11 +566,21 @@ pub async fn tool_set(
         return Err("pass the fully-qualified tool name".into());
     }
     if enabled {
-        let cleared = store::enable_tool(&state.db, name)
-            .await
-            .map_err(|e| e.to_string())?;
-        let snap = state.reload_snapshot().await.map_err(|e| e.to_string())?;
-        state.mcp.notify_tools_changed_now();
+        // The write, the reload and the nudge are a task of their own
+        // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+        // dropped request would leave the tool switched off in the snapshot.
+        let st = state.clone();
+        let owned = name.to_string();
+        let (cleared, snap) = detached("switching the tool on", async move {
+            let cleared = store::enable_tool(&st.db, &owned)
+                .await
+                .map_err(|e| e.to_string())?;
+            let snap = st.reload_snapshot().await.map_err(|e| e.to_string())?;
+            st.mcp.notify_tools_changed_now();
+            Ok::<_, String>((cleared, snap))
+        })
+        .await
+        .map_err(|r| r.message)??;
         // A switch under another name of the same tool (the name it had
         // before a collision, or the one a collision gave it) still holds
         // it off: say which.
@@ -529,13 +604,24 @@ pub async fn tool_set(
         .find(|t| t.name == name && !t.stale)
         .map(|t| t.source_label.clone())
         .ok_or_else(|| format!("no tool named '{name}' is offered by this gateway right now"))?;
-    store::disable_tool(&state.db, name, &source)
-        .await
-        .map_err(|e| e.to_string())?;
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    // Northbound clients hold their own copy of `tools/list`; nudge them to
-    // re-list rather than letting them keep offering a tool that now refuses.
-    state.mcp.notify_tools_changed_now();
+    // The write, the reload and the nudge are a task of their own (*changed
+    // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+    // would leave the snapshot offering a tool the store has switched off.
+    let st = state.clone();
+    let owned = name.to_string();
+    detached("switching the tool off", async move {
+        store::disable_tool(&st.db, &owned, &source)
+            .await
+            .map_err(|e| e.to_string())?;
+        st.reload_snapshot().await.map_err(|e| e.to_string())?;
+        // Northbound clients hold their own copy of `tools/list`; nudge them
+        // to re-list rather than letting them keep offering a tool that now
+        // refuses.
+        st.mcp.notify_tools_changed_now();
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|r| r.message)??;
     Ok(dto::MessageAck::new(format!(
         "'{name}' is disabled — it is no longer listed or callable"
     )))
@@ -581,6 +667,8 @@ pub async fn logs(
             error_msg: r.error_msg,
             fallback_reason: r.fallback_reason,
             rung: r.rung,
+            service_tier: r.service_tier,
+            price_note: r.price_note,
         })
         .collect();
     Ok(self_admin::LogTail { logs })
@@ -608,6 +696,7 @@ pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, S
         jobs_retention_days: s.jobs_retention_days,
         jobs_max_rows: s.jobs_max_rows,
         max_body_mb: s.max_body_mb,
+        quota_recheck_seconds: s.quota_recheck_seconds,
         chat_archive_days: s.chat_archive_days,
         chat_purge_days: s.chat_purge_days,
         docs_ingest_reply_tokens: s.docs_ingest_reply_tokens,
@@ -624,12 +713,10 @@ pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, S
         agent_origin_suffix: s.agent_origin_suffix.clone(),
         agent_script_image: s.agent_script_image.clone(),
         // `active` is reported but never patchable here — see
-        // `SettingsPatch::hold_fallback_alias` and `ops::hold_set` (gpu-hold
-        // design §3.1): engaging the hold runs the sweep, a side effect a
-        // generic settings save must not grow.
+        // `ops::hold_set` (gpu-hold design §3.1): engaging the hold runs the
+        // sweep, a side effect a generic settings save must not grow.
         hold: dto::HoldSettingsDto {
             active: s.hold.active,
-            fallback_alias: s.hold.fallback_alias.clone(),
         },
         // Next to the hold: both decide when a fallback answers instead of
         // the local model. The rest of `VramSettings` is not exposed over
@@ -701,6 +788,9 @@ pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, S
         chat_turn_detection: s.chat_turn_detection.clone(),
         chat_voice_audio_input: s.chat_voice_audio_input.clone(),
         chat_kb_budget_tokens: s.chat_kb_budget_tokens,
+        // The media tools' default models (chat-media-tools design §3.8),
+        // in the shape `lmgw__settings_set chat_media_defaults` takes back.
+        chat_media_defaults: s.chat_media_defaults.clone(),
         // Container builds (container-builds §5, §7, §8). The configured dir
         // and the one builds actually use are both shown, since "unset" means a
         // default that differs between prod and a dev instance.

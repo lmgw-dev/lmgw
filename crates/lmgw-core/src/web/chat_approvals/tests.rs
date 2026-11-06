@@ -31,7 +31,7 @@ async fn gated_thread(state: &SharedState) -> (ChatThread, i64) {
     let tid = store::create_chat_thread(db, "chatty", "chat")
         .await
         .unwrap();
-    store::append_user_message_by(db, tid, ("go", &[], &[], None), &Decider::gateway())
+    store::append_user_message_by(db, tid, store::UserMessage::text("go"), &Decider::gateway())
         .await
         .unwrap();
     let record = vec![
@@ -133,7 +133,7 @@ async fn a_send_between_the_claim_and_the_resume_leaves_the_calls_not_run() {
     store::append_user_message_by(
         &state.db,
         thread.id,
-        ("never mind", &[], &[], None),
+        store::UserMessage::text("never mind"),
         &Decider::gateway(),
     )
     .await

@@ -68,6 +68,41 @@ async fn an_embed_request_evicts_the_idle_chat_model_that_filled_the_gpu() {
     assert!(w.loaded.contains("embed-model"));
 }
 
+/// The waiter's phase is typed and names the model it evicts, and a caller
+/// that follows its own wait hears each phase as it is set
+/// (chat-media-tools design §5.3): measuring, the victim, the start.
+#[tokio::test]
+async fn a_followed_wait_names_the_model_it_evicts() {
+    use lmgw_core::vram::stage_watch::{follow, WaitPhase};
+
+    let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
+    assert_eq!(chat(&f.gateway).await.status(), 200);
+    let route = f.state.snapshot().resolve("embed/embed-model").unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let hold = follow(
+        tx,
+        lmgw_core::vram::admit(&f.state, &route, "embed/embed-model"),
+    )
+    .await
+    .unwrap();
+    assert!(hold.is_some(), "admitted");
+    let mut phases = Vec::new();
+    while let Ok(p) = rx.try_recv() {
+        phases.push(p);
+    }
+    assert_eq!(
+        phases,
+        vec![
+            WaitPhase::Measuring,
+            WaitPhase::Evicting {
+                victim: "chat/chat-model".into()
+            },
+            WaitPhase::Starting,
+        ]
+    );
+    assert_eq!(f.stops(), vec!["chat-model".to_string()]);
+}
+
 /// Nothing is evicted when it fits: a request that has room must not disturb a
 /// model that is happily resident. And the forward lands on the container
 /// `acquire` started, not on the route's configured base URL (§5).

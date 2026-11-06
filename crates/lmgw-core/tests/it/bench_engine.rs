@@ -7,7 +7,7 @@
 //!
 //! `live_engine_against_a_running_server` is the one ignored test: it drives
 //! a real llama-server (and the real NVML) when `LMGW_BENCH_LIVE_URL` points
-//! at one, which is how WP1's numbers were sanity-checked on the 4090.
+//! at one, which is how WP1's numbers were sanity-checked on a 24 GiB card.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -336,8 +336,8 @@ async fn the_whole_suite_against_the_official_shape() {
     let bands: Vec<Phase> = r.timeline.phases.iter().map(|s| s.phase).collect();
     assert_eq!(bands, Phase::ALL.to_vec());
     assert!(r.timeline.phases.iter().all(|s| s.end_ms.is_some()));
-    assert_eq!(r.gpu.name.as_deref(), Some("FakeGPU 4090"));
-    assert_eq!(r.gpu.driver.as_deref(), Some("615.71.09"));
+    assert_eq!(r.gpu.name.as_deref(), Some("FakeGPU 3090"));
+    assert_eq!(r.gpu.driver.as_deref(), Some("600.10.01"));
     assert_eq!(r.gpu.power_limit_w, Some(450.0));
     assert!(!r.gpu.throttled);
     assert_eq!(r.results.energy.source, Some(EnergySource::Counter));

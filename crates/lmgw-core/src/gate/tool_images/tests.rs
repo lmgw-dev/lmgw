@@ -246,8 +246,12 @@ fn request(messages: Vec<Message>) -> ChatRequest {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -295,7 +299,7 @@ fn tool_media_counts_the_tool_images_that_pass_the_format_check() {
     ]);
     assert_eq!(tool_media(&ir, false), 2);
     assert_eq!(tool_media(&ir, true), 3);
-    assert_eq!(crate::gate::media_parts(&ir).images, 1);
+    assert_eq!(crate::gate::media_parts(&ir, None).images, 1);
 }
 
 /// A tool result outside a `tool` message is never rendered as one, so it is

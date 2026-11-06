@@ -17,18 +17,29 @@
 //! Not `canceled`: that is a response that began (a stream cut off, a
 //! caller's stop) and says 200; this one never had a status to send.
 //!
+//! Two platform cases leave more than that row (openai egress design §13.4,
+//! after the WP9 review). A non-streamed chat on an `openai` row reads its
+//! answer in a task of its own (`chat/unary.rs`), which borrows the row
+//! ([`Unanswered::lend`]): when the client is gone by the time the answer is
+//! read, that task writes the `499` with the answer's usage. A stream on an
+//! `openai` row whose client goes away after the request went out and
+//! before the upstream's 2xx counts its prompt locally
+//! ([`Unanswered::count_if_sent`]), the budgets' lower bound.
+//!
 //! The counters ([`super::handle_count_tokens`], `/v1/messages/count_tokens`,
 //! `/tokenize`) write their rows through the guard too
 //! ([`Unanswered::answered`]): a count is metadata and a cheap one leaves no
 //! row (api-docs design §5.4), but one that failed, or that had to bring its
 //! model up first, is traffic like any other.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::config::Route;
 use crate::gate::FallbackReason;
 use crate::ingress::ClientProto;
-use crate::ir::Usage;
+use crate::ir::{ChatRequest, Usage};
 use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
@@ -63,6 +74,83 @@ struct Pending {
     /// For a counter: this count's admission had to bring its model up
     /// ([`Unanswered::cold_start`]), which makes even its success a row.
     cold: bool,
+    /// A platform request whose prompt counts once it was sent
+    /// ([`Unanswered::count_if_sent`]).
+    count: Option<PromptCount>,
+}
+
+/// The request a platform stream sent, and whether it went out yet.
+struct PromptCount {
+    ir: Arc<ChatRequest>,
+    sent: Arc<AtomicBool>,
+}
+
+/// A request's open row, lent to a task that may outlive its handler
+/// ([`Unanswered::lend`]). Dropped without being written or given back (the
+/// task panicked, or its answer was never taken), it closes the in-flight
+/// gauge, which the row would have.
+pub(crate) struct Lent(Option<Pending>);
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            p.state.telemetry.request_abandoned();
+        }
+    }
+}
+
+/// What a lent row says besides its status, usage and error.
+#[derive(Default)]
+pub(crate) struct LentRow {
+    pub ttfb_ms: Option<i64>,
+    pub timings: Option<crate::ir::Timings>,
+    pub max_tokens_clamped: Option<u32>,
+    pub rung: Option<i64>,
+    pub degraded: Option<String>,
+    pub quantities: crate::pricing::Quantities,
+    pub service_tier: crate::pricing::ServedTier,
+}
+
+impl Lent {
+    /// Write the row, which closes the gauge: the task's, for a request
+    /// whose handler is gone.
+    pub(crate) async fn record(
+        mut self,
+        status: u16,
+        usage: Usage,
+        error: Option<(&str, String)>,
+        row: LentRow,
+        local_count: Option<crate::pricing::LocalCount>,
+    ) {
+        let Some(p) = self.0.take() else {
+            return;
+        };
+        record_counted(
+            LogParams {
+                state: &p.state,
+                proto: p.proto,
+                ctx: &p.ctx,
+                alias: p.alias,
+                route: p.route.as_deref(),
+                started: p.started,
+                streamed: p.streamed,
+                class: p.class,
+                timings: row.timings,
+                max_tokens_clamped: row.max_tokens_clamped,
+                fallback: p.fallback,
+                rung: row.rung,
+                degraded: row.degraded,
+                quantities: row.quantities,
+                service_tier: row.service_tier,
+            },
+            status,
+            row.ttfb_ms,
+            usage,
+            error,
+            local_count,
+        )
+        .await;
+    }
 }
 
 impl Unanswered {
@@ -89,6 +177,7 @@ impl Unanswered {
                 fallback: None,
                 stage: "reading the request",
                 cold: false,
+                count: None,
             }),
         }
     }
@@ -131,6 +220,29 @@ impl Unanswered {
         self.with(|p| p.cold = true);
     }
 
+    /// A platform stream's request (`ir`), whose prompt the row counts
+    /// locally once `sent` says it went out, should the client go away
+    /// before the upstream's 2xx: the upstream may already be working on it
+    /// and bills for it (openai egress design §13.4).
+    pub(crate) fn count_if_sent(&mut self, ir: Arc<ChatRequest>, sent: Arc<AtomicBool>) {
+        self.with(|p| p.count = Some(PromptCount { ir, sent }));
+    }
+
+    /// The row, lent to a task that writes it should the handler be gone
+    /// when the task is done; [`Self::restore`] takes it back. `None` when
+    /// it was written already.
+    pub(crate) fn lend(&mut self) -> Option<Lent> {
+        self.open.take().map(|p| Lent(Some(p)))
+    }
+
+    /// Take back a row [`Self::lend`] lent: the handler writes it after
+    /// all, or the guard does should the client go away from here on.
+    pub(crate) fn restore(&mut self, lent: Option<Lent>) {
+        if let Some(mut lent) = lent {
+            self.open = lent.0.take();
+        }
+    }
+
     /// The handler writes the request's row now, and that row closes the
     /// gauge: the guard has nothing left to do.
     pub(crate) fn logging(&mut self) {
@@ -155,7 +267,7 @@ impl Unanswered {
 impl Unanswered {
     /// [`Self::answered`] for a counter that failed with `e`.
     pub(crate) async fn failed(self, e: &crate::error::GatewayError) {
-        self.answered(e.http_status().as_u16(), Some((e.kind(), e.to_string())))
+        self.answered(e.http_status().as_u16(), Some((e.kind(), e.log_text())))
             .await;
     }
 }
@@ -184,9 +296,32 @@ impl Drop for Unanswered {
 }
 
 impl Pending {
-    /// The row, which closes the gauge ([`record`]).
+    /// The row, which closes the gauge ([`record`]). A platform stream's
+    /// request that went out counts its prompt locally (§13.4).
     async fn record(self, status: u16, error: Option<(&str, String)>) {
-        record(
+        let sent = self
+            .count
+            .as_ref()
+            .filter(|c| c.sent.load(Ordering::Relaxed))
+            .map(|c| c.ir.clone());
+        let (local_count, service_tier) = match (sent, self.route.as_deref()) {
+            (Some(ir), Some(route)) => (
+                floor_count(
+                    route,
+                    self.state.snapshot().is_local_upstream(route.upstream.id),
+                    &ir,
+                    String::new(),
+                )
+                .await,
+                crate::pricing::ServedTier::of(
+                    route.upstream.protocol,
+                    None,
+                    ir.requested_service_tier(),
+                ),
+            ),
+            _ => (None, Default::default()),
+        };
+        record_counted(
             LogParams {
                 state: &self.state,
                 proto: self.proto,
@@ -202,11 +337,13 @@ impl Pending {
                 rung: None,
                 degraded: None,
                 quantities: Default::default(),
+                service_tier,
             },
             status,
             None,
             Usage::default(),
             error,
+            local_count,
         )
         .await;
     }

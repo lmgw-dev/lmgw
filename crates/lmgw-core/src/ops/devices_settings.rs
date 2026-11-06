@@ -66,6 +66,10 @@ pub struct DevicesSettingsPatch {
     /// a new one past it closes that address's oldest. Applies to the next
     /// connection.
     pub unauthenticated_per_peer: Option<i64>,
+    /// How long a transfer offer between devices lasts, in days, 1 to 3650;
+    /// its bytes are deleted when it expires undelivered. Applies to the
+    /// next offer.
+    pub transfer_expiry_days: Option<i64>,
 }
 
 impl DevicesSettingsPatch {
@@ -81,6 +85,7 @@ impl DevicesSettingsPatch {
             "enrol_refuse_per_min" => self.enrol_refuse_per_min,
             "unauthenticated_max" => self.unauthenticated_max,
             "unauthenticated_per_peer" => self.unauthenticated_per_peer,
+            "transfer_expiry_days" => self.transfer_expiry_days,
             _ => None,
         }
     }
@@ -293,6 +298,7 @@ pub fn devices_settings_view(d: &DevicesSettings, bind_addr: &str) -> wire::Devi
         enrol_refuse_per_min: d.enrol_refuse_per_min,
         unauthenticated_max: d.unauthenticated_max,
         unauthenticated_per_peer: d.unauthenticated_per_peer,
+        transfer_expiry_days: d.transfer_expiry_days,
     }
 }
 
@@ -421,6 +427,7 @@ mod tests {
                     "enrol_refuse_per_min" => p.enrol_refuse_per_min = Some(bad),
                     "unauthenticated_max" => p.unauthenticated_max = Some(bad),
                     "unauthenticated_per_peer" => p.unauthenticated_per_peer = Some(bad),
+                    "transfer_expiry_days" => p.transfer_expiry_days = Some(bad),
                     other => panic!("{other} has no patch field"),
                 }
                 let e = apply_devices(&mut d, p, BIND).unwrap_err();

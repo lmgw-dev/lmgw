@@ -64,9 +64,12 @@ pub use climb::{
 pub use ownership::{Origin, OwnerDrain};
 
 mod acquire;
+mod caps_seen;
 mod command;
 mod decision_route;
 mod errors;
+mod for_tests;
+mod freeable;
 mod inputs;
 mod lease;
 mod llama_props;
@@ -86,6 +89,7 @@ pub use command::{
 };
 pub use decision_route::{DecisionRoute, RouteRefresh};
 pub use errors::RuntimeError;
+pub use freeable::Freeable;
 pub use inputs::{AcquireSpec, StartSpec};
 pub use llama_props::{unknown_until, LlamaEntry, Refresh};
 pub use podman_ops::log_excerpt_of;
@@ -143,7 +147,7 @@ pub const LIVE_FACT_READ: Duration = CONTAINER_EXIT_POLL;
 /// the SIGTERM-deafness that made the full grace mandatory was router-mode
 /// specific. Spelled out rather than left to podman's identical default so
 /// that the value is visible in the argv a test (and `podman logs`) can read.
-const STOP_GRACE_SECONDS: u64 = 10;
+pub(crate) const STOP_GRACE_SECONDS: u64 = 10;
 
 /// How many container log lines a failed start reads back, and how many of
 /// them the error carries. Same shape (and same reason) as
@@ -204,6 +208,14 @@ pub struct Registry {
     /// The reconciliation pass after boot: one at a time, and what it
     /// remembers from one to the next (`unheld.rs`).
     pass: tokio::sync::Mutex<unheld::PassMemory>,
+    /// Each image row's last capabilities document, by model id
+    /// (`caps_seen.rs`).
+    image_caps_seen: Mutex<HashMap<String, crate::runtime::image::ImageCapabilities>>,
+    /// lmgw's own CDI spec (machine-check design §3.6): made fresh before a
+    /// GPU start or probe, and the `--cdi-spec-dir` every such podman call
+    /// carries. The gateway's, set when it wires this registry
+    /// ([`Registry::set_cdi`]); an unmanaged one until then.
+    cdi: arc_swap::ArcSwap<crate::runtime::cdi::OwnSpec>,
 }
 
 /// [`Registry::set_on_started`]'s hook.

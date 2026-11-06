@@ -227,6 +227,27 @@ impl ToolSurface {
                 })
                 .collect(),
         ));
+        // The image and audio toolsets as their rows offer them now: a
+        // manifest naming one with no row behind it is missing its tools.
+        let offer = crate::mcp::media::offer(state).await;
+        for label in [
+            crate::mcp::media::IMAGE_LABEL,
+            crate::mcp::media::AUDIO_LABEL,
+        ] {
+            labels.push((
+                label.to_string(),
+                offer
+                    .tools(label)
+                    .iter()
+                    .filter_map(|entry| {
+                        entry
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect(),
+            ));
+        }
         labels.push((
             exec::KB_LABEL.to_string(),
             crate::mcp::kb::list()

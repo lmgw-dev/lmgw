@@ -15,7 +15,13 @@
 //! outside-VRAM verdict, rows and candidate aliases stored as given, and cloud
 //! aliases on a wiremock upstream. The compatibility counters
 //! (`count_compat.rs`) add `/apply-template`'s refusal of media a container
-//! cannot take ([`World::projectors`]).
+//! cannot take ([`World::projectors`]). The media tools' claim tests
+//! (`media_tools/claim.rs`) add image rows ([`Gpu::image`]), whose
+//! containers answer sd-server's capabilities and job routes, and a tool
+//! call's arguments ([`World::tool_args`]). The per-request background suite
+//! (`background_header.rs`) adds sd-server's OpenAI image route, a start
+//! on a container the test serves itself ([`Gpu::next_start_on`]) and audio
+//! rows of a given size ([`Gpu::audio`]).
 
 #![allow(dead_code)]
 
@@ -23,9 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lmgw_core::config::{
-    AuxKind, HoldFallbackMode, LlamaParams, Protocol, Route, Settings, UpstreamKind,
-};
+use lmgw_core::config::{AuxKind, LlamaParams, Protocol, Route, Settings, UpstreamKind};
 use lmgw_core::erased::Erased;
 use lmgw_core::ladder::Rung;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry, HOST_PID_FORMAT};
@@ -41,6 +45,10 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use super::audiocpp_options::{self, Served};
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
+
+/// sd-server 0518b34's capabilities document, what every container answers
+/// on its readiness route as an image container.
+const SD_CAPS: &str = include_str!("../../fixtures/sdcpp/capabilities-z-image-turbo-0518b34.json");
 
 /// What a [`World::thinking`] model reasons, and then answers.
 pub const THOUGHT: &str = "Der Nutzer fragt nach dem Wetter, ich antworte kurz.";
@@ -68,6 +76,15 @@ pub struct World {
     /// llama-server refuses a prompt above its context, before any work
     /// (`exceed_context_size_error`).
     pub refuse_context: HashSet<String>,
+    /// Models whose container refuses its next `n` chat requests as
+    /// [`Self::refuse_context`] does, and answers after them.
+    pub refuse_context_times: HashMap<String, usize>,
+    /// Models whose container refuses every chat request the way
+    /// llama-server's GBNF converter refuses a schema (`400`, `JSON schema
+    /// conversion failed`), before any work; each refusal is recorded in
+    /// [`Self::schema_refused`].
+    pub refuse_schema: HashSet<String>,
+    pub schema_refused: Vec<String>,
     /// How many tokens `/tokenize` counts for any prompt — what a ladder's
     /// count beside its send reads.
     pub prompt_tokens: u64,
@@ -82,6 +99,13 @@ pub struct World {
     /// Models whose streamed answer is a call of this tool, unless the
     /// request ends with a tool result: a tool loop's first model call.
     pub calls_tool: HashMap<String, String>,
+    /// The arguments of that call, as JSON text; `{}` when not set.
+    pub tool_args: HashMap<String, String>,
+    /// How many calls of that tool the answer makes, `c1`, `c2`, …; one
+    /// when not set.
+    pub tool_calls_n: HashMap<String, usize>,
+    /// The model of every image job a container was submitted, in order.
+    pub images: Vec<String>,
     /// The model of every chat answer a container gave, in order.
     pub chats: Vec<String>,
     /// Models whose template reasons whatever it is told — a streamed chat
@@ -113,6 +137,9 @@ pub struct World {
     /// before it unloads anything — an eviction held in flight, with the
     /// admission gate held by whoever evicts ([`Gpu::gate_stops`]).
     pub stop_gate: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Images `podman image exists` says are not on the machine
+    /// (machine-check design §5); every other image is there.
+    pub missing_images: HashSet<String>,
     /// How long every container takes to answer a chat request — a model
     /// call still running while a test does something else.
     pub chat_delay: Duration,
@@ -292,6 +319,18 @@ impl CommandRunner for Podman {
     ) -> Erased<'a, std::io::Result<CmdOutput>> {
         Box::pin(async move {
             assert_eq!(program, "podman");
+            // lmgw's own spec dir before the subcommand, when a test gives
+            // the gateway a managed spec (`cdi_machine`): Podman's global
+            // option, nothing this fake reads.
+            let mut args = args;
+            while args.first().map(String::as_str) == Some("--cdi-spec-dir") && args.len() > 1 {
+                args = &args[2..];
+            }
+            // What the machine check asks a podman that works (a test that
+            // states a machine, `machine_world::Machine`).
+            if let Some(out) = super::machine_world::working_podman(args) {
+                return Ok(out);
+            }
             let ok = CmdOutput {
                 status: 0,
                 stdout: "c0ffee\n".into(),
@@ -322,6 +361,13 @@ impl CommandRunner for Podman {
                         }),
                     }
                 }
+                // A throwaway run with no model label: sd-server's `--help`
+                // probe, which reads nothing here (the embedded vocabulary).
+                "run" if !args.iter().any(|a| a.starts_with("lmgw.model=")) => Ok(CmdOutput {
+                    status: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }),
                 "run" => {
                     let name = flag(args, "--name").unwrap_or_default().to_string();
                     let model = args
@@ -334,6 +380,7 @@ impl CommandRunner for Podman {
                         .and_then(|p| p.parse().ok())
                         .expect("every managed container publishes a host port");
                     let file = flag(args, "-m")
+                        .or_else(|| flag(args, "--diffusion-model"))
                         .and_then(|m| m.rsplit('/').next())
                         .unwrap_or_default()
                         .to_string();
@@ -373,6 +420,17 @@ impl CommandRunner for Podman {
                     }
                     w.loaded.insert(model);
                     Ok(ok)
+                }
+                // Whether an engine image is here (machine-check design
+                // §5): podman's exit 1 for one that is not.
+                "image" if args.get(1).map(String::as_str) == Some("exists") => {
+                    let image = args.last().cloned().unwrap_or_default();
+                    let missing = self.world.lock().unwrap().missing_images.contains(&image);
+                    Ok(CmdOutput {
+                        status: if missing { 1 } else { 0 },
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
                 }
                 // Per-process attribution's `State.Pid` read (§4.7).
                 "inspect" if args.get(2).map(String::as_str) == Some(HOST_PID_FORMAT) => {
@@ -483,7 +541,14 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
                     "code": status, "message": message, "type": "server_error",
                 }}));
             }
-            if w.refuse_context.contains(&model) {
+            let once = match w.refuse_context_times.get_mut(&model) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    true
+                }
+                _ => false,
+            };
+            if once || w.refuse_context.contains(&model) {
                 if body["stream"] == true {
                     w.streamed_bodies.push(body);
                 }
@@ -493,11 +558,20 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
                     "n_prompt_tokens": 5000, "n_ctx": 4096,
                 }}));
             }
+            if w.refuse_schema.contains(&model) {
+                w.schema_refused.push(model.clone());
+                return ResponseTemplate::new(400).set_body_json(json!({"error": {
+                    "code": 400, "type": "invalid_request_error",
+                    "message": "JSON schema conversion failed:\nUnrecognized schema: \
+                                {\"type\":\"nonsense\"}",
+                }}));
+            }
             let after_tool = body["messages"]
                 .as_array()
                 .and_then(|m| m.last())
                 .is_some_and(|m| m["role"] == "tool");
             if let Some(tool) = w.calls_tool.get(&model).cloned().filter(|_| !after_tool) {
+                let arguments = w.tool_args.get(&model).cloned().unwrap_or("{}".into());
                 w.streamed_bodies.push(body);
                 w.chats.push(model.clone());
                 let chunk = |d: serde_json::Value, finish: serde_json::Value| {
@@ -505,12 +579,15 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
                         "choices": [{"index": 0, "delta": d, "finish_reason": finish}]});
                     format!("data: {c}\n\n")
                 };
+                let n = w.tool_calls_n.get(&model).copied().unwrap_or(1);
+                let tool_calls: Vec<_> = (0..n)
+                    .map(|i| {
+                        json!({"index": i, "id": format!("c{}", i + 1), "type": "function",
+                            "function": {"name": tool, "arguments": arguments}})
+                    })
+                    .collect();
                 let sse = [
-                    chunk(
-                        json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
-                            "function": {"name": tool, "arguments": "{}"}}]}),
-                        json!(null),
-                    ),
+                    chunk(json!({ "tool_calls": tool_calls }), json!(null)),
                     chunk(json!({}), json!("tool_calls")),
                     "data: [DONE]\n\n".to_string(),
                 ]
@@ -586,6 +663,59 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
                 }})),
                 None => ResponseTemplate::new(200).set_body_json(json!({"prompt": "p"})),
             }
+        })
+        .mount(&server)
+        .await;
+    // An sd-server container: its capabilities route (its readiness probe
+    // too), a job submit, and the job done at its first poll.
+    Mock::given(method("GET"))
+        .and(path("/sdcpp/v1/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SD_CAPS))
+        .mount(&server)
+        .await;
+    let image_world = world.clone();
+    Mock::given(method("POST"))
+        .and(path("/sdcpp/v1/img_gen"))
+        .respond_with(move |_: &Request| {
+            let mut w = image_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            w.images.push(model);
+            ResponseTemplate::new(202).set_body_json(json!({
+                "id": "job_1", "kind": "img_gen", "status": "queued", "created": 1000,
+                "poll_url": "/sdcpp/v1/jobs/job_1",
+            }))
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sdcpp/v1/jobs/job_1"))
+        .respond_with(move |_: &Request| {
+            use base64::Engine as _;
+            let png = base64::engine::general_purpose::STANDARD
+                .encode(lmgw_core::bench::png::solid_red());
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "job_1", "kind": "img_gen", "status": "completed", "created": 1000,
+                "started": 1000, "completed": 1500, "queue_position": 0, "error": null,
+                "result": {"images": [{"index": 0, "b64_json": png}], "output_format": "png"},
+            }))
+        })
+        .mount(&server)
+        .await;
+    // And sd-server's OpenAI image route, what `/v1/images/generations`
+    // relays to a local row: one picture, recorded like a job's.
+    let openai_image_world = world.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(move |_: &Request| {
+            use base64::Engine as _;
+            let mut w = openai_image_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            w.images.push(model);
+            let png = base64::engine::general_purpose::STANDARD
+                .encode(lmgw_core::bench::png::solid_red());
+            ResponseTemplate::new(200).set_body_json(json!({
+                "created": 1000, "data": [{"b64_json": png}],
+            }))
         })
         .mount(&server)
         .await;
@@ -714,6 +844,8 @@ pub struct Gpu {
     pub state: SharedState,
     pub world: Arc<Mutex<World>>,
     containers: Arc<Mutex<Vec<MockServer>>>,
+    /// The host ports the next starts get, in order ([`Self::next_start_on`]).
+    ports: Arc<Mutex<VecDeque<u16>>>,
     /// The cloud upstreams [`Self::cloud`] made, kept alive with the world.
     clouds: Mutex<Vec<MockServer>>,
     dir: tempfile::TempDir,
@@ -736,13 +868,14 @@ impl Gpu {
                 .map(|c| c.address().port())
                 .collect::<VecDeque<u16>>(),
         ));
+        let allocator = Arc::clone(&ports);
         state.set_runtime_for_tests(Arc::new(Registry::with_ports(
             Arc::new(Podman {
                 world: world.clone(),
             }),
             reqwest::Client::new(),
             Arc::new(move || {
-                ports.lock().unwrap().pop_front().ok_or_else(|| {
+                allocator.lock().unwrap().pop_front().ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::AddrNotAvailable,
                         "test allocator ran out of ports — an unexpected extra start",
@@ -765,6 +898,7 @@ impl Gpu {
             state,
             world,
             containers: Arc::new(Mutex::new(servers)),
+            ports,
             clouds: Mutex::new(Vec::new()),
             dir,
         }
@@ -772,6 +906,22 @@ impl Gpu {
 
     pub fn world(&self) -> std::sync::MutexGuard<'_, World> {
         self.world.lock().unwrap()
+    }
+
+    /// The card holds `total` bytes from now on, as the driver reports at
+    /// its next read — nothing reads it here.
+    pub fn card(&self, total: u64) {
+        self.state.vram.set_probe(Arc::new(FakeGpu {
+            total,
+            world: self.world.clone(),
+        }));
+    }
+
+    /// Give the next start `port` — a container the test serves itself
+    /// (a model that streams until its client goes away) — instead of the
+    /// next of this world's own.
+    pub fn next_start_on(&self, port: u16) {
+        self.ports.lock().unwrap().push_front(port);
     }
 
     /// What a new lmgw finds: a fresh registry that holds nothing, on a
@@ -886,10 +1036,33 @@ impl Gpu {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
                 capabilities_override: None,
                 ladder,
+            },
+        )
+        .await
+        .unwrap();
+        self.state.reload_snapshot().await.unwrap();
+    }
+
+    /// An image row `id` on a diffusion model file of `bytes`, kept in the
+    /// chat rows' models dir — which becomes the image class's too.
+    pub async fn image(&self, id: &str, bytes: u64) {
+        let file = format!("{id}.gguf");
+        self.file(&file, bytes);
+        let mut s = self.state.snapshot().settings.clone();
+        s.image.models_dir = self.dir.path().display().to_string();
+        store::save_settings(&self.state.db, &s).await.unwrap();
+        let mut files = serde_json::Map::new();
+        files.insert("diffusion_model".into(), json!(file));
+        store::insert_image_model(
+            &self.state.db,
+            &store::NewImageModel {
+                model_id: id.into(),
+                files,
+                enabled: true,
+                ..Default::default()
             },
         )
         .await
@@ -925,12 +1098,40 @@ impl Gpu {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
         .unwrap();
+        self.state.reload_snapshot().await.unwrap();
+    }
+
+    /// An audio row `id` doing `task` (`tts`: Pocket TTS, whose built-in
+    /// voice `alba` is a file of its root; `asr`: Qwen3 ASR) on a directory
+    /// of `bytes` — what an unlearned row is charged — in the chat rows'
+    /// models dir, which becomes the audio class's too.
+    pub async fn audio(&self, id: &str, task: &str, bytes: u64) {
+        let root = self.dir.path().join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::File::create(root.join("model.gguf"))
+            .unwrap()
+            .set_len(bytes)
+            .unwrap();
+        let family = if task == "tts" {
+            std::fs::create_dir_all(root.join("embeddings")).unwrap();
+            std::fs::write(root.join("embeddings/alba.safetensors"), b"").unwrap();
+            "pocket_tts"
+        } else {
+            "qwen3_asr"
+        };
+        let mut s = self.state.snapshot().settings.clone();
+        s.audio.models_dir = self.dir.path().display().to_string();
+        store::save_settings(&self.state.db, &s).await.unwrap();
+        let mut row = super::audio_world::tts_row(id, family);
+        row.task = task.into();
+        store::insert_audio_model(&self.state.db, &row)
+            .await
+            .unwrap();
         self.state.reload_snapshot().await.unwrap();
     }
 
@@ -964,7 +1165,6 @@ impl Gpu {
                 alias: alias.into(),
                 candidates: candidates.iter().map(|c| c.to_string()).collect(),
                 background: true,
-                fallback_mode: HoldFallbackMode::None,
                 fallback: None,
                 capabilities_disabled: vec![],
                 capabilities_enabled: vec![],
@@ -1014,7 +1214,7 @@ impl Gpu {
             &self.state.db,
             &NewUpstream {
                 name: format!("cloud-{name}"),
-                protocol: Protocol::Openai,
+                protocol: Protocol::OpenaiCompatible,
                 kind: UpstreamKind::Generic,
                 base_url: format!("{}/v1", mock.uri()),
                 api_key: None,
@@ -1038,6 +1238,7 @@ impl Gpu {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override,
+                fallback: None,
             },
         )
         .await

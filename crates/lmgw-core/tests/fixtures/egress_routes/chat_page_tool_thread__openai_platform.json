@@ -1,0 +1,138 @@
+{
+  "requests": [
+    {
+      "body": "{\"input\":[{\"content\":[{\"text\":\"say hi through the tool\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"instructions\":\"You are m. Be brief.\",\"model\":\"chat-gguf\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"stream\":true,\"tools\":[{\"description\":\"echo the input\",\"name\":\"stub__echo\",\"parameters\":{\"properties\":{\"text\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"function\"},{\"description\":\"slow the input\",\"name\":\"stub__slow\",\"parameters\":{\"properties\":{\"text\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"function\"}]}",
+      "body_json": {
+        "input": [
+          {
+            "content": [
+              {
+                "text": "say hi through the tool",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "You are m. Be brief.",
+        "model": "chat-gguf",
+        "reasoning": {
+          "summary": "auto"
+        },
+        "service_tier": "auto",
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "echo the input",
+            "name": "stub__echo",
+            "parameters": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "slow the input",
+            "name": "stub__slow",
+            "parameters": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/responses"
+    },
+    {
+      "body": "{\"input\":[{\"content\":[{\"text\":\"say hi through the tool\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"arguments\":\"{\\\"text\\\":\\\"hi\\\"}\",\"call_id\":\"c1\",\"name\":\"stub__echo\",\"type\":\"function_call\"},{\"call_id\":\"c1\",\"output\":\"echoed {\\\"text\\\":\\\"hi\\\"}\",\"type\":\"function_call_output\"}],\"instructions\":\"You are m. Be brief.\",\"model\":\"chat-gguf\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"stream\":true,\"tools\":[{\"description\":\"echo the input\",\"name\":\"stub__echo\",\"parameters\":{\"properties\":{\"text\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"function\"},{\"description\":\"slow the input\",\"name\":\"stub__slow\",\"parameters\":{\"properties\":{\"text\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"function\"}]}",
+      "body_json": {
+        "input": [
+          {
+            "content": [
+              {
+                "text": "say hi through the tool",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "arguments": "{\"text\":\"hi\"}",
+            "call_id": "c1",
+            "name": "stub__echo",
+            "type": "function_call"
+          },
+          {
+            "call_id": "c1",
+            "output": "echoed {\"text\":\"hi\"}",
+            "type": "function_call_output"
+          }
+        ],
+        "instructions": "You are m. Be brief.",
+        "model": "chat-gguf",
+        "reasoning": {
+          "summary": "auto"
+        },
+        "service_tier": "auto",
+        "store": false,
+        "stream": true,
+        "tools": [
+          {
+            "description": "echo the input",
+            "name": "stub__echo",
+            "parameters": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "function"
+          },
+          {
+            "description": "slow the input",
+            "name": "stub__slow",
+            "parameters": {
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/responses"
+    }
+  ],
+  "status": 200
+}

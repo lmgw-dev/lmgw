@@ -4,9 +4,9 @@
 //! disk ([`super::plan::PlanCache::audio`]) — audio.cpp publishes no model
 //! metadata to plan from — and a container holds more than that once it has
 //! served a request: the CUDA context and ggml's compute buffers come on top
-//! of the weights. Measured per process on the 4090: nemotron-asr 1.48 GB
-//! against 0.93 GB on disk, qwen3-asr 3.28 against 2.47, pocket-tts 0.97
-//! against 0.13. The ratios (1.3×, 1.6×, 7.5×) rule out any multiplier, so
+//! of the weights. Measured per process on a test card: nemotron-asr 1.38 GiB
+//! against 0.87 GiB on disk, qwen3-asr 3.05 against 2.30, pocket-tts 0.90
+//! against 0.12. The ratios (1.3×, 1.6×, 7.5×) rule out any multiplier, so
 //! the figure is learned rather than guessed — the image class's rule
 //! ([`super::peak`]).
 //!
@@ -23,6 +23,24 @@
 //! memory the driver cannot see yet (the ledger's `unmeasured` and
 //! `reserved_peaks`): its expected residency minus what it holds at rest
 //! ([`ready`], WP7 review M4), or all of it where that could not be read.
+//!
+//! **What it holds now counts too** ([`now`]). lmgw learns that a container
+//! loaded only from a request it answered, but anything that reaches the
+//! container directly loads it as well — audio.cpp's own web UI, which the
+//! Overview links to, or a client on its port. An audio container
+//! loaded through its own web UI holds its weights while the ledger, which
+//! never saw that load, still keeps the whole load free on top: the same
+//! memory counted twice. So every ledger with a load pending reads what those
+//! containers' processes hold at its own device read, and the pending figure
+//! is the expected residency less that reading; the basis's own figure is
+//! used only where nothing could be read ([`pending`]). The same reading
+//! covers what the one at rest cannot, in both directions: it is taken once
+//! per container, and an audio.cpp build can create no
+//! CUDA context before its first load — such a container reads 0 B at rest
+//! and still holds its context after its model was idle-unloaded, which the old at-rest figure left pending as well — while
+//! an eager row's weights read at rest leave the card when audio.cpp
+//! idle-unloads after a request lmgw did not route, and only a fresh
+//! reading sees that its reload is pending again.
 //!
 //! **What is learned, and when.** `resident_bytes`: the largest GPU memory
 //! the driver lists for the container's processes (its init and every process
@@ -59,6 +77,7 @@ use crate::hf::fmt_bytes;
 use super::plan::Footprint;
 
 mod learn;
+mod now;
 mod read;
 mod ready;
 mod sample;
@@ -67,6 +86,7 @@ mod tests;
 mod tracker;
 mod weights;
 
+pub(super) use now::Ask;
 pub use sample::SAMPLE_INTERVAL;
 pub(super) use tracker::{AtRest, GenView, Residency};
 pub(super) use weights::selected_weights_bytes;
@@ -75,8 +95,8 @@ pub(super) use weights::selected_weights_bytes;
 /// its CUDA context and runtime. Used by the at-rest rule ([`looks_loaded`]).
 ///
 /// Where it comes from: a bare container's context was what the WP7 review
-/// found double-counted — 0.5–1 GB for a realtime warm-up of two or three
-/// containers, so 0.25–0.5 GB each — and the smallest loaded container
+/// found double-counted — 0.5–1 GiB for a realtime warm-up of two or three
+/// containers, so 0.25–0.5 GiB each — and the smallest loaded container
 /// measured, pocket-tts-english, held 768 MiB (§3.1). Half the row's on-disk
 /// size on top keeps the line clear of a larger model's weights. The WP7
 /// live test checks it against the real containers: every bare reading must
@@ -261,12 +281,47 @@ pub(super) enum Basis {
 pub(super) struct Pending {
     pub(super) bytes: u64,
     pub(super) basis: Basis,
+    /// What its processes hold right now ([`now`]), when that was read —
+    /// then it, not `basis`'s older figure, is what set `bytes`. `None` when
+    /// it was not read (and for a container lmgw knows holds its model).
+    pub(super) measured: Option<u64>,
+}
+
+impl Basis {
+    /// What this basis takes to be on the card already, and subtracts from
+    /// the expected residency: nothing for a lazy row nothing was read of.
+    fn on_card(&self) -> u64 {
+        match self {
+            Basis::Holds | Basis::Whole => 0,
+            Basis::AtRest { on_card, .. } => *on_card,
+            Basis::Unloaded { bare } => bare.unwrap_or(0),
+            Basis::AboveWeights { weights } => *weights,
+        }
+    }
 }
 
 /// The pending table. `expected` is the container's expected residency
 /// ([`expected_for`]); `weights` its selected weights file, for an eager row
 /// nothing was read of. A figure read at rest is what is on the card
 /// already, so only the rest is pending — never more than nothing.
+///
+/// `held_now`: what the container's processes hold at the ledger's own
+/// device read ([`now`]), `None` where that could not be read. When it was
+/// read, the pending figure is the expected residency less it: memory the
+/// container already holds is in the driver's `used`, whoever made it load
+/// — lmgw only learns of a load from a request it answered, and a
+/// generation that bypassed it (audio.cpp's own web UI, a client on the
+/// container's port) left the whole load pending on top of the weights the
+/// driver already showed. The fresh reading wins over the basis's figure in
+/// both directions: one smaller than an older reading at rest, or than an
+/// eager row's weights file, is a container that let go of memory since
+/// (audio.cpp idle-unloads a model whatever loaded it, and lmgw's
+/// `last_answered` clock never started for a load it did not route), and
+/// keeping the older floor would leave that memory neither in `used` nor
+/// kept free. The ways a fresh reading can be off — a process it missed,
+/// the smaller of two lists — both read low, and so keep more free, never
+/// less. The basis's figure is used only when nothing was read. Nothing is
+/// pending for a container lmgw knows holds its model, whatever is read.
 pub(super) fn pending(
     m: &AudioModel,
     s: &AudioSettings,
@@ -274,40 +329,38 @@ pub(super) fn pending(
     weights: u64,
     g: &GenView,
     now: Instant,
+    held_now: Option<u64>,
 ) -> Pending {
-    let take = |on_card: u64| expected.saturating_sub(on_card);
-    if holds(g.last_answered, now, s) {
-        return Pending {
-            bytes: 0,
-            basis: Basis::Holds,
-        };
-    }
-    if g.last_answered.is_some() {
-        let bare = match g.at_rest {
-            AtRest::Bare(b) => Some(b),
-            _ => None,
-        };
-        return Pending {
-            bytes: take(bare.unwrap_or(0)),
-            basis: Basis::Unloaded { bare },
-        };
-    }
-    match g.at_rest {
-        AtRest::Bare(b) | AtRest::Eager(b) | AtRest::Loaded(b) => Pending {
-            bytes: take(b),
-            basis: Basis::AtRest {
+    let basis = if holds(g.last_answered, now, s) {
+        Basis::Holds
+    } else if g.last_answered.is_some() {
+        Basis::Unloaded {
+            bare: match g.at_rest {
+                AtRest::Bare(b) => Some(b),
+                _ => None,
+            },
+        }
+    } else {
+        match g.at_rest {
+            AtRest::Bare(b) | AtRest::Eager(b) | AtRest::Loaded(b) => Basis::AtRest {
                 on_card: b,
                 eager: is_eager(m, s),
             },
-        },
-        _ if is_eager(m, s) => Pending {
-            bytes: take(weights),
-            basis: Basis::AboveWeights { weights },
-        },
-        _ => Pending {
-            bytes: expected,
-            basis: Basis::Whole,
-        },
+            _ if is_eager(m, s) => Basis::AboveWeights { weights },
+            _ => Basis::Whole,
+        }
+    };
+    if basis == Basis::Holds {
+        return Pending {
+            bytes: 0,
+            basis,
+            measured: None,
+        };
+    }
+    Pending {
+        bytes: expected.saturating_sub(held_now.unwrap_or_else(|| basis.on_card())),
+        basis,
+        measured: held_now,
     }
 }
 
@@ -383,6 +436,10 @@ pub(super) struct NoteFacts<'a> {
     /// The container runs a previous configuration whose figure is stored,
     /// and is charged that ([`expected_for`]).
     pub(super) runs_previous: bool,
+    /// Why what its processes hold now was not read ([`now`]) on a host that
+    /// gives per-process figures — `cannot_learn` already says it for one
+    /// that does not. `None` when it was read, or nothing was pending.
+    pub(super) unmeasured: Option<&'a str>,
 }
 
 /// A ready audio resident's note: [`residency_sentence`], then what is kept
@@ -402,6 +459,22 @@ pub(super) fn resident_note(m: &AudioModel, s: &AudioSettings, f: &NoteFacts<'_>
         (AtRest::Reading, _) => "what it holds at rest is being read".to_string(),
         _ => "what it held at rest was not read before a request came".to_string(),
     };
+    if let Some(held) = f.pending.measured {
+        // What it holds now set the figure: say that, not the basis's
+        // older reading.
+        out.push_str(&measured_sentence(
+            s,
+            &f.pending.basis,
+            held,
+            &p,
+            f.pending.bytes == 0,
+        ));
+        if let Some(why) = &f.gen.failure {
+            out.push_str(". ");
+            out.push_str(&failure_note(why));
+        }
+        return out;
+    }
     match &f.pending.basis {
         Basis::Holds => {
             if let AtRest::Loaded(b) = f.gen.at_rest {
@@ -450,11 +523,80 @@ pub(super) fn resident_note(m: &AudioModel, s: &AudioSettings, f: &NoteFacts<'_>
             unread()
         )),
     }
+    if let (Some(why), true) = (f.unmeasured, f.pending.bytes > 0) {
+        out.push_str(&format!(
+            ". What it holds now was not read ({why}), so a load lmgw did not route is not \
+             subtracted"
+        ));
+    }
     if let Some(why) = &f.gen.failure {
         out.push_str(". ");
         out.push_str(&failure_note(why));
     }
     out
+}
+
+/// The pending half of a note whose figure the reading of what the container
+/// holds now set ([`Pending::measured`]): `none_left` when that is at least
+/// its expected residency. A reading below what the basis took to be on the
+/// card (an older reading at rest, an eager row's weights file) is said as
+/// such: the container let go of memory since, and its reload is pending.
+fn measured_sentence(
+    s: &AudioSettings,
+    basis: &Basis,
+    held: u64,
+    p: &str,
+    none_left: bool,
+) -> String {
+    let h = fmt_bytes(held);
+    let floor = basis.on_card();
+    // What the older figure was, when the reading is below it.
+    let less = (held < floor).then(|| {
+        let what = match basis {
+            Basis::AboveWeights { .. } => "its weights file",
+            _ => "it held at rest",
+        };
+        format!("less than the {} {what}", fmt_bytes(floor))
+    });
+    match (basis, none_left) {
+        (Basis::Unloaded { .. }, true) => format!(
+            ". lmgw counts it unloaded after idling {} ms (idle_unload_ms), but its processes \
+             hold {h} now (measured): a request lmgw did not route kept or brought its model \
+             back, so nothing is kept free",
+            s.idle_unload_ms
+        ),
+        (Basis::Unloaded { .. }, false) => format!(
+            ". Unloaded after idling {} ms (idle_unload_ms): {p} kept free until its next \
+             request answers (its processes hold {h} now, measured{}, and that stays on the \
+             card)",
+            s.idle_unload_ms,
+            less.map(|l| format!(", {l}")).unwrap_or_default()
+        ),
+        (Basis::AtRest { eager: true, .. } | Basis::AboveWeights { .. }, true) => format!(
+            ". Run outside lmgw: its processes hold {h} now (measured), so nothing more is kept \
+             free"
+        ),
+        (Basis::AtRest { eager: true, .. } | Basis::AboveWeights { .. }, false) => match less {
+            Some(l) => format!(
+                ". Its weights are not all on the card now: its processes hold {h} (measured), \
+                 {l}, so audio.cpp has let go of its model (an idle unload after a request lmgw \
+                 did not route) and {p} is kept free until its next request"
+            ),
+            None => format!(
+                ". Weights loaded, not run yet: {p} more kept free until its first request (its \
+                 processes hold {h} now, measured)"
+            ),
+        },
+        (_, true) => format!(
+            ". Loaded without an answer lmgw saw (a request outside lmgw, such as audio.cpp's \
+             own web UI): its processes hold {h} now (measured), so nothing is kept free"
+        ),
+        (_, false) => format!(
+            ". Not loaded yet: {p} kept free until its first request (its processes hold {h} \
+             now, measured{})",
+            less.map(|l| format!(", {l}")).unwrap_or_default()
+        ),
+    }
 }
 
 impl super::VramScheduler {

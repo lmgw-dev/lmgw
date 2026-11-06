@@ -98,6 +98,16 @@ pub struct TurnLease {
     /// The send's place in the drain count of the container that answered
     /// (ladder design §12 entry 10), released with the lease.
     pub(super) send: Option<SendGuard>,
+    /// The send's turn on the hold it goes out on
+    /// ([`LocalHold::turn`](crate::vram::LocalHold::turn)), taken when its
+    /// fit starts ([`fit_chat`], [`fit_text`]) and released with the lease,
+    /// or as the send leaves the hold for another model (a re-pick,
+    /// [`Self::reroute`]; a climb's fallback): what keeps a claim several
+    /// model calls share from being read as one the request leaving it alone
+    /// uses (openai egress design §14.3), a call still counting or reserving
+    /// among them. A lease no fit made (an encoder probe's
+    /// [`Self::unguarded`]) counts no turn: it is on a hold of its own.
+    pub(super) turn: Option<crate::vram::HoldTurn>,
     /// The fit found that the candidate alias's model this send is on cannot
     /// take it (candidate-aliases §12 entry 45, [`super::candidate::repicks`]):
     /// a guest over the pool's per-request limit, or a candidate that stopped
@@ -175,6 +185,9 @@ impl TurnLease {
     pub(super) fn reroute(&mut self, nothing_ran: bool) {
         self.served = None;
         self.send = None;
+        // No longer a turn on this hold: the re-pick's admission may take
+        // its model when the claim has no other user (§14.3).
+        self.turn = None;
         if let Some(mut ticket) = self.reservation.take() {
             if nothing_ran {
                 ticket.mark_complete();
@@ -383,7 +396,26 @@ pub(super) async fn within<T>(
 /// second review, finding 7): the count and the pool wait both end at it, so the gate
 /// can never stretch a "fails fast" bound. `None` for a client request, whose
 /// bounds are the route's and the queue's own.
+///
+/// The send is a turn on `hold` from here on ([`TurnLease::turn`]), until
+/// the lease ends — or the fit refuses.
 pub async fn fit_chat<'a>(
+    state: &SharedState,
+    hold: Option<&LocalHold>,
+    route: &Route,
+    ir: &'a ChatRequest,
+    params: &mut Params,
+    stream: bool,
+    deadline: Option<Instant>,
+) -> Result<(TurnLease, Cow<'a, ChatRequest>), FitRefusal> {
+    let turn = hold.map(LocalHold::turn);
+    let (mut lease, ir) = fit_chat_lease(state, hold, route, ir, params, stream, deadline).await?;
+    lease.turn = turn;
+    Ok((lease, ir))
+}
+
+/// [`fit_chat`] but for the turn it counts.
+async fn fit_chat_lease<'a>(
     state: &SharedState,
     hold: Option<&LocalHold>,
     route: &Route,
@@ -432,7 +464,7 @@ pub async fn fit_chat<'a>(
 
     // The per-image bound: both kinds count images against it — the user's,
     // and the tool images the decision lets go (§8.2), at the same bound.
-    let user_media = media_parts(&ir);
+    let user_media = media_parts(&ir, Some(&route.upstream));
     let media = MediaParts {
         images: user_media.images.saturating_add(tool_images),
         ..user_media
@@ -575,7 +607,23 @@ pub async fn fit_chat<'a>(
 ///   path.
 /// - Every prompt runs in its own slot, so the per-request limit applies to
 ///   the largest one and the reservation sums them all.
+///
+/// A turn on `hold` from here on, as for [`fit_chat`].
 pub async fn fit_text(
+    state: &SharedState,
+    hold: Option<&LocalHold>,
+    route: &Route,
+    alias: &str,
+    body: &mut Value,
+) -> Result<TurnLease, FitRefusal> {
+    let turn = hold.map(LocalHold::turn);
+    let mut lease = fit_text_lease(state, hold, route, alias, body).await?;
+    lease.turn = turn;
+    Ok(lease)
+}
+
+/// [`fit_text`] but for the turn it counts.
+async fn fit_text_lease(
     state: &SharedState,
     hold: Option<&LocalHold>,
     route: &Route,
@@ -712,9 +760,10 @@ pub fn planned_rung(hold: Option<&LocalHold>) -> Option<RungTag> {
         .flatten()
 }
 
-/// Name the model on a [`GatewayError::ContextExceeded`] that came back from
-/// llama-server itself (the llama.cpp egress's `map_error` backstop, which
-/// cannot know it). Every other error passes through untouched.
+/// Name the model on a [`GatewayError::ContextExceeded`] (or
+/// [`GatewayError::ContextExceededAsWorded`]) that came back from the
+/// upstream itself (an egress's `map_error`, which cannot know it).
+/// Every other error passes through untouched.
 pub fn attribute(e: GatewayError, route: &Route) -> GatewayError {
     match e {
         GatewayError::ContextExceeded {
@@ -730,6 +779,14 @@ pub fn attribute(e: GatewayError, route: &Route) -> GatewayError {
             limit,
             top_rung,
         },
+        // The OpenAI platform's own refusal in words (openai egress design
+        // §8): its `map_error` cannot know the model either.
+        GatewayError::ContextExceededAsWorded { model, message } if model.is_empty() => {
+            GatewayError::ContextExceededAsWorded {
+                model: route.upstream_model.clone(),
+                message,
+            }
+        }
         other => other,
     }
 }

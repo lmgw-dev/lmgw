@@ -202,7 +202,7 @@ async fn setup(mock: &MockServer) -> SharedState {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -227,6 +227,7 @@ async fn setup(mock: &MockServer) -> SharedState {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -545,6 +546,7 @@ async fn re_embed_repins_the_corpus_and_refills_every_vector() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -636,6 +638,7 @@ async fn re_embed_onto_another_model_moves_the_pin_and_refills_everything() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -768,8 +771,7 @@ async fn a_reranker_can_never_become_a_corpus_embedder() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -932,8 +934,7 @@ async fn ingest_is_refused_under_hold_and_never_reaches_the_cloud_mock() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -944,10 +945,7 @@ async fn ingest_is_refused_under_hold_and_never_reaches_the_cloud_mock() {
 
     // Set on purpose: the point is that a batch job ignores an available
     // fallback entirely, not merely that none exists to try.
-    let mut s = state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("ingest-model".into());
-    store::save_settings(&state.db, &s).await.unwrap();
-    state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&state, Some("ingest-model")).await;
     lmgw_core::ops::hold_set(&state, true).await.unwrap();
 
     let corpus_id = qstore::insert_corpus(

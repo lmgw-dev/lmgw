@@ -82,7 +82,7 @@ async fn stop_then_edit_leaves_only_the_new_answer() {
         Duration::from_millis(300),
     )
     .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
 
     let mut first = post(
@@ -189,7 +189,7 @@ async fn a_refused_save_is_reported_not_shown_as_saved() {
 async fn done_carries_saved_and_the_answering_model() {
     let mock = MockServer::start().await;
     mount_slow(&mock, "hi", "hello", Duration::from_millis(10)).await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw).await;
     let r = post(
         &gw,
@@ -343,6 +343,14 @@ async fn read_request(sock: &mut tokio::net::TcpStream) {
 
 /// A gateway whose alias `m` is the [`HangingFirst`] upstream.
 async fn hanging_gateway(up: &HangingFirst) -> (lmgw_core::state::SharedState, Gw) {
+    hanging_gateway_on(up, Protocol::OpenaiCompatible).await
+}
+
+/// [`hanging_gateway`] on a row of `protocol`.
+async fn hanging_gateway_on(
+    up: &HangingFirst,
+    protocol: Protocol,
+) -> (lmgw_core::state::SharedState, Gw) {
     // `gateway` wants a MockServer only for its uri; build the same rows on
     // the raw upstream's address instead.
     let state = lmgw_core::state::AppState::init_for_tests().await.unwrap();
@@ -350,7 +358,7 @@ async fn hanging_gateway(up: &HangingFirst) -> (lmgw_core::state::SharedState, G
         &state.db,
         &store::NewUpstream {
             name: "raw-up".into(),
-            protocol: Protocol::Openai,
+            protocol,
             kind: UpstreamKind::Generic,
             base_url: up.base.clone(),
             api_key: Some("sk-up".into()),
@@ -374,6 +382,7 @@ async fn hanging_gateway(up: &HangingFirst) -> (lmgw_core::state::SharedState, G
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -408,6 +417,59 @@ async fn stop_before_the_first_token_drops_the_upstream_request() {
         .expect("the stopped turn hung up on the upstream");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(messages(&gw, tid).await, pairs(&[("user", "hello")]));
+}
+
+/// Stopped while the platform had the request: its tier is unknown, so the
+/// row is unpriced, never the Standard an untiered row gets (decision 15),
+/// and the prompt is not estimated as usage either: lmgw's own count of it
+/// is the budgets' lower bound (openai egress design §13.4).
+#[tokio::test]
+async fn a_stopped_platform_turn_is_unpriced_not_standard() {
+    let up = hanging_first("never used").await;
+    let (state, gw) = hanging_gateway_on(&up, Protocol::Openai).await;
+    store::upsert_price(
+        &state.db,
+        lmgw_core::config::PriceScope::Alias,
+        "m",
+        lmgw_core::config::PriceUnit::PerMtok,
+        lmgw_core::config::PriceTier::Standard,
+        &lmgw_core::pricing::Prices {
+            price_in: Some(2.0),
+            price_out: Some(8.0),
+            source: lmgw_core::pricing::PriceSource::Manual,
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let tid = thread(&gw).await;
+
+    let first = post(
+        &gw,
+        &format!("/chat/api/threads/{tid}/send"),
+        json!({"content": "hello"}),
+    )
+    .await;
+    tokio::time::timeout(WAIT, up.arrived.notified())
+        .await
+        .expect("the request reached the upstream");
+    drop(first);
+    tokio::time::timeout(WAIT, up.dropped.notified())
+        .await
+        .expect("the stopped turn hung up on the upstream");
+    let row = crate::stream_usage::row_after(&state, 0).await;
+    assert_eq!(row.error_kind.as_deref(), Some("canceled"), "{row:?}");
+    assert_eq!((row.prompt_tokens, row.cost_micro), (None, None), "{row:?}");
+    assert!(
+        row.price_note.as_deref().is_some_and(|n| n.starts_with(
+            "the caller stopped it before the upstream reported usage; budgets count a local \
+             count of "
+        ) && n.contains(" prompt and 0 output tokens")),
+        "{row:?}"
+    );
 }
 
 /// A newer turn of the same thread (a second tab, a send after a Stop that

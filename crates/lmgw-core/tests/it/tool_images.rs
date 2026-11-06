@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use lmgw_core::config::{HoldFallbackMode, LlamaParams, Snapshot};
+use lmgw_core::config::{LlamaParams, Snapshot};
 use lmgw_core::ladder::Rung;
 use lmgw_core::store::{NewCandidateAlias, NewLocalModel};
 use serde_json::{json, Value};
@@ -55,8 +55,7 @@ fn row(id: &str, params: LlamaParams, args: Vec<String>, ladder: Vec<Rung>) -> N
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder,
     }
@@ -580,7 +579,6 @@ async fn a_candidate_repick_decides_for_itself() {
         alias: "jobs".into(),
         candidates: vec!["p".into(), "a".into()],
         background: true,
-        fallback_mode: HoldFallbackMode::None,
         fallback: None,
         capabilities_disabled: vec![],
         capabilities_enabled: vec!["vision".into()],
@@ -638,7 +636,6 @@ async fn a_candidate_alias_without_vision_keeps_tool_images_back() {
         alias: "plain".into(),
         candidates: vec!["eye".into()],
         background: false,
-        fallback_mode: HoldFallbackMode::None,
         fallback: None,
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],
@@ -813,6 +810,7 @@ async fn external_llama(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -875,7 +873,6 @@ async fn a_candidate_alias_fallback_without_a_hold_keeps_tool_images_back() {
         alias: "plain".into(),
         candidates: vec!["eye".into()],
         background: false,
-        fallback_mode: HoldFallbackMode::Alias,
         fallback: Some("ext".into()),
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],

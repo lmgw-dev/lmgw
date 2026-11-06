@@ -51,6 +51,18 @@ pub struct RowSaved {
     pub id: i64,
     /// What was done, for a person to read.
     pub message: String,
+    /// Something to warn about on a row that was saved all the same: an
+    /// `openai` upstream on a host that is not OpenAI's (`UpstreamView::host_note`).
+    /// Only the dashboard's `upstream_set_full` sets it; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// A plain alias's write (`model_set`): what the save says about its fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }
 
 impl RowSaved {
@@ -60,7 +72,21 @@ impl RowSaved {
             ok: true,
             id,
             message: message.into(),
+            note: None,
+            fallback_notes: Vec::new(),
         }
+    }
+
+    /// With a warning to show beside the message.
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
+    /// With what the save says about the alias's fallback.
+    pub fn with_fallback_notes(mut self, notes: Vec<String>) -> Self {
+        self.fallback_notes = notes;
+        self
     }
 }
 

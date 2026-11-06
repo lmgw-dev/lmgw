@@ -50,8 +50,7 @@ fn row(args: &[&str]) -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -360,8 +359,7 @@ fn new_row(model_id: &str, image: Option<&str>, args: &[&str]) -> NewAuxModel {
         image: image.map(String::from),
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 

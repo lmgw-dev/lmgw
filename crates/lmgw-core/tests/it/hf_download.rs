@@ -58,13 +58,26 @@ fn accepted_file_kinds_are_per_target() {
         e.contains("'embed'") && e.contains("chat, aux, audio, image"),
         "{e}"
     );
-    assert_eq!(hf::models_dir_setting("image"), "image.models_dir");
+    assert_eq!(
+        hf::models_dir_location("image"),
+        "Settings → Runtimes → Image → Models dir"
+    );
     let mut settings = lmgw_core::config::Settings::default();
     settings.image.models_dir = "/srv/sdcpp".into();
     assert_eq!(hf::models_dir_for_target(&settings, "image"), "/srv/sdcpp");
     settings.image.models_dir.clear();
+    // The refusal names the setting where the dashboard shows it, not its key.
     let err = hf::models_dir_or_refuse(&settings, "image").unwrap_err();
-    assert!(err.contains("image.models_dir"), "{err}");
+    assert!(
+        err.contains("Settings → Runtimes → Image → Models dir") && !err.contains("models_dir"),
+        "{err}"
+    );
+    let err = hf::models_dir_or_refuse(&settings, "chat").unwrap_err();
+    assert!(
+        err.contains("choose where chat models are stored first")
+            && err.contains("Settings → Runtimes → Chat → Models dir"),
+        "{err}"
+    );
 }
 
 /// A pipeline's components sit several directories deep inside their repo —
@@ -235,7 +248,9 @@ async fn download_flow_and_update_check() {
     assert_eq!(jobs_seen[0].done, body.len() as u64);
     assert_eq!(jobs_seen[0].percent, Some(100));
     assert!(state.jobs.live().is_empty());
-    let view = lmgw_core::ops::hf_downloads(&state).await.unwrap();
+    let view = lmgw_core::ops::hf_downloads(&state, None, false)
+        .await
+        .unwrap();
     let entry = &view.downloads[0];
     assert_eq!(entry.status, "done");
     assert!(entry.received_bytes.is_none());
@@ -297,9 +312,10 @@ async fn download_flow_and_update_check() {
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
-    let listed = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "image")
-        .await
-        .unwrap();
+    let listed =
+        lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "image", lmgw_api_types::RepoFit::No)
+            .await
+            .unwrap();
     assert_eq!(listed.target, "image");
     let roles: Vec<(&str, &str)> = listed
         .files
@@ -321,7 +337,7 @@ async fn download_flow_and_update_check() {
         ],
         "the README is not a weights file and the roles are the pipeline's"
     );
-    let chat = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "chat")
+    let chat = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "chat", lmgw_api_types::RepoFit::No)
         .await
         .unwrap();
     assert!(chat.files.is_empty(), "the chat target is still GGUF-only");
@@ -391,9 +407,10 @@ async fn download_flow_and_update_check() {
             extra_run_args: None,
             warm_start: false,
             idle_seconds: 0,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
+            prompt_style: None,
+            preview_mode: None,
         },
     )
     .await
@@ -441,7 +458,7 @@ async fn download_flow_and_update_check() {
         .await;
 
     // The listing fails before a download is ever queued, and says why.
-    let err = lmgw_core::ops::hf_repo(&state, GATED, None, "image")
+    let err = lmgw_core::ops::hf_repo(&state, GATED, None, "image", lmgw_api_types::RepoFit::No)
         .await
         .unwrap_err();
     assert!(err.contains("gated repo"), "{err}");

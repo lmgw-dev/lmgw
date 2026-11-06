@@ -37,6 +37,7 @@ use crate::config::{Snapshot, UpstreamKind};
 use crate::egress::{for_protocol, CountPlan};
 use crate::quickdoc::query::TiktokenCounter;
 use crate::runtime::aux::{self as aux_rt, CountFrom};
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 /// Tokens the embedding model adds around an input (BOS/EOS, CLS/SEP) that
@@ -392,11 +393,16 @@ fn windows(text: &str) -> Vec<(usize, usize)> {
 
 /// Measure the embedding model's tokenizer against tiktoken on this text.
 /// Returns the counter and a sentence naming what was counted with — a
-/// failed measurement falls back to tiktoken and says so.
+/// failed measurement falls back to tiktoken and says so. `origin` is whose
+/// traffic the counts are (per-request background design §7): a search made
+/// for a `/v1/responses` run's tool counts as the run's, so a guest's count
+/// on a cold model defers — and the measurement falls back to tiktoken,
+/// saying so — rather than evict the owner.
 pub async fn calibrate(
     state: &SharedState,
     alias: &str,
     text: &str,
+    origin: Origin,
 ) -> (Arc<ScaledCounter>, String) {
     let limit = input_limit(state, alias).await;
     if limit.tokenizer == "tiktoken_guess" {
@@ -418,7 +424,7 @@ pub async fn calibrate(
         if tik == 0 {
             continue;
         }
-        match crate::proxy::count_tokens_inner(state, alias, slice, true).await {
+        match crate::proxy::count_tokens_inner(state, alias, slice, true, origin).await {
             Ok((n, headers)) if headers.fallback().is_none() => {
                 ratio = ratio.max(n as f64 / tik as f64);
             }
@@ -484,14 +490,16 @@ pub fn remember_ratio(state: &SharedState, alias: &str, counter: &ScaledCounter)
 /// another upstream/model — a model file swapped under an unchanged name is
 /// only noticed by a fresh measurement ([`fit::measure`](super::fit) and
 /// [`remember_ratio`] replace the entry), which is why the base's re-embed
-/// stage measures again. The sentence says which it was.
+/// stage measures again. The sentence says which it was. A measurement is
+/// `origin`'s traffic ([`calibrate`]).
 pub async fn cached_counter(
     state: &SharedState,
     alias: &str,
     sample: &str,
+    origin: Origin,
 ) -> (Arc<ScaledCounter>, String) {
     if input_limit(state, alias).await.tokenizer == "tiktoken_guess" {
-        return calibrate(state, alias, sample).await;
+        return calibrate(state, alias, sample, origin).await;
     }
     let key = ratio_key(state, alias);
     if let Some(r) = key.as_deref().and_then(|k| state.knowledge.ratio(k)) {
@@ -500,7 +508,7 @@ pub async fn cached_counter(
             format!("{alias}'s own tokenizer ({r:.2}x tiktoken, measured earlier and remembered)"),
         );
     }
-    let (counter, why) = calibrate(state, alias, sample).await;
+    let (counter, why) = calibrate(state, alias, sample, origin).await;
     remember_ratio(state, alias, &counter);
     (counter, why)
 }

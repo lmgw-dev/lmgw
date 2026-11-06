@@ -319,6 +319,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 ("device.revoked", |g| {
                     g.root_schema_for::<feed::DeviceRevoked>()
                 }),
+                ("transfer.updated", |g| {
+                    g.root_schema_for::<lmgw_api_types::transfer::Transfer>()
+                }),
                 ("turn.started", |g| g.root_schema_for::<feed::TurnStarted>()),
                 ("turn.done", |g| g.root_schema_for::<feed::TurnDone>()),
                 ("voice.bound", |g| g.root_schema_for::<feed::VoiceBound>()),
@@ -401,6 +404,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
     routes.extend(super::chat_threads::routes());
     // The streaming turns: send, continue, regenerate, read-aloud, warm-up.
     routes.extend(super::chat_turns::routes());
+    // The Chat's reads beside its threads: settings, toolsets, knowledge
+    // (chat-plane design §2).
+    routes.extend(super::chat_reads::routes());
     routes
 }
 

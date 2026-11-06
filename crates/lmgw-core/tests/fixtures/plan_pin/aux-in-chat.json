@@ -1,0 +1,28 @@
+{
+  "apply_ready": false,
+  "class": "aux",
+  "configured_as": [],
+  "configured_note": "Aux models already serving this GGUF, and how they differ from the plan. Placement (backend, threads) is never compared here, so a deliberate CPU or GPU variant is not a difference.",
+  "model_id": "demo-embedder",
+  "next_step": "get the file into the aux models dir (see warnings), then run lmgw__local_model_plan again with target=aux",
+  "params": {
+    "batch_size": 32768,
+    "ctx_size": 32768,
+    "gguf_path": "stray/demo-embedder-Q8_0.gguf",
+    "kind": "embed",
+    "pooling": "mean",
+    "ubatch_size": 32768
+  },
+  "rationale": {
+    "batch_size": "= ubatch_size: llama.cpp lowers the ubatch to the batch, and embedding mode lowers the batch to the ubatch, so the two are raised together",
+    "ctx_size": "the model's trained context (32768) — its real ceiling per input, with ubatch_size and batch_size planned at it too, since llama-server evaluates a whole input of this model in one ubatch; llama-server refuses an input longer than this with an error and does not truncate it, so a smaller ctx_size lowers what one input may hold",
+    "gguf_path": "the file this plan was made for",
+    "kind": "the header declares pooling_type 'mean': an encoder with no LM head, served with --embeddings on /v1/embeddings",
+    "pooling": "the pooling the converter recorded ('mean'); the model card's vectors assume it, and a different one retrieves noise while looking fine",
+    "ubatch_size": "= ctx_size (32768, the header's context_length): llama-server cannot split one input of this model across ubatches — its pooling ('mean') reads every token, not only the last one — so a whole input has to fit one ubatch, and embedding mode lowers the batch to the ubatch. At llama-server's default of 512, every input over 512 tokens fails with a 500 (\"input (N tokens) is too large to process. increase the physical batch size\") whatever the context. The compute buffer grows with it: about 3.3 GiB on the GPU at this size, which the VRAM ledger charges with the row (on a backend=cpu row it is RAM)"
+  },
+  "target": "chat",
+  "warnings": [
+    "stray/demo-embedder-Q8_0.gguf is a embed model, which the aux class serves — but it was found in the chat models dir, and an aux row can only address files under the aux models dir (<dir>/aux). Get it there with lmgw__hf_add … target=aux (tracked and updatable), or move the file into the aux models dir, then plan again with target=aux. Do not hard-link or copy it across, and do not create a chat-class row for it: a chat row cannot embed, and the file would fall out of the updater's view."
+  ]
+}

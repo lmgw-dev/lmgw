@@ -135,6 +135,7 @@ impl Registry {
         );
         let out = self
             .run_throwaway(
+                container_prefix,
                 &name,
                 target,
                 crate::runtime::descriptor::SD_SERVER_ENTRYPOINT,

@@ -13,9 +13,15 @@ use crate::state::SharedState;
 use crate::store::{self, HfModelRow};
 
 mod listing;
+pub mod projector;
+pub mod rate;
+pub mod remote;
 mod resolve;
+pub mod search;
 pub use listing::{list_repo_files, list_tree, ListFailure};
-pub use resolve::{get_with_commit, listing_refusal, resolve_url};
+pub use projector::pick_projector;
+pub use remote::{remote_header, ReadError, RemoteHeader, RemoteHeaderCache};
+pub use resolve::{get_with_commit, listing_refusal, resolve_url, HubHop};
 
 pub const HF_BASE: &str = "https://huggingface.co";
 
@@ -88,28 +94,17 @@ pub fn models_dir_for_target(settings: &crate::config::Settings, target: &str) -
     }
 }
 
-/// The settings field a target's models dir is stored under — the name to put
-/// in a refusal, so "not configured" says what to configure.
-/// Where the dashboard sets that directory: its Settings → Runtimes section.
-pub fn runtimes_section(target: &str) -> &'static str {
-    match target {
-        "aux" => "Aux",
-        "audio" => "Audio",
-        "image" => "Image",
-        _ => "Chat",
-    }
+/// A target's models dir as the dashboard names it, for a message that says
+/// where to set it: `Settings → Runtimes → Chat → Models dir`. The label,
+/// never the settings key (`router.models_dir`): the message reaches the
+/// dashboard, which shows no keys. The names are lmgw-api-types'
+/// [`settings_labels`](lmgw_api_types::settings_labels), which the Settings
+/// page's table is built from.
+pub fn models_dir_location(target: &str) -> String {
+    lmgw_api_types::settings_labels::models_dir_at(target).to_string()
 }
 
-pub fn models_dir_setting(target: &str) -> &'static str {
-    match target {
-        "aux" => "aux_router.models_dir",
-        "audio" => "audio.models_dir",
-        "image" => "image.models_dir",
-        _ => "router.models_dir",
-    }
-}
-
-/// [`models_dir_for_target`], refusing an unset one by the setting's name.
+/// [`models_dir_for_target`], refusing an unset one by where to set it.
 pub fn models_dir_or_refuse(
     settings: &crate::config::Settings,
     target: &str,
@@ -117,10 +112,9 @@ pub fn models_dir_or_refuse(
     let dir = models_dir_for_target(settings, target);
     if dir.trim().is_empty() {
         return Err(format!(
-            "the {target} models directory is not configured, so there is nowhere to download \
-             into — set `{}` first (Settings → Runtimes → {})",
-            models_dir_setting(target),
-            runtimes_section(target)
+            "the {target} models directory is not set, so there is nowhere to download into — \
+             choose where {target} models are stored first: {}",
+            models_dir_location(target)
         ));
     }
     Ok(dir)
@@ -293,6 +287,23 @@ pub fn safetensors_shard(file: &str) -> Option<(u32, u32)> {
     Some((n, total))
 }
 
+/// The quantization label embedded in a GGUF filename (`…-UD-Q4_K_XL.gguf` →
+/// `UD-Q4_K_XL`). Best-effort: repos are not consistent, so this is a hint for
+/// choosing a file, never a fact about the file (the GGUF's own `general
+/// .file_type` is the fact, and the two genuinely disagree in the wild).
+pub fn quant_label(path: &str) -> Option<String> {
+    let stem = path.rsplit('/').next()?.strip_suffix(".gguf")?;
+    let stem = split_part_name(&format!("{stem}.gguf"))
+        .map(|(p, _, _)| p.to_string())
+        .unwrap_or_else(|| stem.to_string());
+    let up = stem.to_ascii_uppercase();
+    let idx = ["-UD-", "-Q", "-IQ", "-BF16", "-F16", "-F32"]
+        .iter()
+        .filter_map(|m| up.rfind(m))
+        .min()?;
+    Some(stem[idx + 1..].to_string())
+}
+
 /// Parse `…-NNNNN-of-MMMMM.gguf` into (prefix, n, total).
 pub fn split_part_name(file: &str) -> Option<(&str, u32, u32)> {
     let stem = file.strip_suffix(".gguf")?;
@@ -383,34 +394,47 @@ pub fn scan_model_files(models_dir: &str, target: &str) -> Vec<String> {
     out
 }
 
-/// "1.5 GiB"-style sizes for the UI.
-pub fn fmt_bytes(b: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = b as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{b} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
+/// Sizes in words: the shared binary formatter (`lmgw_api_types::units`,
+/// D160), re-exported where lmgw-core has always reached for it.
+pub use lmgw_api_types::units::fmt_bytes;
 
 // ---------------------------------------------------------------------------
 // HF API
 // ---------------------------------------------------------------------------
 
 /// One entry from the repo tree API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct HfFile {
     pub path: String,
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(rename = "type", default)]
     pub kind: String,
+    /// The `lfs` object of a file stored in LFS (every GGUF): its sha256,
+    /// which the hub's resolver repeats as `x-linked-etag`. `None` for a
+    /// file kept in git itself.
+    #[serde(default)]
+    pub lfs: Option<HfLfs>,
+}
+
+/// The tree listing's `lfs` object of one file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct HfLfs {
+    /// The file's sha256, lowercase hex.
+    pub oid: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+impl HfFile {
+    /// The file's content hash from the listing (`lfs.oid`): the key its
+    /// remote header is cached under (find-a-model design D4).
+    pub fn oid(&self) -> Option<&str> {
+        self.lfs
+            .as_ref()
+            .map(|l| l.oid.trim())
+            .filter(|o| !o.is_empty())
+    }
 }
 
 /// The `rel="next"` target of a `Link` header (RFC 8288), if it names one.
@@ -564,6 +588,7 @@ pub async fn check_update_at(
         store::set_hf_status(&state.db, row.id, status, None)
             .await
             .map_err(|e| e.to_string())?;
+        state.jobs.publish(state);
     }
     if same {
         record_matched(state, row, revision).await?;
@@ -600,6 +625,7 @@ mod tests {
                 path: p.to_string(),
                 size: None,
                 kind: "file".into(),
+                lfs: None,
             })
             .collect()
     }

@@ -5,22 +5,36 @@ use lmgw_api_types as dto;
 use lmgw_api_types::self_admin::{Prices, Usage, UsageCellView};
 
 use crate::catalog;
-use crate::config::{PriceRow, PriceScope};
+use crate::config::{PriceRow, PriceScope, PriceTier};
+use crate::detached::detached;
 use crate::pricing::{micro_to_units, PriceSource};
 use crate::principal::Refusal;
 use crate::state::SharedState;
 use crate::store::{self, GroupBy, UsageFilter};
 use crate::telemetry::RequestClass;
 
+mod hosted;
 mod units;
+pub use hosted::unpriced_hosted_tools;
 pub use units::PriceRates;
 
 /// Sync catalog-advertised prices into the `prices` table and report what
 /// happened, per upstream: rows written, models that advertised no usable
 /// price (written nowhere — §2.3), and any upstream whose catalog fetch
 /// failed. See [`catalog::sync_prices`] for the mechanics.
-pub async fn prices_sync(state: &SharedState) -> Result<dto::PriceSyncSummary, String> {
-    catalog::sync_prices(state).await
+///
+/// The whole sync is a task of its own (*changed 2026-10-24*, see
+/// [`crate::detached::detached`]): it writes its rows one by one and
+/// reloads after the last, so a dropped request would leave rows written
+/// and the snapshot pricing by the old ones.
+pub async fn prices_sync(
+    state: &SharedState,
+) -> Result<dto::PriceSyncSummary, crate::principal::Refusal> {
+    let st = state.clone();
+    detached("syncing prices", async move {
+        catalog::sync_prices(&st).await.map_err(Into::into)
+    })
+    .await?
 }
 
 /// Every model the gateway serves that resolves to **no price at all**, with
@@ -63,14 +77,106 @@ pub async fn unpriced_models(state: &SharedState) -> Result<Vec<(String, i64)>, 
         let Ok(route) = snap.resolve(&name) else {
             continue;
         };
+        // What the scope costs, not what one answer cost: Standard. A scope
+        // priced at Standard that answers at another tier is on
+        // [`unpriced_tiers`]' list instead.
         if !snap
-            .sheet_for(&name, Some(route.upstream.id), Some(&route.upstream_model))
+            .sheet_for(
+                &name,
+                Some(route.upstream.id),
+                Some(&route.upstream_model),
+                Some(PriceTier::Standard),
+            )
             .is_priced()
         {
             out.push((name, requests));
         }
     }
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(out)
+}
+
+/// Every model that answered at an OpenAI service tier it has no price row
+/// for (openai egress design §5.6), with the requests left unpriced since
+/// the first of them, busiest first: that traffic counts toward no budget
+/// until a row of the tier is entered (decision 15).
+///
+/// Read from the raw log ([`store::unpriced_tier_traffic`]) and asked of
+/// today's rows through [`Snapshot::sheet_for`](crate::config::Snapshot::sheet_for)
+/// at the tier, under the alias the group was priced under, the path a request
+/// takes: a group whose tier has a row now drops off the list (its old rows
+/// keep the cost they were written with). Each entry names the units the row
+/// has to price. A reported value that names no price tier (`auto`, none) has
+/// no row to enter: it stays listed, without a tier, until its traffic leaves
+/// the log. The row to enter is named on the upstream model's scope, which is
+/// what an alias resolves to beneath its own rows.
+pub async fn unpriced_tiers(state: &SharedState) -> Result<Vec<dto::UnpricedTier>, String> {
+    let snap = state.snapshot();
+    let traffic = store::unpriced_tier_traffic(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<dto::UnpricedTier> = Vec::new();
+    for t in traffic {
+        let (Some(up), Some(model)) = (t.upstream_id, t.upstream_model.as_deref()) else {
+            continue;
+        };
+        let reported = t.service_tier.as_deref().unwrap_or_default();
+        // `None`: the answers named no tier a row prices (`auto`, a value
+        // that is new, none at all). No row can fix that, so it is listed
+        // without an action.
+        let tier = PriceTier::from_reported(reported);
+        let mut missing: Vec<String> = Vec::new();
+        if let Some(tier) = tier {
+            // The rows the group was priced by: the answering alias's.
+            let alias = t.priced_alias.as_deref().unwrap_or(&t.alias);
+            let Some(gap) = snap
+                .sheet_for(alias, Some(up), Some(model), Some(tier))
+                .tier_gap
+            else {
+                continue;
+            };
+            missing = gap
+                .missing_units()
+                .map(|u| u.as_str().to_string())
+                .collect();
+        }
+        let tier_name = tier.map_or("", PriceTier::as_str);
+        let reported = if tier.is_some() { "" } else { reported };
+        let scope_key = crate::config::upstream_scope_key(up, model);
+        // `priority` and `fast` are one price tier: one entry.
+        if let Some(e) = out.iter_mut().find(|e| {
+            e.name == t.alias
+                && e.scope_key == scope_key
+                && e.service_tier == tier_name
+                && e.reported == reported
+        }) {
+            e.requests += t.requests;
+            if t.first_ts < e.since {
+                e.since = t.first_ts;
+            }
+            for u in missing {
+                if !e.missing_units.contains(&u) {
+                    e.missing_units.push(u);
+                }
+            }
+            continue;
+        }
+        out.push(dto::UnpricedTier {
+            name: t.alias,
+            scope_kind: PriceScope::UpstreamModel.as_str().to_string(),
+            scope_key,
+            service_tier: tier_name.to_string(),
+            reported: reported.to_string(),
+            missing_units: missing,
+            requests: t.requests,
+            since: t.first_ts,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.requests
+            .cmp(&a.requests)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(out)
 }
 
@@ -91,6 +197,7 @@ pub fn price_row_view(r: &PriceRow) -> dto::PriceRowView {
         note,
         updated_at,
         price,
+        service_tier,
     } = r;
     dto::PriceRowView {
         id: *id,
@@ -105,6 +212,7 @@ pub fn price_row_view(r: &PriceRow) -> dto::PriceRowView {
         note: note.clone(),
         updated_at: updated_at.clone(),
         price: *price,
+        service_tier: service_tier.as_str().to_string(),
     }
 }
 
@@ -124,24 +232,45 @@ pub async fn prices(state: &SharedState) -> Result<Prices, String> {
         .into_iter()
         .map(|(name, requests)| dto::UnpricedModel { name, requests })
         .collect();
+    let unpriced_tiers = unpriced_tiers(state).await?;
+    let unpriced_hosted_tools = unpriced_hosted_tools(state).await?;
 
     Ok(Prices {
         currency: snap.settings.currency.clone(),
         sheets,
         unpriced_models: unpriced,
+        unpriced_tiers,
+        unpriced_hosted_tools,
         hint: format!(
-            "Each sheet prices one scope in one unit, and a scope may hold a row per unit \
-             (tokens plus a per-request fee, say); a request costs the sum of every unit \
-             priced for it, and is unpriced when any of those units' quantities is \
-             unknown. Units: {}. A manual row always wins over a catalog row for the same \
-             scope and unit. lmgw__prices_sync refreshes the catalog rows; lmgw__price_set \
-             writes a manual one (needed for upstreams like Gemini that publish no pricing \
-             at all). unpriced_models ({{name, requests}}) covers configured aliases *and* the passthrough \
-             models an expose_all upstream serves, counted from the usage rollup, and lists \
-             a model only when no unit resolves a price for it, through the same order a \
-             real request uses — so a local model never appears here: it is free_local, \
-             not unpriced.",
-            units::unit_table()
+            "Each sheet prices one scope in one unit at one service tier, and a scope may \
+             hold a row per unit (tokens plus a per-request fee, say); a request costs the \
+             sum of every unit priced for it, and is unpriced when any of those units' \
+             quantities is unknown. Units: {}. Service tiers ({}) are OpenAI's pricing \
+             tiers: an OpenAI platform answer is priced with the rows of the tier it \
+             reported (default is standard, priority is fast), and is unpriced, with a \
+             price note, when that tier has no row — never priced at standard. Every other \
+             provider's rows are standard. A manual row always wins over a catalog row for \
+             the same scope, unit and tier. lmgw__prices_sync refreshes the catalog rows \
+             (standard only); lmgw__price_set writes a manual one (needed for upstreams \
+             like Gemini that publish no pricing at all, and for every tier but standard). \
+             unpriced_models ({{name, requests}}) covers configured aliases *and* the \
+             passthrough models an expose_all upstream serves, counted from the usage \
+             rollup, and lists a model only when no unit resolves a standard price for it, \
+             through the same order a real request uses — so a local model never appears \
+             here: it is free_local, not unpriced. unpriced_tiers ({{name, scope_kind, \
+             scope_key, service_tier, reported, missing_units, requests, since}}) lists the models \
+             that answered at a tier with no row, from the request log (an empty \
+             service_tier means the answers named no tier a row can price: reported \
+             says what they did name, and no price fixes it): a lmgw__price_set with that \
+             scope, service_tier and a missing unit prices what comes next. \
+             unpriced_hosted_tools ({{name, scope_key, calls: [{{item_type, calls}}], \
+             requests, since}}) lists the models whose native /v1/responses answers ran a \
+             hosted tool that bills beyond its tokens (web_search_call, file_search_call, \
+             code_interpreter_call, image_generation_call, a hosted shell_call), from the \
+             request log: such a row is unpriced, its price_note naming the calls and what \
+             the tokens alone would cost, and no price row fixes it yet.",
+            units::unit_table(),
+            PriceTier::ALL.map(PriceTier::as_str).join(", "),
         ),
     })
 }
@@ -156,11 +285,17 @@ pub async fn prices(state: &SharedState) -> Result<Prices, String> {
 /// any other unit takes `price`, per its scale. The two shapes are checked
 /// here, once for the tool and the dashboard alike. An existing row's unit is
 /// part of its key, so a call in another unit writes a second row beside it.
+///
+/// `service_tier` is the OpenAI service tier the row prices (openai egress
+/// design §5.7), omitted for `standard`; it is part of the key too, so a
+/// flex row stands beside the standard one.
+#[allow(clippy::too_many_arguments)]
 pub async fn price_set(
     state: &SharedState,
     scope_kind: &str,
     scope_key: Option<&str>,
     unit: Option<&str>,
+    service_tier: Option<&str>,
     rates: PriceRates,
     note: Option<&str>,
 ) -> Result<dto::PriceSaved, String> {
@@ -182,19 +317,49 @@ pub async fn price_set(
                 .to_string()
         })?;
     let unit = units::parse_unit(unit)?;
+    let tier = parse_tier(service_tier)?;
     let (p, price) = units::manual_row(unit, rates)?;
-    let note = note.map(str::trim).filter(|n| !n.is_empty());
-    store::upsert_price(&state.db, scope, scope_key, unit, &p, price, note)
-        .await
-        .map_err(|e| e.to_string())?;
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
+    let note = note
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    // The write and the reload are a task of their own (*changed
+    // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+    // would leave the snapshot pricing by the old row.
+    let st = state.clone();
+    let key = scope_key.to_string();
+    detached("saving the price", async move {
+        store::upsert_price(&st.db, scope, &key, unit, tier, &p, price, note.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        st.reload_snapshot().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|r| r.message)??;
     Ok(dto::PriceSaved {
         ok: true,
         scope_kind: scope.as_str().to_string(),
         scope_key: scope_key.to_string(),
         unit: unit.as_str().to_string(),
+        service_tier: tier.as_str().to_string(),
         source: PriceSource::Manual.as_str().to_string(),
     })
+}
+
+/// A `price_set` call's `service_tier`: `standard` when it names none, an
+/// unknown one refused by name.
+fn parse_tier(tier: Option<&str>) -> Result<PriceTier, String> {
+    match tier.map(str::trim).filter(|t| !t.is_empty()) {
+        None => Ok(PriceTier::Standard),
+        Some(t) => PriceTier::parse(t).ok_or_else(|| {
+            format!(
+                "unknown service_tier '{t}' ({}); OpenAI's response values map onto them: \
+                 default is standard, priority is fast",
+                PriceTier::ALL.map(PriceTier::as_str).join("|")
+            )
+        }),
+    }
 }
 
 /// Delete one price row by id (from `lmgw__prices`).
@@ -202,15 +367,25 @@ pub async fn price_set(
 /// An id no row has is a [`Refusal::not_found`]: `404 not_found` on the HTTP
 /// plane, its message on the tool plane.
 pub async fn price_delete(state: &SharedState, id: i64) -> Result<dto::IdAck, Refusal> {
-    let existed = store::delete_price(&state.db, id)
-        .await
-        .map_err(|e| e.to_string())?;
+    // The delete and the reload are a task of their own (*changed
+    // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+    // would leave the snapshot pricing by the deleted row.
+    let st = state.clone();
+    let existed = detached("deleting the price", async move {
+        let existed = store::delete_price(&st.db, id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if existed {
+            st.reload_snapshot().await.map_err(|e| e.to_string())?;
+        }
+        Ok::<_, String>(existed)
+    })
+    .await??;
     if !existed {
         return Err(Refusal::not_found(format!(
             "no price row {id} — ids are listed by lmgw__prices"
         )));
     }
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
     Ok(dto::IdAck::new(id))
 }
 

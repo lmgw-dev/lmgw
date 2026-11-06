@@ -52,6 +52,13 @@ impl Respond for Answers {
                 "type": "invalid_request_error",
             }}));
         }
+        // The OpenAI platform's chat sends take the Responses wire when they
+        // carry no audio (openai egress design §7.2).
+        if req.url.path() == "/v1/responses" {
+            let item = crate::support::responses_wire::message("msg_1", CLOUD_SAYS);
+            let sse = crate::support::responses_wire::stream("resp_1", &[item]);
+            return ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream");
+        }
         let sse = format!(
             "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
             json!({"choices": [{"delta": {"content": CLOUD_SAYS}}]}),
@@ -69,17 +76,25 @@ pub(super) struct Cloud {
 
 impl Cloud {
     pub(super) async fn new(g: &Gpu, caps: Value, refuse_audio: bool) -> Self {
+        Self::on(g, caps, refuse_audio, Protocol::OpenaiCompatible).await
+    }
+
+    /// [`Self::new`] spelled as `protocol`: `Openai` is the OpenAI platform,
+    /// whose 4xx the egress relays as `UpstreamRelayed`.
+    pub(super) async fn on(g: &Gpu, caps: Value, refuse_audio: bool, protocol: Protocol) -> Self {
         let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(Answers { refuse_audio })
-            .mount(&mock)
-            .await;
+        for at in ["/v1/chat/completions", "/v1/responses"] {
+            Mock::given(method("POST"))
+                .and(path(at))
+                .respond_with(Answers { refuse_audio })
+                .mount(&mock)
+                .await;
+        }
         let up = store::insert_upstream(
             &g.state.db,
             &NewUpstream {
                 name: "cloud-up".into(),
-                protocol: Protocol::Openai,
+                protocol,
                 kind: UpstreamKind::Generic,
                 base_url: format!("{}/v1", mock.uri()),
                 api_key: None,
@@ -103,6 +118,7 @@ impl Cloud {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: Some(caps),
+                fallback: None,
             },
         )
         .await
@@ -111,14 +127,14 @@ impl Cloud {
         Self { mock }
     }
 
-    /// The chat bodies it got, in order.
+    /// The chat bodies it got, on either wire, in order.
     pub(super) async fn bodies(&self) -> Vec<Value> {
         self.mock
             .received_requests()
             .await
             .unwrap_or_default()
             .iter()
-            .filter(|r| r.url.path() == "/v1/chat/completions")
+            .filter(|r| matches!(r.url.path(), "/v1/chat/completions" | "/v1/responses"))
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect()
     }
@@ -134,12 +150,13 @@ pub(super) fn text_only() -> Value {
     }})
 }
 
-/// The `input_audio` parts of `body`.
+/// The `input_audio` parts of `body`: none in a Responses body, whose input
+/// has no audio part.
 pub(super) fn audio_parts(body: &Value) -> usize {
     body["messages"]
         .as_array()
-        .unwrap()
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(|m| m["content"].as_array())
         .flatten()
         .filter(|p| p["type"] == "input_audio")
@@ -156,11 +173,8 @@ async fn settle(g: &Gpu, f: impl FnOnce(&mut Settings)) {
 
 /// `cloud` is every chat row's fallback; `hold` switches the GPU hold.
 pub(super) async fn falls_back_to_cloud(g: &Gpu, hold: bool) {
-    settle(g, |s| {
-        s.hold.fallback_alias = Some("cloud".into());
-        s.hold.active = hold;
-    })
-    .await;
+    settle(g, |s| s.hold.active = hold).await;
+    crate::support::fallbacks::every_chat_model_falls_back_to(&g.state, Some("cloud")).await;
 }
 
 /// A game holds the card: admission's outside-VRAM verdict hands a local
@@ -396,4 +410,52 @@ async fn a_fallbacks_refusal_of_the_audio_is_kept_for_the_fallback_alone() {
     let local = g.world().streamed_bodies.clone();
     assert_eq!(local.len(), 1);
     assert_eq!(audio_parts(&local[0]), 1, "gemma heard it");
+}
+
+/// The same refusal through the OpenAI platform's egress, which relays a
+/// 4xx it has no word for as `UpstreamRelayed` rather than `Upstream`: it
+/// is still the audio's refusal, so the turn goes again as the transcript
+/// and the fallback remembers it.
+#[tokio::test]
+async fn a_platform_fallbacks_relayed_refusal_of_the_audio_goes_again_as_the_transcript() {
+    let g = world().await;
+    let cloud = Cloud::on(&g, hears(), true, Protocol::Openai).await;
+    falls_back_to_cloud(&g, true).await;
+    let tid = thread(&g, "gemma", "chat").await;
+    let id = row_written(&g, tid, "Und morgen?").await;
+    let out = heard_response_for_tests(&g.state, tid, vec![audio()], id).await;
+    assert_eq!(out.result, Ok(CLOUD_SAYS.to_string()), "{out:?}");
+    assert_eq!(out.notes.len(), 1, "{out:?}");
+    assert!(
+        out.notes[0].contains("audio input is not supported"),
+        "{out:?}"
+    );
+    assert_eq!(out.remembered.len(), 1, "{out:?}");
+    assert_eq!(out.remembered[0].0, "cloud", "kept for the fallback");
+    let sent = cloud.bodies().await;
+    assert_eq!(sent.len(), 2, "the audio, then the transcript");
+    assert_eq!(audio_parts(&sent[0]), 1, "the audio took the Chat wire");
+    // The transcript has no audio part, so it took the Responses wire: its
+    // input holds the transcript's text.
+    assert!(sent[1].get("messages").is_none(), "{}", sent[1]);
+    assert!(
+        input_texts(&sent[1])
+            .iter()
+            .any(|t| t.contains("Und morgen?")),
+        "{}",
+        sent[1]
+    );
+}
+
+/// The `input_text` parts of a Responses body's input messages.
+fn input_texts(body: &Value) -> Vec<String> {
+    body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|p| p["type"] == "input_text")
+        .filter_map(|p| p["text"].as_str().map(str::to_string))
+        .collect()
 }

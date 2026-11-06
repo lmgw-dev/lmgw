@@ -12,12 +12,14 @@ use gloo_net::eventsource::futures::EventSource;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::builds::UpdatesSummary;
+use lmgw_api_types::machine::MachineSummary;
 use lmgw_api_types::{
     ChatChanged, JobRow, KeysChanged, McpStatus, RequestRow, RuntimeStatus, StatsView, VramStatus,
 };
 
-mod chat;
-pub use chat::ChatInbox;
+/// The Chat's inbox of what its live updates named (lmgw-chat-ui's): the
+/// shell's `chat` frames are posted into it.
+pub use lmgw_chat_ui::live::ChatInbox;
 
 #[derive(Clone, Copy)]
 pub struct LiveBus {
@@ -47,10 +49,16 @@ pub struct LiveBus {
     /// rotated or deleted. One value per change; the Keys page refetches on
     /// it instead of polling.
     pub keys: ReadSignal<Option<KeysChanged>>,
+    /// The machine check's summary (machine-check design D183): on connect
+    /// once a check finished, and whenever its last result changes (a run,
+    /// the settings judged again, a start that failed because of the
+    /// computer). The app's machine state reads the check again on it.
+    pub machine: ReadSignal<Option<MachineSummary>>,
     /// What every writer changed in the Chat — this window's own writes
     /// too, which read back as what it shows: threads, folders, messages
-    /// (client-apps design §3.6, 2026-10-08). The Chat page takes the
-    /// merged frames and reads what they name again; one with `resync`
+    /// (client-apps design §3.6, 2026-10-08). The dashboard hands it to the
+    /// Chat page as its live updates (chat-plane design D1), which takes
+    /// the merged frames and reads what they name again; one with `resync`
     /// comes on every (re)connect.
     pub chat: ChatInbox,
 }
@@ -70,7 +78,8 @@ pub fn provide_live_bus() {
     let (vram, set_vram) = signal(None);
     let (updates, set_updates) = signal(None);
     let (keys, set_keys) = signal(None);
-    let (chat, post_chat) = chat::inbox();
+    let (machine, set_machine) = signal(None);
+    let (chat, post_chat) = lmgw_chat_ui::live::inbox();
 
     provide_context(LiveBus {
         stats,
@@ -81,6 +90,7 @@ pub fn provide_live_bus() {
         vram,
         updates,
         keys,
+        machine,
         chat,
     });
 
@@ -102,6 +112,7 @@ pub fn provide_live_bus() {
                 vram: set_vram,
                 updates: set_updates,
                 keys: set_keys,
+                machine: set_machine,
                 chat: post_chat,
             });
         }
@@ -128,7 +139,8 @@ struct Setters {
     vram: WriteSignal<Option<VramStatus>>,
     updates: WriteSignal<Option<UpdatesSummary>>,
     keys: WriteSignal<Option<KeysChanged>>,
-    chat: chat::ChatPost,
+    machine: WriteSignal<Option<MachineSummary>>,
+    chat: lmgw_chat_ui::live::ChatPost,
 }
 
 /// One EventSource, alive until a newer one opens or the gate goes up.
@@ -143,7 +155,8 @@ fn open_stream(set: Setters) {
             }
         };
         let subs = [
-            "stats", "request", "runtime", "mcp", "jobs", "vram", "updates", "keys", "chat",
+            "stats", "request", "runtime", "mcp", "jobs", "vram", "updates", "keys", "machine",
+            "chat",
         ]
         .into_iter()
         .filter_map(|name| es.subscribe(name).ok());
@@ -181,6 +194,7 @@ fn open_stream(set: Setters) {
                 "vram" => put(set.vram, &text),
                 "updates" => put(set.updates, &text),
                 "keys" => put(set.keys, &text),
+                "machine" => put(set.machine, &text),
                 "chat" => match serde_json::from_str::<ChatChanged>(&text) {
                     Ok(c) => set.chat.post(c),
                     Err(err) => leptos::logging::error!("SSE decode: {err}"),

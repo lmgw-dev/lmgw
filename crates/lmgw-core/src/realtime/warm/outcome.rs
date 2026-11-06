@@ -18,6 +18,7 @@
 //! | `state` | carries |
 //! |---|---|
 //! | `loading` | — (sent before an admission or a load that will take time) |
+//! | `downloading` | `image`, `done_bytes`, `total_bytes` (absent while not known) and `size_note` (why not): the admission waits for the model's engine image (machine-check design §5); `loading` follows once it is here. Said by a chat turn's own admission only, not yet by a warm |
 //! | `ready` | `ms`: the load time; `null` when nothing had to load — the model was up already, or it is served off this machine |
 //! | `held` | `cause`: `gpu_hold` or `benchmark`, and `message` |
 //! | `fallback` | `answered_by`: the alias the GPU hold or admission answers with; nothing is started for it |
@@ -188,6 +189,14 @@ pub(crate) struct ModelState {
     pub needed_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_note: Option<String>,
 }
 
 impl ModelState {
@@ -203,12 +212,42 @@ impl ModelState {
             message: None,
             needed_bytes: None,
             capacity_bytes: None,
+            image: None,
+            done_bytes: None,
+            total_bytes: None,
+            size_note: None,
         }
     }
 
     /// `loading`: an admission or a load that takes time is under way.
     pub(crate) fn loading(stage: &'static str, alias: &str) -> Self {
         Self::bare(stage, alias, "loading")
+    }
+
+    /// `downloading`: the admission waits for the model's engine image,
+    /// which is not on this machine yet (machine-check design §5) — its
+    /// bytes so far. `None` for any other phase.
+    pub(crate) fn downloading(
+        stage: &'static str,
+        alias: &str,
+        phase: &crate::vram::stage_watch::WaitPhase,
+    ) -> Option<Self> {
+        let crate::vram::stage_watch::WaitPhase::Downloading {
+            image,
+            done_bytes,
+            total_bytes,
+            size_note,
+        } = phase
+        else {
+            return None;
+        };
+        Some(Self {
+            image: Some(image.clone()),
+            done_bytes: Some(*done_bytes),
+            total_bytes: *total_bytes,
+            size_note: size_note.clone(),
+            ..Self::bare(stage, alias, "downloading")
+        })
     }
 
     /// The frame `outcome` is said as; `None` for [`WarmOutcome::Aborted`]
@@ -402,10 +441,29 @@ mod tests {
                 message: "boom".into(),
             },
         ];
+        let downloads = [
+            crate::vram::stage_watch::WaitPhase::Downloading {
+                image: "registry.example/engine:cuda".into(),
+                done_bytes: 7,
+                total_bytes: Some(9),
+                size_note: None,
+            },
+            crate::vram::stage_watch::WaitPhase::Downloading {
+                image: "registry.example/engine:cuda".into(),
+                done_bytes: 0,
+                total_bytes: None,
+                size_note: Some("size not known — no API".into()),
+            },
+        ];
         let frames = outcomes
             .iter()
             .filter_map(|o| ModelState::of("tts", "speak", o))
-            .chain([ModelState::loading("asr", "hear")]);
+            .chain([ModelState::loading("asr", "hear")])
+            .chain(
+                downloads
+                    .iter()
+                    .filter_map(|p| ModelState::downloading("chat", "c", p)),
+            );
         for ours in frames {
             let wire = serde_json::to_value(&ours).unwrap();
             let theirs: lmgw_api_types::chat_voice::ModelState =
@@ -429,6 +487,10 @@ mod tests {
             assert_eq!(theirs.message, ours.message, "{wire}");
             assert_eq!(theirs.needed_bytes, ours.needed_bytes, "{wire}");
             assert_eq!(theirs.capacity_bytes, ours.capacity_bytes, "{wire}");
+            assert_eq!(theirs.image, ours.image, "{wire}");
+            assert_eq!(theirs.done_bytes, ours.done_bytes, "{wire}");
+            assert_eq!(theirs.total_bytes, ours.total_bytes, "{wire}");
+            assert_eq!(theirs.size_note, ours.size_note, "{wire}");
             // And nothing more is written than the clients' type holds
             // (review F-14): a field added here and not there fails, rather
             // than being dropped by every client. A `null` is no field.

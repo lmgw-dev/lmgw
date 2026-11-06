@@ -108,11 +108,9 @@ pub struct LocalModelDetail {
     pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch.
     pub warm_start: bool,
-    /// GPU-hold fallback mode (`inherit` | `none` | `alias`) and alias.
-    #[serde(default = "default_hold_fallback_mode")]
-    pub hold_fallback_mode: String,
+    /// The one fallback (openai egress design §14.2); `None` = none.
     #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
     /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
     /// override.
@@ -139,6 +137,11 @@ pub struct LocalModelDetail {
     /// The download this file came from, when the downloader fetched it.
     #[serde(default)]
     pub downloaded_from: Option<DownloadedFrom>,
+    /// The note of a context fitted to the graphics card (find-a-model
+    /// design D26): Get it's or "Fit again"'s; `None` when the row's
+    /// context isn't a fit's shorter one.
+    #[serde(default)]
+    pub fit_note: Option<crate::model_find::FitNote>,
 }
 
 /// Where a downloaded weights file came from.
@@ -212,6 +215,14 @@ pub struct PlanResult {
     /// owner), so an editor refills a saved row from `change`, not `params`.
     pub configured_as: Vec<ConfiguredAs>,
     pub next_step: String,
+    /// Where the plan's input came from: the disk, or the hub before any
+    /// download (find-a-model design §2.3). An image plan (`target=image`)
+    /// has no `source` in its answer: it is always from the disk.
+    pub source: crate::model_find::PlanSource,
+    /// The planned file's fit on the card, by both measures (find-a-model
+    /// design §3.1); `None` for an image plan, whose fit on the card isn't
+    /// measured yet.
+    pub fit: Option<crate::model_find::PlanFit>,
 }
 
 /// A configured row already serving the planned GGUF, and how it differs

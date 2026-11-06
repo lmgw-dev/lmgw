@@ -77,10 +77,12 @@ pub enum Climbed {
     /// instead: the GPU hold is on ([`FallbackReason::Hold`]), or the VRAM
     /// that is short is outside lmgw's control
     /// ([`FallbackReason::ExternalVram`], §12 entry 8). The running rung was
-    /// not touched. The caller sends to `route` and stamps `x-lmgw-fallback:
-    /// <alias>` with the reason, as the gate does at admission.
+    /// not touched. The caller hands the request on to the fallback along
+    /// its chain, as the gate does at admission (openai egress design
+    /// §14.3): a cloud one answers, a local one is admitted in turn.
     Fallback {
         alias: String,
+        key: crate::config::HopKey,
         route: Route,
         reason: FallbackReason,
     },
@@ -302,6 +304,8 @@ async fn climb_with(
                 "climbing to rung {}: draining the running rung",
                 plan.rung_text()
             ),
+            phase: None,
+            watch: None,
             origin: hold.origin(),
         },
     );
@@ -645,6 +649,7 @@ impl Plan {
 /// may take this request is asked only once a verdict says it could.
 struct ClimbFallback {
     alias: String,
+    key: crate::config::HopKey,
     route: Route,
     external: ExternalFallback<'static>,
 }
@@ -653,10 +658,17 @@ impl ClimbFallback {
     fn answer(&self) -> Climbed {
         Climbed::Fallback {
             alias: self.alias.clone(),
+            key: self.key.clone(),
             route: self.route.clone(),
             reason: FallbackReason::ExternalVram,
         }
     }
+}
+
+/// Whether the request `hold` serves was at `key` already along its chain
+/// (openai egress design §14.3): such a fallback cannot answer it.
+fn visited(hold: &LocalHold, key: &crate::config::HopKey) -> bool {
+    hold.policy().is_some_and(|p| p.chain.seen(key))
 }
 
 fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Option<ClimbFallback> {
@@ -667,11 +679,18 @@ fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Opt
     // The request's fallback: a candidate alias's own, never its candidate's
     // row fallback (candidate-aliases §4.1), even if the alias went away
     // mid-flight (§12 entry 86).
-    let FallbackRoute::Usable { alias, route } =
-        crate::gate::candidate::request_fallback(snap, hold)
+    // Past a disabled hop to its own fallback (openai egress design §14.3);
+    // the chain header does not name the disabled hop on a climb's reroute
+    // yet.
+    let first = crate::gate::candidate::request_fallback(snap, hold);
+    let FallbackRoute::Usable { alias, key, route } =
+        snap.past_disabled(first, |k| visited(hold, k)).1
     else {
         return None;
     };
+    if visited(hold, &key) {
+        return None;
+    }
     let serves = {
         let (state, alias, route, requested) = (
             state.clone(),
@@ -683,6 +702,7 @@ fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Opt
     };
     Some(ClimbFallback {
         alias,
+        key,
         route,
         external: ExternalFallback::confirmed_by(serves),
     })
@@ -708,21 +728,23 @@ async fn held(
     // A candidate alias's own fallback, never its candidate's row fallback
     // (candidate-aliases §4.1): the hold swap answers both alias kinds with it,
     // even if the alias went away mid-flight (§12 entry 86).
-    match crate::gate::candidate::request_fallback(snap, hold) {
-        FallbackRoute::Usable { alias, route } => {
-            if fallback_serves(state, &alias, &route, &hold.alias, policy.check).await {
-                Ok(Climbed::Fallback {
+    let first = crate::gate::candidate::request_fallback(snap, hold);
+    match snap.past_disabled(first, |k| visited(hold, k)).1 {
+        FallbackRoute::Usable { alias, key, .. } if visited(hold, &key) => Err(refused(format!(
+            " (fallback '{alias}' was already tried in this request)"
+        ))),
+        FallbackRoute::Usable { alias, key, route } => {
+            match crate::gate::chain::serves(state, &route, &alias, policy.check).await {
+                Ok(()) => Ok(Climbed::Fallback {
                     alias,
+                    key,
                     route,
                     reason: block.fallback_reason(),
-                })
-            } else {
-                Err(refused(format!(
-                    " (fallback '{alias}' cannot serve this endpoint)"
-                )))
+                }),
+                Err(clause) => Err(refused(clause)),
             }
         }
-        FallbackRoute::Unusable { alias, why } => {
+        FallbackRoute::Unusable { alias, why, .. } => {
             Err(refused(format!(" (fallback '{alias}' {why})")))
         }
         FallbackRoute::None => Err(refused(String::new())),
@@ -936,7 +958,7 @@ impl VramScheduler {
             // entry 47) — a guest's climb never gets here. Held until this
             // returns, however it returns.
             if drain.is_none() {
-                drain = background::owner_drain(state, snap);
+                drain = Some(background::owner_drain(state));
             }
             stage(&format!(
                 "needs {}, {} free with the running rung's {} counted — evicting",
@@ -945,7 +967,7 @@ impl VramScheduler {
                 fmt_bytes(running)
             ));
             if self
-                .evict_one(state, target, &l, background::Victims::Any)
+                .evict_one(state, target, &l, background::Victims::Any, None)
                 .await
             {
                 continue;

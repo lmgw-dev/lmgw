@@ -92,10 +92,14 @@ mod admission;
 pub use admission::*;
 mod beside;
 pub(crate) use beside::Crowded;
+mod download;
 mod on_cpu;
-pub(crate) use on_cpu::held_container_fallback;
+pub(crate) use on_cpu::gpu_container_under_hold;
 mod queue;
+pub mod stage_watch;
 mod stall;
+mod start_failed;
+pub(crate) use start_failed::start_error;
 mod verdict;
 pub(crate) use queue::*;
 

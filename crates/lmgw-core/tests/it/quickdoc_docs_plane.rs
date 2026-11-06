@@ -187,7 +187,7 @@ async fn setup(mock: &MockServer) -> SharedState {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -216,6 +216,7 @@ async fn setup(mock: &MockServer) -> SharedState {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -297,7 +298,9 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 
 /// The text of a tool result, and whether it was an error.
 async fn call(state: &SharedState, name: &str, v: Value) -> (String, bool) {
-    let result = docs::call(state, name, args(v), None, None).await.unwrap();
+    let result = docs::call(state, name, args(v), None, (None, Default::default()))
+        .await
+        .unwrap();
     (
         result["content"][0]["text"].as_str().unwrap().to_string(),
         result["isError"].as_bool().unwrap_or(false),
@@ -1334,18 +1337,14 @@ async fn golden_generation_is_refused_under_hold_and_never_reaches_the_cloud_moc
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
     )
     .await
     .unwrap();
-    let mut s = state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("ingest-model".into());
-    store::save_settings(&state.db, &s).await.unwrap();
-    state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&state, Some("ingest-model")).await;
     lmgw_core::ops::hold_set(&state, true).await.unwrap();
 
     let cid = seed_with_model(&state, "axum", "0.8", "local-gen").await;
@@ -2402,14 +2401,14 @@ async fn the_docs_tab_decodes_every_dashboard_response() {
     assert_eq!(manifest.corpora[0].corpus_id, "axum@0.8");
     assert_eq!(manifest.corpora[0].chunk_count, 3);
 
-    let file = http
+    let exported = http
         .get(format!("{base}/api/docs/export?corpus_id={cid}"))
         .send()
         .await
-        .unwrap()
-        .bytes()
-        .await
         .unwrap();
+    // The documents' text is stored content (WP13).
+    crate::support::stored::assert_sandboxed(exported.headers(), "docs export");
+    let file = exported.bytes().await.unwrap();
     let resp = http
         .post(format!(
             "{base}/api/docs/import?replace=true&validate_only=true"

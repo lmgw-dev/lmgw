@@ -1,0 +1,37 @@
+{
+  "request": {
+    "body": "{\"cache_prompt\":true,\"dry_multiplier\":0.8,\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"mirostat\":2,\"model\":\"the-model\",\"n_probs\":3,\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"typical_p\":0.9}",
+    "body_json": {
+      "cache_prompt": true,
+      "dry_multiplier": 0.8,
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "mirostat": 2,
+      "model": "the-model",
+      "n_probs": 3,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "typical_p": 0.9
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

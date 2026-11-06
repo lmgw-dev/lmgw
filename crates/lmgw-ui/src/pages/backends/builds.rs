@@ -15,7 +15,7 @@ use super::{
     tag_only, use_bk, use_chips, Bk, LogTarget,
 };
 use crate::backends_api as api;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
 use crate::widgets::{ConfirmButton, CopyBtn, MenuItem, Modal, ModalFooter, RowMenu};
 
@@ -73,10 +73,10 @@ pub fn BuildsTab() -> impl IntoView {
                 when=empty
                 fallback=move || {
                     view! {
-                        <table class="data bk-builds">
+                        <table class="data many-cols bk-builds">
                             <thead>
                                 <tr>
-                                    <th>"Engine"</th>
+                                    <th class="bk-late">"Engine"</th>
                                     <th>"Build"</th>
                                     <th class="bk-early">"Repository"</th>
                                     <th>"Ref"</th>
@@ -388,19 +388,24 @@ fn BuildRow(id: i64) -> impl IntoView {
     let repo_title = spec(|s| s.repo_url.clone());
     let repo_short = spec(|s| short_repo(&s.repo_url));
     let git_ref = spec(|s| s.git_ref.clone());
-    let slug = spec(|s| s.slug.clone());
+    // The slug is the tooltip's, not the cell's: the cell is the one that
+    // gives way, so it holds the name alone (the editor has the slug too).
     let name_title = move || {
-        format!(
-            "{}\n{}\n{}",
-            name.get(),
-            v.with(|v| v.build.spec.repo_url.clone()),
-            moving.get()
-        )
+        v.with(|v| {
+            let s = &v.build.spec;
+            // An unnamed build already shows its slug as the name.
+            let slug = if s.name.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", s.slug)
+            };
+            format!("{}{slug}\n{}\n{}", name.get(), s.repo_url, moving.get())
+        })
     };
     let flags = move || v.with(|v| v.update.as_ref().map(update_flags));
     view! {
         <tr class:bk-open=open>
-            <td>{move || engine_chip(v.with(|v| v.build.spec.engine))}</td>
+            <td class="bk-late">{move || engine_chip(v.with(|v| v.build.spec.engine))}</td>
             <td class="clip" title=name_title>
                 <button
                     type="button"
@@ -410,18 +415,19 @@ fn BuildRow(id: i64) -> impl IntoView {
                     on:click=toggle
                 >
                     <span class="caret-icon" aria-hidden="true">"▸"</span>
-                    {move || name.get()}
+                    <span class="bk-name">{move || name.get()}</span>
                 </button>
-                <span class="pfx mono-sm bk-slug">{slug}</span>
-                {flags}
             </td>
             <td class="bk-early mono-sm bk-cut-s" title=repo_title>{repo_short}</td>
             <td class="mono-sm bk-cut-s" title=git_ref>{git_ref}</td>
             <td class="col-p2 bk-cut-s" title=extras_title>
                 <span class="bk-chips">{extras_chips}</span>
             </td>
+            // The update chips ride with the last run (a new run is what
+            // they are about) in a column that never hides and never clips,
+            // so whether a build can be updated reads at every width.
             <td>
-                <span class="bk-status">{status_cell} {when}</span>
+                <span class="bk-status">{status_cell} {when} {flags}</span>
             </td>
             <td class="bk-mid mono-sm bk-cut-s" title=image_title>{image_cell}</td>
             <td class="col-p3 num" title=users_title>{users}</td>
@@ -466,19 +472,19 @@ pub fn update_tooltip(u: &UpdateStatus) -> String {
     lines.join("\n")
 }
 
-/// A build row's update chips (§8): the first reason itself ("master +37
-/// commits"), with how many more; and a separate chip when something could
-/// not be checked — a rate-limited forge is not an update. Nothing when up
-/// to date.
+/// A build row's update chips (§8), in its Last run cell: "update" when a
+/// new run would build something newer or different, and a separate chip
+/// when something could not be checked — a rate-limited forge is not an
+/// update. One short word each, so the cell stays narrow enough for the
+/// table at every width; the reasons ("master +37 commits", …) are the
+/// tooltip's and the unfolded row's. Nothing when up to date.
 fn update_flags(u: &UpdateStatus) -> impl IntoView {
     let title = update_tooltip(u);
-    let reason = u.reasons.first().cloned().map(|first| {
-        let more = u.reasons.len() - 1;
+    let reason = u.has_update().then(|| {
         view! {
             <span class="chip warn bk-flag" title=title.clone()>
                 <span class="dot"></span>
-                <span class="bk-flag-t">{first}</span>
-                {(more > 0).then(|| view! { <span class="bk-flag-n">{format!("+{more}")}</span> })}
+                "update"
             </span>
         }
     });
@@ -889,7 +895,11 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
     };
     let base = run.base_sha.clone().unwrap_or_default();
     let image_id = run.image_id.clone();
-    let has_image = image_id.is_some();
+    // `image_id` stays as history after the image is deleted; the server says
+    // whether it is still on this machine (unknown counts as there).
+    let image_gone = run.image_present == Some(false);
+    let has_image = image_id.is_some() && !image_gone;
+    let gone_title = "The image is gone from this machine; a rebuild makes a new one";
     let promoted = run.promoted;
     // The moving tag names this run's image: the promoted run's, and every
     // up-to-date run's that reused it (it built nothing of its own). Only the promoted one wears the
@@ -915,7 +925,9 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
         let mut items = vec![
             MenuItem::new("Make current", move || promote(ctx, run_id))
                 .disabled(!verified || on_current || !has_image)
-                .title(if on_current {
+                .title(if image_gone {
+                    gone_title
+                } else if on_current {
                     "Already current: the moving tag points at this image"
                 } else if !verified {
                     "Only a verified run can become current"
@@ -924,9 +936,13 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
                 }),
             MenuItem::new("Verify now", move || verify(ctx, run_id))
                 .disabled(!has_image || !status.built())
-                .title("Run the --help and GPU device checks on this image again"),
+                .title(if image_gone {
+                    gone_title
+                } else {
+                    "Run the --help and GPU device checks on this image again"
+                }),
         ];
-        if let Some(img) = image_id.clone() {
+        if let Some(img) = image_id.clone().filter(|_| !image_gone) {
             items.push(
                 MenuItem::new("Retag…", move || {
                     bk.retag.set(Some((img.clone(), tags.clone())))
@@ -934,7 +950,7 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
                 .title("Add or remove a tag on this image"),
             );
         }
-        if let Some(img) = image_id {
+        if let Some(img) = image_id.filter(|_| !image_gone) {
             items.push(
                 MenuItem::new("Delete image…", move || {
                     bk.image_delete.set(Some(img.clone()))
@@ -959,8 +975,16 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
             <td class="num">{run_duration(&run).unwrap_or_default()}</td>
             <td class="mono-sm" title=base.clone()>{sha7(&base)}</td>
             <td class="col-p2 mono-sm bk-cut" title=extras_line.clone()>{extras_line.clone()}</td>
-            <td class="num">{run.size_bytes.map(human_bytes).unwrap_or_default()}</td>
+            <td class="num">{run.size_bytes.map(fmt_bytes).unwrap_or_default()}</td>
             <td class="mono-sm bk-cut" title=tag_title>
+                {image_gone
+                    .then(|| {
+                        view! {
+                            <span class="dim" title="This run's image is no longer on this machine">
+                                "image deleted "
+                            </span>
+                        }
+                    })}
                 {rebuild
                     .then(|| {
                         view! {

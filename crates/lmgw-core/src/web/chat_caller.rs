@@ -32,6 +32,8 @@
 //! reaches no tool and has every model call refused. Only an in-process
 //! caller is the owner without a key ([`Caller::default`]).
 
+mod tail;
+
 use std::convert::Infallible;
 
 use axum::extract::FromRequestParts;
@@ -445,6 +447,22 @@ impl Caller {
         };
         let last = Ok(TurnFrame::of("error", &stopping).into_sse());
         crate::server::until_stopped(&state.stops, self.served_at(), events, Some(last))
+    }
+
+    /// [`Caller::sse`] as the response every Chat SSE route answers (a turn,
+    /// the read-aloud, a warm, a card action): one `:` comment a quarter
+    /// second after each burst of frames, so WebKitGTK hands the page a
+    /// frame's tail at once (`tail`), and axum's keep-alive on a stream that
+    /// stays quiet.
+    pub(crate) fn sse_response<S>(&self, state: &SharedState, events: S) -> axum::response::Response
+    where
+        S: Stream<Item = Result<SseEvent, Infallible>> + Send + 'static,
+    {
+        use axum::response::sse::{KeepAlive, Sse};
+        use axum::response::IntoResponse;
+        Sse::new(tail::tail_flushed(self.sse(state, events)))
+            .keep_alive(KeepAlive::default())
+            .into_response()
     }
 }
 

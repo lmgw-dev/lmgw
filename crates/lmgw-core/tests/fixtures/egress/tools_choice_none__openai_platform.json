@@ -1,0 +1,59 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"Weather in Berlin?\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"tool_choice\":\"none\",\"tools\":[{\"description\":\"The weather in a city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"},\"type\":\"function\"},{\"name\":\"no_description\",\"parameters\":{\"properties\":{},\"type\":\"object\"},\"type\":\"function\"}]}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "Weather in Berlin?",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "tool_choice": "none",
+      "tools": [
+        {
+          "description": "The weather in a city.",
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "type": "function"
+        },
+        {
+          "name": "no_description",
+          "parameters": {
+            "properties": {},
+            "type": "object"
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

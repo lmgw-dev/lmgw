@@ -11,7 +11,7 @@ use lmgw_api_types::bench::ProbeOutcome;
 use lmgw_api_types::bench_ops::{
     BenchArgs, BenchCancelArgs, BenchDeleteArgs, BenchDone, BenchPlan, BenchRun, BenchRunArgs,
     BenchRunDetail, BenchRunSetArgs, BenchRunSummary, BenchRunsArgs, BenchRunsResponse,
-    BenchStarted, BenchStatus, JOB_KEY,
+    BenchStarted, BenchStatus, BenchStop, JOB_KEY,
 };
 
 use crate::bench::compare::{self, headline};
@@ -42,29 +42,53 @@ pub async fn bench_plan(state: &SharedState, args: BenchArgs) -> Result<BenchPla
 /// `bench_start` (§3.2): refused under the hold, while a run is going, or
 /// for a row that cannot run; otherwise the row is written and the job
 /// spawned — the job takes the lease and empties the card.
-pub async fn bench_start(state: &SharedState, args: BenchArgs) -> Result<BenchStarted, String> {
+pub async fn bench_start(
+    state: &SharedState,
+    args: BenchArgs,
+) -> Result<BenchStarted, crate::principal::Refusal> {
     if args.model_id.trim().is_empty() {
         return Err("model_id is required: a local chat model's id".into());
     }
     let snap = state.snapshot();
     if let Some(b) = plan::blocked_now(state, &snap) {
-        return Err(b.message);
+        return Err(b.message.into());
     }
     let prep = plan::prepare(state, &snap, &args)
         .await
         .map_err(|b| b.message)?;
     let launcher = state.bench.launcher(state);
     let image = prep.runtime.image.clone();
-    let (image_id, labels) = launcher::image_facts(launcher.as_ref(), &image)
-        .await
-        .map_err(|e| {
-            format!(
-                "the image '{image}' is not on this machine ({e}) — pull or build it first; a \
-                 run would otherwise time the download as its load"
-            )
-        })?;
-    let build = build_identity(&image, Some(image_id), labels);
+    let build = match launcher::image_facts(launcher.as_ref(), &image).await {
+        Ok((image_id, labels)) => build_identity(&image, Some(image_id), labels),
+        // Not here, and a registry has it: the run downloads it before it
+        // takes the lease (machine-check design §5), and records the
+        // image's identity once it is here.
+        Err(e) => match plan::downloads_first(state, &image).await {
+            Some(_) => build_identity(&image, None, Default::default()),
+            None => return Err(plan::image_missing(&image, &e).into()),
+        },
+    };
     let stops = plan::stops(state).await;
+    // From the row's write on, a task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): a dropped request would leave a run
+    // row with no job behind it, never finished.
+    let st = state.clone();
+    crate::detached::detached("starting the benchmark", async move {
+        let state = &st;
+        record_and_spawn(state, args, prep, build, stops).await
+    })
+    .await?
+}
+
+/// [`bench_start`] from the run row's write on: the row, the job, and the
+/// row's link to the job.
+async fn record_and_spawn(
+    state: &SharedState,
+    args: BenchArgs,
+    prep: plan::Prepared,
+    build: lmgw_api_types::bench::BuildIdentity,
+    stops: Vec<BenchStop>,
+) -> Result<BenchStarted, crate::principal::Refusal> {
     let run_id = store::insert_bench_run(
         &state.db,
         &NewBenchRun {
@@ -145,14 +169,15 @@ pub async fn bench_start(state: &SharedState, args: BenchArgs) -> Result<BenchSt
             )
             .await;
             let _ = store::delete_bench_run(&state.db, run_id).await;
-            Err(format!(
-                "a benchmark run is already going (job {job_id}) — one run at a time"
-            ))
+            Err(
+                format!("a benchmark run is already going (job {job_id}) — one run at a time")
+                    .into(),
+            )
         }
         Err(e) => {
             let _ = store::finish_bench_run(&state.db, run_id, BenchStatus::Failed, None, Some(&e))
                 .await;
-            Err(e)
+            Err(e.into())
         }
     }
 }

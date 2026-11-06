@@ -58,10 +58,7 @@ async fn a_held_guarded_row_falls_back_without_counting() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     guard_chat_model(&f, 64, 32).await;
     let _cloud = cloud_upstream(&f, "cloud-chat").await;
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some("cloud-chat".into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some("cloud-chat")).await;
     engage_hold(&f).await;
 
     let resp = sized_chat(&f.gateway, &words("x", 40), 100).await;

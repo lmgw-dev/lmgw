@@ -15,6 +15,8 @@ pub(crate) mod chat_attachments;
 /// Merged into [`chat`]'s list, not read by `all_routes` on its own.
 pub(crate) mod chat_profiles;
 /// Merged into [`chat`]'s list, not read by `all_routes` on its own.
+pub(crate) mod chat_reads;
+/// Merged into [`chat`]'s list, not read by `all_routes` on its own.
 pub(crate) mod chat_tasks;
 /// Merged into [`chat`]'s list, not read by `all_routes` on its own.
 pub(crate) mod chat_threads;
@@ -29,4 +31,6 @@ pub(crate) mod inference;
 pub(crate) mod knowledge;
 pub(crate) mod labs_store;
 pub(crate) mod session;
+pub(crate) mod transfers;
 pub(crate) mod usage;
+pub(crate) mod voice_lab;

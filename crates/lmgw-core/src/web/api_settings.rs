@@ -13,6 +13,7 @@ use crate::config::{
     ApiKey, ApiKeyKind, AudioSettings, AuxRouterSettings, BudgetPeriod, ImageSettings,
     RouterSettings, SelfAdmin, VramSettings,
 };
+use crate::detached::detached;
 use crate::ops::KeyPatch;
 use crate::principal::Refusal;
 use crate::state::SharedState;
@@ -221,6 +222,9 @@ pub struct SettingsFullPatch {
     /// Spend ceiling across every key, in currency micro-units. `0` = none.
     global_budget_micro: Option<i64>,
     global_budget_period: Option<String>,
+    /// Seconds before an upstream remembered out of quota is asked again,
+    /// when its answer carried no `Retry-After`; at least 1.
+    quota_recheck_seconds: Option<u64>,
     max_body_mb: Option<u32>,
     /// Archive an idle Chat thread this many days after its last activity.
     /// `0` disables auto-archive. A folder's own `archive_days` overrides it
@@ -238,7 +242,8 @@ pub struct SettingsFullPatch {
     /// `chat_feed_keepalive_max_s`.
     chat_feed_keepalive_s: Option<i64>,
     /// The longest keep-alive a feed may ask for itself
-    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 86400 seconds.
+    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 32767 seconds (the longest Linux accepts for a TCP
+    /// keep-alive timer).
     chat_feed_keepalive_max_s: Option<i64>,
     /// Records the Chat feed reads per query while a client catches up,
     /// from 1 to 10000.
@@ -286,6 +291,10 @@ pub struct SettingsFullPatch {
     chat_voice_audio_input: Option<String>,
     /// Tokens of knowledge-base excerpts one Chat turn may carry; above 0.
     chat_kb_budget_tokens: Option<i64>,
+    /// The image and audio tools' default models: only the fields given
+    /// change, `""` clears one. Each name must be one of its tool's
+    /// `model` choices (`GET /chat/api/media/defaults`).
+    chat_media_defaults: Option<lmgw_api_types::chat_media::MediaDefaults>,
     self_admin: Option<String>,
     sampling_alias: Option<String>,
     responses_max_tool_calls: Option<u32>,
@@ -299,10 +308,6 @@ pub struct SettingsFullPatch {
     docs_search: Option<DocsSearchPatch>,
     docs_rerank_model: Option<String>,
     vram: Option<VramSettingsPatch>,
-    /// The GPU hold's global fallback. `active` is deliberately not reachable
-    /// through this patch: the hold is switched only through the `hold_set`
-    /// operation.
-    hold: Option<HoldSettingsPatch>,
     /// Podman container name prefix for the per-model container runtime.
     container_prefix: Option<String>,
     /// The DNS suffix a service agent's UI is served under:
@@ -396,20 +401,6 @@ impl VramSettingsPatch {
         }
         Ok(())
     }
-}
-
-/// The GPU hold's global fallback. Carries no `active` field: engaging the
-/// hold runs the GPU sweep, a side effect a generic settings patch must not
-/// have, so the switch itself is flipped only through the `hold_set`
-/// operation. A patch that names `active` is rejected, like any other field
-/// this route does not carry.
-// Design: gpu-hold §3.1, sweep §5. The rejection is `deny_unknown_fields`.
-#[derive(Deserialize, Default, schemars::JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct HoldSettingsPatch {
-    /// `""` clears it back to "refuse"; otherwise validated (must resolve,
-    /// must not be local) before it is stored.
-    fallback_alias: Option<String>,
 }
 
 /// The Docs search stage defaults. Every field is optional so the Docs tab can
@@ -545,9 +536,102 @@ fn secret(current: &mut String, supplied: Option<String>, clear: Option<bool>) {
 /// here is still the flat `400 op_failed` every
 /// op-level input error is — which is exactly what [`Refusal`]'s `From<String>`
 /// renders — so nothing else about this surface moved.
+///
+/// The save is a task of its own (*changed 2026-10-24*, see
+/// [`crate::detached::detached`]), as `settings_set`'s is: it runs under
+/// the settings lock from its read to its write, so the task starts at the
+/// lock, and a dropped request can no longer skip the MCP reconcile, the
+/// tools' nudge, the device listener's move, the agents' re-pointing at a
+/// moved bind address or the app containers' stop at a renamed origin
+/// after the write.
 pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result<Value, Refusal> {
-    // Held across the whole read-modify-write: see `AppState::settings_write`.
-    let guard = st.settings_write.lock().await;
+    let st = st.clone();
+    crate::detached::detached("saving the settings", async move {
+        // A prefix change is a routing write (`AppState::routing_write`),
+        // taken before the settings lock as every routing write that saves
+        // settings takes it.
+        let routing = st.routing_write().await;
+        // Held across the whole read-modify-write: see
+        // `AppState::settings_write`.
+        let guard = st.settings_write.lock().await;
+        save_full(&st, p, Vec::new(), routing, guard, &mut None).await
+    })
+    .await?
+}
+
+/// What the machine check's settings switch hands the Settings save
+/// ([`settings_set_full_planned`]), worked out under the settings lock.
+pub(crate) enum Planned<T> {
+    /// Save `patch`, and the rows' own image and run arguments in the
+    /// settings' transaction; `carry` comes back with the answer.
+    Save {
+        patch: Box<SettingsFullPatch>,
+        rows: Vec<store::RunOverridesWrite>,
+        carry: T,
+    },
+    /// Save nothing.
+    Refuse(T),
+}
+
+/// How a [`settings_set_full_planned`] save came out.
+pub(crate) enum PlannedSave<T> {
+    /// Saved: the Settings save's answer.
+    Saved { answer: Value, carry: T },
+    /// The plan saved nothing.
+    Refused(T),
+    /// Row `model_id` no longer held what the plan was worked out from, so
+    /// nothing was saved.
+    RowChanged { model_id: String },
+}
+
+/// [`settings_set_full`] for the machine check's settings switch
+/// (machine-check design §4.2, D115, D135, WP12): `plan` works the save out
+/// under the settings lock, from the snapshot then, so no settings save can
+/// land between what it compares and what is written; the rows' own image
+/// and run arguments are written in the settings' own transaction, each
+/// only while the row still holds what the switch was worked out from, so
+/// the classes and the rows that follow them change together or not at
+/// all.
+pub(crate) async fn settings_set_full_planned<T, F>(
+    st: &SharedState,
+    plan: F,
+) -> Result<PlannedSave<T>, Refusal>
+where
+    T: Send + 'static,
+    F: FnOnce(&std::sync::Arc<crate::config::Snapshot>) -> Planned<T> + Send + 'static,
+{
+    let st = st.clone();
+    crate::detached::detached("saving the settings", async move {
+        let routing = st.routing_write().await;
+        let guard = st.settings_write.lock().await;
+        match plan(&st.snapshot()) {
+            Planned::Refuse(carry) => Ok(PlannedSave::Refused(carry)),
+            Planned::Save { patch, rows, carry } => {
+                let mut changed = None;
+                match save_full(&st, *patch, rows, routing, guard, &mut changed).await {
+                    Ok(answer) => Ok(PlannedSave::Saved { answer, carry }),
+                    Err(e) => match changed {
+                        Some(model_id) => Ok(PlannedSave::RowChanged { model_id }),
+                        None => Err(e),
+                    },
+                }
+            }
+        }
+    })
+    .await?
+}
+
+/// [`settings_set_full`]'s save, under the locks its caller took: `rows`
+/// written in its transaction, and `row_changed` set to the model a row
+/// write refused, the save refused with it.
+async fn save_full(
+    st: &SharedState,
+    p: SettingsFullPatch,
+    rows: Vec<store::RunOverridesWrite>,
+    routing: tokio::sync::OwnedMutexGuard<()>,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+    row_changed: &mut Option<String>,
+) -> Result<Value, Refusal> {
     let mut s = st.snapshot().settings.clone();
     let mut notes: Vec<String> = Vec::new();
 
@@ -608,6 +692,10 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.global_budget_period {
         s.global_budget_period = BudgetPeriod::parse(&v);
     }
+    if let Some(v) = p.quota_recheck_seconds {
+        s.quota_recheck_seconds =
+            crate::ops::validate_quota_recheck_seconds(v).map_err(bad_request)?;
+    }
     if let Some(v) = p.max_body_mb {
         s.max_body_mb = v;
     }
@@ -646,6 +734,16 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.chat_kb_budget_tokens {
         s.chat_kb_budget_tokens = crate::ops::validate_chat_kb_budget(v)?;
     }
+    let media_changed = match &p.chat_media_defaults {
+        Some(m) => {
+            let new =
+                crate::mcp::media::defaults::settings_patch(st, &s.chat_media_defaults, m).await?;
+            let moved = new != s.chat_media_defaults;
+            s.chat_media_defaults = new;
+            moved
+        }
+        None => false,
+    };
     crate::ops::apply_chat_voice(
         st,
         &mut s,
@@ -743,16 +841,6 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
                 .iter()
                 .map(crate::ops::DevicesChange::note),
         );
-    }
-    if let Some(h) = p.hold {
-        if let Some(v) = h.fallback_alias {
-            let v = v.trim().to_string();
-            if !v.is_empty() {
-                crate::ops::validate_fallback_alias(&st.snapshot(), &v)
-                    .map_err(|e| format!("hold.fallback_alias: {e}"))?;
-            }
-            s.hold.fallback_alias = (!v.is_empty()).then_some(v);
-        }
     }
     if let Some(v) = p.container_prefix {
         let v = validate_container_prefix(&v)?;
@@ -934,6 +1022,7 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
             );
         }
     }
+    let mut image_dirs = false;
     if let Some(i) = p.image {
         i.apply(&mut s.image);
         notes.push(
@@ -941,6 +1030,64 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
              they restart"
                 .into(),
         );
+        // §3: the LoRA and upscaler directories, made once the save is known
+        // to go through (below).
+        image_dirs = true;
+    }
+
+    if ports_touched {
+        crate::config::webrtc_port_collision(&s)?;
+    }
+    // A changed class prefix renames every local name of its class: the
+    // fallbacks naming them follow, in the same transaction (decision 27).
+    let before = st.snapshot();
+    let rewrites = crate::ops::fallback::prefix_rewrites(&before, &s);
+    // A new prefix also gives its names to fallbacks that held them
+    // dangling: checked in a dry run (§14.2, `fallback::referrers`).
+    let (was, now) = (&before.settings, &s);
+    let renamed = was.router.public_prefix != now.router.public_prefix
+        || was.aux_router.public_prefix != now.aux_router.public_prefix
+        || was.aux_router.decision_prefix != now.aux_router.decision_prefix
+        || was.audio.public_prefix != now.audio.public_prefix
+        || was.image.public_prefix != now.image.public_prefix;
+    if renamed {
+        let mut tx = store::begin_write(&st.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        store::save_settings_rewriting_in(&mut tx, &s, &rewrites.rows)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::ops::fallback::dry_run(st, &before, tx, &[], None).await?;
+    }
+    notes.extend(rewrites.notes.iter().cloned());
+    if rows.is_empty() {
+        store::save_settings_rewriting(&st.db, &s, &rewrites.rows)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        let mut tx = store::begin_write(&st.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        store::save_settings_rewriting_in(&mut tx, &s, &rewrites.rows)
+            .await
+            .map_err(|e| e.to_string())?;
+        for w in &rows {
+            let written = store::set_run_overrides_in(&mut tx, w)
+                .await
+                .map_err(|e| e.to_string())?;
+            if !written {
+                // Dropped without a commit: nothing of this save is kept.
+                *row_changed = Some(w.model_id.clone());
+                return Err(bad_request(format!(
+                    "model '{}' changed while its settings were being switched, so nothing was \
+                     changed; check again and switch again",
+                    w.model_id
+                )));
+            }
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+    }
+    if image_dirs {
         // §3: the LoRA and upscaler directories exist "when the class is first
         // configured". sd-server's capabilities route *throws* when the two
         // flags point at nothing (§12.2), and lmgw renders them
@@ -970,13 +1117,6 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
             }
         }
     }
-
-    if ports_touched {
-        crate::config::webrtc_port_collision(&s)?;
-    }
-    store::save_settings(&st.db, &s)
-        .await
-        .map_err(|e| e.to_string())?;
     // Saved is saved (review G-6): a reload that fails is said beside it,
     // and these settings apply all the same.
     let published = st.settings_saved(&s).await;
@@ -985,7 +1125,12 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     // the settings blob. The reconcile reads the snapshot of then
     // (`reconcile_mcp`).
     drop(guard);
+    drop(routing);
     st.reconcile_mcp().await;
+    // A default model changes the media tools' schemas and descriptions.
+    if media_changed {
+        st.mcp.notify_tools_changed_now();
+    }
     // The device listener follows at once (device link design §4.1).
     if listener_moved {
         notes.extend(crate::ops::apply_devices_listener(st).await);
@@ -1407,31 +1552,39 @@ pub async fn key_create(
     }
 
     let plaintext = format!("lmgw-{}", super::rand_hex32());
-    let id = store::insert_api_key(&st.db, &name, &crate::config::hash_api_key(&plaintext))
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    st.reload_snapshot()
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    if scoped {
-        // Validated above, so this can only fail on the database; the key
-        // then exists unscoped, and the error says so rather than hiding it.
-        let patch = KeyPatch { id, ..scope };
-        if let Err(e) = crate::ops::key_set(st, patch).await {
-            return Err(bad_request(format!(
-                "key '{name}' (id {id}) was created but its scope was not saved: {e} — set it \
-                 with key_set before using the key"
-            )));
+    let task_st = st.clone();
+    // The insert and everything after it are a task of their own (*changed
+    // 2026-10-23*, see [`crate::detached::detached`]): a dropped request would
+    // leave the snapshot without a key the store holds, and its scope unsaved.
+    detached("creating the key", async move {
+        let st = &task_st;
+        let id = store::insert_api_key(&st.db, &name, &crate::config::hash_api_key(&plaintext))
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
+        st.reload_snapshot()
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
+        if scoped {
+            // Validated above, so this can only fail on the database; the key
+            // then exists unscoped, and the error says so rather than hiding it.
+            let patch = KeyPatch { id, ..scope };
+            if let Err(e) = crate::ops::key_set(st, patch).await {
+                return Err(bad_request(format!(
+                    "key '{name}' (id {id}) was created but its scope was not saved: {e} — set \
+                     it with key_set before using the key"
+                )));
+            }
         }
-    }
-    Ok(dto::KeyCreated {
-        ok: true,
-        id,
-        message: format!("key '{name}' created — copy it now, it is not shown again"),
-        name,
-        // Shown exactly once; only the hash is stored.
-        key: plaintext,
+        Ok(dto::KeyCreated {
+            ok: true,
+            id,
+            message: format!("key '{name}' created — copy it now, it is not shown again"),
+            name,
+            // Shown exactly once; only the hash is stored.
+            key: plaintext,
+        })
     })
+    .await?
 }
 
 /// `key_set` with the owner rules in front of it (§3.12).
@@ -1459,27 +1612,39 @@ pub async fn key_delete(st: &SharedState, id: i64) -> Result<dto::MessageAck, Re
     if key.kind == ApiKeyKind::Owner && key.name == token::OWNER_DASHBOARD {
         return Err(refuse_owner(crate::ops::REFUSE_DOOR));
     }
-    store::delete_api_key(&st.db, id)
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    // A device's delete is recorded in the feed (`device.revoked`).
-    if key.kind == ApiKeyKind::Device {
-        st.chat_feed.wake();
-    }
-    // The row is gone: what it opened ends now, whether or not the reload
-    // succeeds (review W2-6).
-    let reloaded = st.reload_snapshot().await;
-    if reloaded.is_err() {
-        st.key_written(key.id, crate::state::KeyWritten::Deleted);
-    }
-    device_keys::deleted(st, &key);
-    // A device's hosted-tools row went with it, and its MCP tasks ended
-    // (MCP Tasks design §1.6): the results enter their threads.
-    if key.kind == ApiKeyKind::Device {
-        crate::web::chat_tasks::servers_gone(st).await;
-    }
-    reloaded.map_err(|e| bad_request(e.to_string()))?;
-    Ok(dto::MessageAck::new("key revoked"))
+    let task_st = st.clone();
+    // The delete and everything after it are a task of their own (*changed
+    // 2026-10-23*, see [`crate::detached::detached`]): a dropped request would
+    // leave a deleted device's connections open and its MCP tasks and
+    // transfers unended.
+    detached("deleting the key", async move {
+        let st = &task_st;
+        store::delete_api_key(&st.db, id)
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
+        // A device's delete is recorded in the feed (`device.revoked`).
+        if key.kind == ApiKeyKind::Device {
+            st.chat_feed.wake();
+        }
+        // The row is gone: what it opened ends now, whether or not the
+        // reload succeeds (review W2-6).
+        let reloaded = st.reload_snapshot().await;
+        if reloaded.is_err() {
+            st.key_written(key.id, crate::state::KeyWritten::Deleted);
+        }
+        device_keys::deleted(st, &key);
+        // A device's hosted-tools row went with it, and its MCP tasks ended
+        // (MCP Tasks design §1.6): the results enter their threads.
+        if key.kind == ApiKeyKind::Device {
+            crate::web::chat_tasks::servers_gone(st).await;
+            // And its transfers end, their bytes deleted (device transfers
+            // design §8).
+            crate::transfers::device_ended(st, key.id, &key.name, true).await;
+        }
+        reloaded.map_err(|e| bad_request(e.to_string()))?;
+        Ok::<_, Refusal>(dto::MessageAck::new("key revoked"))
+    })
+    .await?
 }
 
 /// The stored plaintext of one owner row, or why there is none to hand back.
@@ -1545,23 +1710,32 @@ pub async fn key_rotate(st: &SharedState, id: i64) -> Result<dto::KeySecret, Ref
     // plaintext to replace, only a row to delete and re-create.
     owner_plaintext(&key)?;
     let plaintext = token::mint_owner();
-    token::write_owner_key(st, &key.name, &plaintext, key.enabled)
-        .await
-        .map_err(bad_request)?;
-    // What the old value opened ends now, as a device's does (§1.6) —
-    // whether or not the reload succeeds (review W2-6, W3-7): the new value
-    // is written, and the old one must not keep working.
-    let reloaded = st.reload_snapshot().await;
-    if reloaded.is_err() {
-        st.key_written(
-            key.id,
-            crate::state::KeyWritten::Rehashed {
-                hash: crate::config::hash_api_key(&plaintext),
-                plain: Some(plaintext.clone()),
-            },
-        );
-    }
-    crate::devices::revoke(st, key.id, crate::devices::RevokeReason::Rotated);
+    let (task_st, task_key, task_plain) = (st.clone(), key.clone(), plaintext.clone());
+    // The write and what ends the old value are a task of their own
+    // (*changed 2026-10-23*, see [`crate::detached::detached`]): a dropped
+    // request would leave the old value working.
+    let reloaded = detached("rotating the key", async move {
+        let (st, key) = (&task_st, &task_key);
+        token::write_owner_key(st, &key.name, &task_plain, key.enabled)
+            .await
+            .map_err(bad_request)?;
+        // What the old value opened ends now, as a device's does (§1.6) —
+        // whether or not the reload succeeds (review W2-6, W3-7): the new
+        // value is written, and the old one must not keep working.
+        let reloaded = st.reload_snapshot().await;
+        if reloaded.is_err() {
+            st.key_written(
+                key.id,
+                crate::state::KeyWritten::Rehashed {
+                    hash: crate::config::hash_api_key(&task_plain),
+                    plain: Some(task_plain.clone()),
+                },
+            );
+        }
+        crate::devices::revoke(st, key.id, crate::devices::RevokeReason::Rotated);
+        Ok::<_, Refusal>(reloaded)
+    })
+    .await??;
     let mut message = if key.name == token::OWNER_DASHBOARD {
         "the dashboard key is rotated — every other open tab lands on the login view".to_string()
     } else {

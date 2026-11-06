@@ -108,11 +108,18 @@ pub struct DeviceLink {
     pub cert_serial: Option<String>,
     pub cert_not_after: Option<String>,
     pub cert_notice_after: Option<String>,
-    /// The last enrolment: when, from which peer address, with which
-    /// `client` text (a waiting key's, while one waits).
+    /// The last enrolment of the row's key: when, from which peer address,
+    /// with which `client` text and the device's own `device_name`. A key
+    /// waiting beside it keeps its own ([`WaitingKey`]), which the owner's
+    /// Confirm moves here.
     pub enrolled_at: Option<String>,
     pub enrolled_from: Option<String>,
     pub client_info: Option<String>,
+    pub device_name: Option<String>,
+    /// The app id the enrolment of the row's key declared (device transfers
+    /// design §2): what transfers of that app may be offered to; `None`
+    /// receives none. A waiting key's own is [`WaitingKey::app_id`].
+    pub app_id: Option<String>,
     /// The owner's confirmation of the enrolled key (§3.5): `None` refuses
     /// the device 403 `device_unconfirmed`.
     pub confirmed_at: Option<String>,
@@ -136,6 +143,16 @@ pub struct WaitingKey {
     pub cert_serial: Option<String>,
     pub cert_not_after: Option<String>,
     pub cert_notice_after: Option<String>,
+    /// The app id its enrolment declared: the row's once the owner confirms
+    /// the key (device transfers design §2, I3).
+    pub app_id: Option<String>,
+    /// The enrolment's time, peer address, `client` text and `device_name`,
+    /// as the row's [`DeviceLink::enrolled_at`] and its neighbours hold
+    /// them for the row's key (*added 2026-10-23*).
+    pub enrolled_at: Option<String>,
+    pub enrolled_from: Option<String>,
+    pub client_info: Option<String>,
+    pub device_name: Option<String>,
 }
 
 /// Which credential a device row holds, by its `key_hash`'s prefix.

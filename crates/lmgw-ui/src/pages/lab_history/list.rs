@@ -10,7 +10,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use super::client::{reads_on, LabHistory, Load};
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 use crate::widgets::ConfirmButton;
 
 /// The history. `card` renders one group by its id; the card reads the group
@@ -66,7 +66,7 @@ pub(in crate::pages) fn HistoryList(
                     "{} {} ({}) in the artifacts folder belong to no group: a crash between a write and its commit leaves them.",
                     grouped(u.orphan_files),
                     if u.orphan_files == 1 { "file" } else { "files" },
-                    human_bytes(u.orphan_bytes),
+                    fmt_bytes(u.orphan_bytes),
                 );
                 view! {
                     <div class="notice warn lh-orphans">

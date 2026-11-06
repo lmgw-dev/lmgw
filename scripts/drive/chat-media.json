@@ -1,0 +1,973 @@
+[
+ {
+  "js": "'The Chat image and audio tools on a GPU-held image row answered by its cloud fallback (chat-media-tools design §11, slices 3 and 4): the live pane of a running picture, the card (model, the fallback that answered, size, what was not applied, the prompt, the picture full size, never wider than it is), Save (a PNG), Attach (one draft in the composer for a double click), Re-roll (a second picture in the strip, selected; the thread left and opened again while it runs), a refused Upscale saying why, Vary opening prefilled, the card fitting at 720, 900 and 1280 CSS px with html.tauri, a cancel that only stops the wait (read as cancelled), a spoken result with its player, a turn that draws twice with calls sent without ids (one picture per card), a Stop mid-picture, the frames of every stream whole at once, all of it again after a reload, and the default model of the image tool at its three levels (Settings → Chat, the folder of the thread, the thread; design §3.8) with a turn whose call leaves out model. Run: scripts/chat-media-drive.sh (it fills in the thread id and the helpers of scripts/drive/chat-media.js).'"
+ },
+ {
+  "size": "1152x720"
+ },
+ {
+  "nav": "/chat?t=__THREAD__"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input') && !!document.querySelector('button[aria-label=\"Send\"]')",
+  "timeout": 60,
+  "label": "the thread is open"
+ },
+ {
+  "js": "__cm.hookSave()"
+ },
+ {
+  "js": "__cm.hookWire()"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "__cm.send('Draw a lighthouse on a cliff at dusk.')"
+ },
+ {
+  "until": "__cm.sent('Draw a lighthouse')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "!!__cm.live()",
+  "timeout": 30,
+  "label": "a running picture shows its live pane"
+ },
+ {
+  "expect": "__cm.live().textContent.includes('Waiting for the picture') && !!__cm.cancelButton()",
+  "label": "the live pane says it waits for the picture and offers Cancel"
+ },
+ {
+  "shot": "01-live-pane"
+ },
+ {
+  "until": "!!__cm.card() && !__cm.live() && __cm.loaded()",
+  "timeout": 40,
+  "label": "the picture replaces the live pane"
+ },
+ {
+  "js": "JSON.stringify(__cm.wire())"
+ },
+ {
+  "expect": "__cm.wire().streams === 1 && __cm.wire().lag < 600",
+  "label": "every frame of the turn reached the page whole within 0.6 s of its first byte (WebKit held a frame's tail until the next bytes: the tail flush)"
+ },
+ {
+  "expect": "__cm.facts().includes('image/mock-turbo')",
+  "label": "the card names the model the call asked for"
+ },
+ {
+  "expect": "__cm.facts().includes('answered by cloud-image, fallback')",
+  "label": "the card names the fallback that answered"
+ },
+ {
+  "expect": "/\\d+×\\d+/.test(__cm.facts())",
+  "label": "the card gives the size"
+ },
+ {
+  "expect": "__cm.notApplied().includes('seed')",
+  "label": "the card says the fallback did not take the seed"
+ },
+ {
+  "expect": "__cm.prompt().includes('lighthouse on a cliff')",
+  "label": "the card shows the prompt"
+ },
+ {
+  "js": "__cm.facts() + ' / ' + __cm.notApplied()"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "02-card"
+ },
+ {
+  "expect": "__cm.card().querySelector('.media-pic').title === 'Open full size' && __cm.card().querySelector('.media-pic img').alt.includes('lighthouse on a cliff')",
+  "label": "the picture's tooltip says it opens full size, its alt text is the prompt"
+ },
+ {
+  "js": "String(__cm.card().querySelector('.media-pic').getBoundingClientRect().width) + ' CSS px for ' + __cm.card().querySelector('.media-pic img').naturalWidth + ' px'"
+ },
+ {
+  "expect": "__cm.card().querySelector('.media-pic').getBoundingClientRect().width <= __cm.card().querySelector('.media-pic img').naturalWidth + 2",
+  "label": "a small picture is not drawn wider than it is"
+ },
+ {
+  "js": "__cm.card().querySelector('.media-pic').click(), 'opened'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open] .attach-modal-img')].some(i => /^\\/chat\\/api\\/attachments\\/\\d+$/.test(i.getAttribute('src')))",
+  "timeout": 10,
+  "label": "clicking the picture opens it full size"
+ },
+ {
+  "js": "document.querySelector('dialog[open]').close(), 'closed'"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]')",
+  "timeout": 5
+ },
+ {
+  "js": "__cm.act('save')"
+ },
+ {
+  "expect": "__cmSaved.length === 1 && /^\\/chat\\/api\\/attachments\\/\\d+$/.test(__cmSaved[0].href) && /\\.png$/.test(__cmSaved[0].name)",
+  "label": "Save downloads the picture under its own name"
+ },
+ {
+  "js": "__cm.checkPng(__cmSaved[0].href) + ' as ' + __cmSaved[0].name"
+ },
+ {
+  "until": "window.__cmPng !== undefined",
+  "timeout": 15
+ },
+ {
+  "expect": "window.__cmPng === true",
+  "label": "what Save fetches is a PNG"
+ },
+ {
+  "js": "__cm.act('attach') + ', then ' + __cm.act('attach')"
+ },
+ {
+  "until": "__cm.drafts().includes('.png')",
+  "timeout": 20,
+  "label": "Attach puts the picture in the composer as a draft"
+ },
+ {
+  "until": "!__cm.card().querySelector('[data-media-action=\"attach\"]').disabled",
+  "timeout": 20,
+  "label": "Attach is free again once the copy is in"
+ },
+ {
+  "expect": "__cm.drafts().split('|').filter(c => c.includes('.png')).length === 1",
+  "label": "a second click while the first was on its way made no second copy"
+ },
+ {
+  "js": "__cm.drafts()"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "03-attached"
+ },
+ {
+  "js": "__cm.act('reroll')"
+ },
+ {
+  "until": "!!__cm.card().querySelector('.media-strip-row > .media-live')",
+  "timeout": 15,
+  "label": "a re-roll runs beside the strip"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "04-reroll-running"
+ },
+ {
+  "expect": "!__cm.card().querySelector('.media-strip .media-live') && !!__cm.card().querySelector('.media-strip-row > .media-live')",
+  "label": "the running action's pane sits beside the strip, not in its list"
+ },
+ {
+  "js": "__cm.openThread('__OTHER__')"
+ },
+ {
+  "until": "location.search.includes('t=__OTHER__') && !document.querySelector('.media-card')",
+  "timeout": 20,
+  "label": "another thread opens while the re-roll runs"
+ },
+ {
+  "js": "__cm.openThread('__THREAD__')"
+ },
+ {
+  "until": "location.search.includes('t=__THREAD__') && !!__cm.card() && !!__cm.card().querySelector('.media-strip-row > .media-live')",
+  "timeout": 20,
+  "label": "back on the thread, the running re-roll shows its pane again"
+ },
+ {
+  "expect": "__cm.card().querySelector('[data-media-action=\"reroll\"]').disabled && !!__cm.cancelButton()",
+  "label": "and holds Re-roll, with its Cancel"
+ },
+ {
+  "until": "__cm.thumbs() === 2 && !__cm.card().querySelector('.media-live') && __cm.loaded()",
+  "timeout": 40,
+  "label": "Re-roll adds a picture to the strip"
+ },
+ {
+  "expect": "__cm.newestShown()",
+  "label": "the new picture is selected and shown"
+ },
+ {
+  "expect": "__cm.facts().includes('answered by cloud-image, fallback')",
+  "label": "the re-roll's own facts"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "05-rerolled"
+ },
+ {
+  "js": "__cm.act('upscale')"
+ },
+ {
+  "expect": "!!__cm.form('upscale') && __cm.form('upscale').textContent.includes('local image model only')",
+  "label": "Upscale first says it needs a local image model"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "06-upscale-confirm"
+ },
+ {
+  "js": "__cm.formButton('upscale', true)"
+ },
+ {
+  "until": "__cm.notice().length > 0",
+  "timeout": 20,
+  "label": "a refused upscale says why under the card"
+ },
+ {
+  "js": "__cm.notice()"
+ },
+ {
+  "expect": "/upscal/i.test(__cm.notice())",
+  "label": "the refusal is the gateway's sentence about upscaling"
+ },
+ {
+  "js": "__cm.act('change')"
+ },
+ {
+  "expect": "!!__cm.form('vary') && __cm.form('vary').querySelector('textarea').value.includes('lighthouse')",
+  "label": "Vary opens with the picture's prompt"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "07-vary-form"
+ },
+ {
+  "js": "__cm.formButton('vary', false)"
+ },
+ {
+  "js": "__cm.tauri()"
+ },
+ {
+  "size": "720x720"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "js": "String(__cm.fits())"
+ },
+ {
+  "expect": "__cm.fits() === true",
+  "label": "the card fits at 720 CSS px"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "08-fit-720"
+ },
+ {
+  "size": "900x720"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "__cm.fits() === true",
+  "label": "the card fits at 900 CSS px"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "09-fit-900"
+ },
+ {
+  "size": "1280x800"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "__cm.fits() === true",
+  "label": "the card fits at 1280 CSS px"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "10-fit-1280"
+ },
+ {
+  "size": "1152x720"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "__cm.send('One more, please.')"
+ },
+ {
+  "until": "__cm.sent('One more')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "!!__cm.cancelButton() && !__cm.cancelButton().disabled",
+  "timeout": 30,
+  "label": "the second picture's Cancel is ready"
+ },
+ {
+  "js": "__cm.cancelButton().title"
+ },
+ {
+  "expect": "__cm.cancelButton().title.startsWith('Stop waiting')",
+  "label": "before a job, Cancel only stops the wait"
+ },
+ {
+  "js": "__cm.cancelButton().click(), 'cancel'"
+ },
+ {
+  "until": "__cm.lastToolText().includes('Cancelled')",
+  "timeout": 30,
+  "label": "the cancelled call's result says so"
+ },
+ {
+  "until": "!__cm.live()",
+  "timeout": 15
+ },
+ {
+  "expect": "!__cm.reply().querySelector('.media-card')",
+  "label": "a cancelled call leaves no picture"
+ },
+ {
+  "expect": "!__cm.lastTool().classList.contains('err') && !!__cm.lastTool().querySelector('.tool-state.cancelled')",
+  "label": "a cancelled call reads as cancelled, not as an error"
+ },
+ {
+  "js": "(__cm.player() || __cm.reply()).scrollIntoView({block: 'end'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "11-cancelled"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "__cm.send('Say that the lighthouse is ready.')"
+ },
+ {
+  "until": "__cm.sent('Say that the lighthouse')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "!!__cm.player() && !!__cm.player().querySelector('audio[src^=\"/chat/api/attachments/\"]')",
+  "timeout": 40,
+  "label": "a spoken result gets a player"
+ },
+ {
+  "expect": "__cm.player().textContent.includes('tts-mock')",
+  "label": "the player names the model"
+ },
+ {
+  "js": "__cm.checkMagic(__cm.player().querySelector('audio').getAttribute('src'), 'RIFF')"
+ },
+ {
+  "until": "window.__cmMagic !== undefined",
+  "timeout": 15
+ },
+ {
+  "expect": "window.__cmMagic === true",
+  "label": "the player's source is the recording (a WAV)"
+ },
+ {
+  "js": "(__cm.player() || __cm.reply()).scrollIntoView({block: 'end'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "12-audio"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "__cm.send('Draw two lighthouses, one after the other.')"
+ },
+ {
+  "until": "__cm.sent('Draw two lighthouses')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "__cm.reply().querySelectorAll('.tool-card').length === 2 && !__cm.live() && __cm.canSend() && [...__cm.reply().querySelectorAll('.media-pic img')].every(i => i.complete && i.naturalWidth > 0)",
+  "timeout": 60,
+  "label": "a turn that draws twice ends"
+ },
+ {
+  "js": "JSON.stringify([...__cm.reply().querySelectorAll('.media-card')].map(c => [...c.querySelectorAll('.media-pic')].map(b => b.dataset.attachment)))"
+ },
+ {
+  "expect": "__cm.reply().querySelectorAll('.media-card').length === 2 && new Set([...__cm.reply().querySelectorAll('.media-pic')].map(b => b.dataset.attachment)).size === 2",
+  "label": "each of the two calls shows its own picture, once"
+ },
+ {
+  "js": "__cm.reply().querySelectorAll('.media-card')[1].scrollIntoView({block: 'end'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "16-two-calls"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "__cm.send('Draw one more, I will stop it.')"
+ },
+ {
+  "until": "__cm.sent('Draw one more, I will')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "!!__cm.live()",
+  "timeout": 30,
+  "label": "the picture's live pane shows"
+ },
+ {
+  "js": "document.querySelector('button[aria-label=\"Stop\"]').click(), 'stopped'"
+ },
+ {
+  "until": "!__cm.live()",
+  "timeout": 10,
+  "label": "Stop mid-picture ends the live pane"
+ },
+ {
+  "expect": "!!__cm.lastTool().querySelector('.tool-state.cancelled') && !__cm.lastTool().classList.contains('err')",
+  "label": "the stopped call says it was stopped"
+ },
+ {
+  "js": "__cm.lastTool().textContent"
+ },
+ {
+  "js": "(__cm.reply() || document.body).scrollIntoView({block: 'end'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "17-stopped"
+ },
+ {
+  "js": "JSON.stringify(__cm.wire())"
+ },
+ {
+  "expect": "__cm.wire().lag < 600",
+  "label": "every frame of every stream reached the page whole within 0.6 s of its first byte"
+ },
+ {
+  "wait": 5
+ },
+ {
+  "nav": "/chat?t=__THREAD__"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "document.querySelectorAll('.media-card').length >= 1 && __cm.loaded()",
+  "timeout": 40,
+  "label": "a reopened thread shows the picture"
+ },
+ {
+  "expect": "document.querySelector('.media-card').querySelectorAll('.media-thumb').length === 2",
+  "label": "the re-roll is still in the picture's strip"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.tool-card pre')].some(p => /image att:\\d+/.test(p.textContent))",
+  "label": "the stored result names the picture by its ref"
+ },
+ {
+  "expect": "!!document.querySelector('.media-audio audio')",
+  "label": "the reopened thread keeps the player"
+ },
+ {
+  "expect": "!document.querySelector('.media-live')",
+  "label": "no live pane on a stored turn"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "13-reopened"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "until": "[...document.querySelectorAll('button.row-link')].some(b => b.textContent.includes('mock-turbo'))",
+  "timeout": 30,
+  "label": "the image row is listed"
+ },
+ {
+  "js": "[...document.querySelectorAll('button.row-link')].find(b => b.textContent.includes('mock-turbo')).click(), 'opened'"
+ },
+ {
+  "until": "!!document.querySelector('[data-section=\"image-chat\"]')",
+  "timeout": 20,
+  "label": "the image editor has its Chat section"
+ },
+ {
+  "expect": "document.querySelector('[data-section=\"image-chat\"]').textContent.includes('Derived from the recipe: Plain sentences')",
+  "label": "the prompt style says what the recipe gives the row"
+ },
+ {
+  "expect": "/Live preview.*Default: Quick sketch/.test(document.querySelector('[data-section=\"image-chat\"]').textContent)",
+  "label": "the live preview says its default in words"
+ },
+ {
+  "expect": "!/\\b(prompt_style|preview_mode|proj|tae|vae)\\b/.test(document.querySelector('[data-section=\"image-chat\"]').textContent)",
+  "label": "no config keys as labels"
+ },
+ {
+  "js": "document.querySelector('[data-section=\"image-chat\"]').scrollIntoView({block: 'center'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "14-image-editor"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "until": "[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Add from recipe')",
+  "timeout": 30
+ },
+ {
+  "js": "[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Add from recipe').click(), 'opened'"
+ },
+ {
+  "until": "!!document.querySelector('[data-section=\"upscalers\"] [data-upscaler]')",
+  "timeout": 30,
+  "label": "the recipes list has its Upscalers"
+ },
+ {
+  "expect": "document.querySelector('[data-section=\"upscalers\"]').textContent.includes('the next Upscale finds a new file')",
+  "label": "the upscaler entry says a running image model finds a new file at its next upscale"
+ },
+ {
+  "expect": "!!document.querySelector('[data-section=\"upscalers\"] [data-upscaler] .btn')",
+  "label": "a missing upscaler offers Add"
+ },
+ {
+  "js": "document.querySelector('[data-section=\"upscalers\"]').scrollIntoView({block: 'end'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "15-recipes-upscalers"
+ },
+ {
+  "js": "'The media tools default models (design §3.8): Settings → Chat sets the drawing default, a folder overrides it, the thread overrides the folder, and a call that leaves out model draws with the thread\\'s.'"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "js": "__cm.fetchJson('r', '/api/op/settings_set_full', {chat_media_defaults: {generate: ''}})"
+ },
+ {
+  "until": "!!__cm.got('r')",
+  "timeout": 10,
+  "label": "Settings → Chat starts with no drawing default (a run before this one set it)"
+ },
+ {
+  "nav": "/settings/chat"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "!!document.querySelector('#f-chat-media-defaults-generate .select-btn') && __cm.selected('#f-chat-media-defaults-generate').startsWith('None')",
+  "timeout": 30,
+  "label": "Settings → Chat has the picture and sound tools' defaults, none set"
+ },
+ {
+  "expect": "[...document.querySelectorAll('[id^=\"f-chat-media-defaults\"] label')].map(l => l.textContent.trim()).join('|') === 'Drawing pictures|Editing pictures|Speaking text|Voice|Transcribing recordings'",
+  "label": "each default has a human label, no config key"
+ },
+ {
+  "js": "__cm.openSelect('#f-chat-media-defaults-generate')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "__cm.options().some(o => o.startsWith('image/mock-turbo · Z-Image-Turbo on this machine')) && __cm.options().some(o => o === 'cloud-image · cloud via mock') && __cm.options()[0] === 'None — the model chooses'",
+  "label": "the picker lists the image row and the cloud image alias the tool lists, labelled, after None"
+ },
+ {
+  "js": "__cm.options().join(' | ')"
+ },
+ {
+  "js": "__cm.pickOption('image/mock-turbo')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "__cm.selected('#f-chat-media-defaults-generate').startsWith('image/mock-turbo')",
+  "label": "the row is picked"
+ },
+ {
+  "js": "document.querySelector('#f-chat-media-defaults-generate').scrollIntoView({block: 'center'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "20-settings-media-defaults"
+ },
+ {
+  "js": "(() => { const b = document.querySelector(\".save-bar .btn.primary\"); if (!b) return 'missing .save-bar .btn.primary'; b.click(); return 'clicked'; })()"
+ },
+ {
+  "until": "__cm.poll('s', '/api/settings-full', v => v.chat_media_defaults?.generate === 'image/mock-turbo')",
+  "timeout": 15,
+  "label": "Settings saved the drawing default"
+ },
+ {
+  "js": "__cm.fetchJson('f', '/chat/api/folders', {name: 'Lighthouses __THREAD__'})"
+ },
+ {
+  "until": "!!__cm.got('f')?.id",
+  "timeout": 10,
+  "label": "a folder for the thread"
+ },
+ {
+  "js": "localStorage.setItem('cmFolder', __cm.got('f').id), __cm.fetchJson('m', '/chat/api/threads/__THREAD__/move', {folder_id: __cm.got('f').id})"
+ },
+ {
+  "until": "!!__cm.got('m')",
+  "timeout": 10,
+  "label": "the thread is moved into it"
+ },
+ {
+  "nav": "/chat?t=__THREAD__"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "[...document.querySelectorAll('.thread-folder')].some(f => f.textContent.includes('Lighthouses __THREAD__'))",
+  "timeout": 30,
+  "label": "the folder is listed"
+ },
+ {
+  "js": "(() => { const f = [...document.querySelectorAll('.thread-folder')].find(f => f.textContent.includes('Lighthouses __THREAD__')); f.querySelector('.row-menu-btn').click(); return 'menu'; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-pop .menu-item')].find(i => i.textContent.trim() === 'Folder settings'); if (!i) return 'no Folder settings item'; i.click(); return 'Folder settings'; })()"
+ },
+ {
+  "until": "!!document.querySelector('dialog[open] [data-media-defaults] [data-media-field=\"generate\"] .select-btn')",
+  "timeout": 30,
+  "label": "the folder's settings have the picture and sound tools"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "__cm.selected('dialog[open] [data-media-field=\"generate\"]').startsWith('Inherit — image/mock-turbo · Z-Image-Turbo on this machine')",
+  "timeout": 10,
+  "label": "the folder inherits Settings' default, named"
+ },
+ {
+  "js": "__cm.openSelect('dialog[open] [data-media-field=\"generate\"]')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "__cm.options()[1] === 'None — the model chooses'",
+  "label": "None is a choice of its own below Inherit"
+ },
+ {
+  "js": "__cm.pickOption('cloud-image')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "document.querySelector('dialog[open] [data-media-defaults]').scrollIntoView({block: 'center'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "21-folder-media-defaults"
+ },
+ {
+  "js": "(() => { const b = document.querySelector(\"dialog[open] .modal-foot .btn.primary\"); if (!b) return 'missing dialog[open] .modal-foot .btn.primary'; b.click(); return 'clicked'; })()"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]')",
+  "timeout": 10,
+  "label": "the folder settings save"
+ },
+ {
+  "until": "__cm.poll('v1', '/chat/api/media/defaults?thread=__THREAD__', v => v.resolved?.generate === 'cloud-image' && v.folder?.generate === 'cloud-image')",
+  "timeout": 15,
+  "label": "the thread now resolves to its folder's default, over Settings'"
+ },
+ {
+  "nav": "/chat?t=__THREAD__"
+ },
+ {
+  "js": "__HELPERS__"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 60,
+  "label": "the thread is open again"
+ },
+ {
+  "js": "(() => { if (document.querySelector('.chat-settings')) return 'already open'; const r = document.querySelector('.dock-rail'); if (!r) return 'no rail'; r.click(); return 'opened'; })()"
+ },
+ {
+  "until": "!!document.querySelector('.chat-settings [data-media-defaults] [data-media-field=\"generate\"] .select-btn') && __cm.selected('.chat-settings [data-media-field=\"generate\"]').startsWith('Inherit — cloud-image · cloud via mock')",
+  "timeout": 20,
+  "label": "the thread's settings inherit the folder's default, named"
+ },
+ {
+  "expect": "!document.querySelector('.chat-settings [data-media-unavailable]')",
+  "label": "nothing is marked unavailable"
+ },
+ {
+  "js": "__cm.openSelect('.chat-settings [data-media-field=\"generate\"]')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "__cm.pickOption('image/mock-turbo')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "document.querySelector('.chat-settings [data-media-defaults]').scrollIntoView({block: 'center'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "22-thread-media-defaults"
+ },
+ {
+  "js": "(() => { const b = document.querySelector(\".chat-settings-save .btn.primary\"); if (!b) return 'missing .chat-settings-save .btn.primary'; b.click(); return 'clicked'; })()"
+ },
+ {
+  "until": "__cm.poll('v2', '/chat/api/media/defaults?thread=__THREAD__', v => v.resolved?.generate === 'image/mock-turbo' && v.thread?.generate === 'image/mock-turbo' && v.inherited?.generate === 'cloud-image')",
+  "timeout": 15,
+  "label": "the thread's own default wins over its folder's"
+ },
+ {
+  "js": "'A cloud speech model as the thread\\'s default: its voice keeps Inherit and the model\\'s default voice beside a typed name (design §3.8).'"
+ },
+ {
+  "until": "(__cm.options().length > 0) || (__cm.openSelect('.chat-settings [data-media-field=\"speak\"]'), false)",
+  "timeout": 10,
+  "label": "the picker's options are open"
+ },
+ {
+  "js": "__cm.pickOption('tts-mock')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "until": "__cm.selected('.chat-settings [data-media-field=\"speak\"]').startsWith('tts-mock') && !!document.querySelector('.chat-settings [data-media-field=\"voice\"] .select-btn')",
+  "timeout": 10,
+  "label": "the thread's speech model is the cloud alias tts-mock"
+ },
+ {
+  "until": "(__cm.options().length > 0) || (__cm.openSelect('.chat-settings [data-media-field=\"voice\"]'), false)",
+  "timeout": 10,
+  "label": "the picker's options are open"
+ },
+ {
+  "js": "__cm.options().join(' | ')"
+ },
+ {
+  "expect": "__cm.options().join('|') === 'Inherit — the model\\'s default voice|The model\\'s default voice|Type a voice…'",
+  "label": "the cloud model's voice offers Inherit, the model's default voice and Type a voice…"
+ },
+ {
+  "js": "__cm.pickOption('The model')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "__cm.selected('.chat-settings [data-media-field=\"voice\"]') === 'The model\\'s default voice' && !document.querySelector('.chat-settings .media-voice-typed')",
+  "label": "the model's default voice is picked, with no name box"
+ },
+ {
+  "js": "(() => { const b = document.querySelector(\".chat-settings-save .btn.primary\"); if (!b) return 'missing .chat-settings-save .btn.primary'; b.click(); return 'clicked'; })()"
+ },
+ {
+  "until": "__cm.poll('v3', '/chat/api/media/defaults?thread=__THREAD__', v => v.thread?.speak === 'tts-mock' && v.thread?.voice === '')",
+  "timeout": 15,
+  "label": "the thread stores the model's default voice (\"\"), not Inherit"
+ },
+ {
+  "until": "(__cm.options().length > 0) || (__cm.openSelect('.chat-settings [data-media-field=\"voice\"]'), false)",
+  "timeout": 10,
+  "label": "the picker's options are open"
+ },
+ {
+  "js": "__cm.pickOption('Type a voice')"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "until": "!!document.querySelector('.chat-settings .media-voice-typed')",
+  "timeout": 10,
+  "label": "Type a voice… opens the name box"
+ },
+ {
+  "js": "(() => { const i = document.querySelector('.chat-settings .media-voice-typed'); i.value = 'alloy'; i.dispatchEvent(new Event('input', {bubbles: true})); return 'typed alloy'; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "__cm.selected('.chat-settings [data-media-field=\"voice\"]') === 'Type a voice…' && document.querySelector('.chat-settings .media-voice-typed').value === 'alloy'",
+  "label": "the typed name stays with Type a voice…"
+ },
+ {
+  "js": "document.querySelector('.chat-settings [data-media-field=\"voice\"]').scrollIntoView({block: 'center'}), 'in view'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "[...document.querySelectorAll('.toast-host .toast-x')].forEach(x => x.click()), 'toasts closed'"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "22b-thread-cloud-voice"
+ },
+ {
+  "js": "(() => { const b = document.querySelector(\".chat-settings-save .btn.primary\"); if (!b) return 'missing .chat-settings-save .btn.primary'; b.click(); return 'clicked'; })()"
+ },
+ {
+  "until": "__cm.poll('v4', '/chat/api/media/defaults?thread=__THREAD__', v => v.thread?.voice === 'alloy' && v.resolved?.speak === 'tts-mock' && v.resolved?.voice === 'alloy')",
+  "timeout": 15,
+  "label": "the typed voice is the thread's, and resolves with tts-mock"
+ },
+ {
+  "until": "__cm.canSend()",
+  "timeout": 30,
+  "label": "Send is ready"
+ },
+ {
+  "js": "window.__cmCards = document.querySelectorAll('.media-card').length, __cm.send('Draw it once more, with whichever model.')"
+ },
+ {
+  "until": "__cm.sent('with whichever model')",
+  "timeout": 20,
+  "label": "the message went out"
+ },
+ {
+  "until": "document.querySelectorAll('.media-card').length > window.__cmCards && !__cm.live() && __cm.loaded()",
+  "timeout": 60,
+  "label": "the scripted call, which names no model, makes a picture"
+ },
+ {
+  "js": "__cm.facts()"
+ },
+ {
+  "expect": "__cm.facts().includes('image/mock-turbo') && __cm.facts().includes('answered by cloud-image, fallback')",
+  "label": "it drew with the thread's default (image/mock-turbo, its hold fallback answering), not the folder's cloud-image"
+ },
+ {
+  "js": "__cm.view()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "23-default-drawn"
+ }
+]

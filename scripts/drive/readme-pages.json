@@ -81,7 +81,8 @@
   "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
-  "wait": 2.5
+  "until": "document.querySelectorAll('.msg-user-text').length > 0",
+  "timeout": 60
  },
  {
   "js": "(()=>{const u=[...document.querySelectorAll('.msg-user-text')].pop(); if(!u) return 'no thread'; u.scrollIntoView({block:'start'}); return 'ok'})()"

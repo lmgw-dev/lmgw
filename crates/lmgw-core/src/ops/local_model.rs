@@ -7,7 +7,8 @@ use serde_json::Value;
 
 use lmgw_api_types as dto;
 
-use crate::config::{HoldFallbackMode, LocalModel, Snapshot};
+use crate::config::{HopKey, LocalModel};
+use crate::detached::detached;
 use crate::runtime::argv;
 use crate::runtime::descriptor::model_runtime_at;
 use crate::runtime::{lifecycle, Class};
@@ -121,16 +122,13 @@ pub struct LocalModelPatch {
     /// runtime exists.
     pub warm_start: Option<bool>,
 
-    // -- GPU hold (gpu-hold design §2/§3.2) --
-    /// `inherit` (default) reads the global `settings.hold.fallback_alias`;
-    /// `none` refuses a held request against this model even when a global
-    /// fallback is set; `alias` routes it to `hold_fallback` instead.
-    pub hold_fallback_mode: Option<HoldFallbackMode>,
-    /// The alias `hold_fallback_mode = alias` routes a held request to.
-    /// Required (here or already on the row) when that mode is set;
-    /// validated the same way as the global fallback (must resolve, must not
-    /// be local).
-    pub hold_fallback: Option<String>,
+    // -- fallback (openai egress design §14.2) --
+    /// The model or alias that answers when this one cannot: the GPU hold,
+    /// VRAM outside lmgw, background traffic deferred, or a disabled row. A
+    /// local model id, a passthrough id or a plain alias of the same model
+    /// type; not a candidate alias. Chains are allowed; a loop is refused.
+    /// `clear: "fallback"` removes it.
+    pub fallback: Option<String>,
 
     /// Override of the derived `/v1/models` capability facts: a JSON object,
     /// or a JSON string containing one (MCP arguments are flat scalars).
@@ -267,47 +265,13 @@ fn overlay_params(
             "spec_draft_ngl" => base.spec_draft_ngl = None,
             "extra_args" => {} // handled by the caller, which owns `args`
             "image" | "extra_run_args" => {} // handled by the caller, same reason
-            "hold_fallback" => {} // handled by the caller, same reason
+            "fallback" => {}   // handled by the caller, same reason
             "capabilities_override" => {} // handled by the caller, same reason
             "ladder" => {}     // handled by the caller, same reason
             other => return Err(format!("clear: '{other}' is not a clearable field name")),
         }
     }
     Ok(())
-}
-
-/// Resolve `hold_fallback_mode`/`hold_fallback` for a local-model create or
-/// update (gpu-hold design §2/§3.2). `current` is the row's own values before
-/// this patch (`Inherit`/`None` on create, nothing to fall back to yet).
-///
-/// `clear: "hold_fallback"` wins over everything else and resets both to
-/// inherit/NULL — same convention as `image`/`extra_run_args` (the no-op arm
-/// in [`overlay_params`] defers to this caller-side reset for exactly that
-/// reason). Otherwise mode `alias` needs a non-empty alias, from the patch or
-/// the current row, and it is validated (must resolve, must not be local);
-/// `inherit`/`none` always clear the alias column, so a stale one never sits
-/// there unread.
-fn resolve_hold_fallback(
-    snap: &Snapshot,
-    p: &LocalModelPatch,
-    current: (HoldFallbackMode, Option<String>),
-) -> Result<(HoldFallbackMode, Option<String>), String> {
-    if clear_has(p.clear.as_deref(), "hold_fallback") {
-        return Ok((HoldFallbackMode::Inherit, None));
-    }
-    let (cur_mode, cur_alias) = current;
-    let mode = p.hold_fallback_mode.unwrap_or(cur_mode);
-    match mode {
-        HoldFallbackMode::Alias => {
-            let alias = opt(&p.hold_fallback).or(cur_alias).ok_or(
-                "hold_fallback_mode 'alias' requires hold_fallback (the alias to route to \
-                 while the GPU is held)",
-            )?;
-            validate_fallback_alias(snap, &alias).map_err(|e| format!("hold_fallback: {e}"))?;
-            Ok((mode, Some(alias)))
-        }
-        HoldFallbackMode::Inherit | HoldFallbackMode::None => Ok((mode, None)),
-    }
 }
 
 /// The image a chat model actually runs and the `podman run` args it runs
@@ -449,8 +413,7 @@ pub async fn local_model_get(
         image: m.image.clone(),
         extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
-        hold_fallback_mode: m.hold_fallback_mode,
-        hold_fallback: m.hold_fallback.clone(),
+        fallback: m.fallback.clone(),
         capabilities_override: m.capabilities_override.clone(),
         ladder: m.ladder.clone(),
     };
@@ -505,10 +468,8 @@ pub async fn local_model_get(
         image: m.image.clone(),
         extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
-        // GPU-hold fallback (gpu-hold design §2/§3.2): `inherit` | `none` |
-        // `alias`, plus the alias when the mode is `alias`.
-        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
-        hold_fallback: m.hold_fallback.clone(),
+        // The row's one fallback (openai egress design §14.2); `null` = none.
+        fallback: m.fallback.clone(),
         // Owner override of the derived `/v1/models` capability facts
         // (model-capabilities design §7); `null` means none is set.
         capabilities_override: m.capabilities_override.clone(),
@@ -528,6 +489,9 @@ pub async fn local_model_get(
         // input (a large image, say). Kept apart from `problems` because the
         // model does start.
         advisories,
+        // The note of a context fitted to the card (find-a-model D26), so
+        // the editor reads it with the row.
+        fit_note: crate::modelinfo::refit::note_of(state, Class::Chat, m.id).await,
     }))
 }
 
@@ -586,7 +550,17 @@ fn command_line_preview_at(
         models_dir,
         &state.data_dir,
     ) {
-        Ok(spec) => argv::command_line(&spec),
+        Ok(mut spec) => {
+            // With the option a start would pass for this row: lmgw's own
+            // CDI spec dir for a GPU row (machine-check design §3.6.4), none
+            // while Podman's default dirs are used (D26). Showing it writes
+            // nothing: the dir holds a spec only once a GPU start or probe of
+            // this instance wrote it, and under `$XDG_RUNTIME_DIR` only until
+            // the login session ends.
+            let globals = crate::runtime::cdi::podman_globals(state, &spec.extra_run_args);
+            spec.set_globals(globals);
+            argv::command_line(&spec)
+        }
         Err(e) => format!("could not render the command line: {e}"),
     }
 }
@@ -742,8 +716,7 @@ pub async fn local_model_check(
             image: m.image.clone(),
             extra_run_args: m.extra_run_args.clone(),
             warm_start: m.warm_start,
-            hold_fallback_mode: m.hold_fallback_mode,
-            hold_fallback: m.hold_fallback.clone(),
+            fallback: m.fallback.clone(),
             capabilities_override: m.capabilities_override.clone(),
             ladder: m.ladder.clone(),
         };
@@ -870,6 +843,8 @@ pub async fn local_model_set(
     state: &SharedState,
     p: LocalModelPatch,
 ) -> Result<dto::LocalModelSaved, String> {
+    // From the rows the checks read to the commit (§14.2).
+    let routing = state.routing_write().await;
     let all = store::list_local_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;
@@ -969,8 +944,16 @@ pub async fn local_model_set(
                 )?;
             }
             validate_ladder(&models_dir, &model_id, &gguf_path, &params, &args, &ladder).await?;
-            let (hold_fallback_mode, hold_fallback) =
-                resolve_hold_fallback(&snap, &p, (HoldFallbackMode::Inherit, None))?;
+            let fallback = fallback::patched(p.clear.as_deref(), &p.fallback, None)?;
+            let mut fallback_notes = Vec::new();
+            if let Some(f) = &fallback {
+                let owner = fallback::Owner::typed(
+                    None,
+                    snap.local_public_name(&model_id),
+                    fallback::ModelType::chat(),
+                );
+                fallback_notes = fallback::validate(state, &owner, f).await?;
+            }
             let capabilities_override = match p.capabilities_override.as_ref() {
                 Some(v) => parse_capabilities_override(v)?,
                 None => None,
@@ -992,8 +975,7 @@ pub async fn local_model_set(
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback,
                 capabilities_override,
                 ladder,
             };
@@ -1004,10 +986,43 @@ pub async fn local_model_set(
             warnings.extend(checks.problems);
             let mut advisories = checks.advisories;
             advisories.extend(ladder_footprint_advisories(state, &models_dir, &new).await);
-            let id = store::insert_local_model(&state.db, &new)
+            // A fallback that holds the new name reaches this row from now
+            // on: checked in a dry run (§14.2, `fallback::referrers`).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
+            let dry = store::insert_local_model_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::LocalModels, dry);
+            fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[fallback::Touch::Row(row.0, dry)],
+                Some(row),
+            )
+            .await?;
+            // The write and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped
+            // request would leave the snapshot without the new model.
+            let st = state.clone();
+            let public_name = snap.local_public_name(&model_id);
+            let (id, fallback_notes) = detached("creating the local model", async move {
+                let id = store::insert_local_model(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut notes = fallback_notes;
+                if let Some(f) = &new.fallback {
+                    notes.extend(fallback::facet_notes(&st, &public_name, f).await);
+                }
+                Ok::<_, String>((id, notes))
+            })
+            .await
+            .map_err(|r| r.message)??;
             Ok(dto::LocalModelSaved {
                 ok: true,
                 id,
@@ -1020,6 +1035,7 @@ pub async fn local_model_set(
                      model={model_id} action=start to load it into llama-server, \
                      then lmgw__local_model_test to confirm it loads"
                 ),
+                fallback_notes,
                 ..Default::default()
             })
         }
@@ -1115,11 +1131,8 @@ pub async fn local_model_set(
                 }
             };
             let extra_run_args = run_args_override(extra_run_args);
-            let (hold_fallback_mode, hold_fallback) = resolve_hold_fallback(
-                &snap,
-                &p,
-                (cur.hold_fallback_mode, cur.hold_fallback.clone()),
-            )?;
+            let fallback =
+                fallback::patched(p.clear.as_deref(), &p.fallback, cur.fallback.clone())?;
             let capabilities_override = if clear_has(p.clear.as_deref(), "capabilities_override") {
                 None
             } else {
@@ -1139,6 +1152,31 @@ pub async fn local_model_set(
             if new_model_id != cur.model_id {
                 refuse_if_candidate_alias_name(&snap, &snap.local_public_name(&new_model_id))?;
             }
+            let key = HopKey::Local(Class::Chat, cur.model_id.clone());
+            let (old_name, new_name) = (
+                snap.local_public_name(&cur.model_id),
+                snap.local_public_name(&new_model_id),
+            );
+            let mut fallback_notes = Vec::new();
+            let fallback_changed = fallback != cur.fallback;
+            if let (Some(f), true) = (&fallback, fallback_changed) {
+                let owner = fallback::Owner::typed(
+                    Some(key.clone()),
+                    new_name.clone(),
+                    fallback::ModelType::chat(),
+                )
+                .renamed_from(Some(old_name.clone()));
+                fallback_notes = fallback::validate(state, &owner, f).await?;
+            }
+            // A rename never breaks a chain (decision 27): every other
+            // fallback naming this row follows it, in the same transaction.
+            let rewrites = match new_name != old_name {
+                true => {
+                    fallback::rename_rewrites(&snap, &[(key.clone(), new_name.clone())], Some(&key))
+                }
+                false => fallback::Rewrites::default(),
+            };
+            fallback_notes.extend(rewrites.notes.iter().cloned());
             let new = NewLocalModel {
                 model_id: new_model_id,
                 gguf_path,
@@ -1150,8 +1188,7 @@ pub async fn local_model_set(
                 image,
                 extra_run_args,
                 warm_start: p.warm_start.unwrap_or(cur.warm_start),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback,
                 capabilities_override,
                 ladder,
             };
@@ -1162,87 +1199,141 @@ pub async fn local_model_set(
             warnings.extend(checks.problems);
             let mut advisories = checks.advisories;
             advisories.extend(ladder_footprint_advisories(state, &models_dir, &new).await);
-            store::update_local_model(&state.db, cur.id, &new)
+            // What a rename, an enable or a disable does to the fallbacks
+            // naming this row's names, in a dry run (§14.2).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            // Container hygiene (per-model-containers §3.4/§3.6). Keyed on
-            // `cur.model_id`, never the new one: a rename leaves the container
-            // running under the *old* name, and that is the one that has to go.
-            let renamed = new.model_id != cur.model_id;
-            // Whether a container is still up on the configuration before
-            // this change (mid-request, or a stop that failed): the
-            // dashboard's "Save and test" does not test that one.
-            let mut kept_previous = false;
-            let note = if renamed {
-                // A rename is a delete of the old model as far as the runtime
-                // is concerned: the row it was started from no longer exists,
-                // its container name (which carries the model id, §3.3) is one
-                // nothing will ever render again, and `--replace` therefore
-                // never collects it. A busy-refusal here would protect a model
-                // the configuration no longer admits to having, and would
-                // leave that container running forever — so it goes now,
-                // forced and removed, exactly like `drop_model`'s delete path.
-                // The requests it was serving fail visibly, which is the
-                // honest outcome of renaming a model mid-flight.
-                lifecycle::drop_model(state, Class::Chat, &cur.model_id).await;
-                Some(format!(
-                    "it was renamed from '{}', so that container was stopped and removed — the \
-                     next request starts '{}' fresh",
-                    cur.model_id, new.model_id
-                ))
-            } else if enabled {
-                let stop =
-                    lifecycle::stop_for_apply_outcome(state, Class::Chat, &cur.model_id).await;
-                kept_previous = stop.kept_previous();
-                stop.note(&cur.model_id)
-            } else {
-                lifecycle::drop_model(state, Class::Chat, &cur.model_id).await;
-                Some(format!(
-                    "'{}' is disabled — its container was stopped and removed",
-                    cur.model_id
-                ))
-            };
-            Ok(dto::LocalModelSaved {
-                ok: true,
-                id: cur.id,
-                warnings: Some(warnings),
-                advisories: Some(advisories),
-                container_kept_previous_config: Some(kept_previous),
-                message: match note {
-                    Some(note) => format!(
-                        "local model '{}' {} — {note}",
-                        new.model_id,
-                        saved_verb(&p.action)
-                    ),
-                    None => format!(
-                        "local model '{}' {} — it is not running, so the next request \
-                         starts it with the new configuration",
-                        new.model_id,
-                        saved_verb(&p.action)
-                    ),
-                },
+            store::update_local_model_in(&mut tx, cur.id, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::LocalModels, cur.id);
+            fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[fallback::Touch::Row(row.0, row.1)],
+                fallback_changed.then_some(row),
+            )
+            .await?;
+            let verb = saved_verb(&p.action);
+            // The write and everything after it are a task of their own
+            // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot serving the old row
+            // and the container on the old configuration (or, renamed or
+            // disabled, running).
+            let st = state.clone();
+            detached("updating the local model", async move {
+                let mut tx = store::begin_write(&st.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_local_model_in(&mut tx, cur.id, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut fallback_notes = fallback_notes;
+                if let (Some(f), true) = (&new.fallback, fallback_changed) {
+                    fallback_notes.extend(fallback::facet_notes(&st, &new_name, f).await);
+                }
+                // Container hygiene (per-model-containers §3.4/§3.6). Keyed on
+                // `cur.model_id`, never the new one: a rename leaves the container
+                // running under the *old* name, and that is the one that has to go.
+                let renamed = new.model_id != cur.model_id;
+                // Whether a container is still up on the configuration before
+                // this change (mid-request, or a stop that failed): the
+                // dashboard's "Save and test" does not test that one.
+                let mut kept_previous = false;
+                let note = if renamed {
+                    // A rename is a delete of the old model as far as the runtime
+                    // is concerned: the row it was started from no longer exists,
+                    // its container name (which carries the model id, §3.3) is one
+                    // nothing will ever render again, and `--replace` therefore
+                    // never collects it. A busy-refusal here would protect a model
+                    // the configuration no longer admits to having, and would
+                    // leave that container running forever — so it goes now,
+                    // forced and removed, exactly like `drop_model`'s delete path.
+                    // The requests it was serving fail visibly, which is the
+                    // honest outcome of renaming a model mid-flight.
+                    lifecycle::drop_model(&st, Class::Chat, &cur.model_id).await;
+                    Some(format!(
+                        "it was renamed from '{}', so that container was stopped and removed — the \
+                         next request starts '{}' fresh",
+                        cur.model_id, new.model_id
+                    ))
+                } else if enabled {
+                    let stop =
+                        lifecycle::stop_for_apply_outcome(&st, Class::Chat, &cur.model_id).await;
+                    kept_previous = stop.kept_previous();
+                    stop.note(&cur.model_id)
+                } else {
+                    lifecycle::drop_model(&st, Class::Chat, &cur.model_id).await;
+                    Some(format!(
+                        "'{}' is disabled — its container was stopped and removed",
+                        cur.model_id
+                    ))
+                };
+                Ok(dto::LocalModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    warnings: Some(warnings),
+                    advisories: Some(advisories),
+                    container_kept_previous_config: Some(kept_previous),
+                    fallback_notes,
+                    message: match note {
+                        Some(note) => format!("local model '{}' {} — {note}", new.model_id, verb),
+                        None => format!(
+                            "local model '{}' {} — it is not running, so the next request \
+                             starts it with the new configuration",
+                            new.model_id, verb
+                        ),
+                    },
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let cur = find()?;
-            store::delete_local_model(&state.db, cur.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            // §3.4: the container goes now, not at the next boot — `--replace`
-            // only ever collects a same-name container on a *next start*, and
-            // for a deleted model there is none.
-            lifecycle::drop_model(state, Class::Chat, &cur.model_id).await;
-            Ok(dto::LocalModelSaved {
-                ok: true,
-                id: cur.id,
-                message: format!(
-                    "local model '{}' deleted — its container was stopped and removed",
-                    cur.model_id
-                ),
-                ..Default::default()
+            let fallback_notes =
+                fallback::delete_notes(&snap, &HopKey::Local(Class::Chat, cur.model_id.clone()));
+            // The delete and everything after it are a task of their own
+            // (*changed 2026-10-24*, see [`crate::detached::detached`]): a
+            // dropped request would leave the snapshot serving the deleted
+            // row and its container running.
+            let st = state.clone();
+            detached("deleting the local model", async move {
+                store::delete_local_model(&st.db, cur.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // §3.4: the container goes now, not at the next boot —
+                // `--replace` only ever collects a same-name container on a
+                // *next start*, and for a deleted model there is none.
+                lifecycle::drop_model(&st, Class::Chat, &cur.model_id).await;
+                Ok(dto::LocalModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    message: format!(
+                        "local model '{}' deleted — its container was stopped and removed",
+                        cur.model_id
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         // Clone a local model under a fresh id (same GGUF, params, args, and
         // flags), so the same GGUF can back several presets (reasoning vs
@@ -1253,6 +1344,35 @@ pub async fn local_model_set(
             let cur = find()?;
             let existing: Vec<String> = all.iter().map(|m| m.model_id.clone()).collect();
             let model_id = unique_copy_id(&cur.model_id, &existing);
+            // The copy's fallback is checked as any save's (§14.2): the row's
+            // own may predate the checks (migration 0095 kept a fallback of
+            // another type as it was). One that would be refused is left off
+            // the copy, and the answer says why.
+            let mut fallback_notes = Vec::new();
+            let copied_fallback = match cur.fallback.clone() {
+                Some(f) => {
+                    let owner = fallback::Owner::typed(
+                        None,
+                        snap.local_public_name(&model_id),
+                        fallback::ModelType::chat(),
+                    );
+                    match fallback::validate(state, &owner, &f).await {
+                        Ok(notes) => {
+                            fallback_notes = notes;
+                            Some(f)
+                        }
+                        Err(why) => {
+                            fallback_notes.push(format!(
+                                "the copy has no fallback: '{}''s own would be refused on a \
+                                 save — {why}",
+                                cur.model_id
+                            ));
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
             let new = NewLocalModel {
                 model_id: model_id.clone(),
                 gguf_path: cur.gguf_path.clone(),
@@ -1264,17 +1384,42 @@ pub async fn local_model_set(
                 image: cur.image.clone(),
                 extra_run_args: cur.extra_run_args.clone(),
                 warm_start: cur.warm_start,
-                // Carried over verbatim, like every other field here — it was
-                // already validated when it was set on `cur`.
-                hold_fallback_mode: cur.hold_fallback_mode,
-                hold_fallback: cur.hold_fallback.clone(),
+                fallback: copied_fallback,
                 capabilities_override: cur.capabilities_override.clone(),
                 ladder: cur.ladder.clone(),
             };
-            let id = store::insert_local_model(&state.db, &new)
+            // The copy's name is new: a dangling fallback holding it would
+            // reach the copy (§14.2, the dry run).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            state.reload_snapshot().await.map_err(|e| e.to_string())?;
+            let dry = store::insert_local_model_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::LocalModels, dry);
+            fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[fallback::Touch::Row(row.0, dry)],
+                Some(row),
+            )
+            .await?;
+            // The write and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped
+            // request would leave the snapshot without the copy.
+            let st = state.clone();
+            let id = detached("duplicating the local model", async move {
+                let id = store::insert_local_model(&st.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                st.reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(id)
+            })
+            .await
+            .map_err(|r| r.message)??;
             Ok(dto::LocalModelSaved {
                 ok: true,
                 id,
@@ -1283,6 +1428,7 @@ pub async fn local_model_set(
                      then start it",
                     cur.model_id
                 ),
+                fallback_notes,
                 ..Default::default()
             })
         }

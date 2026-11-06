@@ -142,6 +142,7 @@ async fn record_at_pin(
         crate::store::set_hf_status(&state.db, row.id, "done", None)
             .await
             .map_err(|e| e.to_string())?;
+        state.jobs.publish(state);
     }
     Ok(())
 }

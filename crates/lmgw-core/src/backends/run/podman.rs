@@ -17,6 +17,8 @@ use crate::state::AppState;
 #[derive(Clone)]
 pub(crate) struct Podman {
     runner: Arc<dyn CommandRunner>,
+    /// lmgw's CDI check, asked before every call ([`Self::run`]).
+    cdi: Arc<crate::runtime::cdi::OwnSpec>,
     /// A dev instance's: [`Self::tag`], [`Self::untag`] and [`Self::rmi`]
     /// then refuse every name outside the dev namespace
     /// ([`tags::is_dev_name`]) — the one gate every image mutation of the
@@ -43,6 +45,7 @@ impl Podman {
     pub fn of(state: &AppState) -> Self {
         Self {
             runner: state.runtime().runner(),
+            cdi: state.cdi(),
             dev: state.dev(),
         }
     }
@@ -50,7 +53,11 @@ impl Podman {
     /// A production instance's `podman` through `runner` — a test's fake.
     #[cfg(test)]
     pub(crate) fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
-        Self { runner, dev: false }
+        Self {
+            runner,
+            cdi: Arc::new(crate::runtime::cdi::OwnSpec::unmanaged("a test")),
+            dev: false,
+        }
     }
 
     /// On a dev instance, refuse `name` unless it is a dev name.
@@ -68,6 +75,11 @@ impl Podman {
     /// Run `podman <args>`; any exit status is `Ok`.
     pub async fn run(&self, args: &[&str]) -> Result<CmdOutput, String> {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        // The verbs here start no container; the check is the one every
+        // podman call of lmgw passes, so a verb added later that gives a
+        // container the card without lmgw's spec dir fails instead of
+        // reading the system's.
+        self.cdi.refuse_unpointed(&argv)?;
         self.runner
             .run("podman", &argv)
             .await
@@ -89,10 +101,12 @@ impl Podman {
     }
 
     /// The full ID `reference` (a tag or an ID) names right now, `None` when
-    /// there is no such image on this machine.
+    /// there is no such image on this machine. Here and in the other image
+    /// reads below the image follows `--`, so a value that starts with `-`
+    /// is never read as a flag.
     pub async fn image_id(&self, reference: &str) -> Result<Option<String>, String> {
         let out = self
-            .run(&["image", "inspect", "--format", "{{.Id}}", reference])
+            .run(&["image", "inspect", "--format", "{{.Id}}", "--", reference])
             .await?;
         if !out.ok() {
             if no_such_image(&out.stderr) {
@@ -118,7 +132,7 @@ impl Podman {
     /// The image's size in bytes.
     pub async fn image_size(&self, image: &str) -> Result<u64, String> {
         let out = self
-            .run_ok(&["image", "inspect", "--format", "{{.Size}}", image])
+            .run_ok(&["image", "inspect", "--format", "{{.Size}}", "--", image])
             .await?;
         let text = out.stdout.trim();
         text.parse()
@@ -128,7 +142,14 @@ impl Podman {
     /// Every `repo:tag` the image carries (empty for a dangling one).
     pub async fn repo_tags(&self, image: &str) -> Result<Vec<String>, String> {
         let out = self
-            .run_ok(&["image", "inspect", "--format", "{{json .RepoTags}}", image])
+            .run_ok(&[
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoTags}}",
+                "--",
+                image,
+            ])
             .await?;
         let tags: Option<Vec<String>> = serde_json::from_str(out.stdout.trim())
             .map_err(|e| format!("podman image inspect printed unreadable tags: {e}"))?;
@@ -144,6 +165,7 @@ impl Podman {
                 "inspect",
                 "--format",
                 "{{json .RepoDigests}}",
+                "--",
                 image,
             ])
             .await?;
@@ -472,6 +494,7 @@ mod tests {
         });
         let podman = Podman {
             runner: recorder.clone(),
+            cdi: Arc::new(crate::runtime::cdi::OwnSpec::unmanaged("a test")),
             dev: true,
         };
         let prod = "localhost/lmgw-llama-server:official-master";
@@ -538,6 +561,7 @@ mod tests {
         });
         let podman = Podman {
             runner: recorder.clone(),
+            cdi: Arc::new(crate::runtime::cdi::OwnSpec::unmanaged("a test")),
             dev: false,
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -574,6 +598,7 @@ mod tests {
         });
         let podman = Podman {
             runner: recorder.clone(),
+            cdi: Arc::new(crate::runtime::cdi::OwnSpec::unmanaged("a test")),
             dev: false,
         };
         let tmp = tempfile::tempdir().unwrap();
@@ -683,6 +708,7 @@ mod tests {
         }
         let podman = Podman {
             runner: Arc::new(Ps),
+            cdi: Arc::new(crate::runtime::cdi::OwnSpec::unmanaged("a test")),
             dev: false,
         };
         let ids: Vec<String> = podman

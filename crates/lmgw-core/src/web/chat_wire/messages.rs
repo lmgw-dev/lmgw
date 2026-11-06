@@ -23,6 +23,10 @@ pub(crate) fn message(
         role,
         content,
         reasoning,
+        // The OpenAI-encrypted reasoning is the upstream's to read, not a
+        // client's (openai egress design §7.3.2): not the column, and not a
+        // tool turn's seals inside its record either (`ir_messages` below).
+        reasoning_seals: _,
         prompt_tokens,
         completion_tokens,
         ir_messages,
@@ -32,6 +36,7 @@ pub(crate) fn message(
         answered_by,
         images_note,
         voice,
+        origin,
         pending_approvals,
         task,
         created_at,
@@ -44,13 +49,14 @@ pub(crate) fn message(
         reasoning,
         prompt_tokens,
         completion_tokens,
-        ir_messages,
+        ir_messages: ir_messages.as_deref().map(crate::ir::unsealed_record),
         kb_refs,
         context: context.as_ref().map(message_context),
         model,
         answered_by,
         images_note,
         voice: voice.as_ref().map(message_voice),
+        origin,
         task,
         created_at,
         attachments: attachments.iter().map(|a| attachment(a)).collect(),
@@ -80,6 +86,8 @@ pub(crate) fn attachment(a: &store::ChatAttachmentMeta) -> api::AttachmentMeta {
         extracted_tokens,
         blockers,
         hints,
+        source,
+        call_id,
     } = a.clone();
     api::AttachmentMeta {
         id,
@@ -92,6 +100,8 @@ pub(crate) fn attachment(a: &store::ChatAttachmentMeta) -> api::AttachmentMeta {
         extracted_tokens,
         blockers,
         hints,
+        source,
+        call_id,
     }
 }
 

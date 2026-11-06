@@ -3,7 +3,8 @@
 //! it — the golden event order, every `mcp_call` with all its fields, the
 //! follow-up that renders call and result — the rows the calls leave, a
 //! tool's error and a failed call, a function and a server call in one turn,
-//! `parallel_tool_calls: false`, and the responses that run nothing.
+//! `parallel_tool_calls: false`, the responses that run nothing, and a body
+//! broken after the `Stop`, which still runs its call.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ use crate::support::realtime_fakes::{
     chat_fake, events_until, gateway, next_event, send, types, user_text, Step, Turn, Ws, KEY,
 };
 use crate::support::realtime_mcp::{
-    assert_every_mcp_call, assert_mcp_call, at, calls, rows, shape, tools_session,
+    assert_every_mcp_call, assert_mcp_call, at, calls, rows, rows_at_least, shape, tools_session,
 };
 
 /// The `mcp` tool as `@openai/agents`' `hostedMcpTool` declares it, for
@@ -445,7 +446,8 @@ async fn without_parallel_tool_calls_the_calls_run_in_model_order() {
 }
 
 /// §2.3: a response cut off for `Length`, arguments that are not a JSON
-/// object, and a stream that fails after its `Stop` run nothing. The calls
+/// object, and a stream whose upstream reports an error after its `Stop`
+/// run nothing. The calls
 /// fail at once — never made, or naming the parse error — and the server
 /// sees no call and writes no row.
 #[tokio::test]
@@ -470,7 +472,7 @@ async fn a_cut_off_response_bad_arguments_and_a_failure_after_stop_run_nothing()
             args: r#"{"text":"x"}"#,
         },
         Step::Finish("tool_calls"),
-        Step::Fail,
+        Step::Error("overloaded"),
     ]));
     let (state, addr) = gateway(&fake, false, None, |_| {}).await;
     let stub = alpha(&state, echo_stub().await).await;
@@ -525,4 +527,58 @@ async fn a_cut_off_response_bad_arguments_and_a_failure_after_stop_run_nothing()
 
     assert!(stub.calls().is_empty(), "{:?}", stub.calls());
     assert!(rows(&state, "realtime-tool").await.is_empty());
+}
+
+/// §2.3 (2026-11-05): a body that breaks after the `Stop` undoes nothing —
+/// the answer was whole, so its call runs and completes, and the model's
+/// row is a 200 with no error.
+#[tokio::test]
+async fn a_body_broken_after_stop_still_runs_the_calls() {
+    let fake = chat_fake().await;
+    let go = Arc::new(Notify::new());
+    fake.push(Turn::Stream(vec![
+        Step::CallStart {
+            index: 0,
+            id: Some("c_broke"),
+            name: "a__echo",
+        },
+        Step::CallArgs {
+            index: 0,
+            args: r#"{"text":"x"}"#,
+        },
+        Step::Finish("tool_calls"),
+        Step::Wait(go.clone()),
+        Step::Fail,
+    ]));
+    let (state, addr) = gateway(&fake, false, None, |_| {}).await;
+    let stub = alpha(&state, echo_stub().await).await;
+    let mut ws = tools_session(&addr, None, hosted_a(), 1).await;
+    ask(&mut ws, "breaks after").await;
+    // Long enough for the finish chunk to have left before the body breaks
+    // (an error ends the body at once, buffered bytes with it); the permit
+    // waits if the fake is not there yet.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    go.notify_one();
+    let events = events_until(&mut ws, "response.done").await;
+    assert_every_mcp_call(&events);
+    let item = events
+        .iter()
+        .find(|e| e["type"] == "response.output_item.done")
+        .map(|e| e["item"].clone())
+        .unwrap();
+    at(
+        &events,
+        "response.mcp_call.completed",
+        item["id"].as_str().unwrap(),
+    );
+    assert_eq!(item["error"], Value::Null, "{item}");
+    assert_eq!(events.last().unwrap()["response"]["status"], "completed");
+    assert_eq!(stub.calls().len(), 1, "{:?}", stub.calls());
+    let model = rows_at_least(&state, "realtime", 1).await;
+    assert_eq!(model.len(), 1, "{model:?}");
+    assert_eq!(
+        (model[0].status, model[0].error_kind.as_deref()),
+        (200, None)
+    );
+    assert_eq!(rows_at_least(&state, "realtime-tool", 1).await.len(), 1);
 }

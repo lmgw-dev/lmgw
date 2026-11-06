@@ -9,7 +9,7 @@
 //! engine refuses (`support::audiocpp_options`), with the real indexer,
 //! trimmed, and an empty text.
 
-use lmgw_core::config::{HoldFallbackMode, Protocol, Settings, UpstreamKind};
+use lmgw_core::config::{Protocol, Settings, UpstreamKind};
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewAlias, NewUpstream};
 use serde_json::{json, Value};
@@ -122,7 +122,7 @@ async fn a_fallback_that_answers_is_sent_the_text_unchanged() {
         &w.state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -148,13 +148,13 @@ async fn a_fallback_that_answers_is_sent_the_text_unchanged() {
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "tts", "endpoints": ["/v1/audio/speech"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
     .unwrap();
     w.row_with("st", "supertonic", audiocpp_gguf::supertonic, |row| {
-        row.hold_fallback_mode = HoldFallbackMode::Alias;
-        row.hold_fallback = Some("cloud-tts".into());
+        row.fallback = Some("cloud-tts".into());
     })
     .await;
     w.answer_wav().await;

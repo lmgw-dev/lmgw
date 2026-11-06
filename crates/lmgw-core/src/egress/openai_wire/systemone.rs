@@ -3,8 +3,8 @@
 //!
 //! llama-server, TypeSafe and OpenRouter all serve the route under the base an
 //! OpenAI-protocol row already has (`…/v1`, `https://openrouter.ai/api/v1`),
-//! so the `openai` and `llama_cpp` egresses share this builder, as they share
-//! the rerank one. The body is the client's own with `model` rewritten and
+//! so the `openai_compatible` and `llama_cpp` egresses share this builder, as
+//! they share the rerank one. The OpenAI platform has neither route. The body is the client's own with `model` rewritten and
 //! nothing else touched: not re-read through a `Value`, whose map would sort
 //! the members (`serde_json::Map` is a `BTreeMap` in this build), and the
 //! order of a `choice` question's `criteria` is the order of its options.

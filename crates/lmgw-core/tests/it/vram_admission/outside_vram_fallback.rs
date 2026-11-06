@@ -163,7 +163,7 @@ async fn with_the_switch_off_an_outside_shortfall_queues_as_before() {
         v["external_trigger_reason"]
             .as_str()
             .unwrap_or_default()
-            .contains("vram.fallback_on_external"),
+            .contains("Fall back when VRAM outside"),
         "{v}"
     );
     assert!(v["lmgw_share_bytes"].is_null() && v["outside_share_bytes"].is_null());
@@ -500,10 +500,7 @@ pub(super) enum Dialect {
 /// The global chat fallback (chat rows inherit it). With the hold off it is
 /// what the outside-VRAM verdict answers with.
 pub(super) async fn set_global_fallback(f: &Fixture, alias: &str) {
-    let mut s = f.state.snapshot().settings.clone();
-    s.hold.fallback_alias = Some(alias.into());
-    store::save_settings(&f.state.db, &s).await.unwrap();
-    f.state.reload_snapshot().await.unwrap();
+    crate::support::fallbacks::every_chat_model_falls_back_to(&f.state, Some(alias)).await;
 }
 
 /// The embedder row's own fallback — aux never inherits the global one.
@@ -529,8 +526,7 @@ async fn set_embed_fallback(f: &Fixture, alias: &str) {
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: aux.warm_start,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some(alias.into()),
+            fallback: Some(alias.into()),
         },
     )
     .await
@@ -541,7 +537,16 @@ async fn set_embed_fallback(f: &Fixture, alias: &str) {
 /// A cloud chat alias that answers both shapes: streamed when the body asks
 /// for it, unary otherwise (`cloud_upstream`'s own responder).
 pub(super) async fn cloud_chat(f: &Fixture, alias: &str) -> MockServer {
-    let cloud = cloud_upstream(f, alias).await;
+    cloud_chat_on(f, alias, lmgw_core::config::Protocol::OpenaiCompatible).await
+}
+
+/// [`cloud_chat`] on a row of `protocol`, one of the OpenAI-shaped ones.
+pub(super) async fn cloud_chat_on(
+    f: &Fixture,
+    alias: &str,
+    protocol: lmgw_core::config::Protocol,
+) -> MockServer {
+    let cloud = super::gpu_hold::cloud_upstream_on(f, alias, protocol).await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(wiremock::matchers::body_partial_json(json!({"stream": true})))
@@ -558,6 +563,17 @@ pub(super) async fn cloud_chat(f: &Fixture, alias: &str) -> MockServer {
                 ),
         )
         .with_priority(1)
+        .mount(&cloud)
+        .await;
+    // The OpenAI platform's chat sends take the Responses wire (openai egress
+    // design §7.2).
+    let item = crate::support::responses_wire::message("msg_1", "from the cloud");
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            crate::support::responses_wire::stream("resp_1", &[item]),
+            "text/event-stream",
+        ))
         .mount(&cloud)
         .await;
     cloud
@@ -848,6 +864,7 @@ async fn a_fallback_the_endpoint_cannot_use_leaves_the_request_waiting_for_the_l
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -1005,8 +1022,7 @@ async fn outside_use_sends_an_image_generation_to_its_row_fallback() {
             files: image.files.clone(),
             enabled: true,
             idle_seconds: 0,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-image".into()),
+            fallback: Some("cloud-image".into()),
             ..Default::default()
         },
     )
@@ -1062,8 +1078,7 @@ async fn a_request_that_fits_never_runs_its_fallbacks_route_check() {
             files: image.files.clone(),
             enabled: true,
             idle_seconds: 0,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-image".into()),
+            fallback: Some("cloud-image".into()),
             ..Default::default()
         },
     )
@@ -1129,6 +1144,7 @@ pub(super) async fn cloud_alias_seeing(f: &Fixture, alias: &str, vision: bool) {
                 "vision": vision,
                 "source": "owner",
             }})),
+            fallback: None,
         },
     )
     .await
@@ -1476,8 +1492,7 @@ async fn the_pinned_reranker_and_ingest_count_never_swap_on_outside_use() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud-chat".into()),
+            fallback: Some("cloud-chat".into()),
         },
     )
     .await
@@ -1501,6 +1516,7 @@ async fn the_pinned_reranker_and_ingest_count_never_swap_on_outside_use() {
         &f.state,
         "chat-model",
         lmgw_core::gate::RouteCheck::Count("/v1/count_tokens"),
+        lmgw_core::runtime::registry::Origin::Owner,
     )
     .await;
     let failed = counted.expect_err("pinned: it waits for room, and there is none");

@@ -6,27 +6,9 @@ use lmgw_api_types::realtime::{RealtimeBudget, RealtimeBudgetStage};
 use serde_json::{json, Value};
 
 use super::super::{Def, Page};
+use crate::fmt::fmt_bytes;
 use crate::scope::{Latest, Scope};
 use crate::widgets::FormState;
-
-/// Bytes in binary units, as the server writes them (`hf::fmt_bytes`): the
-/// stage notes, admission's refusals and the residency notes all say GiB, so
-/// the panel's own figures do too rather than the dashboard's usual decimal
-/// GB beside them.
-fn bin_bytes(b: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = b as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{b} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
 
 /// The `realtime_budget` arguments for the draft: every alias as typed, so
 /// an unsaved pick is sized too.
@@ -170,7 +152,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             view! {
                 <i
                     style=format!("width:{:.2}%;background:{colour}", pct(*bytes))
-                    title=format!("{label}: {}", bin_bytes(*bytes))
+                    title=format!("{label}: {}", fmt_bytes(*bytes))
                 ></i>
             }
         })
@@ -186,7 +168,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
                     pct(scale - cap),
                     pct(o.min(cap)),
                 )
-                title=format!("other programs: {}", bin_bytes(o))
+                title=format!("other programs: {}", fmt_bytes(o))
             ></b>
         }
     });
@@ -195,7 +177,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             <b
                 class="rt-cap"
                 style=format!("left:{:.2}%", pct(c))
-                title=format!("lmgw may use {}", bin_bytes(c))
+                title=format!("lmgw may use {}", fmt_bytes(c))
             ></b>
         }
     });
@@ -205,7 +187,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             view! {
                 <span>
                     <i style=format!("background:{colour}")></i>
-                    {format!("{label} {}", bin_bytes(*bytes))}
+                    {format!("{label} {}", fmt_bytes(*bytes))}
                 </span>
             }
         })
@@ -213,15 +195,15 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
     let head = match capacity {
         Some(c) => format!(
             "{} of the {} lmgw may use",
-            bin_bytes(b.needed_bytes),
-            bin_bytes(c)
+            fmt_bytes(b.needed_bytes),
+            fmt_bytes(c)
         ),
-        None => format!("{} needed", bin_bytes(b.needed_bytes)),
+        None => format!("{} needed", fmt_bytes(b.needed_bytes)),
     };
     let models = format!(
         "{} for the models and {} headroom",
-        bin_bytes(b.total_bytes),
-        bin_bytes(b.headroom_bytes)
+        fmt_bytes(b.total_bytes),
+        fmt_bytes(b.headroom_bytes)
     );
     let detail = match (b.verdict.as_str(), capacity, outside) {
         (_, None, _) => format!(
@@ -231,7 +213,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
         ("too_large", Some(c), _) => format!(
             "{models} — {} more than lmgw may use, so the cascade's models evict each other \
              and a turn waits for a load",
-            bin_bytes(b.needed_bytes.saturating_sub(c))
+            fmt_bytes(b.needed_bytes.saturating_sub(c))
         ),
         ("unknown", Some(_), _) => format!(
             "{models} so far — {} has no figure, so the total is a lower bound",
@@ -240,16 +222,16 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
         ("tight", Some(_), Some(o)) => format!(
             "{models}; it fits what lmgw may use, but other programs hold {} now — beside them \
              a start waits for room or falls back",
-            bin_bytes(o)
+            fmt_bytes(o)
         ),
         (_, Some(c), Some(o)) => format!(
             "{models}; other programs hold {} now, and {} stays free",
-            bin_bytes(o),
-            bin_bytes(c.saturating_sub(o).saturating_sub(b.needed_bytes))
+            fmt_bytes(o),
+            fmt_bytes(c.saturating_sub(o).saturating_sub(b.needed_bytes))
         ),
         (_, Some(c), None) => format!(
             "{models}; {} of the card stays free for anything else",
-            bin_bytes(c.saturating_sub(b.needed_bytes))
+            fmt_bytes(c.saturating_sub(b.needed_bytes))
         ),
     };
     let unmeasured = b
@@ -264,21 +246,31 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
         .map(|s| {
             let bytes = match s.bytes {
                 Some(0) if s.placement != "local" => "—".to_string(),
-                Some(n) => bin_bytes(n),
+                Some(n) => fmt_bytes(n),
                 None => "unknown".to_string(),
             };
             let unknown = s.bytes.is_none();
             view! {
                 <tr>
-                    <td>
-                        <span
-                            class="rt-swatch"
-                            style=format!("background:{}", stage_colour(&s.stage))
-                        ></span>
-                        {s.label.clone()}
+                    <td class="wrap">
+                        <span class="rt-stage">
+                            <span
+                                class="rt-swatch"
+                                style=format!("background:{}", stage_colour(&s.stage))
+                            ></span>
+                            <span>{s.label.clone()}</span>
+                        </span>
                     </td>
-                    <td class="mono-sm">
-                        {s.alias.clone().unwrap_or_default()}
+                    <td class="mono-sm wrap rt-alias">
+                        // Breakable after each `/` too (a hyphen already
+                        // is): `audio/parakeet-tdt-q8-0` wraps at its parts.
+                        {s
+                            .alias
+                            .clone()
+                            .unwrap_or_default()
+                            .split_inclusive('/')
+                            .map(|p| view! { {p.to_string()} <wbr/> })
+                            .collect_view()}
                         {s
                             .running
                             .then(|| {
@@ -291,7 +283,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
                     </td>
                     <td>{place_label(s)}</td>
                     <td class="num" class:t-warn=unknown>{bytes}</td>
-                    <td class="wrap dim">{s.note.clone()}</td>
+                    <td class="wrap dim rt-note">{s.note.clone()}</td>
                 </tr>
             }
         })
@@ -316,13 +308,16 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
                     view! {
                         <span>
                             <i class="rt-outside"></i>
-                            {format!("Other programs {}", bin_bytes(o))}
+                            {format!("Other programs {}", fmt_bytes(o))}
                         </span>
                     }
                 })}
         </div>
         <p class="field-hint rt-summary">{detail}</p>
         {unmeasured.map(|u| view! { <p class="field-hint rt-summary">{u}</p> })}
+        // Its own sideways scroller for a pane narrower than even the
+        // wrapped table, which then scrolls here rather than the page.
+        <div class="table-scroll">
         <table class="data rt-stages">
             <thead>
                 <tr>
@@ -335,6 +330,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             </thead>
             <tbody>{rows}</tbody>
         </table>
+        </div>
     }
 }
 
@@ -345,9 +341,9 @@ mod tests {
 
     #[test]
     fn the_panel_s_figures_are_the_server_s_units() {
-        assert_eq!(bin_bytes(9 * 1024 * 1024 * 1024), "9.0 GiB");
-        assert_eq!(bin_bytes(900 * 1024 * 1024), "900.0 MiB");
-        assert_eq!(bin_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(9 * 1024 * 1024 * 1024), "9.0 GiB");
+        assert_eq!(fmt_bytes(900 * 1024 * 1024), "900 MiB");
+        assert_eq!(fmt_bytes(512), "512 B");
     }
 
     #[test]

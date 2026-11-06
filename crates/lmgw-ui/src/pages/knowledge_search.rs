@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::widgets::{use_toasts, Section};
 
 use super::knowledge::use_kb;
-use super::knowledge_source::{SourceModal, SourceRef};
+use lmgw_chat_ui::knowledge_source::{SourceModal, SourceRef};
 
 use lmgw_api_types::knowledge::{KnowledgeExcerpt as Excerpt, KnowledgeSearchResult as Retrieval};
 

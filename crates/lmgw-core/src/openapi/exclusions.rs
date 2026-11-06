@@ -25,8 +25,10 @@
 //! (`planes/knowledge.rs`, admin document only), and last the Audio lab
 //! (`planes/audio_lab.rs`), the Image lab (`planes/image_lab.rs`) and the Chat
 //! page's row refresh, `GET /chat/api/threads/rows`, which sits beside the
-//! thread list (`planes/chat_threads.rs`). All are `Cap::Admin` routes and so
-//! in the admin document only. The labs' four hand-offs to `/v1` handlers
+//! thread list (`planes/chat_threads.rs`). All were `Cap::Admin` routes and so
+//! in the admin document only; the row refresh moved to `Cap::Chat` with the
+//! chat-plane design (D2), which puts it in the developer document too. The
+//! labs' four hand-offs to `/v1` handlers
 //! (speech, transcriptions, alignments, tasks) reuse their siblings' schemas
 //! and say how they differ; `DASHBOARD_BACKEND`, the shared reason of the
 //! 2026-09-28 decision, went with its last user.
@@ -85,16 +87,6 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
 /// a new untyped answer or request body not listed, a listed one that no longer is.
 #[cfg(test)]
 pub(crate) const UNTYPED: &[(&str, &str, &str)] = &[
-    (
-        "post",
-        "/v1/audio/alignments",
-        "audio.cpp's own alignment JSON, relayed verbatim.",
-    ),
-    (
-        "post",
-        "/audio-lab/api/alignments",
-        "audio.cpp's own alignment JSON, relayed verbatim.",
-    ),
     (
         "post",
         "/v1/tasks/run",

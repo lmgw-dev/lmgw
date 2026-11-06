@@ -26,6 +26,83 @@ pub struct ImageRecipes {
     /// What to call next, for a caller that has no dashboard (the tool plane's
     /// rule: a result names the tool that follows it).
     pub next_step: String,
+    /// The upscalers (chat-media-tools design §9): the shipped ESRGAN models
+    /// and the files the image models dir's `upscalers/` holds.
+    pub upscalers: ImageUpscalers,
+}
+
+/// The upscaler side of the image recipes (chat-media-tools design §9):
+/// sd-server's `POST /sdcpp/v1/upscale` runs an ESRGAN model it finds at
+/// the top level of `<image models_dir>/upscalers`, one directory every
+/// image row reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageUpscalers {
+    /// The models lmgw ships an entry for.
+    pub shipped: Vec<ImageUpscalerEntry>,
+    /// The upscalers on disk, by the name `image__upscale` and the card's
+    /// Upscale take (the file stem), whichever way they got there.
+    pub on_disk: Vec<ImageUpscalerFile>,
+    /// The directory, relative to the image models dir.
+    pub dir: String,
+}
+
+/// One shipped upscaler.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageUpscalerEntry {
+    /// What `image_upscaler_add` takes.
+    pub key: String,
+    pub display_name: String,
+    pub description: String,
+    pub repo: String,
+    pub file: String,
+    /// Where it lands, relative to the image models dir: `upscalers/<file>`.
+    pub dest_path: String,
+    pub size_bytes: u64,
+    pub size: String,
+    pub gated: bool,
+    /// The licence the repo states.
+    pub licence: String,
+    /// How many times larger a side gets per run.
+    pub scale: u32,
+    pub present: bool,
+    pub downloading: bool,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub download_id: Option<i64>,
+}
+
+/// One upscaler file on disk.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageUpscalerFile {
+    /// The name sd-server and the tools call it by: the file stem.
+    pub name: String,
+    pub file: String,
+    pub size_bytes: u64,
+}
+
+/// `POST /api/op/image_upscaler_add {key}`: the shipped upscaler queued into
+/// `upscalers/<file>` of the image models dir.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageUpscalerAddResult {
+    pub ok: bool,
+    pub key: String,
+    /// The download queued now; `None` when the file is already there or
+    /// already on its way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub download: Option<QueuedDownload>,
+    pub already_present: bool,
+    pub already_queued: bool,
+    pub message: String,
 }
 
 /// One shipped family.
@@ -135,6 +212,11 @@ pub struct ImageRecipeAddResult {
     /// The `image_model_set` patch, ready to post once the downloads are done.
     pub row: ImageRecipeRow,
     pub message: String,
+    /// The image class's image, when it is not on this machine or podman
+    /// could not say: the download fetches a missing one too, a
+    /// multi-gigabyte download of its own, and starts nothing
+    /// ([`EngineDownload`]). `null` when it is here.
+    pub engine: Option<EngineDownload>,
 }
 
 /// The prefilled row an "add from recipe" hands to the editor — the field
@@ -174,4 +256,9 @@ pub struct AudioCatalogInstall {
     pub files_queued: u32,
     pub downloads: Vec<QueuedDownload>,
     pub message: String,
+    /// The audio class's image, when it is not on this machine or podman
+    /// could not say: the download fetches a missing one too, a
+    /// multi-gigabyte download of its own, and starts nothing
+    /// ([`EngineDownload`]). `null` when it is here.
+    pub engine: Option<EngineDownload>,
 }

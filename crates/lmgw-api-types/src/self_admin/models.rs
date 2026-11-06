@@ -73,6 +73,15 @@ pub struct ModelFacts {
     /// when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The model's or alias's one fallback (openai egress design §14.2), as
+    /// written: what answers whenever it cannot. Absent when it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// Whether that fallback names a model or alias that can stand in now
+    /// (it resolves, and is not a candidate alias). Absent without a
+    /// fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_usable: Option<bool>,
 }
 
 /// A cloud alias.
@@ -102,10 +111,6 @@ pub struct CandidateAliasEntry {
     pub candidates: Vec<String>,
     /// Background traffic is a GPU guest and never disturbs the owner.
     pub background: bool,
-    /// `inherit | none | alias`.
-    pub fallback_mode: String,
-    /// The fallback alias, for mode `alias`; `null` otherwise.
-    pub fallback: Option<String>,
     /// The facets the alias publishes, as last saved.
     pub enabled_facets: Vec<String>,
     /// The facets every usable candidate supports now.
@@ -115,8 +120,6 @@ pub struct CandidateAliasEntry {
     /// What is wrong with a candidate or the fallback.
     pub problems: Vec<String>,
     pub advisories: Vec<String>,
-    /// The alias fallback resolves and is not local.
-    pub fallback_usable: bool,
     /// Requests deferred for the GPU in the last 24 hours.
     pub deferrals_24h: u64,
     #[serde(flatten)]
@@ -134,6 +137,9 @@ pub struct LocalEntry {
     pub public: bool,
     pub gguf_path: String,
     pub id: i64,
+    /// Background requests (`x-lmgw-background: on`) for `name` deferred for
+    /// the GPU in the last 24 hours.
+    pub deferrals_24h: u64,
     #[serde(flatten)]
     pub facts: ModelFacts,
 }
@@ -151,6 +157,8 @@ pub struct AuxEntry {
     pub gguf_path: String,
     /// The pooling override; `null` for the model's own.
     pub pooling: Option<String>,
+    /// As [`LocalEntry::deferrals_24h`].
+    pub deferrals_24h: u64,
     #[serde(flatten)]
     pub facts: ModelFacts,
 }
@@ -167,6 +175,8 @@ pub struct AudioEntry {
     /// The model-loader family.
     pub family: String,
     pub id: i64,
+    /// As [`LocalEntry::deferrals_24h`].
+    pub deferrals_24h: u64,
     #[serde(flatten)]
     pub facts: ModelFacts,
 }
@@ -189,6 +199,8 @@ pub struct ImageEntry {
     /// `diffusion_model` (the stored value, usually a path); `null` when it
     /// names neither.
     pub loads: Option<serde_json::Value>,
+    /// As [`LocalEntry::deferrals_24h`].
+    pub deferrals_24h: u64,
     #[serde(flatten)]
     pub facts: ModelFacts,
 }
@@ -228,8 +240,14 @@ mod tests {
         assert_eq!(wire["context_length"], json!(8192));
         assert!(wire["context_length"].is_u64());
         assert_eq!(wire["deferrals_24h"], json!(0));
-        assert!(wire["fallback"].is_null() && wire.get("fallback").is_some());
-        for absent in ["max_output_tokens", "capabilities", "notes", "facts"] {
+        for absent in [
+            "max_output_tokens",
+            "capabilities",
+            "notes",
+            "facts",
+            "fallback",
+            "fallback_usable",
+        ] {
             assert!(wire.get(absent).is_none(), "{absent}: {wire}");
         }
         assert_eq!(serde_json::from_value::<ModelEntry>(wire).unwrap(), entry);

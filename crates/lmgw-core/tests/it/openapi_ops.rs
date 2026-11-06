@@ -228,7 +228,8 @@ fn op_names_match_the_dispatcher_arms() {
     );
 
     let agents_rs = std::fs::read_to_string(src.join("web/api_agents.rs")).unwrap();
-    let agent_found = dispatched(function_body(&agents_rs, "fn op("));
+    // `op` runs its dispatch, `op_now`, as a task of its own.
+    let agent_found = dispatched(function_body(&agents_rs, "fn op_now("));
     assert_eq!(
         agent_found,
         set(op_names::AGENT_OPS),
@@ -355,7 +356,7 @@ fn every_listed_op_is_documented_and_vice_versa() {
         documented, listed,
         "the doc's x-lmgw-op set and web::op_names::all() have drifted"
     );
-    assert_eq!(listed.len(), 86, "web::op_names::all() should name 86 ops");
+    assert_eq!(listed.len(), 96, "web::op_names::all() should name 96 ops");
 }
 
 /// The property *names* a JSON Schema object declares (`properties`'s keys) —

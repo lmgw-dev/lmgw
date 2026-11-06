@@ -11,7 +11,9 @@ use crate::gate::facts::GateFacts;
 
 use super::raii::StartClaim;
 use super::*;
-use crate::runtime::argv::{podman_run_argv, render_image_args, stamp_owner, EngineArgs};
+use crate::runtime::argv::{
+    never_pull, podman_run_argv, render_image_args, stamp_owner, EngineArgs,
+};
 use crate::runtime::container_name;
 use crate::runtime::descriptor::ModelRuntime;
 use crate::runtime::image::ImageCapabilities;
@@ -40,7 +42,21 @@ impl Registry {
             owner: std::sync::OnceLock::new(),
             on_started: std::sync::OnceLock::new(),
             pass: tokio::sync::Mutex::new(Default::default()),
+            image_caps_seen: Mutex::new(HashMap::new()),
+            cdi: arc_swap::ArcSwap::from_pointee(crate::runtime::cdi::OwnSpec::unmanaged(
+                "this registry is not wired to a gateway",
+            )),
         }
+    }
+
+    /// The gateway's own CDI spec ([`crate::runtime::cdi`]), which every GPU
+    /// start and probe of this registry makes fresh and passes to Podman.
+    pub fn set_cdi(&self, cdi: Arc<crate::runtime::cdi::OwnSpec>) {
+        self.cdi.store(cdi);
+    }
+
+    pub fn cdi(&self) -> Arc<crate::runtime::cdi::OwnSpec> {
+        self.cdi.load_full()
     }
 
     /// The runner every verb of this registry goes through. Container builds
@@ -294,7 +310,11 @@ impl Registry {
 
         if spec.models_dir.trim().is_empty() {
             return Err(fail(
-                "models dir is not configured for this class".into(),
+                format!(
+                    "the {} models directory is not set ({})",
+                    class.as_str(),
+                    crate::hf::models_dir_location(class.as_str())
+                ),
                 Vec::new(),
             ));
         }
@@ -307,6 +327,20 @@ impl Registry {
         // cannot start.
         let (runtime, mut warnings) = self.with_sdcpp_caps(spec).await;
         let runtime: &ModelRuntime = runtime.as_ref().unwrap_or(spec.runtime);
+        // lmgw's own CDI spec, made true of this machine before a GPU start
+        // (machine-check design §3.6.2), and the option that points Podman at
+        // it. Once per start, before a port is taken, within the start's load
+        // timeout: a spec that cannot be written (a restart pending, a
+        // generation that hangs) is the start's answer.
+        let globals = self
+            .cdi()
+            .ready_globals(
+                spec.container_prefix,
+                &runtime.extra_run_args,
+                spec.load_timeout,
+            )
+            .await
+            .map_err(|e| fail(e.to_string(), Vec::new()))?;
         // The gate's facts come from the descriptor this start renders its
         // argv from — the same value, so the ledger's pool is the pool this
         // container really has (second review, finding 1). Once per start,
@@ -345,12 +379,19 @@ impl Registry {
                     spec.data_dir,
                 ),
             };
-            let render = render.map_err(|e| {
+            let mut render = render.map_err(|e| {
                 fail(
                     format!("rendering the container spec failed: {e}"),
                     Vec::new(),
                 )
             })?;
+            // A GPU container pointed at lmgw's spec dir gets no restart
+            // policy (D27); the start says so.
+            let no_restart = render.set_globals(globals.clone());
+            let note = crate::runtime::cdi::restart_note(&no_restart);
+            if !no_restart.is_empty() && !warnings.contains(&note) {
+                warnings.push(note);
+            }
             // The image renderer is the one that can refuse (a row naming
             // neither `model` nor `diffusion_model`, a key this image has no
             // flag for). Asked here, before `podman run`, so the answer is the
@@ -364,10 +405,12 @@ impl Registry {
                 }
             }
 
-            let argv = match self.owner() {
+            // Never a pull here (machine-check design §5): admission
+            // downloaded a missing image before the gate (`vram::download`).
+            let argv = never_pull(match self.owner() {
                 Some(owner) => stamp_owner(podman_run_argv(&render), owner),
                 None => podman_run_argv(&render),
-            };
+            });
             let outcome = self.podman_argv(&argv).await;
             let (status, stderr) = match outcome {
                 Ok(out) if out.ok() => {
@@ -476,7 +519,8 @@ impl Registry {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(format!(
-                    "no HTTP 200 from {url} within vram.load_timeout_seconds ({load_timeout:?})"
+                    "no HTTP 200 from {url} within the load timeout ({load_timeout:?}, {})",
+                    crate::config::LOAD_TIMEOUT_LABEL
                 ));
             }
             // One probe may take until the next look at the container's own
@@ -500,7 +544,8 @@ impl Registry {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(format!(
-                    "no HTTP 200 from {url} within vram.load_timeout_seconds ({load_timeout:?})"
+                    "no HTTP 200 from {url} within the load timeout ({load_timeout:?}, {})",
+                    crate::config::LOAD_TIMEOUT_LABEL
                 ));
             }
             tokio::time::sleep(HEALTH_POLL.min(left)).await;
@@ -553,7 +598,8 @@ impl Registry {
         let timed_out = || {
             format!(
                 "no HTTP 200 (ready) and no 5xx (ready, with a broken capabilities scan) from \
-                 {url} within vram.load_timeout_seconds ({load_timeout:?})"
+                 {url} within the load timeout ({load_timeout:?}, {})",
+                crate::config::LOAD_TIMEOUT_LABEL
             )
         };
         let deadline = Instant::now() + load_timeout;

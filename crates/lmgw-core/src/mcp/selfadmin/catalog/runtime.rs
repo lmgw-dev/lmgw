@@ -70,7 +70,7 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Engage or release lmgw's GPU hold. While the hold is on, lmgw stays off the \
                  GPU without going down: every request that would need a local container is \
-                 either re-routed to that model's configured fallback alias (a cloud model) or \
+                 either re-routed to that model's configured fallback (along its chain) or \
                  refused with a 503 whose error code is 'gpu_hold' — cloud routes are \
                  unaffected. Engaging it also stops every resident local container that is \
                  idle right now, and refuses every new local load: no request start, no warm \
@@ -82,9 +82,11 @@ pub(super) fn tools() -> Vec<Builtin> {
                  everything back: models start on demand again. Engaging it also aborts a benchmark run that is going \
                  (lmgw__bench_start), removing its container. The switch is persisted, so it \
                  survives a gateway restart. Read the current state from lmgw__status (vram.hold_active, \
-                 vram.draining) or lmgw__settings (hold); set the global chat fallback alias \
-                 with lmgw__settings_set hold_fallback_alias, and a per-model one with \
-                 lmgw__local_model_set.",
+                 vram.draining) or lmgw__settings (hold). A held model answers with its own \
+                 fallback, where one is set: each model and alias has one (fallback on \
+                 lmgw__local_model_set, lmgw__aux_model_set, lmgw__audio_model_set, \
+                 lmgw__image_model_set, lmgw__candidate_alias_set and lmgw__model_set); there \
+                 is no global one.",
             props: vec![(
                 "active",
                 bool_p("true engages the hold (and stops idle local containers); false \
@@ -105,6 +107,14 @@ pub(super) fn tools() -> Vec<Builtin> {
                  dashboard: the HF/update/forge tokens and the builds directory.",
             props: vec![
                 ("retention_days", int_p("Days of request logs to keep. 0 = forever.")),
+                (
+                    "quota_recheck_seconds",
+                    int_p(
+                        "Seconds before an upstream remembered out of quota is asked again, when \
+                         its answer carried no Retry-After (at least 1). Until then a model with \
+                         a fallback on it answers with the fallback.",
+                    ),
+                ),
                 (
                     "retention_max_rows",
                     int_p("Hard row cap on the request log. 0 = unlimited."),
@@ -159,7 +169,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     int_p(
                         "The longest keep-alive, in seconds, a feed may ask for itself \
                          (GET /chat/api/feed?keepalive_s=, as a phone holding its feed in the \
-                         background does), at least 1 and at most 86400 (a day). A request past \
+                         background does), at least 1 and at most 32767 (about nine hours, the longest Linux accepts for a TCP keep-alive timer). A request past \
                          it is refused naming this setting. Between events a feed sends only its \
                          keep-alive, so this bounds how long a feed whose device vanished \
                          silently stays open. Applies to feeds opened after the change.",
@@ -326,6 +336,21 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 (
+                    "chat_media_defaults",
+                    str_p(
+                        "The image and audio tools' default models, as a JSON-encoded object \
+                         with only the fields to change: generate, edit, speak, transcribe \
+                         (each a name of that tool's model enum, as tools/list shows it) and \
+                         voice (a voice of the default speech model). '' clears a field: no \
+                         default, the calling model must pick. With a default, a call may \
+                         leave out model (and voice) and the tool's description names the \
+                         default. A Chat folder and a thread can override each field; /mcp, \
+                         /v1/responses and agent runs use these. A default whose model is \
+                         switched off or deleted later is no default (not replaced), and \
+                         lmgw__settings reads it back as stored.",
+                    ),
+                ),
+                (
                     "chat_system_prompt",
                     str_p(
                         "The system prompt a new Chat thread starts with; each thread keeps \
@@ -355,17 +380,6 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "update_check_enabled",
                     bool_p("Poll the package registry for new lmgw releases."),
-                ),
-                (
-                    "hold_fallback_alias",
-                    str_p(
-                        "Global GPU-hold fallback: the alias a held chat-class local model \
-                         falls back to when its own row's hold_fallback_mode (on \
-                         lmgw__local_model_set) is 'inherit'. Must resolve to a non-local \
-                         route; '' clears it back to 'refuse'. The hold switch itself is not \
-                         settable here — engaging it stops containers, a side effect this \
-                         generic settings call must not carry.",
-                    ),
                 ),
                 (
                     "fallback_on_external",

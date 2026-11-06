@@ -52,8 +52,12 @@ fn build_chat_posts_the_counted_body() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let params: Params = serde_json::from_value(json!({"reasoning": {"enabled": false}})).unwrap();
     let req = LlamaCppEgress
@@ -177,8 +181,12 @@ fn the_budget_goes_under_both_names() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     let control = |c: Value| -> Params { serde_json::from_value(json!({"reasoning": c})).unwrap() };
 

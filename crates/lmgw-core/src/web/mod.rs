@@ -84,7 +84,14 @@ mod chat_knowledge;
 /// One live turn per Chat thread, and the generation a turn's reply is
 /// checked against before it is saved (review R1 finding 1).
 pub(crate) mod chat_live;
+/// The files a turn's image and audio tools make (chat-media-tools design
+/// §6.3, §6.4): stored as the thread's attachments, and turned back into
+/// pictures for every send.
+mod chat_media;
+pub(crate) use chat_media::defaults_route::MediaDefaultsQuery;
+pub(crate) use chat_media::MediaCalls;
 mod chat_neutralise;
+mod chat_origin;
 /// Personality profiles in a Chat turn's prompt (personality-profiles
 /// design §2): the system message's parts and the profile's reasoning.
 mod chat_profile;
@@ -92,6 +99,10 @@ mod chat_profile;
 /// CRUD over `ops::chat_profiles`, and the `unknown_profile` check a
 /// thread's settings and a folder's defaults run.
 mod chat_profiles;
+/// The Chat's reads beside its threads and folders (chat-plane design §2):
+/// the settings it uses, the toolsets a thread may attach, the knowledge
+/// bases, scoped to the caller.
+mod chat_reads;
 /// A Chat thread's `x-lmgw-reasoning*` overrides: their checks, their
 /// control, and which of them the answering route drops.
 mod chat_reasoning;
@@ -138,6 +149,7 @@ pub(crate) mod hf;
 /// The Image lab's mini-API (image-generation design §8): the Audio lab's
 /// sibling for `/v1/images/*`.
 mod image_lab;
+pub(crate) use image_lab::model_stem;
 /// The lab store's routes (labs-store design §1.6): `/labs/api/*`, shared by
 /// the three labs.
 mod labs_store;
@@ -147,13 +159,26 @@ mod op_body;
 /// openapi op table (`crate::openapi::ops`) reads it to know which op names
 /// it has to document, the same way it reads `server::CAPABILITY_TABLE`.
 pub mod op_names;
+/// A stored file served to a player, whole or one `Range` (206/416): the
+/// lab artifact, Chat attachment, voice clip and Voices lab candidate routes.
+mod ranged;
 mod responses;
 /// The login (principals design §3.4): the four `/api/session*` routes, and
 /// the one-shot nonce the Tauri shell opens its window with. `pub` because
 /// the shell mints that nonce in-process — it hosts this crate — and because
 /// `AppState` holds the desk it is minted from.
 pub mod session;
+/// nosniff and `Content-Security-Policy: sandbox` (machine-check design WP13,
+/// D90): the helper the stored-content routes call, and the router-wide
+/// default `server::build_router_for` layers over everything but the
+/// dashboard's own routes.
+pub(crate) mod stored;
+/// `/transfers/api/*` (device transfers design §9): a paired device's file
+/// offered to another device of the same app, `Cap::Transfer`.
+mod transfers;
 mod ui;
+/// `/voice-lab/api/*`: the Voices lab's routes (`crate::voice_lab`).
+mod voice_lab;
 mod wiring;
 
 use axum::routing::{get, post};
@@ -177,12 +202,12 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
             chat_routes().route_layer(crate::server::require(state, crate::principal::Cap::Chat)),
         )
         .merge(
-            chat_owner_routes()
-                .route_layer(crate::server::require(state, crate::principal::Cap::Admin)),
-        )
-        .merge(
             labs_routes().route_layer(crate::server::require(state, crate::principal::Cap::Admin)),
         )
+        .merge(transfers::routes().route_layer(crate::server::require(
+            state,
+            crate::principal::Cap::Transfer,
+        )))
         // Ahead of `ui::routes`, whose `/{*path}` catch-all takes every path
         // no other plane claimed: `api/` is one of its `API_PREFIXES`, so a
         // session route registered after it would answer `404` instead of
@@ -289,6 +314,7 @@ fn chat_routes() -> Router<SharedState> {
             post(chat_voice::stop_speech),
         )
         .route("/chat/api/threads/{id}/pin", post(chat::pin_thread))
+        .route("/chat/api/threads/{id}/title", post(chat::rename_thread))
         .route("/chat/api/threads/{id}/archive", post(chat::archive_thread))
         .route(
             "/chat/api/threads/{id}/persist",
@@ -307,6 +333,30 @@ fn chat_routes() -> Router<SharedState> {
         .route(
             "/chat/api/threads/{id}/tasks/{task}/cancel",
             post(chat_tasks::cancel),
+        )
+        .route(
+            "/chat/api/threads/{id}/media/{call_id}/cancel",
+            post(chat_media::cancel_route::cancel),
+        )
+        .route(
+            "/chat/api/media/defaults",
+            get(chat_media::defaults_route::defaults),
+        )
+        // Some of the thread list's rows, for a client following the feed
+        // (review CL-11; on the Chat plane since chat-plane design D2).
+        .route("/chat/api/threads/rows", get(chat::thread_rows))
+        // The Chat's reads beside its threads (chat-plane design §2).
+        .route("/chat/api/settings", get(chat_reads::settings))
+        .route("/chat/api/tools", get(chat_reads::tool_list))
+        .route("/chat/api/tools/{label}", get(chat_reads::tool_detail))
+        .route("/chat/api/knowledge/bases", get(chat_reads::bases))
+        .route(
+            "/chat/api/knowledge/files/{id}/text",
+            get(chat_reads::file_text),
+        )
+        .route(
+            "/chat/api/knowledge/files/{id}/original",
+            get(chat_reads::file_original),
         )
         .route(
             "/chat/api/threads/{id}/messages/{mid}/delete",
@@ -342,13 +392,10 @@ fn chat_routes() -> Router<SharedState> {
             "/chat/api/attachments/{id}/text",
             get(chat_attach_routes::get_text),
         )
-}
-
-/// The Chat API's owner-only reads: the dashboard's Chat page following other
-/// writers ([`Cap::Admin`](crate::principal::Cap::Admin); `chat::thread_rows`
-/// says why). A paired device never holds them: its own feed carries rows.
-fn chat_owner_routes() -> Router<SharedState> {
-    Router::new().route("/chat/api/threads/rows", get(chat::thread_rows))
+        .route(
+            "/chat/api/attachments/{id}/media",
+            post(chat_media::actions::run_action),
+        )
 }
 
 /// The Audio, Image and Decision labs — the playgrounds the owner drives by
@@ -489,6 +536,40 @@ fn labs_routes() -> Router<SharedState> {
             "/decision-lab/api/batches/{id}/threshold",
             post(decision_lab::batch_metrics::threshold)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        // Voices lab: candidate rounds from a text-to-speech alias, saved to
+        // the voice library as samples (`crate::voice_lab`). A round's text
+        // and a sentence are as long as the owner writes them: no guessed
+        // body limit.
+        .route("/voice-lab/api/model", get(voice_lab::model))
+        .route(
+            "/voice-lab/api/sentences",
+            get(voice_lab::sentences)
+                .post(voice_lab::set_sentence)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/voice-lab/api/rounds",
+            get(voice_lab::list_rounds)
+                .post(voice_lab::generate)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/voice-lab/api/rounds/clear", post(voice_lab::clear_rounds))
+        .route(
+            "/voice-lab/api/rounds/{id}/delete",
+            post(voice_lab::delete_round),
+        )
+        .route(
+            "/voice-lab/api/rounds/{id}/candidates/{n}",
+            get(voice_lab::candidate),
+        )
+        .route(
+            "/voice-lab/api/samples",
+            get(voice_lab::samples).post(voice_lab::save_sample),
+        )
+        .route(
+            "/voice-lab/api/clone-check",
+            post(voice_lab::clone_check).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         // The lab store (labs-store design §1.6): the same operations for all
         // three labs, `{lab}` naming which.

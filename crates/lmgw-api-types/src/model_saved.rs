@@ -38,6 +38,13 @@ pub struct LocalModelSaved {
     pub container_kept_previous_config: Option<bool>,
     /// What was done, for a person to read, with the next step.
     pub message: String,
+    /// What the save says about the fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }
 
 /// A write to an aux (embedding, rerank or decision) model: `create`, `update` (also
@@ -62,6 +69,13 @@ pub struct AuxModelSaved {
     pub public_name: Option<String>,
     /// What was done, for a person to read, with the next step.
     pub message: String,
+    /// What the save says about the fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }
 
 /// A write to an audio model: `create`, `update` (also `enable` and
@@ -82,6 +96,13 @@ pub struct AudioModelSaved {
     pub residency_reset: Option<bool>,
     /// What was done, for a person to read.
     pub message: String,
+    /// What the save says about the fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }
 
 /// A write to an image (stable-diffusion.cpp) model: `create`, `update` (also
@@ -117,4 +138,11 @@ pub struct ImageModelSaved {
     pub command_line: Option<String>,
     /// What was done, for a person to read, with the next step.
     pub message: String,
+    /// What the save says about the fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }

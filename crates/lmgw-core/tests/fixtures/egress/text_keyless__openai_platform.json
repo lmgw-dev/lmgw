@@ -1,0 +1,30 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

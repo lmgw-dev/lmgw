@@ -116,7 +116,7 @@ pub(crate) async fn setup(chat: &MockServer, stt: &MockServer) -> (SharedState, 
     let state = AppState::init_for_tests().await.unwrap();
     let up = |name: &str, kind: UpstreamKind, base: String| NewUpstream {
         name: name.into(),
-        protocol: Protocol::Openai,
+        protocol: Protocol::OpenaiCompatible,
         kind,
         base_url: base,
         api_key: Some("sk-up".into()),
@@ -154,6 +154,7 @@ pub(crate) async fn setup(chat: &MockServer, stt: &MockServer) -> (SharedState, 
             c["source"] = json!("owner");
             json!({ "capabilities": c })
         }),
+        fallback: None,
     };
     for a in [
         alias("plain", chat_up, None),
@@ -178,6 +179,7 @@ pub(crate) async fn setup(chat: &MockServer, stt: &MockServer) -> (SharedState, 
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "asr", "endpoints": ["/v1/audio/transcriptions"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
@@ -725,6 +727,7 @@ async fn audio_for_an_anthropic_model_is_transcribed_whatever_its_override_says(
                 "task": "chat", "endpoints": ["/v1/messages"], "source": "owner",
                 "input_modalities": ["text", "audio"]
             } })),
+            fallback: None,
         },
     )
     .await

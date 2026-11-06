@@ -161,9 +161,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     refuse_unmappable_price_rows(pool).await?;
     empty_run_args_notice(pool).await?;
     llama_cpp_notice(pool).await?;
+    openai_compatible_notice(pool).await?;
     device_rows_notice(pool).await?;
+    one_fallback_notice(pool).await?;
     let migrator = sqlx::migrate!("./migrations");
-    // A table rebuild runs with foreign keys off (0058), and that is the only
+    // A table rebuild runs with foreign keys off (0058, 0090), and that is the only
     // way a reference can come to point at a row that is gone: every pool
     // connection has them on. So a start that applies a migration marks the
     // database, and a marked one is checked on every start until it is clean.
@@ -188,6 +190,9 @@ pub use upstreams::*;
 mod aliases;
 pub use aliases::*;
 
+mod fallbacks;
+pub use fallbacks::*;
+
 mod candidate_aliases;
 pub use candidate_aliases::*;
 
@@ -203,11 +208,18 @@ pub use audio_models::*;
 mod image_models;
 pub use image_models::*;
 
+mod run_overrides;
+pub use run_overrides::*;
+
 mod downloads;
 pub use downloads::*;
 
 mod jobs_table;
 pub use jobs_table::*;
+
+// Get it's rows and the fit notes (find-a-model design §6.2, D26).
+mod model_gets;
+pub use model_gets::*;
 
 mod builds;
 pub use builds::*;
@@ -358,10 +370,19 @@ pub use chat_attachments::*;
 mod chat_attachment_extra;
 pub use chat_attachment_extra::*;
 
+mod chat_tool_files;
+pub use chat_tool_files::*;
+
 mod chat_folders;
 pub use chat_folders::*;
 
 mod chat_approval_floor;
+
+mod chat_seals;
+pub use chat_seals::ReplySeal;
+
+mod seal_key;
+pub use seal_key::{seal_key, SEAL_KEY};
 
 mod chat_keep;
 pub use chat_keep::*;
@@ -391,6 +412,11 @@ pub use chat_voice::*;
 /// `kind`) only make sense under it.
 pub mod feed;
 
+/// Device-to-device transfers (device transfers design §3, §9): addressed
+/// as `store::transfers::…`, like [`feed`], since its names (`insert`,
+/// `end`, `list`) only make sense under it.
+pub mod transfers;
+
 /// Personality profiles (personality-profiles design §1.2): addressed as
 /// `store::chat_profiles::…`, like [`feed`], since its write forms
 /// (`create_in`, `delete_in`) only make sense under it.
@@ -401,6 +427,11 @@ pub use responses::*;
 
 mod prices;
 pub use prices::*;
+
+mod hosted_traffic;
+pub use hosted_traffic::*;
+mod tier_traffic;
+pub use tier_traffic::*;
 
 mod usage;
 pub use usage::*;

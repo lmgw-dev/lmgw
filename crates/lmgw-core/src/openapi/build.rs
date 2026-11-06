@@ -275,7 +275,7 @@ fn security_for(cap: Cap, method: &str, path: &str) -> Value {
             json!({"session": []}),
             json!({}),
         ],
-        Cap::Admin | Cap::AgentSelf | Cap::Chat => vec![
+        Cap::Admin | Cap::AgentSelf | Cap::Chat | Cap::Transfer => vec![
             json!({"bearer": []}),
             json!({"apiKeyHeader": []}),
             json!({"session": []}),
@@ -938,18 +938,20 @@ fn op_request_body(g: &mut schemars::SchemaGenerator, op: &OpDoc) -> Option<Valu
 
 /// The capabilities the developer document's operations use: every one but
 /// `admin`, which is [`is_developer_op`]'s rule.
-const DEVELOPER_CAPS: [Cap; 5] = [
+const DEVELOPER_CAPS: [Cap; 6] = [
     Cap::Public,
     Cap::Inference,
     Cap::Chat,
+    Cap::Transfer,
     Cap::Ledger,
     Cap::AgentSelf,
 ];
 
-const CAPS: [Cap; 6] = [
+const CAPS: [Cap; 7] = [
     Cap::Public,
     Cap::Inference,
     Cap::Chat,
+    Cap::Transfer,
     Cap::Ledger,
     Cap::AgentSelf,
     Cap::Admin,
@@ -1272,15 +1274,16 @@ mod tests {
         assert!(!owner_list.contains("ledger"));
         assert!(owner_list.contains("chat"));
 
-        // A paired device (client-apps design §1.2): the Chat API on top of
-        // a client key's inference, and nothing of the admin plane.
+        // A paired device (client-apps design §1.2): the Chat API and its
+        // transfers (device transfers design §10) on top of a client key's
+        // inference, and nothing of the admin plane.
         let device: Vec<&str> = matrix["device"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(device, ["public", "inference", "chat"]);
+        assert_eq!(device, ["public", "inference", "chat", "transfer"]);
 
         let anon_off: HashSet<&str> = matrix["anonymous_auth_off"]
             .as_array()
@@ -1543,7 +1546,10 @@ mod tests {
 
         // The key-kind map is there, without the admin capability.
         let matrix = v1[openapi_ext::PRINCIPALS].as_object().unwrap();
-        assert_eq!(matrix["device"], json!(["public", "inference", "chat"]));
+        assert_eq!(
+            matrix["device"],
+            json!(["public", "inference", "chat", "transfer"])
+        );
         assert!(matrix
             .values()
             .flat_map(|v| v.as_array().unwrap())

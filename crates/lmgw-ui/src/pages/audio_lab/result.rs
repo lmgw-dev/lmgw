@@ -8,8 +8,9 @@
 use lmgw_api_types::lab_store::{artifact_ref_id, LabArtifactView};
 use serde_json::Value;
 
-use super::super::audio_stream::{b64_decode, parse_record, pcm_to_wav, StreamAcc};
+use super::super::audio_stream::{audio_event, b64_decode, pcm_to_wav, StreamAcc};
 use super::{blob_url, track_stem, RunResult, Track};
+use lmgw_ui_kit::http::sse::Decoder;
 
 /// A result and the object URLs its players point at.
 #[derive(Default)]
@@ -215,12 +216,14 @@ pub(super) fn from_stream(acc: &StreamAcc, pcm: Pcm, model: &str) -> Read {
 }
 
 /// A kept event stream's text folded as the live reader folds it: every
-/// record between blank lines.
+/// record the same decoder reads.
 pub(super) fn fold_sse(text: &str) -> StreamAcc {
     let mut acc = StreamAcc::default();
-    let text = text.replace("\r\n", "\n");
-    for record in text.split("\n\n") {
-        if let Some(ev) = parse_record(record) {
+    let mut text = text.replace("\r\n", "\n");
+    // A kept stream may stop without the last record's blank line.
+    text.push_str("\n\n");
+    for r in Decoder::default().push(text.as_bytes()) {
+        if let Some(ev) = audio_event(&r) {
             acc.apply(ev);
         }
     }

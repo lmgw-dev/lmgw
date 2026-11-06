@@ -2,8 +2,9 @@
 //! sends and reads, case by case, captured on the code before the llama.cpp
 //! egress existed, so every later step proves itself against it.
 //!
-//! Each case runs on both abstract upstreams, [`Up::Llama`] and
-//! [`Up::Generic`], and writes `tests/fixtures/egress/<case>__<upstream>.json`:
+//! Each case runs on every abstract upstream it applies to — [`Up::Llama`],
+//! [`Up::Generic`] and [`Up::Platform`] — and writes
+//! `tests/fixtures/egress/<case>__<upstream>.json`:
 //! the request's method, URL and headers (secrets as `<set>`), the body as its
 //! exact serialized string (and parsed beside it, for a readable diff), and
 //! where the case is about them, the count plan, `map_error` on recorded error
@@ -18,6 +19,13 @@
 //!   `LlamaCpp` + `LlamaServer` since WP2a (`Openai` + `LlamaServer` when
 //!   the corpus was captured). The
 //!   route corpus (`route_golden.rs`) stores its external row with it too.
+//! - [`GENERIC_SPELLING`] and [`PLATFORM_SPELLING`] are how an
+//!   OpenAI-compatible provider and the OpenAI platform are spelled (openai
+//!   egress design §10.1). Both were `Openai` + `Generic` when the
+//!   `openai_platform` cases were captured (WP0), so those cases are the
+//!   generic ones with another host and key. Since WP1 the generic upstream
+//!   is `OpenaiCompatible` (the compatible egress) and the platform `Openai`
+//!   (the platform egress), and both render every case as captured.
 //! - [`counted_body`] is the body the gate counts for a chat send.
 //! - [`exceed_context`] is the reader of llama-server's context refusal.
 //!
@@ -28,6 +36,7 @@
 
 mod chat;
 mod reasoning;
+mod structured;
 mod wire;
 
 use std::collections::BTreeSet;
@@ -57,21 +66,36 @@ pub(crate) const MODEL: &str = "the-model";
 pub(crate) const LLAMA_SPELLING: (Protocol, UpstreamKind) =
     (Protocol::LlamaCpp, UpstreamKind::LlamaServer);
 
+/// How an OpenAI-compatible provider (an aggregator, Groq, a box in front of
+/// llama-server) is spelled in a row.
+pub(crate) const GENERIC_SPELLING: (Protocol, UpstreamKind) =
+    (Protocol::OpenaiCompatible, UpstreamKind::Generic);
+
+/// How the OpenAI platform (api.openai.com) is spelled in a row.
+pub(crate) const PLATFORM_SPELLING: (Protocol, UpstreamKind) =
+    (Protocol::Openai, UpstreamKind::Generic);
+
+/// The cases that do not apply to the platform: OpenAI has no rerank route,
+/// and its egress offers none (openai egress design §3.2).
+const NOT_ON_PLATFORM: [&str; 3] = ["rerank", "rerank_top_n", "rerank_responses"];
+
 /// The abstract upstream a case runs on: its name in the fixture's file
 /// name, and the row it stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Up {
     Llama,
     Generic,
+    Platform,
 }
 
 impl Up {
-    pub(crate) const ALL: [Up; 2] = [Up::Llama, Up::Generic];
+    pub(crate) const ALL: [Up; 3] = [Up::Llama, Up::Generic, Up::Platform];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Up::Llama => "llama",
             Up::Generic => "generic",
+            Up::Platform => "openai_platform",
         }
     }
 
@@ -79,7 +103,13 @@ impl Up {
         match self {
             Up::Llama => llama_upstream(),
             Up::Generic => generic_upstream(),
+            Up::Platform => platform_upstream(),
         }
+    }
+
+    /// Whether `case` runs on this upstream.
+    pub(crate) fn runs(self, case: &Case) -> bool {
+        self != Up::Platform || !NOT_ON_PLATFORM.contains(&case.name)
     }
 }
 
@@ -115,15 +145,39 @@ pub(crate) fn llama_upstream() -> Upstream {
     }
 }
 
-/// A generic OpenAI-compatible provider with a key and an extra header.
+/// A generic OpenAI-compatible provider with a key and an extra header,
+/// spelled as [`GENERIC_SPELLING`].
 pub(crate) fn generic_upstream() -> Upstream {
+    let (protocol, kind) = GENERIC_SPELLING;
     Upstream {
         id: 2,
         name: "generic".into(),
-        protocol: Protocol::Openai,
-        kind: UpstreamKind::Generic,
+        protocol,
+        kind,
         base_url: "http://generic.test/v1".into(),
         api_key: Some("sk-generic".into()),
+        extra_headers: vec![("x-extra".into(), "one".into())],
+        timeout_ms: 30_000,
+        enabled: true,
+        expose_all: false,
+        expose_prefix: String::new(),
+        supports_responses: false,
+        llama: None,
+    }
+}
+
+/// The OpenAI platform with a key and an extra header, spelled as
+/// [`PLATFORM_SPELLING`]. Its host is not OpenAI's: no fixture may name a
+/// protocol, and the egress reads nothing from the host.
+pub(crate) fn platform_upstream() -> Upstream {
+    let (protocol, kind) = PLATFORM_SPELLING;
+    Upstream {
+        id: 3,
+        name: "platform".into(),
+        protocol,
+        kind,
+        base_url: "http://platform.test/v1".into(),
+        api_key: Some("sk-platform".into()),
         extra_headers: vec![("x-extra".into(), "one".into())],
         timeout_ms: 30_000,
         enabled: true,
@@ -157,9 +211,9 @@ pub(crate) fn keyless(up: &Upstream) -> Upstream {
 
 /// The chat body the gate counts for a send on `up` (`gate/fit.rs`,
 /// `gate/send.rs`, `proxy/count_messages.rs`): the llama.cpp egress's
-/// `chat_body` — the gate counts only llama.cpp rows. A generic row is never
-/// counted; its case compares the OpenAI egress's own body. Every chat case
-/// asserts it is byte for byte the posted body.
+/// `chat_body` — the gate counts only llama.cpp rows. A generic or platform
+/// row is never counted; its case compares its own egress's body. Every chat
+/// case asserts it is byte for byte the posted body.
 pub(crate) fn counted_body(
     ir: &ChatRequest,
     model: &str,
@@ -171,7 +225,11 @@ pub(crate) fn counted_body(
         Protocol::LlamaCpp => {
             lmgw_core::egress::llama_cpp::chat_body(ir, model, params, stream, up)
         }
-        _ => lmgw_core::egress::openai::chat_body(ir, model, params, stream),
+        Protocol::OpenaiCompatible => {
+            lmgw_core::egress::openai_compatible::chat_body(ir, model, params, stream)
+        }
+        Protocol::Openai => lmgw_core::egress::openai::chat_body(ir, model, params, stream, up),
+        Protocol::Anthropic | Protocol::Gemini => unreachable!("no corpus upstream speaks it"),
     }
 }
 
@@ -197,6 +255,7 @@ pub(crate) struct Case {
 /// Every case of the corpus.
 pub(crate) fn corpus() -> Vec<Case> {
     let mut out = chat::cases();
+    out.extend(structured::cases());
     out.extend(reasoning::cases());
     out.extend(wire::cases());
     out
@@ -281,13 +340,19 @@ fn the_egress_corpus_matches_its_fixtures() {
     let mut written = BTreeSet::new();
     let mut failures = Vec::new();
     for case in corpus() {
-        for up in Up::ALL {
+        for up in Up::ALL.into_iter().filter(|up| up.runs(&case)) {
             let name = format!("{}__{}", case.name, up.name());
             assert!(written.insert(name.clone()), "two cases named {name}");
             if let Err(e) = golden::check(DIR, &name, &render(&case, &up.upstream())) {
                 failures.push(e);
             }
         }
+    }
+    for name in NOT_ON_PLATFORM {
+        assert!(
+            corpus().iter().any(|c| c.name == name),
+            "NOT_ON_PLATFORM names '{name}', which is no case"
+        );
     }
     failures.extend(golden::stale(DIR, &written));
     golden::assert_all("egress", written.len(), failures);
@@ -298,7 +363,7 @@ fn the_egress_corpus_matches_its_fixtures() {
 #[test]
 fn no_egress_fixture_names_a_protocol() {
     for case in corpus() {
-        for up in Up::ALL {
+        for up in Up::ALL.into_iter().filter(|up| up.runs(&case)) {
             let got = render(&case, &up.upstream());
             for word in ["openai", "llama_cpp", "llama_server", "anthropic", "gemini"] {
                 assert!(

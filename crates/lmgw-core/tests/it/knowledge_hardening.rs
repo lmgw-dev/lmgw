@@ -209,6 +209,7 @@ pub(super) async fn world() -> (MockServer, SharedState, Arc<World>) {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -388,6 +389,7 @@ async fn a_failing_reranker_does_not_cost_the_vector_stage() {
         budget_tokens: None,
         params: Some(rerank_params(&state)),
         caller: None,
+        origin: Default::default(),
     };
     let ok = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(ok.traces[0].rerank_model.is_some(), "{:?}", ok.notes);
@@ -495,6 +497,7 @@ async fn rerank_pairs_over_the_reranker_limit_are_not_sent() {
         budget_tokens: None,
         params: Some(rerank_params(&state)),
         caller: None,
+        origin: Default::default(),
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(!r.excerpts.is_empty(), "{:?}", r.notes);

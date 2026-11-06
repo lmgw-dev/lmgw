@@ -5,7 +5,7 @@
 //! one line that adds it to the catalog and the one match arm that dispatches
 //! it (exactly like every other `*_set` tool already does).
 
-use super::{bool_p, enum_p, str_p, Builtin};
+use super::{bool_p, enum_p, fallback_p, str_p, Builtin};
 
 pub fn tool() -> Builtin {
     Builtin {
@@ -68,20 +68,12 @@ pub fn tool() -> Builtin {
                 ),
             ),
             (
-                "fallback_mode",
-                enum_p(
-                    "How this alias' one fallback resolves. 'inherit' reads the global GPU-hold \
-                     fallback; 'none' refuses (503 gpu_hold / gpu_deferred) rather than leave \
-                     the machine; 'alias' routes to 'fallback'. Default inherit.",
-                    &["inherit", "none", "alias"],
-                ),
-            ),
-            (
                 "fallback",
-                str_p(
-                    "The alias this candidate alias falls back to when fallback_mode is \
-                     'alias'. Must resolve, must not itself be local, and must not be another \
-                     candidate alias.",
+                fallback_p(
+                    "a chat model; it answers for the whole alias, a candidate's own row \
+                     fallback is never used through it. Without one, the alias refuses (503 \
+                     gpu_hold under the hold, 503 gpu_deferred for a background request) \
+                     rather than leave the machine",
                 ),
             ),
             (
@@ -106,7 +98,7 @@ pub fn tool() -> Builtin {
                 "clear",
                 str_p(
                     "Field names to reset to unset, comma-separated: capabilities_disabled, \
-                     notes.",
+                     fallback, notes.",
                 ),
             ),
         ],

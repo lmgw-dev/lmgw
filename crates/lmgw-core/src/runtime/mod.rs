@@ -36,11 +36,15 @@
 //! - [`registry`]: [`registry::Registry`] and `acquire` (§3.2) — what lmgw
 //!   believes is running, the one-start-per-model rule, and the RAII
 //!   in-flight claim that closes the reap-between-check-and-forward race.
+//! - [`cdi`]: lmgw's own CDI spec (machine-check design §3.6) — written with
+//!   the user's rights, kept true of the machine before every GPU start, and
+//!   the one source of the `--cdi-spec-dir` every GPU podman call carries.
 //! - This module: [`Class`] and the container naming/label scheme (§3.3).
 
 pub mod argv;
 pub mod audio;
 pub mod aux;
+pub mod cdi;
 pub mod descriptor;
 pub mod image;
 pub mod lifecycle;

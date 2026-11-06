@@ -130,10 +130,10 @@ from shell_check_voice import dictation_checks, popover_checks, realtime_checks 
 
 def preview_sandbox():
     """The chat's HTML preview frame's sandbox attribute, read from the page source."""
-    src = (REPO / "crates/lmgw-ui/src/pages/chat.rs").read_text()
+    src = (REPO / "crates/lmgw-chat-ui/src/chat_preview.rs").read_text()
     m = re.search(r'class="preview-frame"\s*sandbox="([^"]*)"', src)
     if not m:
-        raise RuntimeError("the preview frame's sandbox attribute was not found in pages/chat.rs")
+        raise RuntimeError("the preview frame's sandbox attribute was not found in lmgw-chat-ui chat_preview.rs")
     return m.group(1)
 
 

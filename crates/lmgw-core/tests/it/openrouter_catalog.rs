@@ -15,7 +15,7 @@
 //! - A held GPU decision row falls back to `jev` and is priced under `jev`.
 
 use lmgw_core::config::{
-    upstream_scope_key, AuxKind, HoldFallbackMode, PriceScope, PriceUnit, Protocol, UpstreamKind,
+    upstream_scope_key, AuxKind, PriceScope, PriceUnit, Protocol, UpstreamKind,
 };
 use lmgw_core::pricing::PriceSource;
 use lmgw_core::state::{AppState, SharedState};
@@ -83,7 +83,7 @@ async fn add_openrouter(state: &SharedState, mock: &MockServer) -> i64 {
         &state.db,
         &NewUpstream {
             name: "openrouter".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/api/v1", mock.uri()),
             api_key: Some("sk-or".into()),
@@ -107,6 +107,7 @@ async fn add_openrouter(state: &SharedState, mock: &MockServer) -> i64 {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -311,7 +312,7 @@ async fn an_upstream_that_refuses_the_parameter_names_the_option_and_lists_once_
         &state.db,
         &NewUpstream {
             name: "gemini-compat".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1beta/openai", mock.uri()),
             api_key: Some("g-key".into()),
@@ -514,8 +515,7 @@ async fn a_held_gpu_decision_row_falls_back_to_jev_and_is_priced_under_jev() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("jev".into()),
+            fallback: Some("jev".into()),
         },
     )
     .await

@@ -28,8 +28,8 @@ use crate::gate::{GateHeaders, MediaParts, OpenFailed, Opened, RouteCheck};
 use crate::ingress::anthropic::{parse_messages_request, parse_reasoning};
 use crate::ingress::ClientProto;
 use crate::ir::{
-    flatten_tool_result, tool_image_placeholder, ChatRequest, ContentPart, Params, Role,
-    ToolResultBlock, TEXT_ONLY_SLOT,
+    flatten_tool_result, tool_image_placeholder, AnthropicSent, ChatRequest, ContentPart, Params,
+    Role, Signer, ToolResultBlock, TEXT_ONLY_SLOT,
 };
 use crate::runtime::Class;
 use crate::state::SharedState;
@@ -86,12 +86,15 @@ pub async fn handle_messages_count_tokens(
     // The count is read: the container no longer has to stay up for it.
     drop(hold);
     match counted {
-        Ok(count) => {
+        Ok((count, context_management)) => {
             row.answered(200, None).await;
-            stamp_count(
-                headers.stamp(axum::Json(json!({"input_tokens": count.tokens})).into_response()),
-                &count,
-            )
+            let mut answer = json!({"input_tokens": count.tokens});
+            // Anthropic's own count of the input before the request's
+            // context edits (`original_input_tokens`), relayed as it came.
+            if let Some(cm) = context_management {
+                answer["context_management"] = cm;
+            }
+            stamp_count(headers.stamp(axum::Json(answer).into_response()), &count)
         }
         // A count that failed on the fallback still names it ([`Failed`]).
         Err(e) => {
@@ -117,7 +120,7 @@ pub async fn handle_messages_count_tokens(
 /// (a hold's fallback) named on it. A refusal comes back with the headers to
 /// stamp on it; `row` learns the route and whether the count brought its
 /// model up, as [`admit_counter`]'s does.
-async fn open_for_count(
+pub(super) async fn open_for_count(
     state: &SharedState,
     ctx: &RequestCtx,
     alias: &str,
@@ -125,9 +128,14 @@ async fn open_for_count(
     row: &mut Unanswered,
 ) -> Result<Opened, (GateHeaders, GatewayError)> {
     let refused = |f: OpenFailed| (f.headers, f.error);
-    let routed = crate::gate::resolve(state, alias, RouteCheck::Count("/v1/messages/count_tokens"))
-        .await
-        .map_err(refused)?;
+    let routed = crate::gate::resolve(
+        state,
+        alias,
+        RouteCheck::Count("/v1/messages/count_tokens"),
+        ctx.origin(),
+    )
+    .await
+    .map_err(refused)?;
     let routed = match parsed {
         Ok(ir) => routed
             .using(crate::gate::request_facets(
@@ -152,6 +160,11 @@ async fn open_for_count(
 /// that cannot see, the IR with its images as placeholders
 /// (`gate::fallback_images`), and on an Anthropic route the client's body
 /// with the same placeholders in it ([`unseen`]).
+///
+/// Beside the count, the `context_management` of Anthropic's answer
+/// (`original_input_tokens`, the input before the request's context edits)
+/// when it sent one: the Messages count answer relays it. No other route
+/// has one.
 async fn count_messages_route(
     state: &SharedState,
     ctx: &RequestCtx,
@@ -159,21 +172,78 @@ async fn count_messages_route(
     parsed: Result<ChatRequest, GatewayError>,
     route: &Route,
     hold: Option<&LocalHold>,
-) -> Result<Count, GatewayError> {
+) -> Result<(Count, Option<Value>), GatewayError> {
     match route.upstream.protocol {
         Protocol::Anthropic => {
             let mut body = body.clone();
             // A Gemini step's thought signatures in the call ids stay with
             // Gemini, and out of the count (gateway design §7.1).
             crate::ir::wire_call_ids_in_messages_body(&mut body);
-            with_lmgw_reasoning(&mut body, ctx, route);
+            with_lmgw_reasoning(state, &mut body, ctx, route).await?;
             let requested = body
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let requested = requested.to_string();
             unseen::counted(state, route, &requested, &mut body).await;
+            let answer = send_count_answer(route, hold, |r| {
+                crate::egress::anthropic::count_messages_request(
+                    &state.http,
+                    &r.upstream,
+                    &r.upstream_model,
+                    &body,
+                    &ctx.anthropic_beta,
+                )
+            })
+            .await?;
+            let n = crate::egress::for_protocol(Protocol::Anthropic).parse_count(&answer)?;
+            let context_management = serde_json::from_slice::<Value>(&answer)
+                .ok()
+                .and_then(|v| v.get("context_management").cloned())
+                .filter(|c| !c.is_null());
+            Ok((Count::exact(n), context_management))
+        }
+        _ => Ok((
+            count_ir_route(state, ctx, parsed?, route, hold).await?,
+            None,
+        )),
+    }
+}
+
+/// The count of a request read into the IR, on the route the gate settled
+/// on: the module doc's table, an Anthropic route counting the Messages body
+/// its send would render ([`crate::egress::anthropic::count_body`]) — what
+/// `/v1/responses/input_tokens` counts on every route, and
+/// `/v1/messages/count_tokens` on every route but an Anthropic one, which
+/// passes its client's own body through.
+pub(super) async fn count_ir_route(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    parsed: ChatRequest,
+    route: &Route,
+    hold: Option<&LocalHold>,
+) -> Result<Count, GatewayError> {
+    // Every route but an Anthropic one is sent a compaction block as
+    // Anthropic makes of it (`ir::compaction::folded`), and counted so: the
+    // summary, and nothing before the block.
+    let parsed = match route.upstream.protocol {
+        Protocol::Anthropic => parsed,
+        _ => crate::ir::compaction::folded(&parsed).into_owned(),
+    };
+    match route.upstream.protocol {
+        Protocol::Anthropic => {
+            let ir = crate::gate::fallback_images::counted(state, route, &parsed).await;
+            let mut params = resolve_params(&ir, ctx, route);
+            // The send's reasoning fit: the off in the form this route took
+            // before.
+            super::reasoning_fit::fit(state, route, &mut params).await;
             let n = send_count(route, hold, |r| {
+                let body = crate::egress::anthropic::count_body(
+                    &ir,
+                    &r.upstream,
+                    &r.upstream_model,
+                    &params,
+                )?;
                 crate::egress::anthropic::count_messages_request(
                     &state.http,
                     &r.upstream,
@@ -186,7 +256,6 @@ async fn count_messages_route(
             Ok(Count::exact(n))
         }
         Protocol::Gemini => {
-            let parsed = parsed?;
             let ir = crate::gate::fallback_images::counted(state, route, &parsed).await;
             let params = resolve_params(&ir, ctx, route);
             let n = send_count(route, hold, |r| {
@@ -201,8 +270,7 @@ async fn count_messages_route(
             .await?;
             Ok(Count::exact(n))
         }
-        Protocol::Openai | Protocol::LlamaCpp => {
-            let parsed = parsed?;
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
             let ir = crate::gate::fallback_images::counted(state, route, &parsed).await;
             // Only a local chat container is counted on its template: a remote
             // llama-server may want the upstream's key, which the gate's
@@ -217,7 +285,7 @@ async fn count_messages_route(
                     let mut count =
                         count_text_route(state, &flatten_for_count(&ir), route, hold).await?;
                     count.flag(Approx::Flattened);
-                    let media = crate::gate::media_parts(&ir);
+                    let media = crate::gate::media_parts(&ir, Some(&route.upstream));
                     if media.images > 0 || media.audio > 0 {
                         count.flag(Approx::MediaOmitted);
                     }
@@ -264,7 +332,7 @@ async fn count_on_template(
         .as_ref()
         .is_some_and(|l| l.tool_images.allowed());
 
-    let user = crate::gate::media_parts(ir);
+    let user = crate::gate::media_parts(ir, Some(&route.upstream));
     let media = MediaParts {
         images: user.images.saturating_add(decided.images),
         ..user
@@ -373,29 +441,54 @@ fn without_media(ir: &ChatRequest, images: bool, tool_images: bool) -> ChatReque
 /// rest of the client's `output_config` (a `format`) is part of the request
 /// being counted, and `effort` is merged into it rather than taking its place
 /// (review R3 #6).
-fn with_lmgw_reasoning(body: &mut Value, ctx: &RequestCtx, route: &Route) {
-    if ctx.reasoning_control().is_none() && route.param_defaults.reasoning.is_none() {
-        return;
-    }
+///
+/// An off, wherever it comes from (the client's `thinking: disabled`
+/// included), goes through the reasoning fit as a send's does
+/// ([`super::reasoning_fit::fit`]): the form this model took before is the
+/// one counted, so a route that refuses the plain off does not refuse the
+/// count. A `thinking` type the send refuses (one lmgw does not know) is
+/// refused here too.
+///
+/// The client's `thinking.display` goes back into the thinking lmgw renders
+/// when its type takes one, as the send puts it there.
+async fn with_lmgw_reasoning(
+    state: &SharedState,
+    body: &mut Value,
+    ctx: &RequestCtx,
+    route: &Route,
+) -> Result<(), GatewayError> {
+    let no_tiers = ctx.reasoning_control().is_none() && route.param_defaults.reasoning.is_none();
     let tiers = ChatRequest {
         model_alias: String::new(),
         messages: Vec::new(),
         params: Params {
-            reasoning: parse_reasoning(body),
+            reasoning: parse_reasoning(body)?,
             ..Params::default()
         },
         tools: Vec::new(),
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
-    let control = resolve_params(&tiers, ctx, route).reasoning_control();
+    let mut resolved = resolve_params(&tiers, ctx, route);
+    if no_tiers && resolved.reasoning_control().enabled != Some(false) {
+        return Ok(());
+    }
+    super::reasoning_fit::fit(state, route, &mut resolved).await;
+    let control = resolved.reasoning_control();
     let Some(obj) = body.as_object_mut().filter(|_| !control.is_empty()) else {
-        return;
+        return Ok(());
     };
-    obj.remove("thinking");
+    let display = obj
+        .remove("thinking")
+        .and_then(|t| t.get("display").cloned())
+        .filter(|d| !d.is_null());
     // `apply_reasoning` builds a fresh body's `output_config`, so the client's
     // is taken out first and merged back around whatever it sets. One that
     // is not an object stays where it was, for the provider to refuse.
@@ -411,6 +504,7 @@ fn with_lmgw_reasoning(body: &mut Value, ctx: &RequestCtx, route: &Route) {
         None => None,
     };
     crate::egress::anthropic::apply_reasoning(obj, &control);
+    crate::egress::anthropic::apply_display(obj, display.as_ref());
     if let Some(mut config) = kept {
         if let Some(Value::Object(set)) = obj.remove("output_config") {
             config.extend(set);
@@ -419,6 +513,7 @@ fn with_lmgw_reasoning(body: &mut Value, ctx: &RequestCtx, route: &Route) {
             obj.insert("output_config".into(), Value::Object(config));
         }
     }
+    Ok(())
 }
 
 /// The request as plain text, for a backend that can only count a string
@@ -427,8 +522,28 @@ fn with_lmgw_reasoning(body: &mut Value, ctx: &RequestCtx, route: &Route) {
 /// their own; each message as `role: ` followed by its text and reasoning,
 /// each tool call as `name(<args JSON>)` and each tool result's text (as the
 /// OpenAI egress flattens it). Media parts contribute nothing; the caller
-/// flags them.
+/// flags them. A compaction block in effect counts as what an upstream
+/// reads (`ir::compaction::folded`): its summary, and nothing before it,
+/// which Anthropic drops too.
 pub(crate) fn flatten_for_count(ir: &ChatRequest) -> String {
+    flatten(ir, None)
+}
+
+/// [`flatten_for_count`] of what `ir` sends, for lmgw's own estimates
+/// (`proxy::stop`): on an Anthropic route (`anthropic`, the row's scope,
+/// [`estimate::anthropic_row`]) what the row is sent and nothing else
+/// ([`AnthropicSent`]): a verbatim block's countable text and a text
+/// block's citations too, which only that route is sent ([`estimate`]),
+/// and none of what another scope signed. What it cannot count is
+/// [`estimate::uncounted`]'s.
+pub(crate) fn estimate_text(ir: &ChatRequest, anthropic: Option<&Signer>) -> String {
+    flatten(ir, anthropic)
+}
+
+/// The flattened request; `anthropic` counts what the Anthropic row at that
+/// scope is sent ([`estimate_text`]).
+fn flatten(ir: &ChatRequest, anthropic: Option<&Signer>) -> String {
+    let ir = &*crate::ir::compaction::folded(ir);
     let mut blocks: Vec<String> = Vec::new();
     if let Some(system) = ir.system_text() {
         blocks.push(system);
@@ -445,14 +560,27 @@ pub(crate) fn flatten_for_count(ir: &ChatRequest) -> String {
         let parts: Vec<String> = m
             .content
             .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } | ContentPart::Reasoning { text, .. } => {
-                    Some(text.clone())
-                }
-                ContentPart::ToolUse { name, args, .. } => Some(format!("{name}({args})")),
-                ContentPart::ToolResult { content, .. } => Some(flatten_tool_result(content).0),
-                ContentPart::Image { .. } | ContentPart::Audio { .. } => None,
-            })
+            .filter_map(
+                |p| match (p, anthropic.map(|row| AnthropicSent::of(p, row))) {
+                    // Not sent to this Anthropic row (another scope signed it,
+                    // an unsigned trace, an empty text): not counted.
+                    (_, Some(AnthropicSent::Nothing)) => None,
+                    // A cited text's citations go to an Anthropic route only,
+                    // and only to the scope that answered with them.
+                    (ContentPart::Text { text, .. }, Some(sent)) => {
+                        let mut out = vec![text.clone()];
+                        if sent == AnthropicSent::Whole {
+                            if let Some(row) = anthropic {
+                                AnthropicSent::citations(p, row)
+                                    .iter()
+                                    .for_each(|c| estimate::citation_text(c, &mut out));
+                            }
+                        }
+                        Some(out.join("\n"))
+                    }
+                    (p, sent) => flat_part(p, sent.is_some()),
+                },
+            )
             .filter(|s| !s.is_empty())
             .collect();
         if parts.is_empty() {
@@ -469,6 +597,43 @@ pub(crate) fn flatten_for_count(ir: &ChatRequest) -> String {
     blocks.join("\n\n")
 }
 
+/// One part's text, as [`flatten`] counts it; `anthropic` when the part is
+/// sent to an Anthropic route.
+fn flat_part(p: &ContentPart, anthropic: bool) -> Option<String> {
+    match p {
+        ContentPart::Text { text, .. }
+        | ContentPart::Refusal { text }
+        | ContentPart::Reasoning { text, .. } => Some(text.clone()),
+        ContentPart::ToolUse { name, args, .. } => Some(format!("{name}({args})")),
+        // On an Anthropic route its verbatim blocks go as written: their
+        // countable text; elsewhere their text form, as the egress
+        // flattens them ([`crate::ir::AnthropicBlock::tool_text`]).
+        ContentPart::ToolResult { content, .. } if anthropic => Some(
+            content
+                .iter()
+                .map(|b| match b {
+                    ToolResultBlock::AnthropicBlock(b) => estimate::block_text(b),
+                    other => flatten_tool_result(std::slice::from_ref(other)).0,
+                })
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        ContentPart::ToolResult { content, .. } => Some(flatten_tool_result(content).0),
+        // Folded to text above.
+        ContentPart::Compaction(c) => c.summary.clone(),
+        // Sent only to an Anthropic route: its countable text there.
+        ContentPart::AnthropicBlock(b) if anthropic => Some(estimate::block_text(b)),
+        // Media, and a verbatim block off an Anthropic route (not
+        // sent); `/v1/messages/count_tokens` on an Anthropic route
+        // counts the body itself.
+        ContentPart::Image { .. } | ContentPart::Audio { .. } | ContentPart::AnthropicBlock(_) => {
+            None
+        }
+    }
+}
+
+pub(crate) mod estimate;
 mod unseen;
 
 #[cfg(test)]
@@ -541,7 +706,7 @@ mod tests {
 
         let kept = without_media(&req, false, false);
         assert_eq!(
-            crate::gate::media_parts(&kept),
+            crate::gate::media_parts(&kept, None),
             MediaParts {
                 images: 1,
                 audio: 0
@@ -550,7 +715,10 @@ mod tests {
         assert_eq!(kept.messages[0].content.len(), 2);
 
         let text_only = without_media(&req, true, false);
-        assert_eq!(crate::gate::media_parts(&text_only), MediaParts::default());
+        assert_eq!(
+            crate::gate::media_parts(&text_only, None),
+            MediaParts::default()
+        );
         assert_eq!(
             text_only.messages[0].content,
             vec![ContentPart::text("Listen and look.")]
@@ -646,5 +814,43 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}]
         })));
         assert_eq!(text, "ping\n{}\n\nuser: hi");
+    }
+
+    /// The estimates (a stopped call's prompt, the gate's media bound) count
+    /// past a compaction block in effect, as every upstream reads it: the
+    /// summary, and neither the text nor the image before it.
+    #[test]
+    fn estimates_count_past_a_compaction_block() {
+        let req = ir(json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                 "data": "iVBORw0KGgo="}},
+                    {"type": "text", "text": "OLD QUESTION"}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "compaction", "content": "S."},
+                    {"type": "text", "text": "a1"}
+                ]},
+                {"role": "user", "content": "q2"}
+            ]
+        }));
+        assert_eq!(
+            flatten_for_count(&req),
+            "user: S.\n\nassistant: a1\n\nuser: q2"
+        );
+        assert_eq!(crate::gate::media_parts(&req, None), MediaParts::default());
+        let (u, _) = crate::proxy::stopped_usage(
+            crate::ir::Usage::default(),
+            None,
+            &req,
+            0,
+            Some(&Signer::new("https://api.anthropic.com")),
+        );
+        assert_eq!(
+            u.prompt_tokens,
+            Some(crate::extract::approx_tokens("user: S.\n\nassistant: a1\n\nuser: q2") as u64)
+        );
     }
 }

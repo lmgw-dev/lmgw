@@ -394,8 +394,7 @@ fn local_row(id: &str, vision: bool, ctx: Option<i64>, n_predict: Option<i64>) -
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: Some(json!({
             "capabilities": {
                 "vision": vision,

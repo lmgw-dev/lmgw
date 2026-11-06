@@ -24,7 +24,7 @@ use super::extras::{is_full_sha, repo_key, ExtrasPicker};
 use super::reports::{MergeReportView, ResolvedView};
 use super::{sha7, use_bk};
 use crate::backends_api as api;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
 use crate::widgets::{
     filter_words, matches_word, use_modal, Field, Modal, ModalFooter, ModalSize, Popover, Select,
@@ -240,8 +240,8 @@ pub fn disk_words(last_size: Option<u64>, free: Option<u64>, dir: &str) -> Optio
             f < l,
             format!(
                 "The last run's image took {}; {} free on the builds disk{at}.{}",
-                human_bytes(l),
-                human_bytes(f),
+                fmt_bytes(l),
+                fmt_bytes(f),
                 if f < l {
                     " That is less than the last run took — the next one may run out of space."
                 } else {
@@ -253,12 +253,12 @@ pub fn disk_words(last_size: Option<u64>, free: Option<u64>, dir: &str) -> Optio
             false,
             format!(
                 "The last run's image took {} — a new run needs about as much again. Free space on the builds disk could not be read.",
-                human_bytes(l)
+                fmt_bytes(l)
             ),
         )),
         (None, Some(f)) => Some((
             false,
-            format!("{} free on the builds disk{at}.", human_bytes(f)),
+            format!("{} free on the builds disk{at}.", fmt_bytes(f)),
         )),
         (None, None) => None,
     }
@@ -1630,7 +1630,7 @@ fn BuildForm(seed: EditorSeed, open: RwSignal<bool>) -> impl IntoView {
                                 />
                                 "Keep podman's layer cache"
                             </label>
-                            <div class="field-hint">"off: no multi-GB intermediates are left behind"</div>
+                            <div class="field-hint">"off: no multi-GiB intermediates are left behind"</div>
                         </div>
                         <Field
                             label="Keep runs"

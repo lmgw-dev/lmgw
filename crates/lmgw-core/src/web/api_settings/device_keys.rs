@@ -20,6 +20,7 @@ use serde_json::{Map, Value};
 
 use super::bad_request;
 use crate::config::{ApiKey, ApiKeyKind, DeviceCredential, DeviceLink};
+use crate::detached::detached;
 use crate::devices::{self, RevokeReason};
 use crate::ops::KeyPatch;
 use crate::principal::Refusal;
@@ -98,33 +99,48 @@ pub(super) async fn create(
     let local_only = local_only_arg(args)?.unwrap_or(false);
     let urls = urls_for(st, patch.urls.as_deref(), local_only)?;
     let fp = listening(st)?;
-    let note = patch.note.as_deref().map(str::trim).unwrap_or_default();
+    let note = patch
+        .note
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
     let (token, new) = new_token(st);
-    let id = store::insert_paired_device(
-        &st.db,
-        &name,
-        &policy,
-        (hosts_label, self_admin),
-        note,
-        (&urls, local_only),
-        &new,
-    )
-    .await
-    .map_err(|e| bad_request(e.to_string()))?;
-    // Past the insert the token exists and only this answer holds it: a
-    // reload that fails is said beside it, never a refusal that throws it
-    // away (review W2-6).
-    let reloaded = st.reload_snapshot().await.err();
-    let paired = minted(st, id, &name, (urls, local_only), &fp, &token, &new).await;
-    Ok(dto::DevicePaired {
-        message: format!(
-            "device '{bare}' is waiting for its device: open or copy the link now, it is not \
-             shown again{}{}",
-            reach_note(st, &paired.urls, local_only),
-            unloaded(reloaded.as_ref())
-        ),
-        ..paired
+    let hosts_label = hosts_label.map(str::to_string);
+    let task_st = st.clone();
+    let bare = bare.to_string();
+    // The insert and everything after it run as a task of their own
+    // (*changed 2026-10-23*, see [`crate::detached::detached`]): the token exists
+    // once the row does, and only this answer holds it.
+    detached("pairing the device", async move {
+        let st = &task_st;
+        let id = store::insert_paired_device(
+            &st.db,
+            &name,
+            &policy,
+            (hosts_label.as_deref(), self_admin),
+            &note,
+            (&urls, local_only),
+            &new,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+        // Past the insert the token exists and only this answer holds it: a
+        // reload that fails is said beside it, never a refusal that throws it
+        // away (review W2-6).
+        let reloaded = st.reload_snapshot().await.err();
+        let paired = minted(st, id, &name, (urls, local_only), &fp, &token, &new).await;
+        Ok(dto::DevicePaired {
+            message: format!(
+                "device '{bare}' is waiting for its device: open or copy the link now, it is \
+                 not shown again{}{}",
+                reach_note(st, &paired.urls, local_only),
+                unloaded(reloaded.as_ref())
+            ),
+            ..paired
+        })
     })
+    .await?
 }
 
 /// `device_token { id, end_current?, local_only?, urls? }` → a new pairing
@@ -158,60 +174,69 @@ pub(super) async fn token(
     };
     let fp = listening(st)?;
     let (token, new) = new_token(st);
-    let issued = store::new_device_token(
-        &st.db,
-        key.id,
-        &new,
-        end_current,
-        link.as_ref().map(|(u, l)| (u.as_slice(), *l)),
-    )
-    .await
-    .map_err(|e| bad_request(e.to_string()))?
-    .ok_or_else(|| {
-        bad_request(format!(
-            "device {} disappeared before it could get a new token — nothing was changed",
-            key.id
-        ))
-    })?;
-    let reloaded = st.reload_snapshot().await.err();
-    // The key it held is dead in the table: what it opened ends now, whether
-    // or not the reload succeeded (review W2-6).
-    if issued.ended_key.is_some() {
-        if reloaded.is_some() {
-            st.key_written(key.id, crate::state::KeyWritten::Pending);
+    let (task_st, key) = (st.clone(), key.clone());
+    // The write and its tail are a task of their own (*changed 2026-10-23*,
+    // see [`crate::detached::detached`]): a dropped request must not leave the key it
+    // ended serving, nor its connections open.
+    detached("giving the device a new pairing token", async move {
+        let (st, key) = (&task_st, &key);
+        let issued = store::new_device_token(
+            &st.db,
+            key.id,
+            &new,
+            end_current,
+            link.as_ref().map(|(u, l)| (u.as_slice(), *l)),
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?
+        .ok_or_else(|| {
+            bad_request(format!(
+                "device {} disappeared before it could get a new token — nothing was changed",
+                key.id
+            ))
+        })?;
+        let reloaded = st.reload_snapshot().await.err();
+        // The key it held is dead in the table: what it opened ends now,
+        // whether or not the reload succeeded (review W2-6).
+        if issued.ended_key.is_some() {
+            if reloaded.is_some() {
+                st.key_written(key.id, crate::state::KeyWritten::Pending);
+            }
+            st.devices.revocations.revoke(key.id, RevokeReason::Rotated);
         }
-        st.devices.revocations.revoke(key.id, RevokeReason::Rotated);
-    }
-    let (urls, local_only) = link.unwrap_or_else(|| (key.link.urls.clone(), key.link.local_only));
-    let paired = minted(st, key.id, &key.name, (urls, local_only), &fp, &token, &new).await;
-    let bare = devices::short_name(&key.name);
-    let current = match DeviceLink::credential(&key.key_hash) {
-        DeviceCredential::Key(_) if issued.ended_key.is_some() => {
-            " Its current key is ended: its connections are closed."
-        }
-        DeviceCredential::Key(_) if key.link.confirmed_at.is_some() => {
-            " Its current key works until you confirm the key the device enrols with this \
-             link; the same key enrolling again only renews its certificate."
-        }
-        DeviceCredential::Key(_) => {
-            " Its enrolled key was never confirmed; the key the device enrols with this link \
-             replaces it and waits for your confirmation."
-        }
-        DeviceCredential::V1 => {
-            " It was paired before TLS: its old key opens nothing, so there was no key to end; \
-             the device pairs again with this link."
-        }
-        DeviceCredential::Pending => "",
-    };
-    Ok(dto::DevicePaired {
-        message: format!(
-            "a new pairing link for device '{bare}': open or copy it now, it is not shown \
-             again.{current}{}{}",
-            reach_note(st, &paired.urls, local_only),
-            unloaded(reloaded.as_ref())
-        ),
-        ..paired
+        let (urls, local_only) =
+            link.unwrap_or_else(|| (key.link.urls.clone(), key.link.local_only));
+        let paired = minted(st, key.id, &key.name, (urls, local_only), &fp, &token, &new).await;
+        let bare = devices::short_name(&key.name);
+        let current = match DeviceLink::credential(&key.key_hash) {
+            DeviceCredential::Key(_) if issued.ended_key.is_some() => {
+                " Its current key is ended: its connections are closed."
+            }
+            DeviceCredential::Key(_) if key.link.confirmed_at.is_some() => {
+                " Its current key works until you confirm the key the device enrols with this \
+                 link; the same key enrolling again only renews its certificate."
+            }
+            DeviceCredential::Key(_) => {
+                " Its enrolled key was never confirmed; the key the device enrols with this link \
+                 replaces it and waits for your confirmation."
+            }
+            DeviceCredential::V1 => {
+                " It was paired before TLS: its old key opens nothing, so there was no key to \
+                 end; the device pairs again with this link."
+            }
+            DeviceCredential::Pending => "",
+        };
+        Ok(dto::DevicePaired {
+            message: format!(
+                "a new pairing link for device '{bare}': open or copy it now, it is not shown \
+                 again.{current}{}{}",
+                reach_note(st, &paired.urls, local_only),
+                unloaded(reloaded.as_ref())
+            ),
+            ..paired
+        })
     })
+    .await?
 }
 
 /// `device_token_end { id }`: end device `key`'s pairing token if it is
@@ -221,15 +246,24 @@ pub(super) async fn token_end(
     st: &SharedState,
     key: &ApiKey,
 ) -> Result<dto::DeviceTokenEnded, Refusal> {
-    let ended = store::end_device_token(&st.db, key.id, Utc::now())
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    st.devices.pending.end(key.id);
-    st.devices.minted.forget(key.id);
+    let (task_st, id) = (st.clone(), key.id);
+    // Task of its own from the write on (*changed 2026-10-23*, see
+    // [`crate::detached::detached`]): an ended token whose link stays pending would
+    // still be handed out.
+    let ended = detached("ending the pairing token", async move {
+        let st = &task_st;
+        let ended = store::end_device_token(&st.db, id, Utc::now())
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
+        st.devices.pending.end(id);
+        st.devices.minted.forget(id);
+        if ended {
+            st.telemetry.keys(id, "token");
+        }
+        Ok::<_, Refusal>(ended)
+    })
+    .await??;
     let bare = devices::short_name(&key.name);
-    if ended {
-        st.telemetry.keys(key.id, "token");
-    }
     Ok(dto::DeviceTokenEnded {
         ok: true,
         id: key.id,
@@ -271,18 +305,24 @@ pub(super) async fn confirm(
             "confirm_code is eight hex digits, as the device shows it (e.g. 7F3A-91C2)",
         ));
     };
-    let confirmed = store::confirm_device(&st.db, key.id, &code_, Utc::now())
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-    let (key_hash, replaced, message) = match confirmed {
-        store::Confirmed::Now { key_hash, replaced } => {
+    let (task_st, key_id, key_name, ask) = (st.clone(), key.id, key.name.clone(), code_.clone());
+    // The commit and its tail are a task of their own (*changed 2026-10-23*,
+    // see [`crate::detached::detached`]): a dropped request would leave the snapshot
+    // serving the key that was replaced and its connections open.
+    let confirmed = detached("confirming the device", async move {
+        let st = &task_st;
+        let bare = devices::short_name(&key_name);
+        let confirmed = store::confirm_device(&st.db, key_id, &ask, Utc::now())
+            .await
+            .map_err(|e| bad_request(e.to_string()))?;
+        if let store::Confirmed::Now { key_hash, replaced } = &confirmed {
             if let Err(e) = st.reload_snapshot().await {
                 tracing::warn!("device '{bare}' was confirmed, and the reload failed ({e})");
                 // A kept key ended in the table: the snapshot must not keep
                 // serving it until the next reload.
                 if replaced.is_some() {
                     st.key_written(
-                        key.id,
+                        key_id,
                         crate::state::KeyWritten::Confirmed {
                             key_hash: key_hash.clone(),
                         },
@@ -290,9 +330,18 @@ pub(super) async fn confirm(
                 }
             }
             if replaced.is_some() {
-                st.devices.revocations.revoke(key.id, RevokeReason::Rotated);
+                st.devices.revocations.revoke(key_id, RevokeReason::Rotated);
+                // The waiting key's app id is the row's now (device
+                // transfers design I3, I28).
+                crate::transfers::app_id_settled(st, key_id, &key_name).await;
             }
-            st.telemetry.keys(key.id, "confirmed");
+            st.telemetry.keys(key_id, "confirmed");
+        }
+        Ok::<_, Refusal>(confirmed)
+    })
+    .await??;
+    let (key_hash, replaced, message) = match confirmed {
+        store::Confirmed::Now { key_hash, replaced } => {
             let message = if replaced.is_some() {
                 format!(
                     "device '{bare}' is confirmed with its new key: its next request is served, \
@@ -356,35 +405,44 @@ pub(super) async fn ca_rotate(st: &SharedState) -> Result<dto::DeviceCaRotated, 
              turned on",
         ));
     }
-    let new = st
-        .devices
-        .trust
-        .replace(&st.data_dir)
-        .await
-        .map_err(|e| Refusal {
-            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            code: code::DEVICES_CA_UNAVAILABLE,
-            message: format!("the device CA was not rotated: {e}"),
-        })?;
-    let reset = store::reset_devices_for_new_ca(&st.db, Utc::now())
-        .await
-        .map_err(|e| {
-            bad_request(format!(
-                "the device CA was rotated (fp {}), and the devices could not be reset: {e} — \
-                 they fail to verify lmgw already; rotate again or delete them",
-                new.fp()
-            ))
-        })?;
-    let reloaded = st.reload_snapshot().await.err();
-    devices::tokens::sync(st).await;
-    st.devices.minted.forget_all();
-    for (id, _) in &reset {
-        if reloaded.is_some() {
-            st.key_written(*id, crate::state::KeyWritten::Pending);
+    let task_st = st.clone();
+    // The rotation and its tail are a task of their own (*changed
+    // 2026-10-23*, see [`crate::detached::detached`]): the new CA is on disk once it
+    // is replaced, and the devices it orphaned must stop connecting.
+    let (new, reset, reloaded) = detached("rotating the device CA", async move {
+        let st = &task_st;
+        let new = st
+            .devices
+            .trust
+            .replace(&st.data_dir)
+            .await
+            .map_err(|e| Refusal {
+                status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                code: code::DEVICES_CA_UNAVAILABLE,
+                message: format!("the device CA was not rotated: {e}"),
+            })?;
+        let reset = store::reset_devices_for_new_ca(&st.db, Utc::now())
+            .await
+            .map_err(|e| {
+                bad_request(format!(
+                    "the device CA was rotated (fp {}), and the devices could not be reset: {e} \
+                     — they fail to verify lmgw already; rotate again or delete them",
+                    new.fp()
+                ))
+            })?;
+        let reloaded = st.reload_snapshot().await.err();
+        devices::tokens::sync(st).await;
+        st.devices.minted.forget_all();
+        for (id, _) in &reset {
+            if reloaded.is_some() {
+                st.key_written(*id, crate::state::KeyWritten::Pending);
+            }
+            st.devices.revocations.revoke(*id, RevokeReason::Rotated);
+            st.telemetry.keys(*id, "rotated");
         }
-        st.devices.revocations.revoke(*id, RevokeReason::Rotated);
-        st.telemetry.keys(*id, "rotated");
-    }
+        Ok::<_, Refusal>((new, reset, reloaded))
+    })
+    .await??;
     let names: Vec<String> = reset
         .iter()
         .map(|(_, n)| devices::short_name(n).to_string())
@@ -523,7 +581,7 @@ async fn minted(
     token: &str,
     new: &store::NewToken,
 ) -> dto::DevicePaired {
-    st.devices.pending.set(id, new.expires_at);
+    st.devices.pending.set(id, &new.hash, new.expires_at);
     let link = devices::pairing_link(devices::short_name(name), &urls, fp, token);
     // The one link lmgw's own window may hand to the desktop for it (W2-1).
     st.devices.minted.register(id, &link, new.expires_at);

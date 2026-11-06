@@ -1,59 +1,9 @@
-//! Local/aux/audio/image model rows, and the shared GPU-hold fallback mode
-//! they all carry.
+//! Local/aux/audio/image model rows.
 
+use lmgw_api_types::chat_media::{PreviewMode, PromptStyle};
 use serde::{Deserialize, Serialize};
 
 use super::*;
-
-/// Per-model override of the GPU hold's fallback lookup: whether a held
-/// request against this row falls back to the global chat alias, refuses
-/// outright, or names its own alias.
-// Two columns rather than a `""` sentinel on `hold_fallback` alone: every
-// patch struct in this crate already treats an empty string as "not
-// supplied" (`ops::opt`), so a single `Option<String>` could not distinguish
-// "inherit" from "explicitly none" from "not touched by this patch" at the
-// same time. `Default` is `Inherit` so a row that has never touched this
-// keeps behaving exactly as the global setting says.
-// Design: 2026-09-04-gpu-hold-design.md §2/§3.2.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum HoldFallbackMode {
-    /// Chat: fall through to `settings.hold.fallback_alias`. Aux/audio: no
-    /// fallback — they never inherit the global (a different embedding
-    /// model silently corrupts a vector index).
-    #[default]
-    Inherit,
-    /// Refuse a held request against this row even if a global fallback is
-    /// configured.
-    None,
-    /// Use this row's own `hold_fallback` alias.
-    Alias,
-}
-
-impl HoldFallbackMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Inherit => "inherit",
-            Self::None => "none",
-            Self::Alias => "alias",
-        }
-    }
-}
-
-impl std::str::FromStr for HoldFallbackMode {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "inherit" => Ok(Self::Inherit),
-            "none" => Ok(Self::None),
-            "alias" => Ok(Self::Alias),
-            _ => Err(()),
-        }
-    }
-}
 
 /// A local llama.cpp model, served by llama-server in its own container
 /// (per-model-containers §3.1).
@@ -87,16 +37,13 @@ pub struct LocalModel {
     pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch (§3.1, §3.4).
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2). `Inherit` reads
-    /// `settings.hold.fallback_alias` (this is the chat class, so it does
-    /// inherit); `Alias` reads [`Self::hold_fallback`] instead.
+    /// The one fallback (openai egress design §14.2): the model or alias
+    /// that answers whenever this row cannot — the GPU hold, a benchmark,
+    /// VRAM outside lmgw, a deferred background request, a disabled row —
+    /// as written, trimmed. `None` = no fallback. Re-validated at use, never
+    /// trusted from save time ([`Snapshot::fallback_of`]).
     #[serde(default)]
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// The alias to route to while the GPU is held, when
-    /// [`Self::hold_fallback_mode`] is `Alias`. Meaningless under any other
-    /// mode — [`Snapshot::hold_fallback_for`] never reads it then.
-    #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// Owner override of the derived `/v1/models` capability facts
     /// (model-capabilities design §7): a JSON object with optional keys
     /// `capabilities` (deep-merged over what the GGUF/config derives),
@@ -264,17 +211,13 @@ pub struct AuxModel {
     pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch (§3.1, §3.4).
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2). `Inherit` means "no
-    /// fallback" for this class — aux models never inherit the global chat
-    /// alias, because a different embedding model silently corrupts a vector
-    /// index. Only `Alias` (reading [`Self::hold_fallback`]) gives this row
-    /// one.
+    /// The one fallback (openai egress design §14.2): the model or alias
+    /// that answers whenever this row cannot — the GPU hold, a benchmark,
+    /// VRAM outside lmgw, a deferred background request, a disabled row —
+    /// as written, trimmed. `None` = no fallback. Re-validated at use, never
+    /// trusted from save time ([`Snapshot::fallback_of`]).
     #[serde(default)]
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// The alias to route to while the GPU is held, when
-    /// [`Self::hold_fallback_mode`] is `Alias`.
-    #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
 }
 
 /// A model served by the audio.cpp container (`audiocpp_server`). One entry
@@ -369,15 +312,13 @@ pub struct AudioModel {
     pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch (§3.1, §3.4).
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2). Same rule as
-    /// [`AuxModel::hold_fallback_mode`]: `Inherit` means no fallback for this
-    /// class, only `Alias` gives this row one.
+    /// The one fallback (openai egress design §14.2): the model or alias
+    /// that answers whenever this row cannot — the GPU hold, a benchmark,
+    /// VRAM outside lmgw, a deferred background request, a disabled row —
+    /// as written, trimmed. `None` = no fallback. Re-validated at use, never
+    /// trusted from save time ([`Snapshot::fallback_of`]).
     #[serde(default)]
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// The alias to route to while the GPU is held, when
-    /// [`Self::hold_fallback_mode`] is `Alias`.
-    #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// What this model's container was measured to hold on the GPU once it
     /// had served a request (realtime design §9.4, [`crate::vram::residency`]).
     ///
@@ -466,15 +407,13 @@ pub struct ImageModel {
     /// GPU (0 = never). A real column from day one, unlike audio's: a loaded
     /// pipeline is 7–13 GiB nothing else can use (§3, §9).
     pub idle_seconds: i64,
-    /// GPU-hold fallback mode. Same rule as [`AuxModel::hold_fallback_mode`]:
-    /// `Inherit` means no fallback for this class, only `Alias` gives this row
-    /// one — the global chat alias is not an image model.
+    /// The one fallback (openai egress design §14.2): the model or alias
+    /// that answers whenever this row cannot — the GPU hold, a benchmark,
+    /// VRAM outside lmgw, a deferred background request, a disabled row —
+    /// as written, trimmed. `None` = no fallback. Re-validated at use, never
+    /// trusted from save time ([`Snapshot::fallback_of`]).
     #[serde(default)]
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// The alias to route to while the GPU is held, when
-    /// [`Self::hold_fallback_mode`] is `Alias`.
-    #[serde(default)]
-    pub hold_fallback: Option<String>,
+    pub fallback: Option<String>,
     /// Owner override of the derived `/v1/models` capability facts
     /// (model-capabilities design §7), exactly as [`LocalModel`] types it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,6 +431,15 @@ pub struct ImageModel {
     /// surface can say how old the figure is. `None` whenever the peak is.
     #[serde(default)]
     pub peak_learned_at: Option<String>,
+    /// How the chat model writes this row's prompts (chat-media-tools design
+    /// §3.4). `None` derives it from the recipe
+    /// [`crate::image_recipes::match_path`] finds for the row's weights.
+    #[serde(default)]
+    pub prompt_style: Option<PromptStyle>,
+    /// How a running generation's preview is drawn (design §5.2). `None` is
+    /// the default: `proj` where the probed build offers it, else none.
+    #[serde(default)]
+    pub preview_mode: Option<PreviewMode>,
 }
 
 /// The one mode every image row has unless it says otherwise.

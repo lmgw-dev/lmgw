@@ -24,7 +24,7 @@ async fn serve(state: SharedState) -> String {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     format!("http://{addr}")
 }
 
@@ -39,7 +39,7 @@ async fn setup_native(upstream_base: &str, supports_responses: bool) -> (SharedS
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream_base.trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -63,6 +63,7 @@ async fn setup_native(upstream_base: &str, supports_responses: bool) -> (SharedS
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -267,10 +268,14 @@ async fn store_is_reported_honestly() {
     let (_, on) = post(&base, json!({"model": "my-model", "input": "hi"})).await;
     assert_eq!(on["store"], true, "stored by default, as the API does");
     assert!(
-        store::get_response(&state.db, on["id"].as_str().unwrap())
-            .await
-            .unwrap()
-            .is_some(),
+        store::get_response(
+            &state.db,
+            on["id"].as_str().unwrap(),
+            store::ResponseReader::Owner
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "and it really is in the store"
     );
 
@@ -281,10 +286,14 @@ async fn store_is_reported_honestly() {
     .await;
     assert_eq!(off["store"], false);
     assert!(
-        store::get_response(&state.db, off["id"].as_str().unwrap())
-            .await
-            .unwrap()
-            .is_none(),
+        store::get_response(
+            &state.db,
+            off["id"].as_str().unwrap(),
+            store::ResponseReader::Owner
+        )
+        .await
+        .unwrap()
+        .is_none(),
         "store:false must not persist"
     );
 }
@@ -307,10 +316,14 @@ async fn the_store_setting_overrides_the_request() {
     )
     .await;
     assert_eq!(resp["store"], false);
-    assert!(store::get_response(&state.db, resp["id"].as_str().unwrap())
-        .await
-        .unwrap()
-        .is_none());
+    assert!(store::get_response(
+        &state.db,
+        resp["id"].as_str().unwrap(),
+        store::ResponseReader::Owner
+    )
+    .await
+    .unwrap()
+    .is_none());
 }
 
 #[tokio::test]
@@ -787,7 +800,7 @@ async fn background_and_auto_truncation_are_refused() {
 // Streaming
 // ---------------------------------------------------------------------------
 
-async fn sse_events(base: &str, body: Value) -> Vec<(String, Value)> {
+pub(crate) async fn sse_events(base: &str, body: Value) -> Vec<(String, Value)> {
     let text = reqwest::Client::new()
         .post(format!("{base}/v1/responses"))
         .json(&body)
@@ -1627,6 +1640,7 @@ async fn an_alias_reasoning_default_reaches_a_native_upstream() {
             },
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

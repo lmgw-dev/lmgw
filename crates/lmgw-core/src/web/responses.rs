@@ -10,6 +10,7 @@
 //! impls below; automatic eviction is [`crate::store::gc_responses`].
 
 use lmgw_api_types as dto;
+use lmgw_api_types::units::fmt_bytes;
 use serde_json::Value;
 
 use crate::store::{ResponseChain, StoredResponse};
@@ -27,7 +28,7 @@ impl From<&ResponseChain> for dto::ChainRow {
             last_at: c.last_at.clone(),
             input_tokens: c.input_tokens,
             output_tokens: c.output_tokens,
-            size: human_bytes(c.bytes),
+            size: fmt_bytes(c.bytes.max(0) as u64),
             awaiting_approval: c.awaiting_approval,
         }
     }
@@ -35,10 +36,12 @@ impl From<&ResponseChain> for dto::ChainRow {
 
 /// One stored response as the conversation view shows it: its body is read
 /// for the outline and the text, and kept pretty-printed (a body that is not
-/// JSON reads as `null`).
+/// JSON reads as `null`), each reasoning item's encrypted content shown as
+/// its size only ([`sealed_shown`]).
 impl From<&StoredResponse> for dto::ResponseItem {
     fn from(r: &StoredResponse) -> Self {
-        let body: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+        let mut body: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+        sealed_shown(&mut body);
         Self {
             id: r.id.clone(),
             created_at: r.created_at.clone(),
@@ -53,15 +56,27 @@ impl From<&StoredResponse> for dto::ResponseItem {
     }
 }
 
-fn human_bytes(n: i64) -> String {
-    const KIB: f64 = 1024.0;
-    let n = n.max(0) as f64;
-    if n < KIB {
-        format!("{n:.0} B")
-    } else if n < KIB * KIB {
-        format!("{:.1} KiB", n / KIB)
-    } else {
-        format!("{:.1} MiB", n / (KIB * KIB))
+/// Every reasoning item's `encrypted_content` in `body` as a placeholder
+/// that says what it is and how big (`<sealed reasoning, 1.2 KiB>`): the
+/// encrypted reasoning is the upstream's to read, never a page's or a
+/// device's (WP8 verify V-F3, as the Chat's surfaces show no seal), and in a
+/// loop answer it is the whole carrier, its row and item named. The store
+/// keeps it for the chain's next turn.
+fn sealed_shown(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            if o.get("type").and_then(Value::as_str) == Some("reasoning") {
+                if let Some(Value::String(data)) = o.get_mut("encrypted_content") {
+                    if !data.is_empty() {
+                        let size = fmt_bytes(data.len() as u64);
+                        *data = format!("<sealed reasoning, {size}>");
+                    }
+                }
+            }
+            o.values_mut().for_each(sealed_shown);
+        }
+        Value::Array(a) => a.iter_mut().for_each(sealed_shown),
+        _ => {}
     }
 }
 
@@ -106,4 +121,32 @@ pub(crate) fn describe_rules(retention_hours: i64, max_chains: i64) -> String {
         n => format!("keeping at most {n}"),
     };
     format!("{age}, {count}")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_reasoning_item_s_encrypted_content_shows_as_its_size() {
+        let mut body = json!({"output": [
+            {"type": "reasoning", "id": "rs_1", "summary": [],
+             "encrypted_content": "lmgw-openai:4:cfg:rs_up:gAAAAB-sealed"},
+            {"type": "reasoning", "id": "rs_2", "summary": [], "encrypted_content": ""},
+            {"type": "message", "encrypted_content": "not reasoning"},
+        ], "input": [{"type": "reasoning", "encrypted_content": "x".repeat(2048)}]});
+        sealed_shown(&mut body);
+        assert_eq!(
+            body["output"][0]["encrypted_content"],
+            "<sealed reasoning, 37 B>"
+        );
+        assert_eq!(body["output"][1]["encrypted_content"], "");
+        assert_eq!(body["output"][2]["encrypted_content"], "not reasoning");
+        assert_eq!(
+            body["input"][0]["encrypted_content"],
+            "<sealed reasoning, 2.0 KiB>"
+        );
+    }
 }

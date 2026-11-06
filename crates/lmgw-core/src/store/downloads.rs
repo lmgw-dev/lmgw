@@ -28,6 +28,11 @@ pub struct HfModelRow {
     /// The commit the file on disk came from (the hub's `X-Repo-Commit`);
     /// `None` when unknown, never guessed.
     pub resolved_commit: Option<String>,
+    /// The file's content hash as the hub named it when the transfer of
+    /// its bytes began (`x-linked-etag`, the listing's `lfs.oid`; migration
+    /// 0097): what a kept `.part` is continued against (find-a-model design
+    /// D122). `None`: no hash known, and a `.part` starts again.
+    pub oid: Option<String>,
 }
 
 impl HfModelRow {
@@ -51,7 +56,19 @@ fn hf_model_from_row(row: &sqlx::sqlite::SqliteRow) -> HfModelRow {
         downloaded_at: row.get("downloaded_at"),
         requested_revision: row.get("requested_revision"),
         resolved_commit: row.get("resolved_commit"),
+        oid: row.get("oid"),
     }
+}
+
+/// Record the content hash of the bytes a transfer starts writing into the
+/// row's `.part` (`None` when the hub named none, or the `.part` is gone).
+pub async fn set_hf_oid(pool: &SqlitePool, id: i64, oid: Option<&str>) -> DbResult<()> {
+    sqlx::query("UPDATE hf_models SET oid=?2 WHERE id=?1")
+        .bind(id)
+        .bind(oid)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// All tracked downloads (both targets) — used by the startup resume task.
@@ -82,8 +99,11 @@ pub async fn get_hf_model(pool: &SqlitePool, id: i64) -> DbResult<Option<HfModel
     Ok(row.as_ref().map(hf_model_from_row))
 }
 
-/// Track (repo, file) for download at `main`; re-queues the existing row if
-/// it is already tracked. Returns the row id.
+/// Track (repo, file) for download at `main` into `dest_path`; re-queues
+/// the existing row if that file is already tracked at that place. The same
+/// file at another place is a row of its own (migration 0086): the shipped
+/// upscaler's `upscalers/<file>` beside `hf_add`'s `<repo>/<file>`. Returns
+/// the row id.
 pub async fn upsert_hf_model(
     pool: &SqlitePool,
     repo: &str,
@@ -108,7 +128,7 @@ pub async fn upsert_hf_model_at(
     let row = sqlx::query(
         "INSERT INTO hf_models (repo, file, dest_path, target, requested_revision)
          VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(repo, file, target) DO UPDATE SET status='queued', error=NULL, dest_path=?3,
+         ON CONFLICT(repo, file, target, dest_path) DO UPDATE SET status='queued', error=NULL,
              requested_revision=?5
          RETURNING id",
     )

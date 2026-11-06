@@ -24,7 +24,20 @@ async fn a_key_deleted_while_its_call_ran_gets_no_token_window() {
         ..Default::default()
     };
     let none = crate::pricing::Quantities::default();
-    let call = |key: KeyRef| price_call(&state, "chatty", None, &key, "openai", &usage, &none);
+    let call = |key: KeyRef| {
+        price_call(
+            &state,
+            "chatty",
+            None,
+            &key,
+            "openai",
+            &usage,
+            &none,
+            &Default::default(),
+            &Default::default(),
+            None,
+        )
+    };
 
     call(KeyRef {
         name: Some("live".into()),
@@ -74,6 +87,7 @@ async fn a_row_dropped_mid_write_still_lands_and_closes_the_gauge() {
             rung: None,
             degraded: None,
             quantities: Default::default(),
+            service_tier: Default::default(),
         },
         200,
         None,
@@ -167,4 +181,113 @@ async fn a_call_after_a_disable_a_rotate_or_a_delete_is_refused() {
         .unwrap();
     state.reload_snapshot().await.unwrap();
     assert!(call().await.is_err());
+}
+
+/// The row's note keeps every reason it is unpriced: the tier's words first,
+/// so the no-tier list still reads them by their opening, then the hosted
+/// calls', which the hosted list finds anywhere; an answer whose usage never
+/// came replaces the tier's (moot then) but never the hosted calls'.
+#[test]
+fn the_price_note_joins_the_reasons_and_keeps_the_hosted_calls() {
+    use crate::pricing::{HostedCalls, NO_TIER_NOTE};
+    let mut calls = HostedCalls::default();
+    calls.add("web_search_call", 2);
+    let hosted = calls.note(None, "USD");
+    let tier = format!("{NO_TIER_NOTE}; unpriced rather than assumed standard");
+    let priced = |tier_note: Option<&str>, hosted_note: Option<&str>| super::Priced {
+        client_key: None,
+        key_id: None,
+        cost: crate::pricing::Cost::unknown(),
+        tier_note: tier_note.map(str::to_string),
+        hosted_note: hosted_note.map(str::to_string),
+        floor_note: None,
+        priced_alias: None,
+    };
+
+    let both = priced(Some(&tier), Some(&hosted)).price_note(None).unwrap();
+    assert!(both.starts_with(NO_TIER_NOTE), "{both}");
+    assert_eq!(HostedCalls::from_note(&both), calls);
+
+    let cut = "stream ended before the upstream reported usage";
+    let note = priced(Some(&tier), Some(&hosted))
+        .price_note(Some(cut))
+        .unwrap();
+    assert_eq!(
+        note,
+        format!("{cut}; {hosted}"),
+        "the tier is moot, the calls are not"
+    );
+    assert_eq!(HostedCalls::from_note(&note), calls);
+
+    assert_eq!(
+        priced(Some(&tier), None).price_note(Some(cut)).as_deref(),
+        Some(cut)
+    );
+    assert_eq!(
+        priced(None, Some(&hosted)).price_note(None),
+        Some(hosted.clone())
+    );
+    assert_eq!(priced(Some(&tier), None).price_note(None), Some(tier));
+    assert_eq!(priced(None, None).price_note(None), None);
+}
+
+/// A tier gap above Standard beside a hosted call (openai egress design
+/// §13.2): the fees stay unpriced either way, and the budgets count the
+/// floor sheet's price of what the call did price.
+#[tokio::test]
+async fn a_tier_gap_with_hosted_calls_floors_at_the_standard_price() {
+    use crate::config::{PriceScope, PriceTier, PriceUnit, Protocol};
+    use crate::pricing::{HostedCalls, PriceSource, Prices, ServedTier};
+
+    let state = AppState::init_for_tests().await.unwrap();
+    crate::store::upsert_price(
+        &state.db,
+        PriceScope::Alias,
+        "chatty",
+        PriceUnit::PerMtok,
+        PriceTier::Standard,
+        &Prices {
+            price_in: Some(2.0),
+            price_out: Some(8.0),
+            source: PriceSource::Manual,
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let usage = Usage {
+        prompt_tokens: Some(1000),
+        completion_tokens: Some(100),
+        ..Default::default()
+    };
+    let mut calls = HostedCalls::default();
+    calls.add("web_search_call", 1);
+    let served = ServedTier::of(Protocol::Openai, Some("priority".into()), None);
+    let priced = price_call(
+        &state,
+        "chatty",
+        None,
+        &KeyRef::default(),
+        "responses",
+        &usage,
+        &crate::pricing::Quantities::default(),
+        &served,
+        &calls,
+        None,
+    );
+    assert_eq!(priced.cost.total_micro, None);
+    assert_eq!(priced.cost.budget_floor_micro, Some(2000 + 800));
+    let note = priced.price_note(None).unwrap();
+    assert!(
+        note.starts_with("served at service tier priority; no fast price on file"),
+        "{note}"
+    );
+    assert!(
+        note.contains("budgets count it at the standard price, 0.002800 USD, a lower bound; "),
+        "{note}"
+    );
+    assert_eq!(HostedCalls::from_note(&note), calls);
 }

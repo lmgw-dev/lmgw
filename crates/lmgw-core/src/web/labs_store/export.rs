@@ -45,14 +45,16 @@ pub async fn export(
             Err(e) => Some((Err(e), f)),
         }
     }));
-    (
-        [
-            (header::CONTENT_TYPE, out.mime),
-            (header::CONTENT_DISPOSITION, content_disposition(&out.name)),
-            (header::CONTENT_LENGTH, out.len.to_string()),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-        body,
+    super::super::stored::sandboxed(
+        (
+            [
+                (header::CONTENT_TYPE, out.mime),
+                (header::CONTENT_DISPOSITION, content_disposition(&out.name)),
+                (header::CONTENT_LENGTH, out.len.to_string()),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            body,
+        )
+            .into_response(),
     )
-        .into_response()
 }

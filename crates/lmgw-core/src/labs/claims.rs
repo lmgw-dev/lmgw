@@ -20,6 +20,20 @@ pub struct CellClaims {
     live: Arc<Mutex<HashSet<(i64, i64)>>>,
 }
 
+/// The groups with a cell claimed at one instant. A view takes it **before**
+/// its database reads: a run is committed before its claim is dropped, so a
+/// group not live in the snapshot has its run in the read, and one live in it
+/// only reads as in flight (conservative) when the run lands meanwhile.
+#[derive(Debug, Default, Clone)]
+pub struct LiveGroups(HashSet<i64>);
+
+impl LiveGroups {
+    /// Was a cell of group `group` claimed at the snapshot?
+    pub fn has(&self, group: i64) -> bool {
+        self.0.contains(&group)
+    }
+}
+
 /// One claimed cell; released when dropped, so a handler whose client went
 /// away mid-dispatch releases it too.
 #[derive(Debug)]
@@ -41,6 +55,18 @@ impl CellClaims {
             live: self.live.clone(),
             key,
         })
+    }
+
+    /// The groups with a cell claimed now.
+    pub fn snapshot(&self) -> LiveGroups {
+        LiveGroups(
+            self.live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(g, _)| *g)
+                .collect(),
+        )
     }
 
     /// Is a cell of group `group` claimed now?
@@ -78,5 +104,16 @@ mod tests {
         drop(first);
         assert!(!claims.live(1), "its run is in");
         assert!(claims.claim(1, 0).is_some(), "released");
+    }
+
+    #[test]
+    fn a_snapshot_keeps_a_group_live_after_its_claim_is_released() {
+        let claims = CellClaims::default();
+        let claim = claims.claim(1, 0).expect("free");
+        let seen = claims.snapshot();
+        drop(claim);
+        assert!(seen.has(1), "taken before the release");
+        assert!(!seen.has(2));
+        assert!(!claims.snapshot().has(1), "a later one sees it gone");
     }
 }

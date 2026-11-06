@@ -79,7 +79,10 @@ pub(crate) async fn list(
     let scope = ToolScope::of_request(&state, &ctx).await;
     let snap = state.snapshot();
     let agg = state.mcp.aggregate(&snap).await;
-    let entries = exec::labels(&snap, &agg, &scope);
+    let offer = crate::mcp::media::offer(&state)
+        .await
+        .within(&snap, scope.key());
+    let entries = exec::labels((&snap, &offer), &agg, &scope);
     let data: Vec<ServerObject<'_>> = entries.iter().map(|e| object(e, None)).collect();
     Json(json!({"object": "list", "data": data})).into_response()
 }
@@ -96,6 +99,8 @@ pub(crate) async fn detail(
         server_label: label.clone(),
         allowed_tools: None,
         require_approval: ApprovalRule::Never,
+        server_url: None,
+        connector_id: None,
     };
     let tools = match exec::list_label(&state, &spec, &scope).await {
         Ok(t) => t,
@@ -117,7 +122,11 @@ pub(crate) async fn detail(
         }
     };
     // Listed a moment ago: only a config change in between leaves no entry.
-    let Some(entry) = exec::label_entry(&state.snapshot(), &label, &scope) else {
+    let snap = state.snapshot();
+    let offer = crate::mcp::media::offer(&state)
+        .await
+        .within(&snap, scope.key());
+    let Some(entry) = exec::label_entry((&snap, &offer), &label, &scope) else {
         return error(
             StatusCode::NOT_FOUND,
             "invalid_request_error",

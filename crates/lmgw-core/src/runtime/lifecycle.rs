@@ -23,13 +23,14 @@
 //! lmgw restart cost nothing in reload time.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Snapshot;
 use crate::state::{AppState, SharedState};
 use crate::vram::Fit;
 
-use super::descriptor::{higher_rungs, model_runtimes, ModelRuntime};
+use super::descriptor::{higher_rungs, model_runtime, model_runtimes, ModelRuntime};
 use super::registry::{AcquireSpec, Presence, RuntimeError, RuntimeState};
 use super::Class;
 
@@ -219,30 +220,62 @@ pub async fn boot(state: &SharedState) {
             // and a log full of stops nobody asked for. When admission is
             // inactive this check is a no-op and every flagged model starts,
             // exactly as before.
-            let permit = match state
-                .vram
-                .check_background_start(state, snap, class, model_id)
-                .await
-            {
-                Fit::Full(why) => {
-                    tracing::warn!(
-                        "not warm-starting {class} model '{model_id}': {why}. It will start on \
-                         demand, evicting if it has to."
-                    );
-                    return;
+            // The snapshot and the row as they are after a download of the
+            // engine image (machine-check design §5, `Fit::Downloaded`): it
+            // can take minutes, and the row may have changed meanwhile.
+            let mut reread: Option<(Arc<Snapshot>, ModelRuntime)> = None;
+            let permit = loop {
+                let snap: &Snapshot = reread.as_ref().map_or(snap, |(s, _)| s);
+                match state
+                    .vram
+                    .check_background_start(state, snap, class, model_id)
+                    .await
+                {
+                    Fit::Full(why) => {
+                        tracing::warn!(
+                            "not warm-starting {class} model '{model_id}': {why}. It will \
+                             start on demand, evicting if it has to."
+                        );
+                        return;
+                    }
+                    // Unreachable on the normal path — the block above
+                    // returns before this one when hold is active — but a
+                    // hold engaged while these starts were already in flight
+                    // lands here, and then it is exactly right: skip, and
+                    // say why.
+                    Fit::Held(why) => {
+                        tracing::info!("not warm-starting {class} model '{model_id}': {why}");
+                        return;
+                    }
+                    Fit::Failed(why) => {
+                        tracing::warn!("not warm-starting {class} model '{model_id}': {why}");
+                        return;
+                    }
+                    Fit::Downloaded => {
+                        let now = state.snapshot();
+                        match model_runtime(&now, class, model_id)
+                            .filter(|r| r.enabled && r.warm_start)
+                        {
+                            Some(r) => reread = Some((now, r)),
+                            None => {
+                                tracing::info!(
+                                    "not warm-starting {class} model '{model_id}': it was \
+                                     removed, disabled or taken off warm start while its \
+                                     engine image downloaded"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Fit::Go(permit) => break Some(permit),
+                    Fit::Unchecked => break None,
                 }
-                // Unreachable on the normal path — the block above returns
-                // before this one when hold is active — but a hold engaged
-                // while these starts were already in flight lands here, and
-                // then it is exactly right: skip, and say why.
-                Fit::Held(why) => {
-                    tracing::info!("not warm-starting {class} model '{model_id}': {why}");
-                    return;
-                }
-                Fit::Go(permit) => Some(permit),
-                Fit::Unchecked => None,
             };
-            let started = registry.acquire(spec).await;
+            let runtime = reread.as_ref().map_or(spec.runtime, |(_, r)| r);
+            let started = match &reread {
+                Some((now, runtime)) => registry.acquire(&acquire_spec(state, now, runtime)).await,
+                None => registry.acquire(spec).await,
+            };
             drop(permit);
             match started {
                 // Dropped immediately and on purpose: warm start means
@@ -250,12 +283,19 @@ pub async fn boot(state: &SharedState) {
                 // `in_flight = 0`, which is exactly what the reaper and the
                 // eviction policy expect of an idle model.
                 Ok(guard) => {
+                    crate::machine::after_start(state, runtime);
                     tracing::info!(
                         "warm-started {class} model '{model_id}' on {}",
                         guard.port()
                     );
                 }
-                Err(e) => tracing::warn!("warm start of {class} model '{model_id}': {e}"),
+                // A start that failed on the graphics card checks the
+                // machine again (machine-check design §2.5), so the status
+                // and the tray say what keeps local models from starting.
+                Err(e) => {
+                    let e = crate::vram::start_error(state, runtime, e).await;
+                    tracing::warn!("warm start of {class} model '{model_id}': {e}")
+                }
             }
         }
     }))

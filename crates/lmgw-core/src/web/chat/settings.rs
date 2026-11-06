@@ -343,6 +343,33 @@ pub(crate) async fn apply_settings_patch(
         Ok(seed) => seed,
         Err(msg) => return Err(err_json(StatusCode::BAD_REQUEST, "bad_request", msg)),
     };
+    // The media tools' default models (chat-media-tools design §3.8): a
+    // name the thread does not hold yet must be one of its tool's choices
+    // for the caller.
+    if let Some(m) = req.media_defaults {
+        let key = caller.ctx().client_key;
+        // What the thread inherits, from its folder as its turn reads it:
+        // a device's copy has no folder when the device does not see it.
+        let folder = ChatRepo::of(t.id)
+            .thread(state, t.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| raw.folder_id);
+        let above = crate::mcp::media::defaults::above_thread(state, folder).await;
+        match crate::mcp::media::defaults::check(
+            state,
+            key.as_deref(),
+            (m, &t.media_defaults),
+            &above,
+            false,
+        )
+        .await
+        {
+            Ok(m) => t.media_defaults = m,
+            Err(msg) => return Err(err_json(StatusCode::BAD_REQUEST, "bad_request", msg)),
+        }
+    }
     // The model and voice aliases a device writes are within its own alias
     // scope (review W3-4); the ones the thread carried pass.
     let carried: Vec<Option<&str>> = aliases_before.iter().map(Option::as_deref).collect();

@@ -32,8 +32,7 @@ async fn as_decision_row_falling_back_to(f: &Fixture, alias: &str) {
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: aux.warm_start,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some(alias.into()),
+            fallback: Some(alias.into()),
         },
     )
     .await
@@ -66,7 +65,7 @@ async fn cloud_decider(f: &Fixture) -> MockServer {
         &f.state.db,
         &store::NewUpstream {
             name: "cloud".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", server.uri()),
             api_key: None,
@@ -91,6 +90,7 @@ async fn cloud_decider(f: &Fixture) -> MockServer {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await

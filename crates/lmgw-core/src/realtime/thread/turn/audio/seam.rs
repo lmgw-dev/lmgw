@@ -83,12 +83,9 @@ pub async fn heard_response_for_tests(
                     Ok(c) => Ok(c
                         .content
                         .iter()
-                        .filter_map(|p| match p {
-                            ContentPart::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
+                        .filter_map(ContentPart::answer_text)
                         .collect()),
-                    Err(e) => Err(e.code().to_string()),
+                    Err(e) => Err(e.kind().to_string()),
                 }
             }
             _ => {}

@@ -13,6 +13,7 @@
 //! ones. [`props`] reads what a server says it can do.
 
 pub(crate) mod count;
+pub mod legacy_format;
 pub mod props;
 mod reasoning;
 #[cfg(test)]
@@ -66,6 +67,7 @@ pub fn chat_body(
         model,
         params,
         stream,
+        openai_wire::BodyDialect::COMPATIBLE,
         &reasoning::LlamaReasoning,
         renderer,
     )
@@ -86,7 +88,8 @@ impl Egress for LlamaCppEgress {
         stream: bool,
     ) -> Result<reqwest::RequestBuilder, GatewayError> {
         let body = chat_body(ir, model, params, stream, up);
-        Ok(openai_wire::chat_request(http, up, &body))
+        let rb = openai_wire::chat_request(http, up, &body);
+        Ok(crate::egress::watch::built(up, &ir.passthrough, rb))
     }
 
     fn parse_completion(&self, body: &[u8]) -> Result<Completion, GatewayError> {
@@ -103,6 +106,12 @@ impl Egress for LlamaCppEgress {
     /// of llama-server maps the same refusal.
     fn map_error(&self, status: u16, body: &[u8]) -> GatewayError {
         openai_wire::map_error(status, body)
+    }
+
+    /// llama.cpp's schema refusals (structured-output design §9.1) — the
+    /// same classifier the OpenAI egress asks, which knows both texts.
+    fn structured_refusal(&self, status: u16, body: &[u8]) -> Option<GatewayError> {
+        openai_wire::structured::refusal(status, body)
     }
 
     fn build_embeddings(

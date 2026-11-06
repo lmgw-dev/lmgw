@@ -367,6 +367,9 @@ pub(super) async fn run_auto(
                     // A device's turn embeds and ranks as its key (client-apps
                     // design L4).
                     caller: caller.charged(),
+                    // The Chat is the owner's traffic (per-request
+                    // background design §12).
+                    origin: Default::default(),
                 },
             )
             .await;

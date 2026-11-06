@@ -24,7 +24,9 @@ pub(super) async fn run(
         }
         "lmgw__bench_start" => {
             phases_to_array(&mut a)?;
-            let started = bench::bench_start(state, ops::patch_from_args(Some(a))?).await?;
+            let started = bench::bench_start(state, ops::patch_from_args(Some(a))?)
+                .await
+                .map_err(|r| r.message)?;
             let next_step = bench::start_next_step(&started);
             ops::backends::to_json(Ok(WithNextStep::new(started, next_step)))
         }

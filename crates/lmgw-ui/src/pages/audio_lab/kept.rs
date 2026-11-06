@@ -159,7 +159,7 @@ impl Lab {
             .cloned()
         {
             self.scope.spawn(async move {
-                let got = fetch_file(&a.href, &a.name, &a.mime).await;
+                let got = api::file_of(api::Http::fetch(), &a.href, &a.name, &a.mime).await;
                 if !ticket.is_some_and(|t| f.asr_reads.is(t)) {
                     return;
                 }
@@ -244,22 +244,6 @@ impl Lab {
             }
         }
     }
-}
-
-/// `href`'s bytes as a `File` named `name`.
-async fn fetch_file(href: &str, name: &str, mime: &str) -> Result<web_sys::File, String> {
-    let resp = Request::get(href).send().await.map_err(|e| e.to_string())?;
-    // A refusal as every call reads it: a `401 session_required` raises the
-    // login gate.
-    let resp = api::checked(resp).await.map_err(|e| e.to_string())?;
-    let bytes = resp.binary().await.map_err(|e| e.to_string())?;
-    let arr = js_sys::Uint8Array::from(bytes.as_slice());
-    let parts = js_sys::Array::new();
-    parts.push(&arr);
-    let opts = web_sys::FilePropertyBag::new();
-    opts.set_type(mime);
-    web_sys::File::new_with_u8_array_sequence_and_options(&parts, name, &opts)
-        .map_err(|_| "the browser would not make a file of it".to_string())
 }
 
 /// The speech settings a new preset keeps.

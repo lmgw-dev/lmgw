@@ -23,8 +23,7 @@ pub struct CandidateAliasView {
     /// preference order.
     pub candidates: Vec<String>,
     pub background: bool,
-    /// `inherit` | `none` | `alias`.
-    pub fallback_mode: String,
+    /// The alias's one fallback, as written; `null` = none.
     pub fallback: Option<String>,
     /// The explicit "turn this common facet off" list (wire facet names).
     pub capabilities_disabled: Vec<String>,
@@ -50,8 +49,8 @@ pub struct CandidateAliasView {
     /// A candidate with `--cache-ram 0`: not an error, but worth
     /// flagging.
     pub advisories: Vec<String>,
-    /// The alias fallback resolves, is not local, and supports every enabled
-    /// facet.
+    /// The alias fallback resolves to a model that can stand in (not a
+    /// candidate alias).
     pub fallback_usable: bool,
     /// Minimum across `routable_candidates` (a ladder candidate at its top rung);
     /// absent if any of them is unknown or nothing is routable.
@@ -146,6 +145,13 @@ pub struct CandidateAliasSaved {
     pub max_output_tokens: Option<Option<u64>>,
     /// What was done, for a person to read.
     pub message: String,
+    /// What the save says about the fallback (openai egress design §14.2):
+    /// what a chat fallback lacks or adds, a type lmgw could not check, the
+    /// same upstream, the references a rename rewrote, the rows a delete
+    /// leaves without a working fallback. Absent when there is nothing to
+    /// say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_notes: Vec<String>,
 }
 
 /// `candidate_alias_set action=preview`: the alias editor's live answer to

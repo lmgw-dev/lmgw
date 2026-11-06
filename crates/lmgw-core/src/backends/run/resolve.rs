@@ -506,7 +506,10 @@ pub async fn check_merge(
         .check_merge(
             &inputs.base.sha,
             &inputs.assemble,
-            AssembleOpts::default(),
+            AssembleOpts {
+                repo_url: Some(spec.repo_url.clone()),
+                ..AssembleOpts::default()
+            },
             Some(&quiet),
         )
         .await?;

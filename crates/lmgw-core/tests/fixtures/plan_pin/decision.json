@@ -1,0 +1,26 @@
+{
+  "apply_ready": true,
+  "class": "aux",
+  "configured_as": [],
+  "configured_note": "Aux models already serving this GGUF, and how they differ from the plan. Placement (backend, threads) is never compared here, so a deliberate CPU or GPU variant is not a difference.",
+  "model_id": "demo-decider",
+  "next_step": "pass these to lmgw__aux_model_set action=create (adding model_id, e.g. 'demo-decider'), then lmgw__local_model_test model_id=<id> target=aux — the test asks one System One choice question on /v1/systemone, since this model cannot generate",
+  "params": {
+    "backend": "cpu",
+    "batch_size": 8192,
+    "ctx_size": 8192,
+    "gguf_path": "decide/demo-decider-Q8_0.gguf",
+    "kind": "decision",
+    "ubatch_size": 8192
+  },
+  "rationale": {
+    "backend": "the CPU, for a 421M-parameter non-causal encoder: it takes no VRAM and keeps serving under the GPU hold. Only Laya (421M parameters, Q8_0) was measured there: 33 ms for one question on 16 threads, and 14.9 s for one question on a 7,669-token state. The time grows with the model's size, with the state and with the number of questions, each its own pass, and the aux class's request timeout (60 s, aux_router.request_timeout_seconds) bounds the whole request; raise it for long states with many questions, or clear backend to run on the GPU. threads is left unset, so <this machine's cores>",
+    "batch_size": "= ubatch_size: llama.cpp lowers the ubatch to the batch, and embedding mode lowers the batch to the ubatch, so the two are raised together",
+    "ctx_size": "the model's trained context (8192), its real ceiling: llama-server refuses a longer prompt with an error naming the batch size and does not truncate it",
+    "gguf_path": "the file this plan was made for",
+    "kind": "the header declares decision.type 'laya': a decision model, which llama-server serves on /v1/systemone; it renders no kind flag and takes no pooling. It is a non-causal model (attention.causal = false): llama-server reads its embeddings, in embedding mode, and evaluates each prompt (the state and one question) in one ubatch",
+    "ubatch_size": "= ctx_size (8192, the header's context_length): a non-causal model evaluates its whole prompt in one ubatch, and embedding mode forces n_batch down to n_ubatch, whose default is 512, so without it every request over 512 tokens fails with a 500. The compute buffer grows with it, and on this CPU row it is RAM: Laya's container held 2.07 GiB after a 7,669-token prompt at 8192. On the GPU the VRAM ledger would charge it with the row: not estimated here (the header states no embedding_length)"
+  },
+  "target": "aux",
+  "warnings": []
+}

@@ -19,7 +19,11 @@ use crate::state::SharedState;
 use super::background::{restart_candidate, Restart};
 use super::Target;
 
+mod leaving;
 mod let_go;
+pub(in crate::vram) use leaving::current as leaving_now;
+pub use leaving::leaving;
+pub use leaving::HoldTurn;
 pub use let_go::LetGo;
 
 /// Held for the life of a request against a local model: the registry's
@@ -86,6 +90,11 @@ pub struct LocalHold {
     /// guest's rule or never for the holds [`join`](crate::vram::join) and [`start_background`](crate::vram::start_background)
     /// give.
     pub(super) restart: Restart,
+    /// The turns in progress on this hold ([`Self::turn`]): what tells a
+    /// claim several model calls share from one only the request leaving it
+    /// uses (`leaving`'s module doc). Never carried to a regained hold: a
+    /// let-go claim has no turn in flight.
+    pub(super) turns: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl LocalHold {
@@ -552,8 +561,10 @@ where
 {
     let Some(hold) = hold else {
         // No local container in this route's future: one send, no recovery,
-        // exactly what the call site did before.
-        return send_built(build(route)?, timeout).await;
+        // exactly what the call site did before. A cloud upstream that could
+        // not be connected to is `Unreachable` (openai egress design §14.4).
+        let cloud = super::classify(route).is_none();
+        return send_with(build(route)?, timeout, cloud).await;
     };
 
     let build = &build;
@@ -639,13 +650,31 @@ pub(crate) async fn send_built(
     rb: reqwest::RequestBuilder,
     timeout: Option<Duration>,
 ) -> Result<reqwest::Response, GatewayError> {
-    match timeout {
+    send_with(rb, timeout, false).await
+}
+
+/// [`send_built`], and with `cloud` a connect that failed is
+/// [`GatewayError::Unreachable`]: nothing reached the upstream (openai
+/// egress design §14.4). A local container's stays `Transport`, which the
+/// dead-container recovery reads.
+async fn send_with(
+    rb: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+    cloud: bool,
+) -> Result<reqwest::Response, GatewayError> {
+    let sent = match timeout {
         Some(d) => tokio::time::timeout(d, rb.send())
             .await
-            .map_err(|_| GatewayError::Timeout)?
-            .map_err(GatewayError::from),
-        None => rb.send().await.map_err(GatewayError::from),
-    }
+            .map_err(|_| GatewayError::Timeout)?,
+        None => rb.send().await,
+    };
+    sent.map_err(|e| {
+        if cloud && e.is_connect() && !e.is_timeout() {
+            GatewayError::Unreachable(e.to_string())
+        } else {
+            GatewayError::from(e)
+        }
+    })
 }
 
 impl std::fmt::Debug for LocalHold {

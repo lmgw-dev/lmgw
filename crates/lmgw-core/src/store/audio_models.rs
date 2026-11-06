@@ -2,7 +2,7 @@
 
 use sqlx::{Row, SqlitePool};
 
-use crate::config::{AudioModel, HoldFallbackMode, LearnedResidency};
+use crate::config::{AudioModel, LearnedResidency};
 use crate::error::GatewayError;
 
 use super::*;
@@ -38,8 +38,7 @@ pub(super) fn audio_model_from_row(row: &sqlx::sqlite::SqliteRow) -> AudioModel 
         image: row.get("image"),
         extra_run_args: parse_json_opt(row.get::<Option<String>, _>("extra_run_args")),
         warm_start: row.get::<i64, _>("warm_start") != 0,
-        hold_fallback_mode: hold_fallback_mode_from_row(row),
-        hold_fallback: row.get("hold_fallback"),
+        fallback: fallback_from_row(row),
         // Learned, not configured (0053): written only by
         // `set_audio_model_residency` below, which is why `NewAudioModel` has
         // no field for it and neither insert nor update names the columns. A
@@ -94,10 +93,8 @@ pub struct NewAudioModel {
     pub image: Option<String>,
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2).
-    pub hold_fallback_mode: HoldFallbackMode,
-    /// Meaningful only when `hold_fallback_mode` is `Alias`.
-    pub hold_fallback: Option<String>,
+    /// The row's one fallback (openai egress design §14.2); `None` = none.
+    pub fallback: Option<String>,
 }
 
 pub async fn list_audio_models(pool: &SqlitePool) -> DbResult<Vec<AudioModel>> {
@@ -131,17 +128,26 @@ fn audio_model_json(m: &NewAudioModel) -> DbResult<(String, String, String, Stri
 }
 
 pub async fn insert_audio_model(pool: &SqlitePool, m: &NewAudioModel) -> DbResult<i64> {
+    insert_audio_model_in(&mut *pool.acquire().await?, m).await
+}
+
+/// [`insert_audio_model`] inside a caller's transaction: the fallback save checks
+/// write it in a dry run first (`ops::fallback::referrers`).
+pub async fn insert_audio_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    m: &NewAudioModel,
+) -> DbResult<i64> {
     let (load, session, request_defaults, presets, default_preset) = audio_model_json(m)?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     let res = sqlx::query(
         "INSERT INTO audio_models (model_id, family, path, task, mode, load_options, session_options,
                                    voice_presets, default_voice_preset, enabled, image, extra_run_args,
-                                   warm_start, hold_fallback_mode, hold_fallback,
+                                   warm_start, fallback,
                                    lazy, busy_timeout_ms, default_request_options,
                                    model_spec_override, config_id, weight_id,
                                    backend, threads)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
     )
     .bind(&m.model_id)
     .bind(&m.family)
@@ -156,8 +162,7 @@ pub async fn insert_audio_model(pool: &SqlitePool, m: &NewAudioModel) -> DbResul
     .bind(&m.image)
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(m.lazy.map(|v| v as i64))
     .bind(m.busy_timeout_ms)
     .bind(request_defaults)
@@ -166,22 +171,32 @@ pub async fn insert_audio_model(pool: &SqlitePool, m: &NewAudioModel) -> DbResul
     .bind(&m.weight_id)
     .bind(&m.backend)
     .bind(m.threads)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(res.last_insert_rowid())
 }
 
 pub async fn update_audio_model(pool: &SqlitePool, id: i64, m: &NewAudioModel) -> DbResult<()> {
+    update_audio_model_in(&mut *pool.acquire().await?, id, m).await
+}
+
+/// [`update_audio_model`] inside a caller's transaction: a rename rewrites the
+/// fallbacks that name the row in the same one ([`rewrite_fallbacks_in`]).
+pub async fn update_audio_model_in(
+    conn: &mut sqlx::SqliteConnection,
+    id: i64,
+    m: &NewAudioModel,
+) -> DbResult<()> {
     let (load, session, request_defaults, presets, default_preset) = audio_model_json(m)?;
     let extra_run_args = run_args_json(&m.extra_run_args)?;
     sqlx::query(
         "UPDATE audio_models SET model_id=?2, family=?3, path=?4, task=?5, mode=?6,
          load_options=?7, session_options=?8, voice_presets=?9, default_voice_preset=?10,
          enabled=?11, image=?12, extra_run_args=?13, warm_start=?14,
-         hold_fallback_mode=?15, hold_fallback=?16,
-         lazy=?17, busy_timeout_ms=?18, default_request_options=?19,
-         model_spec_override=?20, config_id=?21, weight_id=?22,
-         backend=?23, threads=?24,
+         fallback=?15,
+         lazy=?16, busy_timeout_ms=?17, default_request_options=?18,
+         model_spec_override=?19, config_id=?20, weight_id=?21,
+         backend=?22, threads=?23,
          updated_at=datetime('now') WHERE id=?1",
     )
     .bind(id)
@@ -198,8 +213,7 @@ pub async fn update_audio_model(pool: &SqlitePool, id: i64, m: &NewAudioModel) -
     .bind(&m.image)
     .bind(extra_run_args)
     .bind(m.warm_start as i64)
-    .bind(m.hold_fallback_mode.as_str())
-    .bind(&m.hold_fallback)
+    .bind(&m.fallback)
     .bind(m.lazy.map(|v| v as i64))
     .bind(m.busy_timeout_ms)
     .bind(request_defaults)
@@ -208,7 +222,7 @@ pub async fn update_audio_model(pool: &SqlitePool, id: i64, m: &NewAudioModel) -
     .bind(&m.weight_id)
     .bind(&m.backend)
     .bind(m.threads)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

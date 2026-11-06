@@ -42,7 +42,7 @@ async fn serve(policy: KeyPolicy) -> (SharedState, String) {
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     (state, base)
 }
 
@@ -51,7 +51,7 @@ async fn seed_upstream(state: &SharedState, upstream_base: &str) {
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('slow', 'openai', 'generic', ?1, '[]', 20000, 1, 0, '',
+         VALUES ('slow', 'openai_compatible', 'generic', ?1, '[]', 20000, 1, 0, '',
                  datetime('now'), datetime('now'), 0)",
     )
     .bind(upstream_base.trim_end_matches('/'))

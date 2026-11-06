@@ -51,6 +51,15 @@ pub async fn get_upstream_by_name(pool: &SqlitePool, name: &str) -> DbResult<Opt
 }
 
 pub async fn insert_upstream(pool: &SqlitePool, u: &NewUpstream) -> DbResult<i64> {
+    insert_upstream_in(&mut *pool.acquire().await?, u).await
+}
+
+/// [`insert_upstream`] inside a caller's transaction: the fallback save checks
+/// write it in a dry run first (`ops::fallback::referrers`).
+pub async fn insert_upstream_in(
+    conn: &mut sqlx::SqliteConnection,
+    u: &NewUpstream,
+) -> DbResult<i64> {
     let headers = serde_json::to_string(&u.extra_headers)
         .map_err(|e| GatewayError::Internal(e.to_string()))?;
     let res = sqlx::query(
@@ -69,7 +78,7 @@ pub async fn insert_upstream(pool: &SqlitePool, u: &NewUpstream) -> DbResult<i64
     .bind(&u.expose_prefix)
     .bind(u.supports_responses as i64)
     .bind(u.catalog_all_modalities as i64)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(res.last_insert_rowid())
 }
@@ -77,6 +86,17 @@ pub async fn insert_upstream(pool: &SqlitePool, u: &NewUpstream) -> DbResult<i64
 /// `api_key: None` keeps the stored key (UI sends masked value back).
 pub async fn update_upstream(
     pool: &SqlitePool,
+    id: i64,
+    u: &NewUpstream,
+    update_key: bool,
+) -> DbResult<()> {
+    update_upstream_in(&mut *pool.acquire().await?, id, u, update_key).await
+}
+
+/// [`update_upstream`] inside a caller's transaction (the fallback save
+/// checks' dry run, `ops::fallback::referrers`).
+pub async fn update_upstream_in(
+    conn: &mut sqlx::SqliteConnection,
     id: i64,
     u: &NewUpstream,
     update_key: bool,
@@ -103,7 +123,7 @@ pub async fn update_upstream(
         .bind(&u.expose_prefix)
         .bind(u.supports_responses as i64)
         .bind(u.catalog_all_modalities as i64)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     } else {
         sqlx::query(
@@ -124,7 +144,7 @@ pub async fn update_upstream(
         .bind(&u.expose_prefix)
         .bind(u.supports_responses as i64)
         .bind(u.catalog_all_modalities as i64)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     }
     Ok(())

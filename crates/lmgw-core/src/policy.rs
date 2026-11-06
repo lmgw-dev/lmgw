@@ -31,6 +31,9 @@ use crate::config::{ApiKey, ApiKeyKind, Settings, Snapshot};
 use crate::error::GatewayError;
 use crate::pricing::micro_to_units;
 
+mod unpriced;
+pub use unpriced::check_priced;
+
 /// Rolling window for the per-minute limits.
 const WINDOW: Duration = Duration::from_secs(60);
 

@@ -7,6 +7,7 @@
 //! request and answer schemas. Admin routes (`Cap::Admin`), so they appear
 //! in the admin document only.
 
+use lmgw_api_types::audio_alignment::AudioAlignment;
 use lmgw_api_types::audio_lab as lab;
 use lmgw_api_types::openapi_ext::model_task;
 use schemars::generate::SchemaGenerator;
@@ -212,8 +213,16 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 "/audio-lab/api/refs/{name}",
                 "Read a reference clip",
                 "The stored clip's bytes, with the content type its extension implies, for \
-                 a player. 400 \"invalid clip\" for a name that is not a plain file name, 404 \
-                 for a clip that is not there; both answer `{error}`.",
+                 a player, and Accept-Ranges: bytes. One Range (bytes=a-b, bytes=a- or \
+                 bytes=-n) answers 206 with Content-Range; the answer carries an ETag made \
+                 from the file (inode, length, modification time) and X-Content-Type-Options: \
+                 nosniff and Content-Security-Policy: sandbox; If-Range with that ETag applies \
+                 the range, any other If-Range serves the whole clip, and so does a Range lmgw \
+                 does not read; a Range on an empty clip serves it whole (200); \
+                 416 range_not_satisfiable (Content-Range: \
+                 bytes */size, a {code, message} body) for a range that names no byte of it. \
+                 400 \"invalid clip\" for a name that is not a plain file name, 404 for a clip \
+                 that is not there; both answer `{error}`.",
             )
         },
         DocRoute {
@@ -338,7 +347,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             query: Some(|g| g.root_schema_for::<lab::GroupQuery>()),
             request: Req::Multipart(media::alignments_request),
-            response: Resp::Untyped("audio.cpp's own alignment JSON, relayed verbatim"),
+            response: Resp::Json(|g| g.root_schema_for::<AudioAlignment>()),
             model_task: Some(model_task::ASR),
             writes: Some(false),
             ..handoff!(

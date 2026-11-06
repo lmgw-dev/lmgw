@@ -58,6 +58,7 @@ async fn price(state: &SharedState, p: Prices) {
         PriceScope::Alias,
         "my-model",
         lmgw_core::config::PriceUnit::PerMtok,
+        lmgw_core::config::PriceTier::Standard,
         &p,
         None,
         None,
@@ -69,7 +70,7 @@ async fn price(state: &SharedState, p: Prices) {
 
 #[test]
 fn a_whole_answer_reads_the_write_as_a_subset_of_the_prompt() {
-    let u = for_protocol(Protocol::Openai)
+    let u = for_protocol(Protocol::OpenaiCompatible)
         .parse_completion(chat_answer(openai_usage()).to_string().as_bytes())
         .unwrap()
         .usage;
@@ -80,7 +81,7 @@ fn a_whole_answer_reads_the_write_as_a_subset_of_the_prompt() {
 
 #[test]
 fn an_answer_without_the_field_reports_no_write() {
-    let u = for_protocol(Protocol::Openai)
+    let u = for_protocol(Protocol::OpenaiCompatible)
         .parse_completion(
             chat_answer(json!({"prompt_tokens": 10, "completion_tokens": 1,
                                "prompt_tokens_details": {"cached_tokens": 0}}))
@@ -94,7 +95,7 @@ fn an_answer_without_the_field_reports_no_write() {
 
 #[test]
 fn the_streamed_usage_chunk_carries_the_write() {
-    let mut dec = for_protocol(Protocol::Openai).new_decoder();
+    let mut dec = for_protocol(Protocol::OpenaiCompatible).new_decoder();
     let usage: Vec<Usage> = dec
         .on_event(&SseEvent {
             event: None,
@@ -121,6 +122,10 @@ fn completion_with(usage: Usage) -> Completion {
         usage,
         model: "m".into(),
         timings: None,
+        service_tier: None,
+        upstream_items: None,
+        context_management: None,
+        usage_iterations: None,
     }
 }
 
@@ -165,7 +170,12 @@ async fn a_cache_write_is_recorded_shown_and_priced_at_its_own_rate() {
         .respond_with(ResponseTemplate::new(200).set_body_json(chat_answer(openai_usage())))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     price(&state, sheet(Some(1.25))).await;
 
     let v: Value = reqwest::Client::new()
@@ -202,7 +212,12 @@ async fn a_write_without_a_write_rate_is_billed_at_the_input_rate() {
         .respond_with(ResponseTemplate::new(200).set_body_json(chat_answer(openai_usage())))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     price(&state, sheet(None)).await;
 
     let resp = reqwest::Client::new()
@@ -231,7 +246,12 @@ async fn legacy_completions_record_the_write_too() {
         })))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/completions"))

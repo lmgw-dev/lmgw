@@ -101,6 +101,7 @@ impl External {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -205,7 +206,7 @@ async fn the_resolver_reads_an_external_row_from_the_cache() {
 #[tokio::test]
 async fn the_resolver_asks_nothing_of_another_protocol() {
     let w = External::new(
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         ResponseTemplate::new(200).set_body_json(completion()),
     )
@@ -397,7 +398,7 @@ async fn an_error_body_that_breaks_off_is_relayed_as_it_came() {
         &w.state.db,
         &NewUpstream {
             name: "plain".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: base,
             api_key: None,
@@ -421,6 +422,7 @@ async fn an_error_body_that_breaks_off_is_relayed_as_it_came() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -583,8 +585,7 @@ async fn the_resolver_carries_a_managed_rows_advisory() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },

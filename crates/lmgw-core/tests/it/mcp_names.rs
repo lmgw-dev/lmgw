@@ -41,7 +41,12 @@ fn names(v: &Value) -> Vec<String> {
         .unwrap_or_else(|| panic!("{v}"))
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_string())
-        .filter(|n| !n.starts_with("docs__") && !n.starts_with("kb__"))
+        // The built-in toolsets are not what this file is about.
+        .filter(|n| {
+            !["docs__", "kb__", "image__", "audio__"]
+                .iter()
+                .any(|p| n.starts_with(p))
+        })
         .collect();
     n.sort();
     n
@@ -135,7 +140,10 @@ async fn a_listed_tool_says_which_server_it_belongs_to() {
     assert_eq!(card["_meta"]["ui"]["resourceUri"], "ui://g__wx/card");
     for t in listed {
         let name = t["name"].as_str().unwrap();
-        if name.starts_with("docs__") || name.starts_with("kb__") {
+        if ["docs__", "kb__", "image__", "audio__"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
             assert!(ToolServer::of_tool(t).is_none(), "{t}");
         }
     }

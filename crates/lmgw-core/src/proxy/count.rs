@@ -20,6 +20,7 @@ use crate::egress::{for_protocol, with_timeout, CountPlan};
 use crate::error::GatewayError;
 use crate::gate::GateHeaders;
 use crate::ingress::ClientProto;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry::TelemetryBus;
 use crate::vram::LocalHold;
@@ -47,6 +48,14 @@ pub enum Approx {
     /// text went as one user message, and that message's framing is in the
     /// number.
     MessageFraming,
+    /// `/v1/responses/input_tokens` with `mcp` tools: their definitions are
+    /// listed from the servers when a run starts, and a count lists none, so
+    /// they are not in the number (not yet).
+    ToolsOmitted,
+    /// `/v1/responses/input_tokens` continuing a stored response that is
+    /// waiting on calls (an approval, a client tool): the results those
+    /// calls will carry, once decided, are not in the number.
+    PendingCallsOmitted,
 }
 
 impl Approx {
@@ -57,6 +66,8 @@ impl Approx {
             Self::MediaBound => "media_bound",
             Self::MediaOmitted => "media_omitted",
             Self::MessageFraming => "message_framing",
+            Self::ToolsOmitted => "tools_omitted",
+            Self::PendingCallsOmitted => "pending_calls_omitted",
         }
     }
 }
@@ -206,7 +217,7 @@ pub async fn handle_count_tokens(state: SharedState, ctx: RequestCtx, body: Valu
         return error_response(proto, &e);
     }
 
-    match count_alias(&state, &alias, &input, false, Some(&mut row)).await {
+    match count_alias(&state, &alias, &input, false, ctx.origin(), Some(&mut row)).await {
         Ok((count, headers)) => {
             row.answered(200, None).await;
             stamp_count(
@@ -274,7 +285,7 @@ pub(crate) async fn count_texts_if(
         return Err((GateHeaders::default(), e));
     }
     let check = crate::gate::RouteCheck::Count("/v1/count_tokens");
-    let routed = match crate::gate::resolve(state, alias, check).await {
+    let routed = match crate::gate::resolve(state, alias, check, ctx.origin()).await {
         Ok(r) => r,
         Err(f) => {
             row.failed(&f.error).await;
@@ -325,6 +336,10 @@ pub(crate) async fn count_texts_if(
 /// ([`crate::gate::Routed::admit_pinned`]). Ingest refuses the hold itself,
 /// before it counts.
 ///
+/// `origin` is whose traffic the count is (per-request background design
+/// §7): a knowledge search's limit check made for a `/v1/responses` run's
+/// tool carries the run's, the gateway's own ingest the owner's.
+///
 /// Erased ([`crate::erased`]): every input-limit check and ingest count
 /// awaits it.
 pub(crate) fn count_tokens_inner<'a>(
@@ -332,9 +347,10 @@ pub(crate) fn count_tokens_inner<'a>(
     alias: &'a str,
     input: &'a str,
     pinned: bool,
+    origin: Origin,
 ) -> crate::erased::Erased<'a, Result<(u64, GateHeaders), (GateHeaders, GatewayError)>> {
     futures::FutureExt::boxed(async move {
-        count_alias(state, alias, input, pinned, None)
+        count_alias(state, alias, input, pinned, origin, None)
             .await
             .map(|(count, headers)| (count.tokens, headers))
     })
@@ -342,12 +358,14 @@ pub(crate) fn count_tokens_inner<'a>(
 
 /// [`count_tokens_inner`] with the count's [`Approx`] flags kept, for the
 /// HTTP handler that reports them — and that keeps its row in `row`: the
-/// route, the stage, and whether this count brought its model up.
+/// route, the stage, and whether this count brought its model up. `origin`
+/// is whose traffic the count is (per-request background design §3).
 async fn count_alias(
     state: &SharedState,
     alias: &str,
     input: &str,
     pinned: bool,
+    origin: Origin,
     row: Option<&mut Unanswered>,
 ) -> Result<(Count, GateHeaders), (GateHeaders, GatewayError)> {
     // The gate's per-request half, and only that half: a count is not a chat
@@ -356,7 +374,7 @@ async fn count_alias(
     // tokens on a cold local model loads it — metadata call or not, that is a
     // load, and it goes through admission like any other (§9b).
     let check = crate::gate::RouteCheck::Count("/v1/count_tokens");
-    let opened = admit_counter(state, alias, check, pinned, row).await?;
+    let opened = admit_counter(state, alias, check, pinned, origin, row).await?;
     // Everything past the resolve can fail *on the fallback*, so the count and
     // its failure both leave through one place that names it — see [`Failed`].
     match count_text_route(state, input, &opened.route, opened.hold.as_ref()).await {
@@ -412,7 +430,7 @@ pub(crate) async fn count_text_route(
             // framing is in the number.
             Ok(match route.upstream.protocol {
                 Protocol::Anthropic | Protocol::Gemini => count.flagged(Approx::MessageFraming),
-                Protocol::Openai | Protocol::LlamaCpp => count,
+                Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => count,
             })
         }
     }
@@ -431,6 +449,21 @@ pub(super) async fn send_count<F>(
 where
     F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    let bytes = send_count_answer(route, hold, build).await?;
+    for_protocol(route.upstream.protocol).parse_count(&bytes)
+}
+
+/// [`send_count`]'s answer as the backend wrote it, for a caller that relays
+/// more of it than the number (`/v1/messages/count_tokens`' Anthropic
+/// `context_management`).
+pub(super) async fn send_count_answer<F>(
+    route: &Route,
+    hold: Option<&LocalHold>,
+    build: F,
+) -> Result<bytes::Bytes, GatewayError>
+where
+    F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
+{
     let egress = for_protocol(route.upstream.protocol);
     let timeout = route.upstream.request_timeout();
     let resp = crate::vram::send_local(hold, route, None, |r| {
@@ -442,7 +475,7 @@ where
     if !status.is_success() {
         return Err(egress.map_error(status.as_u16(), &bytes));
     }
-    egress.parse_count(&bytes)
+    Ok(bytes)
 }
 
 #[cfg(test)]

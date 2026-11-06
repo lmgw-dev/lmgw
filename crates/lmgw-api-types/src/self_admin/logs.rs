@@ -46,12 +46,23 @@ pub struct LogEntry {
     pub streamed: bool,
     pub error_kind: Option<String>,
     pub error_msg: Option<String>,
-    /// Why a fallback answered instead of the requested local model: `hold`,
-    /// `external_vram`, `background` or `unavailable`; `null` when none did.
+    /// Why a fallback answered instead of the requested model or alias:
+    /// `hold`, `external_vram`, `background`, `unavailable`, `benchmark`,
+    /// `quota`, `unreachable`, `disabled`, `gpu_setup` (the graphics card is
+    /// not ready on this computer) or `engine_download` (a local model's
+    /// engine could not be downloaded); `null` when none did.
     pub fallback_reason: Option<String>,
     /// The ladder rung the row answered from, counted from 1; `null` without a
     /// ladder.
     pub rung: Option<i64>,
+    /// The `service_tier` an OpenAI platform answer reported (`default`,
+    /// `flex`, `priority`, …), the tier the row is priced at; `null` on
+    /// every other upstream and when the answer named none.
+    pub service_tier: Option<String>,
+    /// Why the row's cost is what it is, when that is not plain: a tier
+    /// with no price on file, an answer that ended before its usage was
+    /// reported; `null` otherwise.
+    pub price_note: Option<String>,
 }
 
 #[cfg(test)]
@@ -59,13 +70,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// All seventeen keys of a row are always sent, `null` where the request
+    /// All nineteen keys of a row are always sent, `null` where the request
     /// had no value; the tail is `{logs}` and an empty one says so.
     #[test]
     fn a_row_sends_every_key_and_an_empty_tail_is_one_key() {
         let wire = serde_json::to_value(LogEntry::default()).unwrap();
         let keys = wire.as_object().unwrap();
-        assert_eq!(keys.len(), 17, "{wire}");
+        assert_eq!(keys.len(), 19, "{wire}");
         for nullable in [
             "upstream_name",
             "upstream_model",
@@ -78,6 +89,8 @@ mod tests {
             "error_msg",
             "fallback_reason",
             "rung",
+            "service_tier",
+            "price_note",
         ] {
             assert!(keys[nullable].is_null(), "{nullable}: {wire}");
         }

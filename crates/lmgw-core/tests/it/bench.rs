@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use lmgw_api_types::bench::{Phase, ProbeKind, SuiteParams};
 use lmgw_core::bench::Tuning;
-use lmgw_core::config::{AuxKind, HoldFallbackMode, LlamaParams};
+use lmgw_core::config::{AuxKind, LlamaParams};
 use lmgw_core::runtime::registry::Registry;
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewAuxModel, NewLocalModel};
@@ -28,6 +28,9 @@ use crate::common::{self, Gw};
 use crate::support::bench_fake::{FakeLauncher, HeldProbe, PsRunner};
 use crate::support::gpu_world::{Gpu, GIB};
 use crate::support::llama_fake::{self, Config, FakeLlama, ScriptedGpu};
+
+mod cdi;
+mod download;
 
 // ---------------------------------------------------------------------------
 // The world
@@ -224,7 +227,7 @@ async fn a_run_is_stored_whole_and_the_next_one_is_compared_with_it() {
     assert!(!run["results"]["prefill"].as_array().unwrap().is_empty());
     assert!(!run["results"]["decode"].as_array().unwrap().is_empty());
     assert_eq!(run["probes"]["probes"].as_array().unwrap().len(), 9);
-    assert_eq!(run["gpu"]["name"], "FakeGPU 4090");
+    assert_eq!(run["gpu"]["name"], "FakeGPU 3090");
     assert_eq!(run["build"]["build_info"], "b11226-0c6a6a7", "from /props");
     assert!(run["results"]["energy"]["idle_power_w"].as_f64().is_some());
     let name = format!("{prefix}-bench-{first}");
@@ -322,8 +325,7 @@ async fn the_plan_names_why_a_run_cannot_start() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -408,8 +410,7 @@ fn aux(id: &str) -> NewAuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::Inherit,
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -433,8 +434,7 @@ async fn during_a_run_the_card_is_the_benchmarks_and_cancel_keeps_what_it_measur
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("cloud".into()),
+            fallback: Some("cloud".into()),
             capabilities_override: None,
             ladder: vec![],
         },
@@ -526,7 +526,7 @@ async fn during_a_run_the_card_is_the_benchmarks_and_cancel_keeps_what_it_measur
     let err = lmgw_core::vram::admit(w.state(), &w.g.route("other"), "other")
         .await
         .unwrap_err();
-    assert_eq!(err.code(), "gpu_benchmark", "{err}");
+    assert_eq!(err.kind(), "gpu_benchmark", "{err}");
     assert!(w.g.runs().is_empty(), "nothing local was started");
 
     // One run at a time.
@@ -749,7 +749,7 @@ async fn the_drain_waits_for_a_start_decided_before_the_lease() {
     );
     probe.release();
     let err = guest.await.unwrap().unwrap_err();
-    assert_eq!(err.code(), "gpu_benchmark", "{err}");
+    assert_eq!(err.kind(), "gpu_benchmark", "{err}");
     w.finished(job).await;
     assert_eq!(w.run(run_id).await["run"]["status"], "done");
     assert!(w.g.runs().is_empty(), "the guest's model never started");
@@ -775,7 +775,7 @@ async fn a_request_queued_for_room_is_refused_once_the_lease_is_taken() {
     // The waiter leaves the queue refused instead of starting a container
     // once `other` is stopped.
     let err = queued.await.unwrap().unwrap_err();
-    assert_eq!(err.code(), "gpu_benchmark", "{err}");
+    assert_eq!(err.kind(), "gpu_benchmark", "{err}");
     drop(held);
     w.finished(job).await;
     assert_eq!(w.run(run_id).await["run"]["status"], "done");
@@ -1090,7 +1090,7 @@ async fn an_unreadable_run_degrades_instead_of_failing_the_list() {
         ..Default::default()
     };
     let mut ids = Vec::new();
-    for card in ["RTX 4090", "RTX 4090", "RTX 4090", "RTX 4090", "RTX 3090"] {
+    for card in ["RTX 4080", "RTX 4080", "RTX 4080", "RTX 4080", "RTX 3090"] {
         let id = store::insert_bench_run(
             db,
             &store::NewBenchRun {
@@ -1168,4 +1168,90 @@ async fn an_unreadable_run_degrades_instead_of_failing_the_list() {
     assert_eq!(page["more"], true);
     let msg = w.refused("bench_runs", json!({"limit": 0})).await;
     assert!(msg.contains("at least 1"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_hold_whose_run_container_would_not_be_removed_says_so() {
+    let w = World::new(Config {
+        hang_n_predict: Some(1),
+        ..quick()
+    })
+    .await;
+    let (run_id, job) = w
+        .start(json!({"model_id": "qwen", "repetitions": 1, "phases": ["prefill"]}))
+        .await;
+    w.stage(job, |s| s.starts_with("prefill")).await;
+    common::patience::until("the measured prefill hangs", || {
+        w.llama.seen.hanging.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    w.launcher.rm_fails.store(true, Ordering::SeqCst);
+    let v = w.ok("hold_set", json!({"active": true})).await;
+    // The run is aborted either way; what the answer may not claim is that
+    // its container is gone.
+    assert_eq!(v["benchmark_aborted"], run_id, "{v}");
+    let msg = v["message"].as_str().unwrap();
+    assert!(
+        msg.contains(&format!(
+            "benchmark run {run_id} was aborted but its container could NOT be removed"
+        )),
+        "{msg}"
+    );
+    assert!(msg.contains("container state improper"), "{msg}");
+    assert!(!msg.contains("and its container removed"), "{msg}");
+    w.launcher.rm_fails.store(false, Ordering::SeqCst);
+}
+
+/// `vram.unload_timeout_seconds` has no upper bound, so the removal's bound
+/// (the stop grace plus it) must saturate rather than overflow.
+#[tokio::test]
+async fn a_hold_with_an_enormous_unload_timeout_still_aborts_the_run() {
+    let w = World::new(Config {
+        hang_n_predict: Some(1),
+        ..quick()
+    })
+    .await;
+    *w.launcher.rm_kills.lock().unwrap() = Some(w.llama.seen.killed.clone());
+    let (run_id, job) = w
+        .start(json!({"model_id": "qwen", "repetitions": 1, "phases": ["prefill"]}))
+        .await;
+    w.stage(job, |s| s.starts_with("prefill")).await;
+    common::patience::until("the measured prefill hangs", || {
+        w.llama.seen.hanging.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    let mut s = w.state().snapshot().settings.clone();
+    s.vram.unload_timeout_seconds = u64::MAX;
+    lmgw_core::store::save_settings(&w.state().db, &s)
+        .await
+        .unwrap();
+    w.state().reload_snapshot().await.unwrap();
+    let v = w.ok("hold_set", json!({"active": true})).await;
+    assert_eq!(v["benchmark_aborted"], run_id, "{v}");
+    w.finished(job).await;
+}
+
+/// A task that panicked is a 500 `internal` on the dashboard's op, not the
+/// 400 `op_failed` a flattened `String` made of it.
+#[tokio::test]
+async fn a_hold_whose_task_panics_answers_500_internal() {
+    let w = World::new(Config {
+        hang_n_predict: Some(1),
+        ..quick()
+    })
+    .await;
+    let (_run_id, job) = w
+        .start(json!({"model_id": "qwen", "repetitions": 1, "phases": ["prefill"]}))
+        .await;
+    w.stage(job, |s| s.starts_with("prefill")).await;
+    common::patience::until("the measured prefill hangs", || {
+        w.llama.seen.hanging.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    // The abort removes the run's container inside the hold's task.
+    *w.launcher.panic_on.lock().unwrap() = Some("rm".into());
+    let (status, body) = w.op("hold_set", json!({"active": true})).await;
+    *w.launcher.panic_on.lock().unwrap() = None;
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(body["code"], "internal", "{body}");
 }

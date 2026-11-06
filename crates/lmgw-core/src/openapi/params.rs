@@ -155,9 +155,29 @@ mod tests {
         // `x-lmgw-run`'s `Scope::AllInference` (headers.rs, WP2) matches any
         // inference route regardless of method or path, even one with no
         // more specific header of its own.
-        let params = header_params("GET", "/v1/audio/voices", true, Direction::Request);
+        let params = header_params("GET", "/v1/models", true, Direction::Request);
         assert_eq!(params.len(), 1, "{params:#?}");
         assert_eq!(params[0]["name"], "x-lmgw-run");
+    }
+
+    #[test]
+    fn every_route_that_admits_a_model_carries_the_background_header() {
+        // `x-lmgw-background` (per-request background design §3): the voice
+        // list admits a model with `?probe=engine`, so it is there too.
+        for (method, path) in [
+            ("POST", "/v1/chat/completions"),
+            ("POST", "/v1/embeddings"),
+            ("POST", "/tokenize"),
+            ("GET", "/v1/audio/voices"),
+        ] {
+            let params = header_params(method, path, true, Direction::Request);
+            assert!(
+                params.iter().any(|p| p["name"] == "x-lmgw-background"),
+                "{method} {path}: {params:#?}"
+            );
+        }
+        let models = header_params("GET", "/v1/models", true, Direction::Request);
+        assert!(!models.iter().any(|p| p["name"] == "x-lmgw-background"));
     }
 
     #[test]

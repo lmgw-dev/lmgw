@@ -373,7 +373,7 @@ fn the_runtime_folds_to_the_image_and_its_bounds() {
     };
     assert_eq!(
         runtime_summary(Some(&r), None),
-        "localhost/folder-chat:0.2.0 · 2048 MB · 2 CPU · no deadline · read-only"
+        "localhost/folder-chat:0.2.0 · 2.0 GiB · 2 CPU · no deadline · read-only"
     );
     let p = AgentProvenance {
         image: "ghcr.io/x/agent:1".into(),

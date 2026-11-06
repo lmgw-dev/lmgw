@@ -1,0 +1,42 @@
+{
+  "egress_proto": [
+    "openai"
+  ],
+  "requests": [
+    {
+      "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"instructions\":\"Be brief.\",\"max_output_tokens\":64,\"model\":\"chat-gguf\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"temperature\":0.5}",
+      "body_json": {
+        "input": [
+          {
+            "content": [
+              {
+                "text": "hello",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "Be brief.",
+        "max_output_tokens": 64,
+        "model": "chat-gguf",
+        "reasoning": {
+          "summary": "auto"
+        },
+        "service_tier": "auto",
+        "store": false,
+        "temperature": 0.5
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/responses"
+    }
+  ],
+  "status": 200
+}

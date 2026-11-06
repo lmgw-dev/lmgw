@@ -3,8 +3,8 @@
 use sqlx::Row;
 
 use crate::config::{
-    ApiKey, ApiKeyKind, BudgetPeriod, CandidateAlias, HoldFallbackMode, KeyPolicy, LocalModel,
-    McpServer, McpTransport, ModelAlias, PriceRow, PriceScope, PriceUnit, Protocol, ScopeMode,
+    ApiKey, ApiKeyKind, BudgetPeriod, CandidateAlias, KeyPolicy, LocalModel, McpServer,
+    McpTransport, ModelAlias, PriceRow, PriceScope, PriceTier, PriceUnit, Protocol, ScopeMode,
     Upstream, UpstreamKind,
 };
 use crate::error::GatewayError;
@@ -59,11 +59,24 @@ pub(super) fn capabilities_override_from_row(raw: Option<String>) -> Option<serd
 }
 
 pub(super) fn upstream_from_row(row: &sqlx::sqlite::SqliteRow) -> Upstream {
+    let id: i64 = row.get("id");
+    let name: String = row.get("name");
+    let raw_protocol: String = row.get("protocol");
+    // The table's CHECK makes an unreadable protocol unreachable. Should one
+    // appear anyway, it reads as the compatible protocol, never the OpenAI
+    // platform, whose egress would send OpenAI-only fields to whatever it is
+    // (openai egress design §1.1), and the log names the row.
+    let protocol = Protocol::parse(&raw_protocol).unwrap_or_else(|| {
+        tracing::error!(
+            "upstream '{name}' (id {id}) has the unknown protocol '{raw_protocol}'; \
+             it is treated as openai_compatible"
+        );
+        Protocol::OpenaiCompatible
+    });
     Upstream {
-        id: row.get("id"),
-        name: row.get("name"),
-        protocol: Protocol::parse(row.get::<String, _>("protocol").as_str())
-            .unwrap_or(Protocol::Openai),
+        id,
+        name,
+        protocol,
         kind: UpstreamKind::parse(row.get::<String, _>("kind").as_str())
             .unwrap_or(UpstreamKind::Generic),
         base_url: row.get("base_url"),
@@ -89,24 +102,15 @@ pub(super) fn alias_from_row(row: &sqlx::sqlite::SqliteRow) -> ModelAlias {
         capabilities_override: capabilities_override_from_row(
             row.get::<Option<String>, _>("capabilities_override"),
         ),
+        fallback: fallback_from_row(row),
     }
 }
 
-/// Read `hold_fallback_mode` back out, defaulting to `Inherit` on anything
-/// this build does not recognise — same "unwrap_or(default)" convention as
-/// `Protocol`/`UpstreamKind` (see `McpTransport`'s doc comment).
-pub(super) fn hold_fallback_mode_from_row(row: &sqlx::sqlite::SqliteRow) -> HoldFallbackMode {
-    row.get::<String, _>("hold_fallback_mode")
-        .parse()
-        .unwrap_or(HoldFallbackMode::Inherit)
-}
-
-/// Same convention as [`hold_fallback_mode_from_row`], for
-/// `candidate_aliases.fallback_mode` (candidate-aliases design §4.1).
-fn candidate_fallback_mode_from_row(row: &sqlx::sqlite::SqliteRow) -> HoldFallbackMode {
-    row.get::<String, _>("fallback_mode")
-        .parse()
-        .unwrap_or(HoldFallbackMode::Inherit)
+/// A stored `fallback` as the config types carry it: `NULL` is none, and so
+/// is a blank one (only a hand edit writes that; every setter refuses `""`).
+pub(super) fn fallback_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<String> {
+    row.get::<Option<String>, _>("fallback")
+        .filter(|f| !f.trim().is_empty())
 }
 
 pub(super) fn candidate_alias_from_row(row: &sqlx::sqlite::SqliteRow) -> CandidateAlias {
@@ -115,8 +119,7 @@ pub(super) fn candidate_alias_from_row(row: &sqlx::sqlite::SqliteRow) -> Candida
         alias: row.get("alias"),
         candidates: parse_json_or(row.get::<String, _>("candidates").as_str()),
         background: row.get::<i64, _>("background") != 0,
-        fallback_mode: candidate_fallback_mode_from_row(row),
-        fallback: row.get("fallback"),
+        fallback: fallback_from_row(row),
         capabilities_disabled: parse_json_or(
             row.get::<String, _>("capabilities_disabled").as_str(),
         ),
@@ -139,8 +142,7 @@ pub(super) fn local_model_from_row(row: &sqlx::sqlite::SqliteRow) -> LocalModel 
         image: row.get("image"),
         extra_run_args: parse_json_opt(row.get::<Option<String>, _>("extra_run_args")),
         warm_start: row.get::<i64, _>("warm_start") != 0,
-        hold_fallback_mode: hold_fallback_mode_from_row(row),
-        hold_fallback: row.get("hold_fallback"),
+        fallback: fallback_from_row(row),
         capabilities_override: capabilities_override_from_row(
             row.get::<Option<String>, _>("capabilities_override"),
         ),
@@ -193,6 +195,8 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
             enrolled_at: row.get("enrolled_at"),
             enrolled_from: row.get("enrolled_from"),
             client_info: row.get("client_info"),
+            device_name: row.get("device_name"),
+            app_id: row.get("app_id"),
             confirmed_at: row.get("confirmed_at"),
             contested_at: row.get("contested_at"),
             contested_from: row.get("contested_from"),
@@ -203,6 +207,11 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
                     cert_serial: row.get("waiting_cert_serial"),
                     cert_not_after: row.get("waiting_cert_not_after"),
                     cert_notice_after: row.get("waiting_cert_notice_after"),
+                    app_id: row.get("waiting_app_id"),
+                    enrolled_at: row.get("waiting_enrolled_at"),
+                    enrolled_from: row.get("waiting_enrolled_from"),
+                    client_info: row.get("waiting_client_info"),
+                    device_name: row.get("waiting_device_name"),
                 }),
         },
     }
@@ -223,6 +232,9 @@ pub(super) fn price_from_row(row: &sqlx::sqlite::SqliteRow) -> PriceRow {
         note: row.get("note"),
         updated_at: row.get("updated_at"),
         price: row.get("price"),
+        // The table's CHECK admits only the tiers `PriceTier` names.
+        service_tier: PriceTier::parse(row.get::<String, _>("service_tier").as_str())
+            .unwrap_or_default(),
     }
 }
 

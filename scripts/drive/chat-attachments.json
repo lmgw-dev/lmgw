@@ -37,10 +37,10 @@
  },
  {
   "expect": "document.querySelector('.attach-blocker')?.textContent.includes('choose Text or Pages for letter.pdf')",
-  "label": "the blocker names the PDF under the chips"
+  "label": "the blocker above the composer names the PDF"
  },
  {
-  "expect": "[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled&&[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').title.includes('choose Text or Pages')",
+  "expect": "document.querySelector('.composer-send[aria-label=Send]').disabled&&document.querySelector('.composer-send[aria-label=Send]').title.includes('choose Text or Pages')",
   "label": "Send is disabled with the blocker as its title"
  },
  {
@@ -56,7 +56,7 @@
   "timeout": 10
  },
  {
-  "expect": "![...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled",
+  "expect": "!document.querySelector('.composer-send[aria-label=Send]').disabled",
   "label": "Send is enabled after choosing Text"
  },
  {
@@ -110,7 +110,7 @@
   "js": "(()=>{const t=document.querySelector('.composer textarea');t.value='what is in the files?';t.dispatchEvent(new Event('input',{bubbles:true}));return 'typed'})()"
  },
  {
-  "js": "(()=>{[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').click();return 'sent'})()"
+  "js": "(()=>{document.querySelector('.composer-send[aria-label=Send]').click();return 'sent'})()"
  },
  {
   "until": "[...document.querySelectorAll('.msg-assistant')].some(m=>m.textContent.includes('landlord'))&&[...document.querySelectorAll('.msg-assistant')].some(m=>m.textContent.includes('pineapple'))",
@@ -160,7 +160,7 @@
   "timeout": 10
  },
  {
-  "expect": "[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled",
+  "expect": "document.querySelector('.composer-send[aria-label=Send]').disabled",
   "label": "Send disabled for Pages without vision"
  },
  {

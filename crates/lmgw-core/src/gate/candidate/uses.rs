@@ -11,20 +11,21 @@
 //! **What counts, per facet.** Only what the request itself asks for — a
 //! facet a client could not have meant is never read into it:
 //! - **vision:** an image part anywhere in the messages
-//!   ([`crate::gate::media_parts`]);
+//!   ([`crate::gate::media_parts`]). Not a Files API image (changed
+//!   2026-11-06): only an Anthropic-protocol row is sent one, and a
+//!   candidate is a local row;
 //! - **audio:** an audio input part;
 //! - **tool_calls:** tool definitions the model is given. The IR's own
 //!   `tools` here; a site whose loop adds tools of its own (the
 //!   `/v1/responses` MCP blocks, Admin/agent chat, agent runs) adds the facet
 //!   itself. Tool *history* without definitions is not counted: a model
 //!   given no tools cannot call one;
-//! - **structured_output:** `response_format` of type `json_schema` or
-//!   `json_object`, or llama.cpp's native top-level `json_schema`. The
-//!   `/v1/responses` `text.format` arrives here already renamed to
-//!   `response_format` by its ingress. Anthropic's structured-output field
-//!   is dropped at ingress (the IR's passthrough is empty on that dialect),
-//!   so it never reaches a model and is not counted. `grammar` is a
-//!   llama.cpp-only sampler control, not this facet;
+//! - **structured_output:** a JSON format in the IR's field
+//!   (structured-output design §4) — `response_format` of type `json_schema`
+//!   or `json_object`, llama.cpp's native top-level `json_schema` (beside a
+//!   `text` format too), the `/v1/responses` `text.format`, Anthropic's
+//!   `output_config.format`, all read into it by their ingress. `grammar` is
+//!   a llama.cpp-only sampler control, not this facet;
 //! - **reasoning:** an explicit ask to **think** (§12, "narrow"): `enabled:
 //!   true`, an effort level other than `none`, a budget above zero, or
 //!   `chat_template_kwargs.enable_thinking: true` — from the body or from
@@ -45,7 +46,8 @@ use crate::ir::{ChatRequest, ReasoningControl};
 /// ([`crate::proxy::RequestCtx::reasoning_control`]), `None` for in-process
 /// callers, which have no headers.
 pub fn request_facets(ir: &ChatRequest, header: Option<&ReasoningControl>) -> FacetSet {
-    let media = crate::gate::media_parts(ir);
+    // A candidate is a local row, which is sent no Files API image.
+    let media = crate::gate::media_parts(ir, None);
     let mut uses = FacetSet::EMPTY;
     if media.images > 0 {
         uses = uses.insert(Facet::Vision);
@@ -56,10 +58,7 @@ pub fn request_facets(ir: &ChatRequest, header: Option<&ReasoningControl>) -> Fa
     if !ir.tools.is_empty() {
         uses = uses.insert(Facet::ToolCalls);
     }
-    if structured(
-        ir.passthrough.get("response_format"),
-        ir.passthrough.get("json_schema"),
-    ) {
+    if ir.asks_json() {
         uses = uses.insert(Facet::StructuredOutput);
     }
     let thinks = ir.params.reasoning.as_ref().is_some_and(asks_to_think)
@@ -77,20 +76,11 @@ pub fn request_facets(ir: &ChatRequest, header: Option<&ReasoningControl>) -> Fa
 /// prompt that carries media is refused by the fit on a guarded row and
 /// otherwise llama-server's own business.
 pub fn legacy_facets(body: &Value) -> FacetSet {
-    if structured(body.get("response_format"), body.get("json_schema")) {
+    if crate::ir::structured::body_kind(body).is_some() {
         FacetSet::EMPTY.insert(Facet::StructuredOutput)
     } else {
         FacetSet::EMPTY
     }
-}
-
-/// A `response_format` asking for JSON, or llama.cpp's native `json_schema`.
-fn structured(response_format: Option<&Value>, json_schema: Option<&Value>) -> bool {
-    let format = response_format
-        .and_then(|f| f.get("type"))
-        .and_then(Value::as_str)
-        .is_some_and(|t| t == "json_schema" || t == "json_object");
-    format || json_schema.is_some_and(|s| !s.is_null())
 }
 
 /// An explicit ask to think (module doc): on, an effort other than `none`,
@@ -118,8 +108,12 @@ mod tests {
             tool_choice: None,
             stream: false,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         }
     }
 
@@ -149,6 +143,7 @@ mod tests {
             name: "f".into(),
             description: None,
             parameters: json!({"type": "object"}),
+            strict: None,
         });
         assert_eq!(
             names(request_facets(&r, None)),
@@ -166,19 +161,26 @@ mod tests {
             ),
             ("response_format", json!({"type": "json_object"}), true),
             ("response_format", json!({"type": "text"}), false),
+            ("response_format", json!({"type": "regex"}), false),
             ("json_schema", json!({"type": "object"}), true),
             ("grammar", json!("root ::= \"a\""), false),
         ] {
-            let mut r = ir();
-            r.passthrough.insert(key.into(), v.clone());
+            let body = json!({"model": "m", "messages": [], key: v.clone()});
+            let r = crate::ingress::openai::parse_chat_request(&body).unwrap();
             assert_eq!(
                 request_facets(&r, None).contains(Facet::StructuredOutput),
                 used,
                 "{key}: {v}"
             );
-            let body = json!({ key: v });
             assert_eq!(legacy_facets(&body).contains(Facet::StructuredOutput), used);
         }
+        // A `text` format beside the native schema asks for the schema
+        // (structured-output design §11.18), in both dialects' readers.
+        let body = json!({"model": "m", "messages": [],
+                          "response_format": {"type": "text"}, "json_schema": {"type": "object"}});
+        let r = crate::ingress::openai::parse_chat_request(&body).unwrap();
+        assert!(request_facets(&r, None).contains(Facet::StructuredOutput));
+        assert!(legacy_facets(&body).contains(Facet::StructuredOutput));
     }
 
     /// Only an ask to think counts; switching it off, or an effort of
@@ -199,6 +201,7 @@ mod tests {
                 enabled,
                 effort: effort.map(str::to_string),
                 budget_tokens: budget,
+                ..Default::default()
             };
             let mut r = ir();
             r.params.reasoning = Some(c.clone());

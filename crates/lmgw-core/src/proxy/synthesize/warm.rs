@@ -40,7 +40,7 @@ pub(crate) async fn load(
     let speech = local_speech(state, route).await;
     let (body, _) = clause_body(state, label, route, speech.as_ref(), alias, clause)?;
     hold.note_sending();
-    let resp = audio_send(Some(hold), route, |r| {
+    let resp = audio_send(state, Some(hold), route, |r| {
         let url = format!("{}/audio/speech", r.upstream.base());
         Ok(apply_bearer_auth(
             state.http.post(url).json(&body),

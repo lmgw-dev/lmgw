@@ -1,0 +1,43 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"What is the weather in Berlin?\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\",\"call_id\":\"call_1\",\"name\":\"get_weather\",\"type\":\"function_call\"},{\"call_id\":\"call_1\",\"output\":\"city not found\",\"type\":\"function_call_output\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "What is the weather in Berlin?",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "arguments": "{\"city\":\"Berlin\"}",
+          "call_id": "call_1",
+          "name": "get_weather",
+          "type": "function_call"
+        },
+        {
+          "call_id": "call_1",
+          "output": "city not found",
+          "type": "function_call_output"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

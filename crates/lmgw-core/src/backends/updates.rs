@@ -67,7 +67,9 @@ use serde::{Deserialize, Serialize};
 
 use super::forge;
 use super::git::{self, remote_key, short_sha, Git, GitAuth, Pool};
-use super::images::{configured_images, local_images, resolve, LocalImage};
+use super::images::{
+    configured_images, images_in_use, local_images, reference_names, resolve, LocalImage,
+};
 use super::model::{Build, BuildExtra, BuildRun, BuildSpec, Forge};
 use super::oci::{self, ImageRef, RemoteManifest};
 use super::run::Podman;
@@ -987,10 +989,12 @@ async fn observe(
     out
 }
 
-/// The registry images in use (§8, last bullet): each class default and
+/// The registry images configured (§8, last bullet): each class default and
 /// model override that names a local image under a registry name, checked
-/// once per reference. `None` when the local images could not be listed —
-/// the previous observations then stay as they are.
+/// once per reference — a class default no row runs too, so the Engines page
+/// shows its update and offers its pull. The nav badge counts only those in
+/// use ([`summary`]). `None` when the local images could not be listed — the
+/// previous observations then stay as they are.
 async fn observe_images(state: &SharedState) -> Option<BTreeMap<String, ImageObservation>> {
     let images = match local_images(&Podman::of(state)).await {
         Ok(i) => i,
@@ -1228,9 +1232,23 @@ pub async fn after_pull(state: &SharedState, reference: &str, repo_digests: &[St
     publish(state).await;
 }
 
-/// The nav badge's numbers (§8): builds with an update, registry images in
-/// use with a newer digest, and when the last full check ended. Database
-/// reads only.
+/// The names the badge's images are stored under: those of every image a
+/// model row runs ([`images_in_use`]), as [`reference_names`] spells them.
+/// Read from the snapshot, so the badge follows a row that starts or stops
+/// running an image without a new registry check.
+pub(crate) fn badge_image_names(snap: &crate::config::Snapshot) -> BTreeSet<String> {
+    images_in_use(snap)
+        .iter()
+        .flat_map(|c| reference_names(&c.reference))
+        .collect()
+}
+
+/// The nav badge's numbers (§8): builds with an update, registry images a
+/// model row runs ([`badge_image_names`]) with a newer digest, and when the
+/// last full check ended. An observation of an image nothing runs (a class
+/// default no row follows, an image whose last row was deleted, one an
+/// older version observed) stays for the Engines page and is not counted.
+/// Database and snapshot reads only.
 pub async fn summary(state: &AppState) -> UpdatesSummary {
     let stored = state.builds.updates().loaded(state).await;
     let mut builds_with_updates = 0;
@@ -1241,12 +1259,13 @@ pub async fn summary(state: &AppState) -> UpdatesSummary {
             }
         }
     }
+    let in_use = badge_image_names(&state.snapshot());
     UpdatesSummary {
         builds_with_updates,
         images_with_updates: stored
             .images
-            .values()
-            .filter(|o| o.update_available)
+            .iter()
+            .filter(|(name, o)| o.update_available && in_use.contains(*name))
             .count() as u32,
         checked_at: stored.last_all,
     }

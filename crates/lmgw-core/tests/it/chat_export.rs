@@ -93,6 +93,7 @@ pub(crate) async fn rich_thread(state: &SharedState, title: &str) -> i64 {
         &store::ChatReply {
             content: "It is a picture.".into(),
             reasoning: "let me think it over".into(),
+            reasoning_seals: Vec::new(),
             prompt_tokens: Some(11),
             completion_tokens: Some(5),
             ir_messages: Some(ir.into()),
@@ -101,6 +102,7 @@ pub(crate) async fn rich_thread(state: &SharedState, title: &str) -> i64 {
             images_note: None,
             voice: None,
             pending_approvals: None,
+            tool_files: Vec::new(),
         },
     )
     .await
@@ -141,6 +143,8 @@ async fn markdown_is_a_readable_transcript() {
     let id = rich_thread(&state, "Bilder und Notizen").await;
     let r = export(&gw, &format!("/chat/api/threads/{id}/export?format=md")).await;
     assert_eq!(r.status(), 200);
+    // A thread's text is stored content (WP13).
+    crate::support::stored::assert_sandboxed(r.headers(), "thread export");
     assert!(r.headers()["content-type"]
         .to_str()
         .unwrap()
@@ -396,6 +400,8 @@ async fn a_folder_zip_has_one_file_per_thread_and_honours_archived() {
     let r = export(&gw, &format!("/chat/api/folders/{folder}/export?format=md")).await;
     assert_eq!(r.status(), 200, "{:?}", r.text().await);
     assert_eq!(r.headers()["content-type"], "application/zip");
+    // The threads' text, zipped, is stored content (WP13).
+    crate::support::stored::assert_sandboxed(r.headers(), "folder export");
     let d = disposition(&r);
     assert!(
         d.contains("lmgw-folder-work-stuff-") && d.contains(".zip"),
@@ -445,7 +451,7 @@ async fn a_folder_zip_has_one_file_per_thread_and_honours_archived() {
 async fn the_all_zip_has_everything_stored_and_a_readme() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "ok", 1, 1).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let folder = store::create_chat_folder(&state.db, "F", &ThreadDefaults::default(), None)
         .await
         .unwrap();
@@ -468,6 +474,8 @@ async fn the_all_zip_has_everything_stored_and_a_readme() {
 
     let r = export(&gw, "/chat/api/export?format=json").await;
     assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "application/zip");
+    crate::support::stored::assert_sandboxed(r.headers(), "all-threads export");
     assert!(
         disposition(&r).contains("lmgw-chats-"),
         "{}",
@@ -490,7 +498,7 @@ async fn the_all_zip_has_everything_stored_and_a_readme() {
 async fn a_temporary_thread_exports_from_memory() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "a reply", 5, 2).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let t: Value = post(
         &gw,
         "/chat/api/threads",

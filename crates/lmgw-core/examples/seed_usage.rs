@@ -54,19 +54,20 @@ async fn main() -> anyhow::Result<()> {
     // empty, every series comes back with no colour slot, and nothing is
     // classified as local — so the seeded page would exercise none of the
     // paths it exists to show.
-    for (id, name, kind) in [
-        (1i64, "cloud", "generic"),
-        (2, "llama-server", "llama_server"),
+    for (id, name, protocol, kind) in [
+        (1i64, "cloud", "openai_compatible", "generic"),
+        (2, "llama-server", "llama_cpp", "llama_server"),
     ] {
         sqlx::query(
             "INSERT OR REPLACE INTO upstreams
                 (id, name, protocol, kind, base_url, extra_headers, timeout_ms,
                  enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-             VALUES (?1, ?2, 'openai', ?3, 'http://127.0.0.1:1', '[]', 60000,
+             VALUES (?1, ?2, ?3, ?4, 'http://127.0.0.1:1', '[]', 60000,
                      1, 0, '', datetime('now'), datetime('now'), 0)",
         )
         .bind(id)
         .bind(name)
+        .bind(protocol)
         .bind(kind)
         .execute(&pool)
         .await?;
@@ -95,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             lmgw_core::config::PriceScope::Alias,
             alias,
             lmgw_core::config::PriceUnit::PerMtok,
+            lmgw_core::config::PriceTier::Standard,
             &lmgw_core::pricing::Prices {
                 price_in: Some(*pin),
                 price_out: Some(*pout),
@@ -223,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
                         class, cost_micro, price_source, cached_in_tokens, key_id,
                         prefill_ms, decode_ms, decode_tok_s, prompt_n, cache_n,
                         draft_n, draft_accepted, predicted_n, cache_write_tokens)
-                     VALUES (?1,?2,'openai',?3,?4,?5,'openai',?6,?7,?8,?9,?10,1,?11,
+                     VALUES (?1,?2,'openai',?3,?4,?5,?26,?6,?7,?8,?9,?10,1,?11,
                              ?12,?13,?14,?15,?23,?16,?17,?18,?19,?20,?21,?22,?24,?25)",
                 )
                 .bind(ts.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -288,6 +290,12 @@ async fn main() -> anyhow::Result<()> {
                     None
                 })
                 .bind(cache_write)
+                // The wire the row left on: its upstream's protocol.
+                .bind(if local {
+                    "llama_cpp"
+                } else {
+                    "openai_compatible"
+                })
                 .execute(&pool)
                 .await?;
                 rows += 1;

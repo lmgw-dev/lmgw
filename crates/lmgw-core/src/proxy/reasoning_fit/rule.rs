@@ -44,7 +44,10 @@ pub(super) fn decide(
     }
     let off = match protocol {
         Protocol::Gemini => Off::Lowest(GEMINI_LOWEST.to_string()),
-        Protocol::Openai | Protocol::Anthropic | Protocol::LlamaCpp => Off::Control,
+        Protocol::Openai
+        | Protocol::OpenaiCompatible
+        | Protocol::Anthropic
+        | Protocol::LlamaCpp => Off::Control,
     };
     (off, Basis::Default)
 }
@@ -57,9 +60,10 @@ pub(super) fn default_reason(protocol: Protocol) -> &'static str {
             "Gemini's catalog does not say whether this model can stop thinking, and current \
              Gemini models cannot — minimal is the least they take"
         }
-        Protocol::Openai | Protocol::Anthropic | Protocol::LlamaCpp => {
-            "nothing is known about the model"
-        }
+        Protocol::Openai
+        | Protocol::OpenaiCompatible
+        | Protocol::Anthropic
+        | Protocol::LlamaCpp => "nothing is known about the model",
     }
 }
 
@@ -84,6 +88,17 @@ fn from_facts(protocol: Protocol, r: &ReasoningCaps) -> Option<(Off, &'static st
         return Some((
             Off::Omitted,
             "its capabilities say it does not reason unless asked to",
+        ));
+    }
+    // Anthropic's catalog names the `thinking` types a model takes. One that
+    // takes `between_tools` and not `disabled` (Claude Sonnet 5.5, whose
+    // documentation calls it its lowest thinking setting) gets that type: it
+    // stops the up-front thinking, which no effort level does.
+    if protocol == Protocol::Anthropic && r.thinking_types.iter().any(|t| t == "between_tools") {
+        return Some((
+            Off::BetweenTools,
+            "its capabilities name between_tools (no up-front thinking) among the thinking \
+             types it takes, and not disabled",
         ));
     }
     // `levels` run least → most (§2.1).
@@ -135,7 +150,7 @@ mod tests {
     #[test]
     fn nothing_known_is_each_protocols_default() {
         assert_eq!(
-            decide(Protocol::Openai, None, None),
+            decide(Protocol::OpenaiCompatible, None, None),
             (Off::Control, Basis::Default)
         );
         assert_eq!(
@@ -148,7 +163,11 @@ mod tests {
         );
         // A bare toggle says a control exists, not whether it reaches "off".
         let toggle = caps("toggle", &[], None);
-        for p in [Protocol::Openai, Protocol::Anthropic, Protocol::Gemini] {
+        for p in [
+            Protocol::OpenaiCompatible,
+            Protocol::Anthropic,
+            Protocol::Gemini,
+        ] {
             assert_eq!(decide(p, Some(&toggle), None).1, Basis::Default, "{p:?}");
         }
     }
@@ -160,7 +179,11 @@ mod tests {
             enabled: Some(false),
             ..caps("fixed", &[], None)
         };
-        for p in [Protocol::Openai, Protocol::Anthropic, Protocol::Gemini] {
+        for p in [
+            Protocol::OpenaiCompatible,
+            Protocol::Anthropic,
+            Protocol::Gemini,
+        ] {
             assert_eq!(decide(p, Some(&fixed), None).0, Off::Omitted, "{p:?}");
         }
         // Off by default already: nothing to send.
@@ -169,19 +192,22 @@ mod tests {
             ..caps("toggle", &[], None)
         };
         assert_eq!(
-            decide(Protocol::Openai, Some(&off_by_default), None).0,
+            decide(Protocol::OpenaiCompatible, Some(&off_by_default), None).0,
             Off::Omitted
         );
         // Reasons, cannot stop, and nothing lower to ask for.
         let stuck = caps("toggle", &[], Some(false));
-        assert_eq!(decide(Protocol::Openai, Some(&stuck), None).0, Off::Omitted);
+        assert_eq!(
+            decide(Protocol::OpenaiCompatible, Some(&stuck), None).0,
+            Off::Omitted
+        );
     }
 
     #[test]
     fn a_model_that_can_stop_gets_the_protocols_off() {
         // Kilo's `gpt-5.4-nano`: levels, and `none` among its variants.
         let can = caps("levels", &["low", "medium", "high", "xhigh"], Some(true));
-        let (off, basis) = decide(Protocol::Openai, Some(&can), None);
+        let (off, basis) = decide(Protocol::OpenaiCompatible, Some(&can), None);
         assert_eq!(off, Off::Control);
         assert!(matches!(basis, Basis::Facts(_)));
         // An owner override that lists `none` as a level says the same.
@@ -198,11 +224,14 @@ mod tests {
         // catalog lists, none of them off.
         let nano = caps("levels", &["minimal", "low", "medium", "high"], None);
         assert_eq!(
-            decide(Protocol::Openai, Some(&nano), None).0,
+            decide(Protocol::OpenaiCompatible, Some(&nano), None).0,
             lowest("minimal")
         );
         let pro = caps("levels", &["low", "medium", "high"], None);
-        assert_eq!(decide(Protocol::Openai, Some(&pro), None).0, lowest("low"));
+        assert_eq!(
+            decide(Protocol::OpenaiCompatible, Some(&pro), None).0,
+            lowest("low")
+        );
         assert_eq!(decide(Protocol::Gemini, Some(&pro), None).0, lowest("low"));
         // Said outright (an owner override), on any protocol.
         let stuck = caps("levels", &["low", "high"], Some(false));
@@ -224,6 +253,52 @@ mod tests {
     }
 
     #[test]
+    fn an_anthropic_model_whose_lowest_setting_is_between_tools_gets_it() {
+        let with_types = |types: &[&str], can_disable| ReasoningCaps {
+            thinking_types: types.iter().map(|t| t.to_string()).collect(),
+            ..caps("levels", &["low", "medium", "high"], can_disable)
+        };
+        // Claude Sonnet 5.5, as its catalog says it.
+        let sonnet = with_types(&["adaptive", "between_tools"], Some(false));
+        let (off, basis) = decide(Protocol::Anthropic, Some(&sonnet), None);
+        assert_eq!(off, Off::BetweenTools);
+        assert!(matches!(basis, Basis::Facts(_)));
+        // `disabled` unpublished, `between_tools` published: still the type.
+        let silent = with_types(&["adaptive", "between_tools"], None);
+        assert_eq!(
+            decide(Protocol::Anthropic, Some(&silent), None).0,
+            Off::BetweenTools
+        );
+        // A model that can switch off keeps the plain off.
+        let both = with_types(&["adaptive", "between_tools", "disabled"], Some(true));
+        assert_eq!(
+            decide(Protocol::Anthropic, Some(&both), None).0,
+            Off::Control
+        );
+        // Neither (Claude Opus 5.5): its lowest level.
+        let opus = with_types(&["adaptive"], Some(false));
+        assert_eq!(
+            decide(Protocol::Anthropic, Some(&opus), None).0,
+            lowest("low")
+        );
+        // A type only an Anthropic route sends.
+        assert_eq!(
+            decide(Protocol::OpenaiCompatible, Some(&sonnet), None).0,
+            lowest("low")
+        );
+        // A refusal of exactly that form is learned over it.
+        let refused = Lesson {
+            refused: Off::BetweenTools,
+            instead: Off::Omitted,
+            fallback: true,
+        };
+        assert_eq!(
+            decide(Protocol::Anthropic, Some(&sonnet), Some(&refused)),
+            (Off::Omitted, Basis::Learned { fallback: true })
+        );
+    }
+
+    #[test]
     fn what_was_learned_stands_in_for_missing_facts_only() {
         let lesson = |refused: Off, instead: Off, fallback: bool| Lesson {
             refused,
@@ -232,7 +307,7 @@ mod tests {
         };
         let omitted = lesson(Off::Control, Off::Omitted, false);
         assert_eq!(
-            decide(Protocol::Openai, None, Some(&omitted)),
+            decide(Protocol::OpenaiCompatible, None, Some(&omitted)),
             (Off::Omitted, Basis::Learned { fallback: false })
         );
         let toggle = caps("toggle", &[], None);
@@ -245,13 +320,13 @@ mod tests {
         let can = caps("levels", &["low"], Some(true));
         let learned_low = lesson(lowest("minimal"), lowest("low"), false);
         assert_eq!(
-            decide(Protocol::Openai, Some(&can), Some(&learned_low)).0,
+            decide(Protocol::OpenaiCompatible, Some(&can), Some(&learned_low)).0,
             Off::Control
         );
         // …but not over the provider refusing exactly the form they give.
         let refused_off = lesson(Off::Control, Off::Omitted, true);
         assert_eq!(
-            decide(Protocol::Openai, Some(&can), Some(&refused_off)),
+            decide(Protocol::OpenaiCompatible, Some(&can), Some(&refused_off)),
             (Off::Omitted, Basis::Learned { fallback: true })
         );
     }

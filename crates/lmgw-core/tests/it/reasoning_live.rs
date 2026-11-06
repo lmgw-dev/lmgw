@@ -89,6 +89,7 @@ async fn replayed_reasoning_grows_the_prompt_through_the_gateway() {
             param_overrides: Params::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -97,7 +98,7 @@ async fn replayed_reasoning_grows_the_prompt_through_the_gateway() {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
 
     let client = reqwest::Client::new();
     let chat = format!("{base}/v1/chat/completions");

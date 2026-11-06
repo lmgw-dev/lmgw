@@ -138,12 +138,14 @@ pub(crate) struct Stage {
     /// the swap is `Snapshot::resolve_for_request`'s. `None` for an alias off
     /// this machine, or a row with none (a block then refuses).
     pub fallback: Option<Fallback>,
-    /// A hold fallback the row names but that cannot stand in, and why (a
+    /// A fallback the row names but that cannot stand in, and why (a
     /// block then refuses, naming it).
     pub fallback_unusable: Option<FallbackUnusable>,
 }
 
-/// A hold fallback, and whether it is local (a usable one never is).
+/// The fallback that answers for a blocked model, and whether it is a local
+/// model: a local one may be a fallback too, and answers where it may run
+/// (a row on the CPU under the hold).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Fallback {
     pub alias: String,
@@ -151,7 +153,7 @@ pub(crate) struct Fallback {
 }
 
 /// A named hold fallback that cannot answer: `why` is the clause the hold's
-/// refusal names it with ("does not resolve", "is itself a local model", …).
+/// refusal names it with ("does not resolve", "is itself a candidate alias").
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct FallbackUnusable {
     pub alias: String,
@@ -476,14 +478,19 @@ fn stage(
         // A CPU row too: the GPU hold leaves it alone, but a benchmark run's
         // lease swaps it to this fallback exactly as the hold swaps a GPU row
         // (WP7 review M2), and the page says so before anything is recorded.
-        match snap.fallback_route(&target) {
-            crate::config::FallbackRoute::Usable { alias, route } => {
+        let first = snap.next_hop(&crate::config::HopKey::Local(
+            target.class,
+            target.model_id.clone(),
+        ));
+        // Past a disabled hop to its own fallback, as a request goes.
+        match snap.past_disabled(first, |_| false).1 {
+            crate::config::FallbackRoute::Usable { alias, route, .. } => {
                 out.fallback = Some(Fallback {
                     local: snap.is_local_upstream(route.upstream.id),
                     alias,
                 });
             }
-            crate::config::FallbackRoute::Unusable { alias, why } => {
+            crate::config::FallbackRoute::Unusable { alias, why, .. } => {
                 out.fallback_unusable = Some(FallbackUnusable { alias, why });
             }
             crate::config::FallbackRoute::None => {}

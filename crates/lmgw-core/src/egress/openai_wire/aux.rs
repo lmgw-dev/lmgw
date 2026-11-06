@@ -110,7 +110,11 @@ pub fn build_embeddings(
         body["dimensions"] = json!(d);
     }
     let rb = http.post(url).json(&body);
-    Ok(apply_bearer_auth(rb, up))
+    Ok(crate::egress::watch::built(
+        up,
+        &serde_json::Map::new(),
+        apply_bearer_auth(rb, up),
+    ))
 }
 
 pub fn parse_embeddings(body: &[u8]) -> Result<EmbeddingsResponse, GatewayError> {

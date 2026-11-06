@@ -78,11 +78,11 @@ fn the_trigger_is_off_for_the_switch_admission_and_the_hold() {
     snap.settings.hold.active = true;
     assert!(trigger_off(&snap).unwrap().contains("hold"));
     snap.settings.vram.enabled = false;
-    assert!(trigger_off(&snap).unwrap().contains("vram.enabled"));
+    assert!(trigger_off(&snap).unwrap().contains("Arbitrate GPU memory"));
     snap.settings.vram.fallback_on_external = false;
     assert!(trigger_off(&snap)
         .unwrap()
-        .contains("vram.fallback_on_external"));
+        .contains("Fall back when VRAM outside"));
 }
 
 /// A stored settings blob from before the switch existed reads as on.
@@ -307,4 +307,50 @@ fn a_slot_is_busy_only_when_it_is_actually_working() {
     assert!(!slot_is_busy(
         &json!({ "id": 0, "is_processing": false, "id_task": "abc" })
     ));
+}
+
+/// Words no phase types clear the phase with them, so the view never pairs
+/// "looking for containers lmgw lost track of" with the eviction before
+/// it; and the caller that follows the wait is not told the same phase
+/// twice across them (chat-media-tools design §5.3).
+#[test]
+fn a_stage_in_words_clears_the_phase_and_the_watch_hears_no_repeat() {
+    use super::scheduler::Waiter;
+    use super::stage_watch::{follow, WaitPhase};
+
+    let q = super::VramScheduler::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let watch = rt.block_on(follow(tx, async { super::stage_watch::current() }));
+    q.live.lock().unwrap().queue.push(Waiter {
+        id: 1,
+        alias: "image/z".into(),
+        model: "z".into(),
+        class: Class::Image,
+        needs: 7 * GIB,
+        since: std::time::Instant::now(),
+        stage: String::new(),
+        phase: None,
+        watch,
+        origin: crate::runtime::registry::Origin::Owner,
+    });
+    let phase = |q: &super::VramScheduler| q.live.lock().unwrap().queue[0].phase.clone();
+    let stage = |q: &super::VramScheduler| q.live.lock().unwrap().queue[0].stage.clone();
+    let room = WaitPhase::WaitingForRoom {
+        needs_bytes: 7 * GIB,
+        free_bytes: 2 * GIB,
+    };
+    q.set_phase(1, room.clone(), Some("waiting for a busy model to finish"));
+    q.set_stage(1, "needs 7 GiB, 2 GiB free — evicting");
+    assert_eq!(phase(&q), None);
+    assert_eq!(stage(&q), "needs 7 GiB, 2 GiB free — evicting");
+    q.set_phase(1, room.clone(), Some("waiting for a busy model to finish"));
+    assert_eq!(phase(&q), Some(room.clone()));
+    let mut heard = Vec::new();
+    while let Ok(p) = rx.try_recv() {
+        heard.push(p);
+    }
+    assert_eq!(heard, vec![room], "the same wait, told once");
 }

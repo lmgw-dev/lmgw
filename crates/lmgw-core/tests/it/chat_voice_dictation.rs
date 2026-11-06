@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use lmgw_core::bench::lease::lease;
-use lmgw_core::config::{HoldFallbackMode, Protocol, Settings, UpstreamKind};
+use lmgw_core::config::{Protocol, Settings, UpstreamKind};
 use lmgw_core::runtime::descriptor::model_runtime;
 use lmgw_core::runtime::lifecycle::acquire_spec;
 use lmgw_core::runtime::registry::RuntimeState;
@@ -128,12 +128,7 @@ pub(crate) async fn asr_row(g: &Gpu, id: &str, cpu: bool, fallback: Option<&str>
     let mut row = crate::support::audio_world::tts_row(id, "qwen3_asr");
     row.task = "asr".into();
     row.backend = cpu.then(|| "cpu".to_string());
-    row.hold_fallback_mode = if fallback.is_some() {
-        HoldFallbackMode::Alias
-    } else {
-        HoldFallbackMode::Inherit
-    };
-    row.hold_fallback = fallback.map(str::to_string);
+    row.fallback = fallback.map(str::to_string);
     store::insert_audio_model(&g.state.db, &row).await.unwrap();
     g.state.reload_snapshot().await.unwrap();
 }
@@ -164,7 +159,7 @@ async fn cloud_alias(state: &SharedState, name: &str, mock: MockServer) -> MockS
         &state.db,
         &NewUpstream {
             name: format!("provider-{name}"),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: Some("sk-test".into()),
@@ -190,6 +185,7 @@ async fn cloud_alias(state: &SharedState, name: &str, mock: MockServer) -> MockS
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "asr", "endpoints": ["/v1/audio/transcriptions"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
@@ -511,7 +507,7 @@ async fn the_outside_vram_fallback_that_answers_is_named() {
     asr_chat_rows(&g, &["ears"]).await;
     let _cloud = cloud_asr(&g.state, "cloud-asr", "from the provider").await;
     sqlx::query(
-        "UPDATE local_models SET hold_fallback_mode = 'alias', hold_fallback = 'cloud-asr'
+        "UPDATE local_models SET fallback = 'cloud-asr'
          WHERE model_id = 'ears'",
     )
     .execute(&g.state.db)

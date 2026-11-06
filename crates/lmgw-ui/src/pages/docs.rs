@@ -19,9 +19,8 @@ use lmgw_api_types::{
     DocumentsResponse, ExportManifest, ImportReport, JobRow, MessageAck,
 };
 use serde_json::{json, Value};
-use wasm_bindgen::JsCast;
 
-use crate::fmt::{grouped, hue_for, human_bytes};
+use crate::fmt::{fmt_bytes, grouped, hue_for};
 use crate::widgets::{
     use_toasts, Facet, FacetSet, FilterBar, MenuItem, Modal, ModalFooter, ModalSize, ModelPicker,
     NavTab, PageFrame, PageMode, RowMenu, Side, SplitPane, SubNav, Tone,
@@ -404,7 +403,7 @@ fn CorpusList() -> impl IntoView {
     let total = Signal::derive(move || state.corpora.with(Vec::len));
     let count = Signal::derive(move || shown.with(Vec::len));
     let resident = move || {
-        human_bytes(
+        fmt_bytes(
             state
                 .corpora
                 .get()
@@ -746,7 +745,7 @@ fn CorpusRow(
         }
         lines.join("\n")
     };
-    let resident = human_bytes(c.resident_bytes.max(0) as u64);
+    let resident = fmt_bytes(c.resident_bytes.max(0) as u64);
     let unembedded = c.unembedded_chunks;
     let warnings = StoredValue::new(c.warnings.clone());
     let has_detail =
@@ -822,26 +821,10 @@ fn CorpusRow(
     }
 }
 
-/// Start a download the way a click on `<a download>` does; the router leaves
-/// a `download` link alone. In the desktop app the shell asks where to save
-/// it (a Save As dialog with the server's or `filename`'s name), as it does
-/// for every download of the window; a browser decides for itself.
-pub fn download(href: &str, filename: &str) {
-    let doc = document();
-    let Ok(el) = doc.create_element("a") else {
-        return;
-    };
-    let _ = el.set_attribute("href", href);
-    let _ = el.set_attribute("download", filename);
-    let Ok(a) = el.dyn_into::<web_sys::HtmlElement>() else {
-        return;
-    };
-    if let Some(body) = doc.body() {
-        let _ = body.append_child(&a);
-        a.click();
-        let _ = body.remove_child(&a);
-    }
-}
+/// Start a download the way a click on `<a download>` does: the kit's, which
+/// the Chat's downloads use too (`lmgw_ui_kit::http::bytes::click_download`,
+/// whose doc says what the desktop shell does with it).
+pub use lmgw_ui_kit::http::bytes::click_download as download;
 
 /// Two things behind one dialog, because they are the same job with and
 /// without a new pin. Filling in missing vectors keeps the corpus where it
@@ -1352,7 +1335,7 @@ fn ExportModal(open: RwSignal<bool>) -> impl IntoView {
                                 <span class="dim">"Schema"</span>
                                 <span class="mono-sm">{format!("v{}", m.schema_version)}</span>
                                 <span class="dim">"Size"</span>
-                                <span class="mono-sm">{human_bytes(m.byte_size)}</span>
+                                <span class="mono-sm">{fmt_bytes(m.byte_size)}</span>
                             </div>
                             <table class="data" style="margin-top:8px">
                                 <thead>

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use lmgw_api_types::realtime::cue_hint_text;
-use lmgw_core::config::{HoldFallbackMode, Settings};
+use lmgw_core::config::Settings;
 use lmgw_core::store;
 use serde_json::{json, Value};
 
@@ -908,8 +908,7 @@ async fn under_the_gpu_hold_a_cloud_fallback_takes_the_description_as_its_style(
     voice_design(&root);
     let mut row = tts_row("design", "qwen3_tts");
     row.task = "vdes".into();
-    row.hold_fallback_mode = HoldFallbackMode::Alias;
-    row.hold_fallback = Some("cloud-tts".into());
+    row.fallback = Some("cloud-tts".into());
     store::insert_audio_model(&state.db, &row).await.unwrap();
     state.reload_snapshot().await.unwrap();
 

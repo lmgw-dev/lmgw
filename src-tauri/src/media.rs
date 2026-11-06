@@ -26,6 +26,13 @@
 //! handler, which Tauri runs on this same GTK main thread as each message
 //! arrives, so no commit can fall between the message and the answer.
 //!
+//! **Which document, by number.** Every document the window runs gets a
+//! number of its own ([`document`]): a commit takes the next one, and so do
+//! the first document seen and a new window. The machine check's
+//! confirmation keys a "Not now" on it, so the same document is not asked
+//! again until it is replaced (machine-check design D140); a same-document
+//! navigation (the dashboard's router, `pushState`) keeps the number.
+//!
 //! **Frames.** The handler sees only the top-level document. What keeps an
 //! agent app's frame or the chat's sandboxed HTML preview off the microphone
 //! is WebKit's Permissions Policy: a cross-origin or opaque frame gets no
@@ -40,8 +47,9 @@
 //! mock camera — so a check can open "the microphone" in the real shell
 //! without one. Requests still go through this handler.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use webkit2gtk::glib::prelude::*;
 use webkit2gtk::glib::translate::ToGlibPtr;
@@ -188,13 +196,32 @@ pub(crate) fn running_after(
     }
 }
 
-/// The window's document, for [`command_allowed`]: kept on the GTK main
-/// thread, which is where Tauri dispatches commands and where `load-changed`
-/// runs. Replaced when a new window is built.
+/// Whether `event` replaced the running document: a commit always does, and
+/// so does the first running URI seen without one (an idle finish of a load
+/// whose commit came before the tracking began, [`running_after`]). A
+/// finish that names another URI of the same document (the dashboard's
+/// router moved it with `replaceState`) is no new document.
+pub(crate) fn new_document(event: Load, before: Option<&str>, after: Option<&str>) -> bool {
+    event == Load::Committed || (before.is_none() && after.is_some())
+}
+
+/// The last number a document was given; numbers start at 1 and are never
+/// given twice in a run, across windows too.
+static DOCUMENTS: AtomicU64 = AtomicU64::new(0);
+
+fn next_document() -> u64 {
+    DOCUMENTS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// The window's document, for [`command_allowed`] and [`document`]: kept on
+/// the GTK main thread, which is where Tauri dispatches commands and where
+/// `load-changed` runs. Replaced when a new window is built.
 struct WindowDocument {
     view: WeakRef<WebView>,
     serving: Serving,
     running: Rc<RefCell<Option<String>>>,
+    /// The running document's number.
+    number: Rc<Cell<u64>>,
 }
 
 thread_local! {
@@ -225,6 +252,18 @@ pub(crate) fn command_allowed() -> Result<(), String> {
         let serving = doc.serving.origin();
         document_at_gateway(running.as_deref(), active.as_deref(), serving.as_ref())
             .map_err(str::to_string)
+    })
+}
+
+/// The number of the document the window runs now (module docs), or `None`
+/// with no window. Like [`command_allowed`], only on the GTK main thread;
+/// anywhere else there is no window document and the answer is `None`.
+pub(crate) fn document() -> Option<u64> {
+    WINDOW_DOCUMENT.with(|doc| {
+        let doc = doc.borrow();
+        let doc = doc.as_ref()?;
+        doc.view.upgrade()?;
+        Some(doc.number.get())
     })
 }
 
@@ -265,8 +304,10 @@ pub(crate) fn install(window: &tauri::WebviewWindow, serving: Serving) {
         } else {
             view.uri().map(|u| u.to_string())
         }));
+        let number = Rc::new(Cell::new(next_document()));
         {
             let running = running.clone();
+            let number = number.clone();
             view.connect_load_changed(move |view, event| {
                 let event = match event {
                     LoadEvent::Committed => Load::Committed,
@@ -275,12 +316,11 @@ pub(crate) fn install(window: &tauri::WebviewWindow, serving: Serving) {
                 };
                 let uri = view.uri();
                 let before = running.take();
-                running.replace(running_after(
-                    event,
-                    uri.as_deref(),
-                    view.is_loading(),
-                    before,
-                ));
+                let after = running_after(event, uri.as_deref(), view.is_loading(), before.clone());
+                if new_document(event, before.as_deref(), after.as_deref()) {
+                    number.set(next_document());
+                }
+                running.replace(after);
             });
         }
         WINDOW_DOCUMENT.with(|doc| {
@@ -288,6 +328,7 @@ pub(crate) fn install(window: &tauri::WebviewWindow, serving: Serving) {
                 view: view.downgrade(),
                 serving: serving.clone(),
                 running: running.clone(),
+                number,
             }));
         });
         view.connect_permission_request(move |view, request| {

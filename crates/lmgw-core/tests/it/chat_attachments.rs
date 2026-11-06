@@ -39,7 +39,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream_base.trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -70,6 +70,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
                 }
             })
         }),
+        fallback: None,
     };
     store::insert_alias(&state.db, &alias("my-model", None))
         .await
@@ -433,7 +434,7 @@ async fn the_upstream_body_carries_attachments_in_upload_order_before_the_typed_
         .as_array()
         .expect("multimodal content is an array")
         .clone();
-    assert_eq!(parts.len(), 3, "{parts:#?}");
+    assert_eq!(parts.len(), 4, "{parts:#?}");
     assert_eq!(parts[0]["type"], "text");
     assert!(
         parts[0]["text"]
@@ -446,16 +447,22 @@ async fn the_upstream_body_carries_attachments_in_upload_order_before_the_typed_
         .as_str()
         .unwrap()
         .contains("the file contents"));
-    assert_eq!(parts[1]["type"], "image_url");
+    // The picture goes with its ref, which the image tools take
+    // (chat-media-tools design §3.6).
+    assert_eq!(
+        parts[1]["text"],
+        format!("[attachment att:{img_id}: image \"shot.png\"]")
+    );
+    assert_eq!(parts[2]["type"], "image_url");
     assert!(
-        parts[1]["image_url"]["url"]
+        parts[2]["image_url"]["url"]
             .as_str()
             .unwrap()
             .starts_with("data:image/png;base64,"),
         "{parts:#?}"
     );
-    assert_eq!(parts[2]["type"], "text");
-    assert_eq!(parts[2]["text"], "what do you make of these?");
+    assert_eq!(parts[3]["type"], "text");
+    assert_eq!(parts[3]["text"], "what do you make of these?");
 }
 
 #[tokio::test]
@@ -764,8 +771,39 @@ async fn get_attachment_serves_bytes_with_the_right_content_type_and_security_he
             .unwrap(),
         "sandbox"
     );
+    assert_eq!(resp.headers()["accept-ranges"], "bytes");
     let bytes = resp.bytes().await.unwrap();
     assert_eq!(&bytes[..], PNG);
+
+    // One Range (web::ranged): 206 with the span, still sandboxed; one past
+    // the end is 416.
+    let part = base
+        .client()
+        .get(format!("{base}/chat/api/attachments/{aid}"))
+        .header("range", "bytes=4-7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(part.status(), 206);
+    let n = PNG.len();
+    assert_eq!(
+        part.headers()["content-range"],
+        format!("bytes 4-7/{n}").as_str()
+    );
+    assert_eq!(part.headers()["content-security-policy"], "sandbox");
+    assert_eq!(&part.bytes().await.unwrap()[..], &PNG[4..=7]);
+    let past = base
+        .client()
+        .get(format!("{base}/chat/api/attachments/{aid}"))
+        .header("range", format!("bytes={n}-"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(past.status(), 416);
+    assert_eq!(
+        past.headers()["content-range"],
+        format!("bytes */{n}").as_str()
+    );
 }
 
 #[tokio::test]
@@ -963,4 +1001,55 @@ async fn concurrent_sends_of_the_same_draft_never_both_succeed() {
         "the attachment must end up bound to exactly one message: {:?}",
         atts[0]
     );
+}
+
+/// WP13: the extracted-text route sends nosniff and the sandbox policy too,
+/// and the bytes route on all three of its answers.
+#[tokio::test]
+async fn the_attachment_routes_are_sandboxed_on_every_answer() {
+    let mock = MockServer::start().await;
+    let (_state, base) = setup(&mock.uri()).await;
+    let tid = new_thread(&base, "my-model").await;
+    let att: Value = upload(&base, tid, "notes.txt", b"hello")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let aid = att["id"].as_i64().unwrap();
+    let resp = base
+        .client()
+        .get(format!("{base}/chat/api/attachments/{aid}/text"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "text/plain; charset=utf-8");
+    crate::support::stored::assert_sandboxed(resp.headers(), "text");
+    for (range, want) in [
+        (None, 200),
+        (Some("bytes=0-1"), 206),
+        (Some("bytes=99-"), 416),
+    ] {
+        let mut req = base
+            .client()
+            .get(format!("{base}/chat/api/attachments/{aid}"));
+        if let Some(r) = range {
+            req = req.header("range", r);
+        }
+        let r = req.send().await.unwrap();
+        assert_eq!(r.status().as_u16(), want, "{range:?}");
+        crate::support::stored::assert_sandboxed(r.headers(), &format!("{range:?}"));
+    }
+    // A `HEAD`, which a player may send before it asks for a range: the same
+    // head as the `GET`'s, no body.
+    let r = base
+        .client()
+        .head(format!("{base}/chat/api/attachments/{aid}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["accept-ranges"], "bytes");
+    crate::support::stored::assert_sandboxed(r.headers(), "HEAD");
+    assert!(r.bytes().await.unwrap().is_empty());
 }

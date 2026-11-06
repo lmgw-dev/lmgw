@@ -64,7 +64,7 @@ pub(crate) async fn gateway_on(base: &str) -> (lmgw_core::state::SharedState, cr
         &state.db,
         &lmgw_core::store::NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: base.to_string(),
             api_key: None,
@@ -88,6 +88,7 @@ pub(crate) async fn gateway_on(base: &str) -> (lmgw_core::state::SharedState, cr
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -191,7 +192,7 @@ async fn stop_during_a_slow_tool_then_send_again_succeeds() {
         )
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::from_secs(30)).await).await;
     let tid = tool_thread(&gw).await;
 
@@ -275,7 +276,7 @@ async fn a_turn_out_of_budget_records_its_unmade_calls() {
         .with_priority(2)
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let mut settings = state.snapshot().settings.clone();
     settings.responses_max_tool_calls = 1;
     lmgw_core::store::save_settings(&state.db, &settings)
@@ -333,7 +334,7 @@ async fn a_turn_failing_after_its_tools_ran_keeps_their_record() {
             .mount(&mock)
             .await;
     }
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
     let tid = tool_thread(&gw).await;
 
@@ -407,7 +408,7 @@ async fn a_failed_send_then_a_send(tools: bool) {
         .with_priority(2)
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = if tools {
         register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
         tool_thread(&gw).await

@@ -143,7 +143,7 @@ pub async fn add_asr_alias_named(state: &SharedState, fake: &AsrFake, alias: &st
             } else {
                 format!("audiocpp-{alias}")
             },
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::AudioCpp,
             base_url: format!("{}/v1", fake.url),
             api_key: None,
@@ -169,6 +169,7 @@ pub async fn add_asr_alias_named(state: &SharedState, fake: &AsrFake, alias: &st
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "asr", "endpoints": ["/v1/audio/transcriptions"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await

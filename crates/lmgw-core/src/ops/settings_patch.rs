@@ -3,7 +3,7 @@
 use lmgw_api_types as dto;
 use serde::Deserialize;
 
-use crate::config::{Settings, Snapshot};
+use crate::config::Settings;
 use crate::state::SharedState;
 use crate::store::{self};
 
@@ -41,6 +41,10 @@ pub struct SettingsPatch {
     pub auth_enabled: Option<bool>,
     pub retention_days: Option<i64>,
     pub retention_max_rows: Option<i64>,
+    /// Seconds before an upstream remembered out of quota is asked again,
+    /// when its answer carried no `Retry-After` (at least 1); until then a
+    /// model with a fallback on it answers with the fallback.
+    pub quota_recheck_seconds: Option<u64>,
     pub max_body_mb: Option<u32>,
     /// Archive an idle Chat thread this many days after its last activity.
     /// `0` disables auto-archive. A folder's own `archive_days` overrides it
@@ -58,7 +62,8 @@ pub struct SettingsPatch {
     /// `chat_feed_keepalive_max_s`.
     pub chat_feed_keepalive_s: Option<i64>,
     /// The longest keep-alive a feed may ask for itself
-    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 86400 seconds.
+    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 32767 seconds (the longest Linux accepts for a TCP
+    /// keep-alive timer).
     pub chat_feed_keepalive_max_s: Option<i64>,
     /// Records the Chat feed reads per query while a client catches up,
     /// from 1 to 10000.
@@ -105,13 +110,14 @@ pub struct SettingsPatch {
     /// Tokens of knowledge-base excerpts one Chat turn may carry. Must be
     /// above zero.
     pub chat_kb_budget_tokens: Option<i64>,
+    /// The image and audio tools' default models: `generate`, `edit`,
+    /// `speak`, `transcribe` (a name of that tool's `model` enum) and
+    /// `voice` (a voice of the default speech model). Only the fields
+    /// given change; `""` clears one (no default: the model chooses). The
+    /// self-admin tool takes it as a JSON-encoded object.
+    pub chat_media_defaults: Option<lmgw_api_types::chat_media::MediaDefaults>,
     pub sampling_alias: Option<String>,
     pub update_check_enabled: Option<bool>,
-    /// Global GPU-hold fallback for chat-class local models. `""` clears it
-    /// back to "refuse"; otherwise validated (must resolve, must not be local)
-    /// before it is stored. Deliberately not `hold_active`: engage or release
-    /// the hold with `hold_set`.
-    pub hold_fallback_alias: Option<String>,
     /// `vram.fallback_on_external`: answer a local model's fallback at once when VRAM outside lmgw's
     /// control is short, instead of queueing. On by default; turn off on
     /// shared-memory systems (APUs).
@@ -134,26 +140,6 @@ pub struct SettingsPatch {
     /// name outside its range. Taken by this op only: like `bind_addr`, an
     /// access setting the lmgw__settings_set tool refuses.
     pub devices: Option<super::DevicesSettingsPatch>,
-}
-
-/// A GPU-hold fallback alias is "usable" (gpu-hold design §2) when it
-/// resolves at all and lands on a route that is not itself local. Applied at
-/// set time by every setter that takes one — this settings patch, the local/
-/// aux/audio model patches, and (candidate-aliases design §4.1)
-/// `candidate_alias_set` — because a typo caught here never reaches a held
-/// request. Request-time re-checks still exist on top of this (§2, package
-/// 2): rows change after they are validated, and a bare `expose_all` upstream
-/// accepts any name here and can still fail at the provider later — that
-/// limit cannot be detected at set time either.
-///
-/// A candidate alias is refused by name here too (§4.1: "never another
-/// candidate alias") — [`Snapshot::usable_fallback`] is the request-time twin
-/// of this same rule, and both go through it so the two do not drift.
-pub fn validate_fallback_alias(snap: &Snapshot, alias: &str) -> Result<(), String> {
-    match snap.usable_fallback(alias) {
-        Ok(_) => Ok(()),
-        Err(why) => Err(format!("fallback alias '{alias}' {why}")),
-    }
 }
 
 /// `chat_pdf_mode` must be one of [`crate::config::CHAT_PDF_MODES`].
@@ -204,10 +190,36 @@ pub async fn validate_stt_alias(state: &SharedState, alias: &str) -> Result<(), 
     }
 }
 
+/// Save `p` over the stored settings, as a task of its own (*changed
+/// 2026-10-24*, see [`crate::detached::detached`]): the save runs under the
+/// settings lock from its read to its write, so the task starts at the lock,
+/// and a dropped request can no longer skip the publish, the MCP reconcile,
+/// the tools' nudge or the device listener's move after the write.
 pub async fn settings_set(
     state: &SharedState,
     p: SettingsPatch,
 ) -> Result<dto::SettingsSaved, String> {
+    let st = state.clone();
+    crate::detached::detached("saving the settings", async move { save(&st, p).await })
+        .await
+        .map_err(|r| r.message)?
+}
+
+/// [`settings_set`]'s save.
+/// `quota_recheck_seconds`: at least 1 — a re-check every request would
+/// send every request to an upstream known to refuse it.
+pub fn validate_quota_recheck_seconds(v: u64) -> Result<u64, String> {
+    if v == 0 {
+        return Err(
+            "quota_recheck_seconds must be at least 1: it is how long an upstream remembered out \
+             of quota is left alone before it is asked again"
+                .into(),
+        );
+    }
+    Ok(v)
+}
+
+async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSaved, String> {
     // Held across the whole read-modify-write: see `AppState::settings_write`.
     let guard = state.settings_write.lock().await;
     let snap = state.snapshot();
@@ -225,6 +237,10 @@ pub async fn settings_set(
     if let Some(v) = p.retention_max_rows {
         s.retention_max_rows = v.max(0);
         changed.push("retention_max_rows");
+    }
+    if let Some(v) = p.quota_recheck_seconds {
+        s.quota_recheck_seconds = validate_quota_recheck_seconds(v)?;
+        changed.push("quota_recheck_seconds");
     }
     if let Some(v) = p.max_body_mb {
         s.max_body_mb = v;
@@ -272,6 +288,17 @@ pub async fn settings_set(
         s.chat_kb_budget_tokens = validate_chat_kb_budget(v)?;
         changed.push("chat_kb_budget_tokens");
     }
+    let media_changed = match &p.chat_media_defaults {
+        Some(m) => {
+            let new = crate::mcp::media::defaults::settings_patch(state, &s.chat_media_defaults, m)
+                .await?;
+            changed.push("chat_media_defaults");
+            let moved = new != s.chat_media_defaults;
+            s.chat_media_defaults = new;
+            moved
+        }
+        None => false,
+    };
     changed.extend(
         super::apply_chat_voice(
             state,
@@ -296,16 +323,6 @@ pub async fn settings_set(
     if let Some(v) = p.update_check_enabled {
         s.update_check_enabled = v;
         changed.push("update_check_enabled");
-    }
-    if let Some(v) = p.hold_fallback_alias.as_deref() {
-        let v = v.trim();
-        if v.is_empty() {
-            s.hold.fallback_alias = None;
-        } else {
-            validate_fallback_alias(&snap, v)?;
-            s.hold.fallback_alias = Some(v.to_string());
-        }
-        changed.push("hold_fallback_alias");
     }
     if let Some(v) = p.fallback_on_external {
         s.vram.fallback_on_external = v;
@@ -355,6 +372,10 @@ pub async fn settings_set(
     // against the snapshot of then (`reconcile_mcp`).
     drop(guard);
     state.reconcile_mcp().await;
+    // A default model changes the media tools' schemas and descriptions.
+    if media_changed {
+        state.mcp.notify_tools_changed_now();
+    }
     // The device listener follows at once (device link design §4.1).
     if listener_moved {
         applies.extend(super::apply_devices_listener(state).await);

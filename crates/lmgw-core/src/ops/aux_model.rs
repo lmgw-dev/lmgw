@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 use lmgw_api_types as dto;
 
-use crate::config::{AuxKind, AuxModel, HoldFallbackMode, Snapshot};
+use crate::config::{AuxKind, AuxModel, HopKey};
+use crate::detached::detached;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::store::{self, NewAuxModel};
@@ -106,11 +107,12 @@ pub struct AuxModelPatch {
     /// stored as one); absent leaves the current value.
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: Option<bool>,
-    /// `inherit` (default — which for this class means *no* fallback) |
-    /// `none` | `alias`.
-    pub hold_fallback_mode: Option<String>,
-    pub hold_fallback: Option<String>,
-    /// Field names to reset: `extra_run_args`, `hold_fallback`, `extra_args`,
+    /// The model or alias that answers when this one cannot (openai egress
+    /// design §14.2): a model of the same type — an embedder for an
+    /// embedder, a reranker for a reranker, a decision model that answers
+    /// `/v1/systemone` for a decision row. `clear: "fallback"` removes it.
+    pub fallback: Option<String>,
+    /// Field names to reset: `extra_run_args`, `fallback`, `extra_args`,
     /// `ctx_size`, `ubatch_size`, `batch_size`, `mmproj_path`, `backend`,
     /// `threads`.
     pub clear: Option<String>,
@@ -410,71 +412,11 @@ pub(super) async fn aux_model_get(
         image: m.image.clone(),
         extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
-        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
-        hold_fallback: m.hold_fallback.clone(),
+        fallback: m.fallback.clone(),
         command_line,
         problems,
+        fit_note: crate::modelinfo::refit::note_of(state, Class::Aux, m.id).await,
     }))
-}
-
-/// Resolve the hold fallback for an aux create/update from string-typed
-/// fields (the dashboard and the tool plane both send the mode as text).
-fn resolve_aux_hold_fallback(
-    snap: &Snapshot,
-    p: &AuxModelPatch,
-    current: (HoldFallbackMode, Option<String>),
-) -> Result<(HoldFallbackMode, Option<String>), String> {
-    resolve_hold_fallback_text(
-        snap,
-        p.hold_fallback_mode.as_deref(),
-        p.hold_fallback.as_deref(),
-        p.clear.as_deref(),
-        current,
-    )
-}
-
-/// `hold_fallback_mode`/`hold_fallback` resolution for the patches that carry
-/// the mode as raw text (aux here, audio in `web::api`) rather than as
-/// [`LocalModelPatch`]'s typed enum (gpu-hold design §2/§3.2).
-///
-/// `clear: "hold_fallback"` wins over everything else and resets both to
-/// inherit/NULL — same convention as `extra_run_args`. Otherwise mode `alias`
-/// needs a non-empty alias, from the patch or the current row, and it is
-/// validated (must resolve, must not be local); `inherit`/`none` always clear
-/// the alias column.
-pub fn resolve_hold_fallback_text(
-    snap: &Snapshot,
-    mode: Option<&str>,
-    fallback: Option<&str>,
-    clear: Option<&str>,
-    current: (HoldFallbackMode, Option<String>),
-) -> Result<(HoldFallbackMode, Option<String>), String> {
-    if clear_has(clear, "hold_fallback") {
-        return Ok((HoldFallbackMode::Inherit, None));
-    }
-    let (cur_mode, cur_alias) = current;
-    let mode = match mode.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(s) => s
-            .parse::<HoldFallbackMode>()
-            .map_err(|_| format!("unknown hold_fallback_mode '{s}' (inherit|none|alias)"))?,
-        None => cur_mode,
-    };
-    match mode {
-        HoldFallbackMode::Alias => {
-            let alias = fallback
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .or(cur_alias)
-                .ok_or(
-                    "hold_fallback_mode 'alias' requires hold_fallback (the alias to route to \
-                     while the GPU is held)",
-                )?;
-            validate_fallback_alias(snap, &alias).map_err(|e| format!("hold_fallback: {e}"))?;
-            Ok((mode, Some(alias)))
-        }
-        HoldFallbackMode::Inherit | HoldFallbackMode::None => Ok((mode, None)),
-    }
 }
 
 /// Create, update, delete, enable or disable an aux (embedding / rerank)
@@ -490,6 +432,8 @@ pub async fn aux_model_set(
     state: &SharedState,
     p: AuxModelPatch,
 ) -> Result<dto::AuxModelSaved, String> {
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = state.routing_write().await;
     let snap = state.snapshot();
     let all = snap.aux_models.clone();
     let find = || -> Result<AuxModel, String> {
@@ -526,7 +470,6 @@ pub async fn aux_model_set(
         AuxKind::parse(s.trim())
             .ok_or_else(|| format!("unknown kind '{s}' (embed|rerank|decision)"))
     };
-    let reload = || async { state.reload_snapshot().await.map_err(|e| e.to_string()) };
 
     match p.action.as_str() {
         "create" => {
@@ -550,16 +493,17 @@ pub async fn aux_model_set(
                 None => vec![],
             };
             check_aux_flags(kind, pooling.as_deref(), &args)?;
-            let (hold_fallback_mode, hold_fallback) =
-                resolve_aux_hold_fallback(&snap, &p, (HoldFallbackMode::Inherit, None))?;
-            fallback::check_decision_fallback(
-                state,
-                &snap,
-                kind,
-                hold_fallback_mode,
-                hold_fallback.as_deref(),
-            )
-            .await?;
+            let row_fallback = super::fallback::patched(p.clear.as_deref(), &p.fallback, None)?;
+            let mut fallback_notes = Vec::new();
+            if let Some(f) = &row_fallback {
+                let owner = super::fallback::Owner::typed(
+                    None,
+                    public_name.clone(),
+                    super::fallback::ModelType::aux(kind),
+                );
+                fallback_notes = super::fallback::validate(state, &owner, f).await?;
+            }
+            fallback::check_decision_fallback(state, &snap, kind, row_fallback.as_deref()).await?;
             let f = fields::patched(&p, None)?;
             let new = NewAuxModel {
                 model_id: model_id.clone(),
@@ -585,31 +529,60 @@ pub async fn aux_model_set(
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
             };
             let (image, run_args) = effective_aux_image(state, &new.image, &new.extra_run_args);
             let row = as_aux_model(&new);
             let mut warnings = aux_config_warnings(state, &image, &run_args, &row).await;
             warnings.extend(aux_model_problems(&models_dir, &row).await);
             warnings.extend(fields::threads_note(new.threads, crate::host::cpu()));
-            let id = store::insert_aux_model(&state.db, &new)
+            // A fallback that holds the new name reaches this row from now
+            // on: checked in a dry run (§14.2, `fallback::referrers`).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            reload().await?;
-            Ok(dto::AuxModelSaved {
-                ok: true,
-                id,
-                warnings: Some(warnings),
-                message: format!(
-                    "{} model '{model_id}' created — clients request it as '{public_name}' on \
-                     {}; run lmgw__local_model_test model_id={model_id} target=aux to prove it \
-                     loads (its container starts on the first request)",
-                    kind.as_str(),
-                    kind.endpoint()
-                ),
-                public_name: Some(public_name),
+            let dry = store::insert_aux_model_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::AuxModels, dry);
+            super::fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(row.0, dry)],
+                Some(row),
+            )
+            .await?;
+            // The write and the reload are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot without the new model.
+            let task_st = state.clone();
+            detached("creating the aux model", async move {
+                let state = &task_st;
+                let id = store::insert_aux_model(&state.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(dto::AuxModelSaved {
+                    ok: true,
+                    id,
+                    warnings: Some(warnings),
+                    message: format!(
+                        "{} model '{model_id}' created — clients request it as '{public_name}' on \
+                         {}; run lmgw__local_model_test model_id={model_id} target=aux to prove it \
+                         loads (its container starts on the first request)",
+                        kind.as_str(),
+                        kind.endpoint()
+                    ),
+                    public_name: Some(public_name),
+                    fallback_notes,
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" | "enable" | "disable" => {
             let cur = find()?;
@@ -655,28 +628,8 @@ pub async fn aux_model_set(
                 }
             };
             let extra_run_args = run_args_override(extra_run_args);
-            let (hold_fallback_mode, hold_fallback) = resolve_aux_hold_fallback(
-                &snap,
-                &p,
-                (cur.hold_fallback_mode, cur.hold_fallback.clone()),
-            )?;
-            // A row turned into a decision row keeps no fallback that cannot
-            // answer System One, nor does one whose fallback changed (§2.4).
-            // Only then: an enable or a rename needs no catalog fetch, and
-            // the gate checks the fallback on every request anyway.
-            if kind != cur.kind
-                || hold_fallback_mode != cur.hold_fallback_mode
-                || hold_fallback != cur.hold_fallback
-            {
-                fallback::check_decision_fallback(
-                    state,
-                    &snap,
-                    kind,
-                    hold_fallback_mode,
-                    hold_fallback.as_deref(),
-                )
-                .await?;
-            }
+            let row_fallback =
+                super::fallback::patched(p.clear.as_deref(), &p.fallback, cur.fallback.clone())?;
             let new_aux_model_id = match (p.id, opt(&p.model_id)) {
                 (Some(_), Some(m)) => m,
                 _ => cur.model_id.clone(),
@@ -684,10 +637,42 @@ pub async fn aux_model_set(
             // Same rename guard as `model_set`/`local_model_set` (review
             // finding X4). A kind change across the prefixes renames the row
             // too (decision-models design §3.10).
+            let old_public_name = snap.aux_public_name(&cur);
             let new_public_name = snap.aux_name_for(kind, &new_aux_model_id);
-            if new_public_name != snap.aux_public_name(&cur) {
+            if new_public_name != old_public_name {
                 refuse_if_candidate_alias_name(&snap, &new_public_name)?;
             }
+            // A fallback is checked when it changes, and when the row's kind
+            // does (its type changes with it, §14.2 item 4). A row turned into
+            // a decision row keeps no fallback that cannot answer System One
+            // (§2.4). Only then: an enable or a rename needs no catalog fetch,
+            // and the gate checks the fallback on every request anyway.
+            let key = HopKey::Local(Class::Aux, cur.model_id.clone());
+            let mut fallback_notes = Vec::new();
+            let fallback_changed = kind != cur.kind || row_fallback != cur.fallback;
+            if fallback_changed {
+                if let Some(f) = &row_fallback {
+                    let owner = super::fallback::Owner::typed(
+                        Some(key.clone()),
+                        new_public_name.clone(),
+                        super::fallback::ModelType::aux(kind),
+                    )
+                    .renamed_from(Some(old_public_name.clone()));
+                    fallback_notes = super::fallback::validate(state, &owner, f).await?;
+                }
+                fallback::check_decision_fallback(state, &snap, kind, row_fallback.as_deref())
+                    .await?;
+            }
+            // A rename never breaks a chain (decision 27).
+            let rewrites = match new_public_name != old_public_name {
+                true => super::fallback::rename_rewrites(
+                    &snap,
+                    &[(key.clone(), new_public_name.clone())],
+                    Some(&key),
+                ),
+                false => super::fallback::Rewrites::default(),
+            };
+            fallback_notes.extend(rewrites.notes.iter().cloned());
             let f = fields::patched(&p, Some(&cur))?;
             let new = NewAuxModel {
                 model_id: new_aux_model_id,
@@ -710,75 +695,129 @@ pub async fn aux_model_set(
                 image,
                 extra_run_args,
                 warm_start: p.warm_start.unwrap_or(cur.warm_start),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
             };
             let (image, run_args) = effective_aux_image(state, &new.image, &new.extra_run_args);
             let row = as_aux_model(&new);
             let mut warnings = aux_config_warnings(state, &image, &run_args, &row).await;
             warnings.extend(aux_model_problems(&models_dir, &row).await);
             warnings.extend(fields::threads_note(new.threads, crate::host::cpu()));
-            store::update_aux_model(&state.db, cur.id, &new)
+            // What a rename, a kind change, an enable or a disable does to
+            // the fallbacks naming this row, in a dry run (§14.2).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            reload().await?;
-            // Container hygiene (per-model-containers §3.4/§3.6), keyed on
-            // the *current* model id so a rename stops the container that
-            // exists — see the chat path in `local_model_set` for why a
-            // rename is a drop rather than a stop.
-            let note = if new.model_id != cur.model_id {
-                lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
-                Some(format!(
-                    "it was renamed from '{}', so that container was stopped and removed — the \
-                     next request starts '{}' fresh",
-                    cur.model_id, new.model_id
-                ))
-            } else if enabled {
-                lifecycle::stop_for_apply(state, Class::Aux, &cur.model_id).await
-            } else {
-                lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
-                Some(format!(
-                    "'{}' is disabled — its container was stopped and removed",
-                    cur.model_id
-                ))
-            };
-            Ok(dto::AuxModelSaved {
-                ok: true,
-                id: cur.id,
-                warnings: Some(warnings),
-                message: match note {
-                    Some(note) => format!(
-                        "aux model '{}' {} — {note}",
-                        new.model_id,
-                        saved_verb(&p.action)
-                    ),
-                    None => format!(
-                        "aux model '{}' {} — it is not running, so the next request \
-                         starts it with the new configuration",
-                        new.model_id,
-                        saved_verb(&p.action)
-                    ),
-                },
-                ..Default::default()
+            store::update_aux_model_in(&mut tx, cur.id, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::AuxModels, cur.id);
+            super::fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(row.0, row.1)],
+                (fallback_changed && new.fallback.is_some()).then_some(row),
+            )
+            .await?;
+            let verb = saved_verb(&p.action);
+            // The write and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot serving the old row and the container on
+            // the old configuration (or, renamed or disabled, running).
+            let task_st = state.clone();
+            detached("updating the aux model", async move {
+                let state = &task_st;
+                let mut tx = store::begin_write(&state.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::update_aux_model_in(&mut tx, cur.id, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Container hygiene (per-model-containers §3.4/§3.6), keyed on
+                // the *current* model id so a rename stops the container that
+                // exists — see the chat path in `local_model_set` for why a
+                // rename is a drop rather than a stop.
+                let note = if new.model_id != cur.model_id {
+                    lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
+                    Some(format!(
+                        "it was renamed from '{}', so that container was stopped and removed — the \
+                         next request starts '{}' fresh",
+                        cur.model_id, new.model_id
+                    ))
+                } else if enabled {
+                    lifecycle::stop_for_apply(state, Class::Aux, &cur.model_id).await
+                } else {
+                    lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
+                    Some(format!(
+                        "'{}' is disabled — its container was stopped and removed",
+                        cur.model_id
+                    ))
+                };
+                Ok(dto::AuxModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    warnings: Some(warnings),
+                    message: match note {
+                        Some(note) => format!("aux model '{}' {} — {note}", new.model_id, verb),
+                        None => format!(
+                            "aux model '{}' {} — it is not running, so the next request \
+                             starts it with the new configuration",
+                            new.model_id, verb
+                        ),
+                    },
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let cur = find()?;
-            store::delete_aux_model(&state.db, cur.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            reload().await?;
-            // §3.4: immediately, not at the next boot.
-            lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
-            Ok(dto::AuxModelSaved {
-                ok: true,
-                id: cur.id,
-                message: format!(
-                    "aux model '{}' deleted — its container was stopped and removed",
-                    cur.model_id
-                ),
-                ..Default::default()
+            let fallback_notes = super::fallback::delete_notes(
+                &snap,
+                &HopKey::Local(Class::Aux, cur.model_id.clone()),
+            );
+            // The delete and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot serving the deleted row and its container
+            // running.
+            let task_st = state.clone();
+            detached("deleting the aux model", async move {
+                let state = &task_st;
+                store::delete_aux_model(&state.db, cur.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // §3.4: immediately, not at the next boot.
+                lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
+                Ok(dto::AuxModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    message: format!(
+                        "aux model '{}' deleted — its container was stopped and removed",
+                        cur.model_id
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"
@@ -807,7 +846,6 @@ fn as_aux_model(n: &NewAuxModel) -> AuxModel {
         image: n.image.clone(),
         extra_run_args: n.extra_run_args.clone(),
         warm_start: n.warm_start,
-        hold_fallback_mode: n.hold_fallback_mode,
-        hold_fallback: n.hold_fallback.clone(),
+        fallback: n.fallback.clone(),
     }
 }

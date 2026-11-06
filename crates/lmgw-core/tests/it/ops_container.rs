@@ -160,8 +160,7 @@ async fn fixture(chat: &[(&str, bool)], aux: &[(&str, bool)]) -> Fixture {
                 image: None,
                 extra_run_args: None,
                 warm_start: *warm_start,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
                 capabilities_override: None,
                 ladder: vec![],
             },
@@ -189,8 +188,7 @@ async fn fixture(chat: &[(&str, bool)], aux: &[(&str, bool)]) -> Fixture {
                 image: None,
                 extra_run_args: None,
                 warm_start: *warm_start,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await

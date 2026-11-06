@@ -579,7 +579,7 @@ async fn a_retest_asks_the_server_now() {
     assert!(cache.view(7)[0].read_at >= first);
 
     let mut openai = up.clone();
-    openai.protocol = Protocol::Openai;
+    openai.protocol = Protocol::OpenaiCompatible;
     cache.retest(&http, &openai, []);
     assert!(!cache.knows(7));
     cache.settled(7).await;
@@ -713,6 +713,6 @@ fn only_stored_llama_rows_are_external() {
         String::new()
     )));
     let mut openai = row(7, String::new());
-    openai.protocol = Protocol::Openai;
+    openai.protocol = Protocol::OpenaiCompatible;
     assert!(!is_external_llama(&openai));
 }

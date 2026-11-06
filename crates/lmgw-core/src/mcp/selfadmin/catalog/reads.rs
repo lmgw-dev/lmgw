@@ -1,4 +1,4 @@
-//! The read-only tools (`lmgw__status` … `lmgw__forge_prs`): every
+//! The read-only tools (`lmgw__status` … `lmgw__model_find`): every
 //! `Builtin` with `writes: false`, gated on
 //! [`SelfAdmin::allows_read`](crate::config::SelfAdmin::allows_read)
 //! alone. Order is the `tools/list` contract — do not resort.
@@ -21,10 +21,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                  configured objects. A ladder model's runtime entry additionally carries rung \
                  k/n (which weights file is loaded now, out of how many configured) and, while \
                  it is moving to a higher one, a climbing state naming the target and the \
-                 reason ('prompt 41,210 + 8,192 > 30,000'). A runtime entry a background \
-                 candidate alias started carries owner: 'background' until an ordinary request \
-                 claims it, and draining_for_owner while an ordinary request's admission is waiting on it; both \
-                 are absent on every other entry. \
+                 reason ('prompt 41,210 + 8,192 > 30,000'). A runtime entry background traffic \
+                 started (a background candidate alias, or a request sent with \
+                 x-lmgw-background: on) carries owner: 'background' until an ordinary request \
+                 claims it, absent otherwise. While any ordinary request waits for GPU room, \
+                 every running entry carries draining_for_owner: true — one global mark, the \
+                 owner is waiting for room and no model takes new background work; absent \
+                 otherwise. \
                  When any candidate alias is configured, a candidate_aliases array lists each \
                  one's name, mode (background/owner), primary, alternates, enabled facets, \
                  problems and deferrals_24h — how many times it answered gpu_deferred (a \
@@ -49,9 +52,14 @@ pub(super) fn tools() -> Vec<Builtin> {
                  candidates are routable right now (routable_candidates), any problems (a candidate or the fallback \
                  that stopped supporting an enabled facet, say), and deferrals_24h — how many \
                  times a background alias answered gpu_deferred (declined rather than disturb \
-                 ordinary traffic) in the last 24 hours. Answering this makes the same cached catalog \
+                 ordinary traffic) in the last 24 hours. Local, aux, audio and image entries carry \
+                 deferrals_24h too: requests sent for that name with x-lmgw-background: on that \
+                 were deferred in the last 24 hours. Answering this makes the same cached catalog \
                  HTTP calls to expose-all upstreams that /v1/models makes (warm calls are free; \
-                 a cold one fetches each reachable upstream's catalog once).",
+                 a cold one fetches each reachable upstream's catalog once). Every model and \
+                 alias entry carries fallback (the model or alias that answers when it cannot, \
+                 as configured; absent for none) and fallback_usable (whether that name stands \
+                 in right now).",
             props: vec![
                 (
                     "kind",
@@ -100,11 +108,18 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Tail the gateway request log (every /v1 request and MCP tool call, newest \
                  first) with status, latency, tokens and error details. fallback_reason says \
-                 why a fallback answered instead of the requested local model (hold, \
-                 external_vram, background, unavailable); upstream_name is the fallback. rung is the 1-based rung \
+                 why a fallback answered instead of the model or alias requested (hold, \
+                 benchmark, external_vram, background, unavailable, quota, unreachable, \
+                 disabled, gpu_setup, engine_download; along a chain, the last hop's); \
+                 upstream_name is where the answer \
+                 came from. An attempt handed to its fallback (an exhausted quota, an \
+                 unreachable upstream) has a row of its own saying so. rung is the 1-based rung \
                  a ladder model's row was judged on (empty for a row without a ladder, and for \
-                 one a fallback answered instead). Use it to diagnose a failing model or \
-                 upstream.",
+                 one a fallback answered instead). service_tier is the tier an OpenAI \
+                 platform answer reported (default, flex, priority, …), and price_note says \
+                 why a row's cost is what it is when that is not plain (a tier with no price \
+                 on file, an answer that ended before its usage was reported). Use it to \
+                 diagnose a failing model or upstream.",
             props: vec![
                 ("limit", int_p("How many rows to return. Default 50.")),
                 (
@@ -129,7 +144,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 "Read gateway settings: bind address, auth, log retention, the self-admin \
                  mode, the four container configurations (chat, aux, audio, image — audio \
                  also carries catalog_revision, which revision an audio catalog download \
-                 takes), the GPU hold (active, fallback_alias), the external-VRAM fallback switch \
+                 takes), the GPU hold (active), the external-VRAM fallback switch \
                  (vram.fallback_on_external) and the container-build settings (builds \
                  directory, update-check interval, which hosts have a forge token). Tokens \
                  are redacted.",
@@ -299,16 +314,41 @@ pub(super) fn tools() -> Vec<Builtin> {
                  differs from the plan and carries a ready-made update patch — so this is \
                  also the repair tool, not just the add-a-model tool. For target=image the \
                  result's params are lmgw__image_model_set's, matched from the shipped \
-                 recipe list rather than read out of the file.",
+                 recipe list rather than read out of the file. A file not downloaded yet is \
+                 planned from Hugging Face instead: pass repo and file in place of gguf_path, \
+                 and lmgw reads the file's header (and its projector's and drafter's) from \
+                 the hub, which costs 1 to 16 MiB a file and downloads nothing; the plan is \
+                 the one the file gets once lmgw__hf_add has put it on disk. A chat or aux \
+                 plan also answers 'source' and 'fit': whether the file fits the graphics \
+                 card, measured against the whole card and beside what runs on it now, with \
+                 the largest context that fits. An image plan answers neither yet.",
             props: vec![
                 (
                     "gguf_path",
-                    str_p("Weights GGUF path relative to the target's models directory."),
+                    str_p(
+                        "Weights GGUF path relative to the target's models directory. Or name \
+                         a file on Hugging Face with repo and file instead.",
+                    ),
+                ),
+                (
+                    "repo",
+                    str_p(
+                        "A Hugging Face repo (owner/name) to plan a file of before downloading \
+                         it, with file; in place of gguf_path.",
+                    ),
+                ),
+                (
+                    "file",
+                    str_p(
+                        "The weights GGUF's path in repo, as lmgw__hf_repo lists it (the \
+                         first part of a split file).",
+                    ),
                 ),
                 (
                     "target",
                     enum_p(
-                        "Which class's models directory the path is under. Default 'chat'. \
+                        "Which class's models directory the path is under. Default 'chat'; with repo \
+                         and file, the class to plan for, else the header's. \
                          'aux' is the embedding / rerank / decision models dir — the classes \
                          keep \
                          separate trees, so a file downloaded with lmgw__hf_add target=aux is \
@@ -322,7 +362,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
             ],
-            required: &["gguf_path"],
+            required: &[],
         },
         Builtin {
             name: "lmgw__llama_flags",
@@ -362,13 +402,34 @@ pub(super) fn tools() -> Vec<Builtin> {
                  .gguf, and names the roles of an image pipeline instead (diffusion, \
                  checkpoint, vae, text_encoder, lora, upscaler) — but one image pipeline \
                  spans several repos, so prefer lmgw__image_recipes, which names every \
-                 component of a known family with its repo, file and size.",
+                 component of a known family with its repo, file and size. \
+                 With fit=true each 'weights' file also gets its fit on this computer's \
+                 graphics card (`fit`: by the whole card and beside what runs on it now, with \
+                 the longest conversation that fits) and the answer names the `recommended` \
+                 file with its reason (`picks`). That reads GGUF headers from Hugging Face, \
+                 1 to 16 MiB each: one file's, then only the files near the card's edge and \
+                 those that could be the recommended one; the others are estimated from it \
+                 (`estimated_from`), never smaller than the real use. `header_bytes_read` \
+                 says what it cost. The card measured (`card`) and what holds for every file \
+                 (`fit_notes`: the hold, admission, where the estimates came from, why the reads \
+                 stopped) are said once for the list, not in each file's fit. A gated repo, the \
+                 hub's rate limit or no connection stops the reads at the first refusal; nothing \
+                 is recommended then. lmgw__local_model_plan with repo + file reads one file \
+                 exactly.",
             props: vec![
                 (
                     "repo",
                     str_p(
                         "Repo id like 'unsloth/Qwen3.5-9B-GGUF' — owner/name only, not a \
                          full huggingface.co URL.",
+                    ),
+                ),
+                (
+                    "fit",
+                    bool_p(
+                        "Mark the weights files with their fit on the graphics card and name \
+                         the recommended one; reads file headers (1 to 16 MiB each). Chat and \
+                         aux only. Default false: nothing is read.",
                     ),
                 ),
                 ("search", str_p("Case-insensitive substring filter on the filename.")),
@@ -387,15 +448,39 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__hf_downloads",
             writes: false,
             description:
-                "Every tracked Hugging Face download with its status, destination path and \
-                 live byte progress. Poll this after lmgw__hf_add until the status is 'done'. \
+                "Tracked Hugging Face downloads with their status, destination path and \
+                 live byte progress. Poll this after lmgw__hf_add, lmgw__image_recipe_add, \
+                 lmgw__image_upscaler_add or an audio catalog download with ids = the \
+                 download ids that call returned, until each status is 'done'. Without ids \
+                 it returns every row ever recorded, which grows without bound; `active` \
+                 true keeps only the rows that still need attention (status queued, \
+                 downloading or failed; done and update_available are left out). With both, \
+                 a row must match both. With neither, every row. \
                  requested_revision is what the download asks for ('main', or the commit an \
                  audio.cpp spec pins, which an audio catalog download takes under \
                  audio.catalog_revision 'pinned'); resolved_commit is the commit the file on \
                  disk came from, as the hub named it. On a row from before lmgw recorded \
                  them, requested_revision is null because every download then took main, \
                  and resolved_commit is null because the commit is unknown.",
-            props: vec![],
+            props: vec![
+                (
+                    "ids",
+                    serde_json::json!({
+                        "type": "array",
+                        "items": { "type": "integer" },
+                        "description": "Only these download row ids: the ids hf_add, \
+                            image_recipe_add, image_upscaler_add or an audio catalog \
+                            download returned.",
+                    }),
+                ),
+                (
+                    "active",
+                    bool_p(
+                        "true: only rows that are not finished (status queued, downloading \
+                         or failed).",
+                    ),
+                ),
+            ],
             required: &[],
         },
         Builtin {
@@ -492,7 +577,15 @@ pub(super) fn tools() -> Vec<Builtin> {
                  always wins over a catalog row for the same scope. An upstream that \
                  publishes no pricing at all (Gemini, for one) leaves its models unpriced \
                  unless priced by hand with lmgw__price_set; a local model is never in the \
-                 list — it resolves free_local, not unknown.",
+                 list — it resolves free_local, not unknown. Every sheet names its \
+                 service_tier (OpenAI's pricing tiers; standard for every other provider), and \
+                 `unpriced_tiers` lists each model that answered at a tier it has no row for, \
+                 as {name, scope_kind, scope_key, service_tier, requests, since}: that traffic \
+                 is unpriced, and counts toward no budget, until a row of that tier exists. \
+                 `unpriced_hosted_tools` lists each model whose native /v1/responses answers \
+                 ran a hosted tool that bills beyond its tokens (web search, file search, a \
+                 container, image generation), as {name, scope_key, calls, requests, since}: \
+                 those rows are unpriced, since no price unit covers the fees yet.",
             props: vec![],
             required: &[],
         },
@@ -718,6 +811,115 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ("page", int_p("Page number, from 1 — the previous answer's next_page.")),
             ],
             required: &[],
+        },
+        Builtin {
+            name: "lmgw__machine_check",
+            writes: false,
+            description:
+                "Whether this computer can run local models, item by item: the graphics card and \
+                 its driver (the running kernel module against the driver libraries on disk, NVML \
+                 read in a separate process), what lets models use the card (who owns \
+                 /usr/bin/nvidia-ctk and whether lmgw could write its own CDI spec), the program \
+                 that runs models (Podman), whether the model settings fit the card, free disk \
+                 space and whether the engine images are downloaded. Each item has a plain \
+                 sentence for the person, technical detail lines and a typed cause; the verdict \
+                 is ready, needs_fix, needs_steps, needs_restart, needs_driver or cloud_only. \
+                 When something can be done, the answer carries the plan: every step with the \
+                 exact commands it runs as root, the full text of the files it writes, the same \
+                 lines to type in a terminal, and how it is carried out (the app's button or \
+                 instructions, and why). The fix itself runs only from lmgw's own app window on \
+                 this computer, after the person confirms and types their password: explain the \
+                 plan to them, but it cannot be run from here. When the model settings are for \
+                 the other maker's card, the settings item carries an action instead: every \
+                 field the switch to the settings for this card changes, as it is and as it \
+                 would become, what it leaves, and the running models it stops; that switch \
+                 needs no password and is the machine_settings_fit op (POST \
+                 /api/op/machine_settings_fit, with confirm set to the listed changes), which \
+                 is not a tool here. Without fresh this is the last \
+                 result (the check runs at boot); fresh: true runs it now, joining a run already \
+                 in progress that began after the call. It only reads, with the user's rights, \
+                 and runs these programs: lmgw's own NVML probe (lmgw --machine-probe nvml, in \
+                 a process of its own), rpm and rpmkeys queries, nvidia-ctk --version, one \
+                 cache-only dnf repoquery for the toolkit's download sizes, and Podman's \
+                 --version, --help, info and image exists for each engine image, and podman \
+                 images; for an engine image that is not one of the engines' published images \
+                 it reads its build label, or lists its ggml libraries in a throwaway \
+                 container with no network and no device, to tell which card it is built for; \
+                 for an engine image that is not downloaded yet it reads its registry manifest \
+                 anonymously, for the download's size.",
+            props: vec![(
+                "fresh",
+                bool_p("Run the check now instead of answering the last result."),
+            )],
+            required: &[],
+        },
+        Builtin {
+            name: "lmgw__model_find",
+            writes: false,
+            description:
+                "Finds a model by the name someone said ('qwen 3.6'), a Hugging Face address (a repo, a \
+                 file, a download link, also inside pasted text) or owner/repo, and picks one model and one \
+                 file of it that fits this computer's graphics card. Names are searched as typed, with no \
+                 aliases: numbers are written as digits ('gemma 4', not 'gemma four'). It asks Hugging \
+                 Face's model search twice (every repo, and GGUF repos, each the hub's first page by \
+                 downloads); keeps the repos whose name has every query word; takes the originals, not \
+                 uploads of them; ranks them by matched words, weights of their own, likes and downloads; \
+                 and walks the top author's originals of the top one's kind to the first whose upload has a \
+                 file that fits by its size (an upload by the maker first, gated ones last); when none \
+                 fits, the card is the one closest to fitting (nothing_fits). It reads no file header, so \
+                 the card's marks are by size ('fits_by_size'): lmgw__hf_repo with fit=true on the card's \
+                 upload reads the header (1 to 16 MiB) and checks exactly. A search usually costs 3 to 8 \
+                 Hugging Face requests: the two searches, two per model the walk reads (its uploads, a \
+                 tree) plus one per gated or unanswered upload or further tree page, and the display \
+                 name; lmgw sets no bound of its own, the hub's limit is the bound. hub_budget carries \
+                 the hub's own RateLimit and RateLimit-Policy figures, near when fewer requests are left \
+                 than this answer took; a limit used up before anything was found answers rate_limited \
+                 with the seconds to the reset, and one used up partway keeps what was found, with a \
+                 note. An address on another host, or a Hugging Face page that isn't a model's \
+                 (not_a_model), is answered without asking anyone. A private repo's card has no share \
+                 link. others, did_you_mean and the card's other_uploads are windows of 10 by default \
+                 (each one's *_total and *_more say how many there are); the *_offset and *_count \
+                 arguments ask for another window, which runs the same search again. \
+                 next_cursor continues the search with the hub's next pages (answer 'more': the lists \
+                 only).",
+            props: vec![
+                (
+                    "query",
+                    str_p(
+                        "A model's name as people say it ('qwen 3.6'), a Hugging Face address, \
+                         or owner/repo.",
+                    ),
+                ),
+                (
+                    "cursor",
+                    str_p("A previous answer's next_cursor: the search's next pages."),
+                ),
+                (
+                    "others_offset",
+                    int_p("The first entry of others to answer with (default 0)."),
+                ),
+                (
+                    "others_count",
+                    int_p("How many entries of others to answer with (default 10)."),
+                ),
+                (
+                    "did_you_mean_offset",
+                    int_p("The first entry of did_you_mean to answer with (default 0)."),
+                ),
+                (
+                    "did_you_mean_count",
+                    int_p("How many entries of did_you_mean to answer with (default 10)."),
+                ),
+                (
+                    "other_uploads_offset",
+                    int_p("The first entry of the card's other_uploads to answer with (default 0)."),
+                ),
+                (
+                    "other_uploads_count",
+                    int_p("How many entries of the card's other_uploads to answer with (default 10)."),
+                ),
+            ],
+            required: &["query"],
         },
     ]
 }

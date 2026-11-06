@@ -6,7 +6,7 @@
 // ci/check.sh when node is installed. --long runs the resampler's rate check
 // over 20 minutes of input instead of 3.
 //
-// crates/lmgw-ui/assets/voice/capture-worklet.js — the resampler and chunker:
+// crates/lmgw-chat-ui/assets/voice/capture-worklet.js — the resampler and chunker:
 //   THD+N at 1 kHz for 48 and 44.1 kHz into 24 and 16 kHz, with 128-, 127- and
 //   480-frame blocks (the state carried across process() calls); the
 //   frequency response near the top of the band; aliases from above the
@@ -14,7 +14,7 @@
 //   count against the ideal over minutes (no drift); 40 ms chunks; the
 //   push-to-talk pre-roll contiguous with the live audio; a gate close that
 //   posts the utterance's tail before `gated`; flush.
-// crates/lmgw-ui/assets/voice/player-worklet.js — the player:
+// crates/lmgw-chat-ui/assets/voice/player-worklet.js — the player:
 //   gapless chunks, played == pushed, progress about every 50 ms, `underrun`
 //   (an item still waits) apart from `drained` (nothing waits), `ended`, a
 //   flush's counts, a push after `end` ignored, PCM16 scaling.
@@ -26,7 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const voice = path.join(here, "..", "crates", "lmgw-ui", "assets", "voice");
+const voice = path.join(here, "..", "crates", "lmgw-chat-ui", "assets", "voice");
 const long = process.argv.includes("--long");
 
 // --- the worklet scope stub ----------------------------------------------------------

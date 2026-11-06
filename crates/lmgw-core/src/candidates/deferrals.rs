@@ -3,12 +3,17 @@
 //! request log (`gpu_deferred`)").
 //!
 //! A background walk that finds nothing local it may use answers
-//! [`crate::error::GatewayError::GpuDeferred`] — `503`, wire code
-//! `gpu_hold`, but logged under its own kind, `gpu_deferred`
-//! (`request_logs.error_kind`), precisely so this count can tell a real hold
-//! from the alias just being busy (spec §12 entry 67). This module reads
-//! that count back, for `lmgw__status`, `lmgw__models kind=alias` and
+//! [`crate::error::GatewayError::GpuDeferred`] — `503`, logged under its own
+//! kind, `gpu_deferred` (`request_logs.error_kind`), so this count can tell a
+//! real hold from the alias just being busy (spec §12 entry 67; since
+//! 2026-10-21 the wire code says `gpu_deferred` too). This module reads that
+//! count back, for `lmgw__status`, `lmgw__models kind=alias` and
 //! `GET /api/models/full` alike.
+//!
+//! A plain local model's guest (`x-lmgw-background: on`, per-request
+//! background design §10) is deferred the same way, logged with the model's
+//! public name as `requested_alias`, so the same map answers for local rows
+//! ([`for_alias`] with that name).
 //!
 //! Its own file rather than a new `store.rs` function, or a new one in
 //! `ops/candidate_alias.rs`: `store.rs` and `ops.rs` are both past the

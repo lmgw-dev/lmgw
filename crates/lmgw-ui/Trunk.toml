@@ -7,3 +7,15 @@
 target = "index.html"
 dist = "dist"
 public_url = "/"
+# No inline loader: Trunk's default is an inline module script, which a page
+# under `script-src 'self' 'wasm-unsafe-eval'` refuses (chat-plane design,
+# "WP3a: the transport seam"). This leaves the build's file names on a <meta>
+# that assets/start.js, a module file, reads and loads.
+pattern_script = '<meta name="lmgw-wasm" data-js="{base}{js}" data-wasm="{base}{wasm}">'
+
+# `trunk watch` watches this directory by default and only it; the Chat
+# (lmgw-chat-ui: its code, chat.css, voice.css, codeblocks.js, vendor/ and
+# voice/) and the kit (kit.css, profiles.css) are built into this page too,
+# so an edit there rebuilds it as well.
+[watch]
+watch = [".", "../lmgw-chat-ui", "../lmgw-ui-kit"]

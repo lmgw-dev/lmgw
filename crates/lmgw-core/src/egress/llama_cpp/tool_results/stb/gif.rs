@@ -89,6 +89,43 @@ pub(super) fn check(bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// How many images `bytes` holds ([`super::gif_images`]): only walked, no
+/// image checked.
+pub(super) fn images(bytes: &[u8]) -> Option<u32> {
+    let mut r = Reader::new(bytes);
+    let magic = r.take(6, "header").ok()?;
+    if magic != b"GIF87a" && magic != b"GIF89a" {
+        return None;
+    }
+    r.take(4, "logical screen descriptor").ok()?;
+    let flags = r.u8("logical screen descriptor").ok()?;
+    r.take(2, "logical screen descriptor").ok()?;
+    if flags & 0x80 != 0 {
+        r.take(colour_table(flags), "global colour table").ok()?;
+    }
+    let mut images = 0u32;
+    loop {
+        match r.u8("block list").ok()? {
+            0x2C => {
+                r.take(8, "image descriptor").ok()?;
+                let local = r.u8("image descriptor").ok()?;
+                if local & 0x80 != 0 {
+                    r.take(colour_table(local), "local colour table").ok()?;
+                }
+                r.u8("image data").ok()?;
+                sub_blocks(&mut r, "image data").ok()?;
+                images += 1;
+            }
+            0x21 => {
+                r.u8("extension").ok()?;
+                sub_blocks(&mut r, "extension").ok()?;
+            }
+            0x3B => return Some(images),
+            _ => return None,
+        }
+    }
+}
+
 /// The size of a colour table its flags announce.
 fn colour_table(flags: u8) -> usize {
     3 * (2 << (flags & 7))

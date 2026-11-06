@@ -62,6 +62,16 @@ impl Gw {
             .expect("a client with no redirect policy always builds")
     }
 
+    /// The same credential, decoding nothing: for the tests that read what
+    /// the server put on the wire (its `Content-Encoding`), which reqwest's
+    /// gzip decoding would take off.
+    pub fn client_raw(&self) -> reqwest::Client {
+        self.builder()
+            .no_gzip()
+            .build()
+            .expect("a client that decodes nothing always builds")
+    }
+
     fn builder(&self) -> reqwest::ClientBuilder {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -152,7 +162,11 @@ pub async fn serve(state: SharedState) -> Gw {
 /// address on every request, which the agent proxy forwards as
 /// `X-Forwarded-For` (origins §4.6). For the suites that bind their own
 /// listener before building the router.
+///
+/// Every answer of an OpenAI- or Anthropic-shaped `/v1` route is checked
+/// against the provider's schema on its way out ([`api_compat::answers`]).
 pub async fn serve_on(listener: tokio::net::TcpListener, app: axum::Router) {
+    let app = app.layer(axum::middleware::from_fn(api_compat::answers::check));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<lmgw_core::server::Conn>(),
@@ -377,5 +391,6 @@ pub fn inspect_wire(answer: impl serde::Serialize) -> serde_json::Value {
     live
 }
 
+pub mod api_compat;
 pub mod captured_log;
 pub mod patience;

@@ -127,8 +127,7 @@ async fn a_cpu_row_never_takes_the_outside_vram_fallback() {
     op(
         &f,
         "audio_model_set",
-        json!({"action": "update", "id": asr, "hold_fallback_mode": "alias",
-               "hold_fallback": "cloud-speech"}),
+        json!({"action": "update", "id": asr, "fallback": "cloud-speech"}),
     )
     .await;
     assert!(f.state.snapshot().settings.vram.fallback_on_external);

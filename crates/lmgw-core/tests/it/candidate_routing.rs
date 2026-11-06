@@ -14,7 +14,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::runtime::registry::{Origin, RuntimeState, RuntimeView};
 use lmgw_core::store::{self, NewCandidateAlias, NewLocalModel};
 use lmgw_core::vram;
@@ -49,11 +48,6 @@ fn alias(
         alias: name.into(),
         candidates: candidates.iter().map(|c| c.to_string()).collect(),
         background,
-        fallback_mode: if fallback.is_some() {
-            HoldFallbackMode::Alias
-        } else {
-            HoldFallbackMode::None
-        },
         fallback: fallback.map(str::to_string),
         capabilities_disabled: vec![],
         capabilities_enabled: enabled.iter().map(|f| f.to_string()).collect(),
@@ -91,8 +85,7 @@ fn row(id: &str, capabilities: Option<Value>) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: capabilities,
         ladder: vec![],
     }
@@ -330,7 +323,7 @@ async fn a_background_alias_whose_primary_is_blocked_uses_a_loaded_alternate() {
 }
 
 /// Nothing usable: the alias fallback answers with reason `background`; with
-/// none, `503 gpu_hold` logged `gpu_deferred`, saying what is in the way. No
+/// none, `503 gpu_deferred` (wire and log alike), saying what is in the way. No
 /// eviction either way.
 #[tokio::test]
 async fn a_background_alias_with_nothing_usable_goes_to_its_fallback_or_defers() {
@@ -351,7 +344,7 @@ async fn a_background_alias_with_nothing_usable_goes_to_its_fallback_or_defers()
     assert_eq!(resp.status(), 503);
     assert_eq!(header(&resp, "x-lmgw-candidate"), None);
     let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["error"]["code"], "gpu_hold", "{v}");
+    assert_eq!(v["error"]["code"], "gpu_deferred", "{v}");
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(msg.contains("deferred: GPU in use by"), "{msg}");
     assert!(!msg.contains("  "), "one sentence, no stray spaces: {msg}");
@@ -375,8 +368,7 @@ async fn the_hold_answers_both_alias_kinds_with_the_alias_fallback_never_a_row_f
     g.cloud("cloud", None).await;
     g.cloud("rowcloud", None).await;
     let mut p = row("p", None);
-    p.hold_fallback_mode = HoldFallbackMode::Alias;
-    p.hold_fallback = Some("rowcloud".into());
+    p.fallback = Some("rowcloud".into());
     g.row(p, 8 * GIB).await;
     g.candidate(alias("writer", &["p"], false, Some("cloud"), &[]))
         .await;
@@ -443,6 +435,79 @@ async fn a_request_using_a_facet_the_alias_does_not_enable_is_a_400() {
         "{v}"
     );
 
+    // Structured output is refused with the code a plain model's early
+    // refusal uses, `param` naming the field (structured-output design §7).
+    let resp = chat_body(
+        &gw,
+        json!({"model": "writer", "messages": [{"role": "user", "content": "hi"}],
+               "response_format": {"type": "json_schema", "json_schema": {
+                   "name": "answer", "schema": {"type": "object"}}}}),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "response_format_unsupported", "{v}");
+    assert_eq!(v["error"]["param"], "response_format", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'writer' does not enable Structured output"),
+        "{v}"
+    );
+
+    assert!(g.runs().is_empty(), "refused before anything started");
+}
+
+/// On `/v1/responses`, a part only a native upstream serves uses its facet
+/// too, though the IR leaves it out: a hosted tool, a `tool_choice` naming
+/// one and a hosted tool's record are tool calls, an `input_image` by
+/// `file_id` is vision (openai egress design §6.1).
+#[tokio::test]
+async fn a_native_only_part_uses_its_facet_on_a_candidate_alias() {
+    let (g, gw) = world(24 * GIB, 2).await;
+    g.row(row("p", Some(caps(true))), 8 * GIB).await;
+    g.candidate(alias("writer", &["p"], false, None, &[])).await;
+
+    let cases = [
+        (
+            json!({"tools": [{"type": "web_search"}], "input": "hi"}),
+            "Tool calls",
+        ),
+        (
+            json!({"tool_choice": {"type": "web_search"}, "input": "hi"}),
+            "Tool calls",
+        ),
+        (
+            json!({"input": [{"type": "web_search_call", "id": "ws_1", "status": "completed"},
+                             {"role": "user", "content": "go on"}]}),
+            "Tool calls",
+        ),
+        (
+            json!({"input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "what is this?"},
+                {"type": "input_image", "file_id": "file-1"},
+            ]}]}),
+            "Vision",
+        ),
+    ];
+    for (mut body, facet) in cases {
+        body["model"] = json!("writer");
+        let resp = gw
+            .client()
+            .post(format!("{gw}/v1/responses"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{body}");
+        let v: Value = resp.json().await.unwrap();
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains(&format!("'writer' does not enable {facet}")),
+            "{body}: {msg}"
+        );
+    }
     assert!(g.runs().is_empty(), "refused before anything started");
 }
 
@@ -582,8 +647,7 @@ async fn a_non_background_alias_uses_its_alias_fallback_on_the_outside_vram_verd
     g.cloud("cloud", None).await;
     g.cloud("rowcloud", None).await;
     let mut p = row("p", None);
-    p.hold_fallback_mode = HoldFallbackMode::Alias;
-    p.hold_fallback = Some("rowcloud".into());
+    p.fallback = Some("rowcloud".into());
     g.row(p, 8 * GIB).await;
     g.candidate(alias("writer", &["p"], false, Some("cloud"), &[]))
         .await;
@@ -670,7 +734,7 @@ async fn a_guest_with_every_loaded_candidate_excluded_goes_to_its_fallback_or_de
     assert_eq!(resp.status(), 503);
     assert_eq!(header(&resp, "x-lmgw-candidate"), None, "nothing answered");
     let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["error"]["code"], "gpu_hold");
+    assert_eq!(v["error"]["code"], "gpu_deferred");
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(msg.contains("'a' cannot hold this request"), "{msg}");
     let row = newest_log(&g, "jobs-local").await;
@@ -728,6 +792,7 @@ async fn a_pinned_caller_is_refused_a_candidate_alias() {
         &g.state,
         "writer",
         lmgw_core::gate::RouteCheck::Count("/v1/count_tokens"),
+        lmgw_core::runtime::registry::Origin::Owner,
     )
     .await
     .unwrap_err();
@@ -914,8 +979,7 @@ async fn a_request_keeps_its_alias_fallback_when_the_alias_goes_away_mid_flight(
         gguf_path: "p-2.gguf".into(),
         ctx_size: 4096,
     }];
-    p.hold_fallback_mode = HoldFallbackMode::Alias;
-    p.hold_fallback = Some("rowcloud".into());
+    p.fallback = Some("rowcloud".into());
     g.row(p, 4 * GIB).await;
     g.candidate(alias("writer", &["p"], false, Some("cloud"), &[]))
         .await;
@@ -924,6 +988,7 @@ async fn a_request_keeps_its_alias_fallback_when_the_alias_goes_away_mid_flight(
         &g.state,
         "writer",
         lmgw_core::gate::RouteCheck::Text("/v1/chat/completions"),
+        lmgw_core::runtime::registry::Origin::Owner,
     )
     .await
     .unwrap();

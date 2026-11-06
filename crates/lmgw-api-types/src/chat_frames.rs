@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chat_approvals::ApprovalRequest;
+use crate::chat_media::ToolProgressFrame;
 use crate::chat_threads::MessageContext;
 use crate::mcp_apps::{ToolReadyFrame, ToolResultFrame};
 
@@ -78,6 +79,9 @@ pub struct ToolArgsFrame {
 /// (`POST /chat/api/threads/{id}/approvals`); `result` when it has run. A
 /// result's `task` says which MCP task a call started: its output is then
 /// `started, job <task_id>`, and the result enters the thread later.
+/// `progress` while an image or audio tool runs: its stage, step and latest
+/// preview ([`ToolProgressFrame`]), lossy and not in the change feed; a
+/// result's `attachments` are the files the call stored in the thread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -87,6 +91,7 @@ pub enum ToolFrame {
     Ready(ToolReadyFrame),
     Approval(ApprovalRequest),
     Result(ToolResultFrame),
+    Progress(ToolProgressFrame),
 }
 
 /// `usage`: the tokens the model reported for the turn so far.

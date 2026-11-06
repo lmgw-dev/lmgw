@@ -41,6 +41,8 @@ pub async fn list(
         scope: LabGroupScope::History,
         ..LabGroupFilter::lab(lab)
     };
+    // Before the reads: see `LiveGroups`.
+    let live = state.lab_cells.snapshot();
     let read = async {
         let rows = store::lab_groups_newest(&state.db, &f, q.before, q.limit).await?;
         let total = store::count_lab_groups(&state.db, &f, None).await?;
@@ -48,7 +50,7 @@ pub async fn list(
         let from = rows.last().map(|last| last.id).or(q.before);
         let older = store::count_lab_groups(&state.db, &f, from).await?;
         let mut groups = views::groups(&state.db, rows, &|a| views::api_href(a.id)).await?;
-        views::mark_in_flight(&mut groups, &state.lab_cells);
+        views::mark_in_flight(&mut groups, &live);
         Ok::<_, crate::error::GatewayError>(LabGroupPage {
             groups,
             total,
@@ -83,6 +85,8 @@ pub(crate) async fn one(
     lab: LabKind,
     id: i64,
 ) -> Result<Option<lmgw_api_types::lab_store::LabGroupView>, Response> {
+    // Before the reads: see `LiveGroups`.
+    let live = state.lab_cells.snapshot();
     let row = store::lab_group(&state.db, lab, id)
         .await
         .map_err(|e| store_failed("reading the group", e))?;
@@ -92,7 +96,7 @@ pub(crate) async fn one(
     let mut views = views::groups(&state.db, vec![row], &|a| views::api_href(a.id))
         .await
         .map_err(|e| store_failed("reading the group", e))?;
-    views::mark_in_flight(&mut views, &state.lab_cells);
+    views::mark_in_flight(&mut views, &live);
     Ok(views.pop())
 }
 

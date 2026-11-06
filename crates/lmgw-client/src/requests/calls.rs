@@ -214,7 +214,7 @@ pub fn hangup(call_id: &str) -> Request {
 
 /// `id` as one path segment: bytes beyond RFC 3986's unreserved ones
 /// percent-encoded.
-fn segment(id: &str) -> String {
+pub(crate) fn segment(id: &str) -> String {
     id.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {

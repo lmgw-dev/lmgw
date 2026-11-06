@@ -74,6 +74,8 @@ impl StartClaim {
                     e.last_used = Instant::now();
                     e.warnings = warnings.clone();
                     e.capabilities = capabilities.clone();
+                    self.reg
+                        .remember_image_caps(self.key.0, &self.key.1, capabilities.as_ref());
                     e.llama = llama.clone();
                     e.gate = gate.clone();
                     (true, claimed)
@@ -228,6 +230,15 @@ impl AcquireGuard {
     /// The container this claim's port is on ([`Entry::generation`]).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Count one more turn on the hold this claim is carried by
+    /// (`vram::LocalHold::turn`), under the map lock an eviction's stop
+    /// decides in ([`Freeable::frees`] reads `turns` in that lock hold): the
+    /// stop either sees the turn, or marked the entry stopping first.
+    pub(crate) fn count_turn(&self, turns: &std::sync::atomic::AtomicUsize) {
+        let _map = self.reg.map();
+        turns.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Move the claim onto the container that replaced its own under the same

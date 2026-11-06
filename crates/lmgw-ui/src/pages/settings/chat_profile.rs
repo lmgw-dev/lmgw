@@ -6,7 +6,7 @@ use lmgw_ui_kit::profiles::api;
 
 /// `(value, label)` for a select: "Default" (none), then the profiles.
 pub(super) fn options() -> Signal<Vec<(String, String)>> {
-    let list = LocalResource::new(api::list);
+    let list = LocalResource::new(|| api::list(crate::api::Http::fetch()));
     Signal::derive(move || {
         let profiles = match list.get() {
             Some(Ok(l)) => l.profiles,

@@ -617,8 +617,7 @@ async fn local_model_get_caps_the_shown_per_slot_context_at_the_trained_one() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![Rung {
                 gguf_path: "top.gguf".into(),

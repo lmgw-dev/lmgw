@@ -215,7 +215,7 @@ fn an_unbound_calls_event_loses_its_largest_field_first_and_never_an_id() {
         {"type": "function", "name": "a", "description": "y".repeat(500)}
     ]}});
     let (v, emptied) = fitted(&event, 4_096);
-    let marker = "[omitted: 6 KiB over this call's 4 KiB event limit]";
+    let marker = "[omitted: 5.9 KiB over this call's 4 KiB event limit]";
     assert_eq!(v["session"]["instructions"], marker);
     assert_eq!(v["session"]["id"], "sess_1");
     assert_eq!(v["type"], "session.updated");
@@ -296,7 +296,7 @@ fn the_narrowest_field_that_suffices_goes_and_items_keep_their_ids() {
     assert!(out["content"][0]["text"]
         .as_str()
         .unwrap()
-        .starts_with("[omitted: 9 KiB"));
+        .starts_with("[omitted: 8.8 KiB"));
     assert_eq!(emptied[0].path, "response.output[0].content[0].text");
 
     // Two fields, neither alone enough: the largest first, then the other.
@@ -335,7 +335,7 @@ fn the_shaper_sends_the_emptied_event_then_one_event_too_large_per_field() {
     let message = err["error"]["message"].as_str().unwrap();
     assert!(
         message.contains("response.output_text.done event_6")
-            && message.contains("20 KiB")
+            && message.contains("19.5 KiB")
             && message.contains("the client's max-message-size of 8192 bytes"),
         "{message}"
     );
@@ -344,8 +344,8 @@ fn the_shaper_sends_the_emptied_event_then_one_event_too_large_per_field() {
 
 #[test]
 fn sizes_read_as_a_person_reads_them() {
-    assert_eq!(human(512), "512 bytes");
-    assert_eq!(human(262_144), "256 KiB");
-    assert_eq!(human(319_488), "312 KiB");
-    assert_eq!(human(3 << 20), "3.0 MiB");
+    assert_eq!(fmt_bytes(512), "512 B");
+    assert_eq!(fmt_bytes(262_144), "256 KiB");
+    assert_eq!(fmt_bytes(319_488), "312 KiB");
+    assert_eq!(fmt_bytes(3 << 20), "3.0 MiB");
 }

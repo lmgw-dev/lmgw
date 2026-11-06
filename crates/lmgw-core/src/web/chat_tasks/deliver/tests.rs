@@ -22,9 +22,14 @@ use crate::web::chat_turn::{start_turn_into, TurnFrame, TurnMode, TurnOpts};
 async fn answered_thread(state: &SharedState) -> (ChatThread, i64) {
     let db = &state.db;
     let tid = store::create_chat_thread(db, "m", "chat").await.unwrap();
-    store::append_user_message_by(db, tid, ("build it", &[], &[], None), &Decider::gateway())
-        .await
-        .unwrap();
+    store::append_user_message_by(
+        db,
+        tid,
+        store::UserMessage::text("build it"),
+        &Decider::gateway(),
+    )
+    .await
+    .unwrap();
     let reply = store::ChatReply {
         content: "Started.".into(),
         ..Default::default()
@@ -190,7 +195,7 @@ async fn a_send_writes_what_waits_before_its_message_and_holds_off_what_ends_aft
     assert!(state.chat_live.running(thread.id));
     let caller = crate::web::chat_caller::Caller::default();
     let sent = ChatRepo::Db
-        .append_user_message(&state, thread.id, "and?", &[], &[], None, &caller)
+        .append_user_message(&state, thread.id, store::UserMessage::text("and?"), &caller)
         .await
         .unwrap();
     assert!(matches!(sent, store::SendMessageOutcome::Sent(_)));
@@ -246,7 +251,16 @@ async fn a_send_that_rolls_back_leaves_what_waits_waiting() {
     let hold = super::sent(&state, thread.id, true).unwrap();
     let caller = crate::web::chat_caller::Caller::default();
     let sent = ChatRepo::Db
-        .append_user_message(&state, thread.id, "and?", &[4242], &[], None, &caller)
+        .append_user_message(
+            &state,
+            thread.id,
+            store::UserMessage {
+                content: "and?",
+                attachment_ids: &[4242],
+                ..Default::default()
+            },
+            &caller,
+        )
         .await
         .unwrap();
     assert!(matches!(
@@ -279,7 +293,7 @@ async fn a_send_s_turn_start_delivers_nothing() {
     let hold = super::sent(&state, thread.id, true).unwrap();
     let caller = crate::web::chat_caller::Caller::default();
     let store::SendMessageOutcome::Sent(mid) = ChatRepo::Db
-        .append_user_message(&state, thread.id, "and?", &[], &[], None, &caller)
+        .append_user_message(&state, thread.id, store::UserMessage::text("and?"), &caller)
         .await
         .unwrap()
     else {

@@ -41,13 +41,17 @@ fn image_upstream_path(endpoint: &str) -> &str {
 /// `500 {"error":"server_error","message":…}` carries the *type* there and the
 /// text in `message` — and a JSON parse error is a 500 on that server, not a
 /// 400. Anything else — a cloud provider's `{"error":{"message":…}}`, an HTML
-/// body from a proxy in between — goes through the shared OpenAI mapper. One
-/// route must never answer in two error shapes, whichever kind of upstream is
-/// behind it.
-fn image_error(status: u16, body: &[u8]) -> GatewayError {
+/// body from a proxy in between — goes through the mapper of the route's own
+/// egress (`protocol`). One route must never answer in two error shapes,
+/// whichever kind of upstream is behind it.
+pub(super) fn image_error(
+    protocol: crate::config::Protocol,
+    status: u16,
+    body: &[u8],
+) -> GatewayError {
     let v: Value = serde_json::from_slice(body).unwrap_or_default();
     let Some(err) = v.get("error").and_then(Value::as_str) else {
-        return for_protocol(crate::config::Protocol::Openai).map_error(status, body);
+        return for_protocol(protocol).map_error(status, body);
     };
     match v.get("message").and_then(Value::as_str) {
         Some(message) => GatewayError::Upstream {
@@ -89,9 +93,14 @@ pub(crate) async fn image_route_guard(
     alias: &str,
     endpoint: &str,
 ) -> Result<(), GatewayError> {
-    if route.upstream.protocol != crate::config::Protocol::Openai {
+    // OpenAI serves gpt-image there, sd-server and other compatible servers
+    // the same shape; llama.cpp has no such route (openai egress design §1.1).
+    if !matches!(
+        route.upstream.protocol,
+        crate::config::Protocol::Openai | crate::config::Protocol::OpenaiCompatible
+    ) {
         return Err(GatewayError::Unsupported(format!(
-            "/v1/images/* requires an openai-protocol upstream; alias '{alias}' resolves to \
+            "/v1/images/* requires an openai or openai_compatible upstream; alias '{alias}' resolves to \
              '{}' ({})",
             route.upstream.name,
             route.upstream.protocol.as_str(),
@@ -183,7 +192,8 @@ async fn cloud_image_guard(
 /// A non-2xx is buffered and turned into a [`GatewayError`] carrying the
 /// server's own message — error bodies are small, and the alternative is
 /// logging a bare "HTTP 500" and relaying a foreign error shape.
-async fn image_send<F>(
+pub(super) async fn image_send<F>(
+    state: &SharedState,
     hold: Option<&crate::vram::LocalHold>,
     route: &Route,
     build: F,
@@ -199,11 +209,16 @@ where
     let resp =
         crate::vram::send_local(hold, route, route.upstream.request_timeout(), build).await?;
     let status = resp.status();
+    state.upstream_quota.answered(route, status);
     if status.is_success() {
         return Ok(resp);
     }
     let bytes = resp.bytes().await.unwrap_or_default();
-    Err(image_error(status.as_u16(), &bytes))
+    Err(image_error(
+        route.upstream.protocol,
+        status.as_u16(),
+        &bytes,
+    ))
 }
 
 /// Resolve, admit, rewrite `model`, send — the JSON path behind
@@ -213,6 +228,7 @@ async fn image_json_call(
     endpoint: &'static str,
     body: &Value,
     started: Instant,
+    origin: crate::runtime::registry::Origin,
 ) -> Result<MediaOutcome, Failed> {
     let alias = body.get("model").and_then(Value::as_str).ok_or((
         None,
@@ -229,16 +245,21 @@ async fn image_json_call(
         route,
         hold: admission,
         headers,
-    } = crate::gate::open(state, alias, crate::gate::RouteCheck::Image(endpoint))
-        .await
-        .map_err(|f| (f.route, f.headers, f.error))?;
+    } = crate::gate::open(
+        state,
+        alias,
+        crate::gate::RouteCheck::Image(endpoint),
+        origin,
+    )
+    .await
+    .map_err(|f| (f.route, f.headers, f.error))?;
     // The one edit lmgw makes. sd-server ignores `model` outright (§2.3), so
     // the rewrite costs nothing there and is what a cloud upstream needs;
     // every other field is forwarded exactly as it arrived.
     let mut out = body.clone();
     out["model"] = Value::String(route.upstream_model.clone());
     let path = image_upstream_path(endpoint);
-    let sent = image_send(admission.as_ref(), &route, |r| {
+    let sent = image_send(state, admission.as_ref(), &route, |r| {
         let url = format!("{}{path}", r.upstream.base());
         Ok(apply_bearer_auth(
             state.http.post(url).json(&out),
@@ -280,7 +301,14 @@ pub async fn handle_image_generation(state: SharedState, ctx: RequestCtx, body: 
     {
         return r;
     }
-    let result = image_json_call(&state, IMAGE_GENERATIONS_ENDPOINT, &body, started).await;
+    let result = image_json_call(
+        &state,
+        IMAGE_GENERATIONS_ENDPOINT,
+        &body,
+        started,
+        ctx.origin(),
+    )
+    .await;
     finish_image(&state, &ctx, alias, started, result).await
 }
 
@@ -344,7 +372,7 @@ pub async fn handle_image_edit(
     // for a request that would kill it. The claim is held until the last byte
     // of the answer has been relayed — see [`MediaOutcome::admission`].
     let check = crate::gate::RouteCheck::Image(IMAGE_EDITS_ENDPOINT);
-    let result = match crate::gate::open(&state, &alias, check).await {
+    let result = match crate::gate::open(&state, &alias, check, ctx.origin()).await {
         Ok(crate::gate::Opened {
             route,
             hold: admission,
@@ -361,7 +389,7 @@ pub async fn handle_image_edit(
                     &r.upstream,
                 ))
             };
-            match image_send(admission.as_ref(), &route, encode).await {
+            match image_send(&state, admission.as_ref(), &route, encode).await {
                 Ok(resp) => Ok(MediaOutcome {
                     ttfb_ms: started.elapsed().as_millis() as i64,
                     resp,

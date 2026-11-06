@@ -281,6 +281,8 @@ fn build_run_from_row(row: &sqlx::sqlite::SqliteRow) -> DbResult<BuildRun> {
         base_sha: row.get("base_sha"),
         cfg_hash: row.get("cfg_hash"),
         image_id: row.get("image_id"),
+        // Not stored: the ops fill it from the podman image listing.
+        image_present: None,
         tags: json_col(&what, "tags", row.get::<&str, _>("tags"))?,
         promoted: row.get::<i64, _>("promoted") != 0,
         size_bytes: row

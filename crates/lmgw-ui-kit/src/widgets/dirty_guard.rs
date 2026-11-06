@@ -10,7 +10,8 @@
 //! A reload or closing the tab gets the browser's own question.
 //!
 //! Not guarded: Back/Forward (the history has already moved when the router
-//! hears of it) and navigations code makes itself.
+//! hears of it) and navigations code makes itself, unless it asks first
+//! ([`DirtyGuard::ask_before`], what the desktop shell's moves do).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -82,6 +83,23 @@ impl DirtyGuard {
         on_cleanup(move || {
             watched.try_update(|w| w.retain(|x| x.id != id));
         });
+    }
+
+    /// A move the host's code makes for someone else (the desktop shell's
+    /// tray sending the window to a page): asked about like a link when a
+    /// draft would be lost. `true` when the question is up and the caller
+    /// must not move; the guard's "Leave and discard" moves to `to` then.
+    pub fn ask_before(&self, to: &str) -> bool {
+        let path = to.split(['?', '#']).next().unwrap_or(to);
+        let labels = self.dirty_labels(Some(path));
+        if labels.is_empty() {
+            return false;
+        }
+        self.pending.set(Some(Pending {
+            to: to.to_string(),
+            labels,
+        }));
+        true
     }
 
     /// The drafts with changes that going to `to` (a path; `None` = leaving

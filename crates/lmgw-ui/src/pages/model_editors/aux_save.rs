@@ -24,8 +24,8 @@ pub(super) struct Draft {
     /// The `podman run` args override, one argument per line; blank inherits.
     pub extra_run_args: String,
     pub warm_start: bool,
-    pub hold_fallback_mode: String,
-    pub hold_fallback: Option<String>,
+    /// The picked fallback; blank is none, and clears a stored one.
+    pub fallback: String,
     pub fields: FieldsDraft,
 }
 
@@ -55,6 +55,12 @@ pub(super) fn save_body(d: &Draft) -> Result<Value, String> {
     if run_args.is_empty() {
         clear.push("extra_run_args");
     }
+    let fallback = d.fallback.trim();
+    // Always named when blank: a fallback an earlier save of the same open
+    // form set is removed by "None" too (review UI1).
+    if fallback.is_empty() {
+        clear.push("fallback");
+    }
     let mut body = json!({
         "action": if d.id.is_some() { "update" } else { "create" },
         "id": d.id,
@@ -63,8 +69,7 @@ pub(super) fn save_body(d: &Draft) -> Result<Value, String> {
         "kind": d.kind,
         "pooling": if takes_no_pooling(&d.kind) { "" } else { d.pooling.as_str() },
         "ctx_size": ctx,
-        "hold_fallback_mode": d.hold_fallback_mode,
-        "hold_fallback": d.hold_fallback,
+        "fallback": if fallback.is_empty() { Value::Null } else { json!(fallback) },
         "args": lines(&d.args),
         "idle_seconds": idle,
         "image": d.image.trim(),
@@ -103,8 +108,7 @@ mod tests {
         "image",
         "extra_run_args",
         "warm_start",
-        "hold_fallback_mode",
-        "hold_fallback",
+        "fallback",
         "clear",
     ];
 
@@ -121,8 +125,7 @@ mod tests {
             image: String::new(),
             extra_run_args: String::new(),
             warm_start: false,
-            hold_fallback_mode: "inherit".into(),
-            hold_fallback: None,
+            fallback: String::new(),
             fields: FieldsDraft {
                 ubatch_size: "8192".into(),
                 batch_size: "8192".into(),
@@ -168,7 +171,7 @@ mod tests {
         assert_eq!(b["backend"], "cpu");
         assert_eq!(b["args"], json!(["--flash-attn", "on"]));
         assert!(b["extra_run_args"].is_null());
-        assert_eq!(b["clear"], "threads,mmproj_path,extra_run_args");
+        assert_eq!(b["clear"], "threads,mmproj_path,extra_run_args,fallback");
     }
 
     #[test]
@@ -184,9 +187,26 @@ mod tests {
         assert_eq!(b["extra_run_args"], json!(["--cpus", "4"]));
         assert_eq!(
             b["clear"],
-            "ubatch_size,batch_size,threads,mmproj_path,backend,ctx_size"
+            "ubatch_size,batch_size,threads,mmproj_path,backend,ctx_size,fallback"
         );
         assert!(b.get("ubatch_size").is_none() && b.get("backend").is_none());
+    }
+
+    #[test]
+    fn a_fallback_is_sent_and_a_blank_one_is_cleared() {
+        let mut d = draft("embed");
+        d.fallback = " embed/bge ".into();
+        let b = save_body(&d).unwrap();
+        assert_eq!(b["fallback"], "embed/bge");
+        assert!(!b["clear"].as_str().unwrap().contains("fallback"));
+        d.fallback = String::new();
+        let b = save_body(&d).unwrap();
+        assert!(b["fallback"].is_null());
+        assert!(b["clear"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|c| c == "fallback"));
     }
 
     #[test]

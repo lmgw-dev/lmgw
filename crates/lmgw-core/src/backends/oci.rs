@@ -26,6 +26,12 @@
 //! an index whose members include a local digest is up to date. That read
 //! happens only on a mismatch: a steady-state check is two or three small
 //! requests per image.
+//!
+//! # The size of a pull
+//!
+//! [`RegistryClient::platform_blobs`] reads the platform manifest's blob
+//! sizes the same anonymous way: the total a first-start download shows
+//! before Podman has reported a byte (machine-check design §5).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -34,6 +40,9 @@ use reqwest::header::{ACCEPT, WWW_AUTHENTICATE};
 use reqwest::{Method, StatusCode, Url};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+mod layers;
+pub use layers::{is_digest, short_id, Blobs, Platform, PullRef};
 
 /// Docker Hub's name in image references.
 pub const DOCKER_HUB: &str = "docker.io";
@@ -202,6 +211,7 @@ impl RegistryClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(USER_AGENT)
+            .no_gzip()
             .build()
             .map_err(|e| format!("building the registry HTTP client: {e}"))?;
         Ok(Self {

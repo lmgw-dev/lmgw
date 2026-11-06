@@ -13,9 +13,11 @@ use crate::runtime::Class;
 use crate::state::SharedState;
 
 use super::background::{self, Restart};
+use super::download::Engine;
 use super::ledger::Ledger;
 use super::scheduler::{Waiter, CONTROL_TIMEOUT, MIB, POLL};
-use super::stall::waiting_stage;
+use super::stage_watch::WaitPhase;
+use super::stall::{evicting_stage, waiting_stage};
 use super::{
     Admission, Decided, ExternalFallback, Fit, Gated, LocalHold, StartPermit, Target, VramScheduler,
 };
@@ -78,93 +80,116 @@ impl VramScheduler {
         let mut fallback = fallback;
         // The snapshot and descriptor a retry after a failed climb re-read.
         let mut reread: Option<(Arc<Snapshot>, ModelRuntime)> = None;
-        let guard =
-            loop {
-                let (snap, runtime) = match &reread {
-                    Some((s, r)) => (&**s, r),
-                    None => (snap, runtime),
-                };
-                // A CPU start takes nothing from the card: no gate, no queue,
-                // no reservation, and no `vram_too_large`.
-                let on_gpu = runtime.placement().is_gpu();
-                // Arbitrate only when there is something to arbitrate: the switch
-                // is on, and the model is not already up. A model the registry
-                // already holds takes no gate, no measurement and no queue —
-                // admission must not put a serialization point in front of
-                // traffic that fits.
-                let up = self.is_up(state, target);
-                let reservation = if snap.settings.vram.enabled && !up && on_gpu {
-                    match self
-                        .arbitrate(state, snap, target, alias, fallback.as_deref_mut())
-                        .await?
-                    {
-                        Decided::Go(reservation) => reservation,
-                        Decided::External(short) => return Ok(Admission::External(short)),
+        let guard = loop {
+            let (snap, runtime) = match &reread {
+                Some((s, r)) => (&**s, r),
+                None => (snap, runtime),
+            };
+            // The engine image first, when the model is not up and its
+            // image is not on this machine (machine-check design §5):
+            // downloaded before anything below takes the gate, evicts or
+            // reserves, so the queue's budget starts after it. On every
+            // pass: a start over after a failed climb renders the row as
+            // it is now, which may name another image.
+            if !self.is_up(state, target) {
+                match self
+                    .engine_download(state, target, runtime, alias, &mut fallback)
+                    .await?
+                {
+                    Engine::Here => {}
+                    Engine::Blocked(block) => {
+                        return Err(block.refusal(target.model_id.clone(), ""))
                     }
-                } else {
-                    None
-                };
-
-                // Asked again, of the snapshot as it is now: the footprint and
-                // ledger reads above are awaits, and the lease (or the hold)
-                // may have come on during them — the check at the top is this
-                // request's arrival, not its start. The registry refuses a
-                // start under the lease anyway (`runtime/registry/lease.rs`);
-                // this is the same refusal in the admission's own words.
-                // By the placement of the descriptor `acquire` starts below,
-                // not the row's: a row switched to the CPU while this request
-                // queued still has its GPU descriptor started here.
-                if let Some(block) = state.snapshot().gpu_block_at(runtime.placement()) {
-                    return Err(block.refusal(target.model_id.clone(), ""));
-                }
-                // Always. Admission decided *whether and when*; this is what makes
-                // the model reachable, and it is the same call on every path that
-                // got here.
-                let guard = state
-                    .runtime()
-                    .acquire(&lifecycle_spec(state, snap, runtime))
-                    .await;
-                drop(reservation);
-                match guard {
-                    // The climb this request parked on could not start its rung,
-                    // and the model is gone (ladder design §12 entry 22): it wanted
-                    // the model, not that rung, so admission starts over — which
-                    // cold-starts the base through the decision above instead of
-                    // the registry starting it unarbitrated.
-                    //
-                    // Starting over means reading again what a new admission reads
-                    // (§12 entry 51): the climb ran start to finish while this
-                    // request waited, and the owner may have switched the hold on,
-                    // or edited or deleted the row, meanwhile.
-                    Err(RuntimeError::ClimbFailed { message, .. }) => {
-                        tracing::debug!("re-admitting '{alias}' after a failed climb: {message}");
-                        let now = state.snapshot();
-                        if let Some(block) = now.gpu_block_for(target.class, &target.model_id) {
-                            return Err(block.refusal(target.model_id.clone(), ""));
-                        }
-                        let runtime = model_runtime(&now, target.class, &target.model_id)
-                            .ok_or_else(|| GatewayError::Upstream {
-                                status: 502,
-                                provider_type: None,
-                                message: format!(
-                                    "{} model '{}' is no longer configured, so it could not be \
-                                 started again after its climb failed",
-                                    target.class, target.model_id
-                                ),
-                            })?;
-                        reread = Some((now, runtime));
+                    Engine::External(short) => return Ok(Admission::External(short)),
+                    // The download can take minutes: the owner may have
+                    // switched the hold on, or edited or deleted the row,
+                    // while it ran. A new admission reads both again, and
+                    // so does this one (as after a failed climb, below);
+                    // the next pass finds the image here.
+                    Engine::Downloaded => {
+                        reread = Some(read_again(
+                            state,
+                            target,
+                            "after its engine image downloaded",
+                        )?);
                         continue;
                     }
-                    guard => {
-                        if !up && guard.is_ok() {
-                            // It came up just now: learn its PID while it is known
-                            // to be here.
-                            self.cache_pids(state);
-                        }
-                        break guard.map_err(upstream_error);
-                    }
                 }
+            }
+            // A CPU start takes nothing from the card: no gate, no queue,
+            // no reservation, and no `vram_too_large`.
+            let on_gpu = runtime.placement().is_gpu();
+            // Arbitrate only when there is something to arbitrate: the switch
+            // is on, and the model is not already up. A model the registry
+            // already holds takes no gate, no measurement and no queue —
+            // admission must not put a serialization point in front of
+            // traffic that fits.
+            let up = self.is_up(state, target);
+            let reservation = if snap.settings.vram.enabled && !up && on_gpu {
+                match self
+                    .arbitrate(state, snap, target, alias, fallback.as_deref_mut())
+                    .await?
+                {
+                    Decided::Go(reservation) => reservation,
+                    Decided::External(short) => return Ok(Admission::External(short)),
+                }
+            } else {
+                None
             };
+
+            // Asked again, of the snapshot as it is now: the footprint and
+            // ledger reads above are awaits, and the lease (or the hold)
+            // may have come on during them — the check at the top is this
+            // request's arrival, not its start. The registry refuses a
+            // start under the lease anyway (`runtime/registry/lease.rs`);
+            // this is the same refusal in the admission's own words.
+            // By the placement of the descriptor `acquire` starts below,
+            // not the row's: a row switched to the CPU while this request
+            // queued still has its GPU descriptor started here.
+            if let Some(block) = state.snapshot().gpu_block_at(runtime.placement()) {
+                return Err(block.refusal(target.model_id.clone(), ""));
+            }
+            // Always. Admission decided *whether and when*; this is what makes
+            // the model reachable, and it is the same call on every path that
+            // got here.
+            let guard = state
+                .runtime()
+                .acquire(&lifecycle_spec(state, snap, runtime))
+                .await;
+            drop(reservation);
+            match guard {
+                // The climb this request parked on could not start its rung,
+                // and the model is gone (ladder design §12 entry 22): it wanted
+                // the model, not that rung, so admission starts over — which
+                // cold-starts the base through the decision above instead of
+                // the registry starting it unarbitrated.
+                //
+                // Starting over means reading again what a new admission reads
+                // (§12 entry 51): the climb ran start to finish while this
+                // request waited, and the owner may have switched the hold on,
+                // or edited or deleted the row, meanwhile.
+                Err(RuntimeError::ClimbFailed { message, .. }) => {
+                    tracing::debug!("re-admitting '{alias}' after a failed climb: {message}");
+                    reread = Some(read_again(state, target, "again after its climb failed")?);
+                    continue;
+                }
+                Ok(guard) => {
+                    if !up {
+                        // It came up just now: learn its PID while it is known
+                        // to be here — and, when the last machine check said
+                        // this computer could not start it, that check is
+                        // out of date (machine-check design §2.5).
+                        self.cache_pids(state);
+                        crate::machine::after_start(state, runtime);
+                    }
+                    break Ok(guard);
+                }
+                // The machine check runs again for a start that failed on
+                // the graphics card, and names the cause when it is the
+                // computer's (machine-check design §2.5, WP5).
+                Err(e) => break Err(super::start_error(state, runtime, e).await),
+            }
+        };
         Ok(Admission::Admitted(Some(LocalHold {
             guard: std::sync::Mutex::new(guard?),
             state: state.clone(),
@@ -174,6 +199,7 @@ impl VramScheduler {
             policy: None,
             origin: Origin::Owner,
             restart: Restart::Admit,
+            turns: Default::default(),
         })))
     }
 
@@ -187,7 +213,12 @@ impl VramScheduler {
     /// model that is actually in use, and a boot that evicts its way through
     /// a warm-start list would end with the last model up and the rest gone.
     /// So this only ever *refuses*: it never evicts, never queues and never
-    /// waits.
+    /// waits for room. The one wait is the engine download of a model whose
+    /// image is not on this machine (machine-check design §5), before
+    /// anything is measured, exactly as a request's admission has it: the
+    /// hold or a benchmark's lease coming on during it is [`Fit::Held`], a
+    /// download that fails is [`Fit::Failed`], and one that ran to its end is
+    /// [`Fit::Downloaded`] — the caller reads its row again and asks again.
     ///
     /// It is the same ledger the request path decides on, read the same way
     /// (measured free, minus what is committed but not yet on the card, plus
@@ -217,16 +248,50 @@ impl VramScheduler {
         if let Some(block) = snap.gpu_block_for(class, model_id) {
             return held(&block, model_id);
         }
+        let target = Target {
+            class,
+            model_id: model_id.to_string(),
+        };
+        if !self.is_up(state, &target) {
+            if let Some(runtime) = model_runtime(snap, class, model_id) {
+                match self
+                    .engine_download(state, &target, &runtime, model_id, &mut None)
+                    .await
+                {
+                    Ok(Engine::Here) => {}
+                    Ok(Engine::Blocked(block)) => return held(&block, model_id),
+                    // Only ever answered to a caller with a fallback, and a
+                    // start nobody waits on has none; were it, the room is
+                    // short outside lmgw's control, which is what `Full`
+                    // tells.
+                    Ok(Engine::External(short)) => return Fit::Full(short.describe()),
+                    // The download can take minutes: the snapshot this check
+                    // was given is from before it. The hold as it is now,
+                    // so a hold switched on at the very end is said at once;
+                    // then the caller reads the row again and asks again
+                    // (`Fit::Downloaded`), and that check starts from the
+                    // snapshot the start renders.
+                    Ok(Engine::Downloaded) => {
+                        return match state.snapshot().gpu_block_for(class, model_id) {
+                            Some(block) => held(&block, model_id),
+                            None => Fit::Downloaded,
+                        };
+                    }
+                    Err(e) => {
+                        return Fit::Failed(match e {
+                            GatewayError::EngineDownload { message } => message,
+                            other => other.to_string(),
+                        })
+                    }
+                }
+            }
+        }
         if !snap.placement(class, model_id).is_gpu() {
             return Fit::Go(StartPermit { _reservation: None });
         }
         if !snap.settings.vram.enabled {
             return Fit::Unchecked;
         }
-        let target = Target {
-            class,
-            model_id: model_id.to_string(),
-        };
         // Already up (or coming up): the start will join it, and it is
         // already charged to the ledger. Nothing to decide.
         if self.is_up(state, &target) {
@@ -327,6 +392,10 @@ impl VramScheduler {
                 needs,
                 since: started,
                 stage: "waiting for the admission gate".into(),
+                phase: Some(WaitPhase::Gate),
+                // The caller's own, when it follows its wait
+                // (chat-media-tools design §5.3).
+                watch: super::stage_watch::current(),
                 origin: Origin::Owner,
             },
         );
@@ -404,7 +473,7 @@ impl VramScheduler {
             }
         };
 
-        self.set_stage(waiter_id, "measuring GPU memory");
+        self.set_phase(waiter_id, WaitPhase::Measuring, None);
         // Held from the first look that does not fit until this returns,
         // however it returns (candidate-aliases §4.5, §12 entry 47).
         let mut drain = None;
@@ -439,7 +508,7 @@ impl VramScheduler {
             }
 
             if cap.free >= needs {
-                self.set_stage(waiter_id, "starting the container");
+                self.set_phase(waiter_id, WaitPhase::Starting, None);
                 return Ok(Decided::Go(Some(self.reserve(state, target, bytes))));
             }
 
@@ -453,18 +522,17 @@ impl VramScheduler {
             // A guest's run that holds one claim for a whole tool loop keeps
             // its model for the run: a request that has started finishes.
             if drain.is_none() {
-                drain = background::owner_drain(state, snap);
+                drain = Some(background::owner_drain(state));
             }
-            self.set_stage(
-                waiter_id,
-                &format!(
-                    "needs {}, {} free — evicting",
-                    fmt_bytes(needs),
-                    fmt_bytes(cap.free)
-                ),
-            );
+            self.set_stage(waiter_id, &evicting_stage(needs, Some(cap.free), None));
             if self
-                .evict_one(state, target, &l, background::Victims::Any)
+                .evict_one(
+                    state,
+                    target,
+                    &l,
+                    background::Victims::Any,
+                    Some((waiter_id, needs)),
+                )
                 .await
             {
                 continue;
@@ -491,7 +559,14 @@ impl VramScheduler {
                 // Measured again whatever the pass found: the gate was let go.
                 continue;
             }
-            self.set_stage(waiter_id, &waiting_stage(&l, target, needs, cap.free));
+            self.set_phase(
+                waiter_id,
+                WaitPhase::WaitingForRoom {
+                    needs_bytes: needs,
+                    free_bytes: cap.free,
+                },
+                Some(&waiting_stage(&l, target, needs, cap.free)),
+            );
             tokio::time::sleep(POLL).await;
             if let Some(short) = self.recheck(state, target, alias, &mut fallback).await {
                 return Ok(Decided::External(short));
@@ -589,18 +664,34 @@ impl VramScheduler {
     ///
     /// `victims`: any idle model, or only idle `Background`-owned ones — a
     /// guest's start, which never evicts the owner's (candidate-aliases
-    /// §4.4).
+    /// §4.4). `waiter`: the wait this eviction makes room for and the bytes
+    /// it needs; its phase names each victim before it is stopped
+    /// (chat-media-tools design §5.3), and its stage keeps what it needs and
+    /// what is free beside the victim ([`evicting_stage`]).
     pub(super) async fn evict_one(
         &self,
         state: &SharedState,
         target: &Target,
         l: &Ledger,
         victims: background::Victims,
+        waiter: Option<(u64, u64)>,
     ) -> bool {
         // Residency in the registry is what makes a model a candidate, never a
         // nonzero estimate (§4): a resident whose footprint reads zero would be
         // unevictable forever, which is how a GPU fills up with models nothing
         // can reclaim.
+        //
+        // A request on its way to, or served by, its own fallback still
+        // holds its claim on each model it left; such a claim alone keeps
+        // nothing busy for this admission (`leaving`, openai egress design
+        // §14.3).
+        let own = super::leaving_now();
+        let idle = |e: &RuntimeView| {
+            e.in_flight == 0
+                || own
+                    .iter()
+                    .any(|o| o.frees(e.class, &e.model_id, e.generation, e.in_flight, e.sends))
+        };
         let mut candidates: Vec<&RuntimeView> = l
             .entries
             .iter()
@@ -614,7 +705,7 @@ impl VramScheduler {
                 // is not on the card yet either (the ledger charges it
                 // whole). Waiting for it to finish is what the LRU is for.
                 e.state == RuntimeState::Ready
-                    && e.in_flight == 0
+                    && idle(e)
                     && !(e.class == target.class && e.model_id == target.model_id)
                     && (victims == background::Victims::Any || e.owner == Origin::Background)
             })
@@ -643,26 +734,25 @@ impl VramScheduler {
                     }
                 }
             }
+            if let Some((id, needs)) = waiter {
+                let victim = format!("{}/{}", c.class.as_str(), c.model_id);
+                let free = l.capacity.as_ref().map(|c| c.free);
+                let stage = evicting_stage(needs, free, Some(&victim));
+                self.set_phase(id, WaitPhase::Evicting { victim }, Some(&stage));
+            }
             // Never forced: `stop` refuses on its own in-flight count, so a
             // request that raced in between the candidate list and here still
             // wins, and this pass moves on to the next victim. And only the
             // container the list showed idle (ladder design §12 entry 20):
             // one restarted or climbed since is another container, which
             // nobody judged.
-            let stopped = match victims {
-                background::Victims::Any => {
-                    registry
-                        .stop_generation(c.class, &c.model_id, c.generation, false)
-                        .await
-                }
-                // Only while it is still a guest's: the owner may have
-                // claimed it during the `/slots` probe.
-                background::Victims::IdleBackground => {
-                    registry
-                        .stop_idle_background(c.class, &c.model_id, c.generation)
-                        .await
-                }
-            };
+            // A guest's eviction stops only while the victim is still a
+            // guest's: the owner may have claimed it during the `/slots`
+            // probe.
+            let only_background = victims == background::Victims::IdleBackground;
+            let stopped = registry
+                .stop_for_eviction(c.class, &c.model_id, c.generation, only_background, &own)
+                .await;
             match stopped {
                 Ok(()) => {
                     let estimated = l
@@ -688,6 +778,33 @@ impl VramScheduler {
         }
         false
     }
+}
+
+/// What a start over reads again (ladder design §12 entry 51): the snapshot
+/// as it is now — the hold, or a benchmark's lease, may have come on — and
+/// the model's row, which may have been edited or deleted. `after` finishes
+/// the 502's sentence when the row is gone: "… could not be started
+/// <after>".
+fn read_again(
+    state: &SharedState,
+    target: &Target,
+    after: &str,
+) -> Result<(Arc<Snapshot>, ModelRuntime), GatewayError> {
+    let now = state.snapshot();
+    if let Some(block) = now.gpu_block_for(target.class, &target.model_id) {
+        return Err(block.refusal(target.model_id.clone(), ""));
+    }
+    let runtime = model_runtime(&now, target.class, &target.model_id).ok_or_else(|| {
+        GatewayError::Upstream {
+            status: 502,
+            provider_type: None,
+            message: format!(
+                "{} model '{}' is no longer configured, so it could not be started {after}",
+                target.class, target.model_id
+            ),
+        }
+    })?;
+    Ok((now, runtime))
 }
 
 /// Where this model's container is placed — what `acquire` (start this

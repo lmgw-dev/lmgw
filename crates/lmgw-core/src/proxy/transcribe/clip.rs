@@ -64,6 +64,11 @@ pub fn answered_line(alias: &str, answered_by: Option<&(String, FallbackReason)>
         FallbackReason::Hold => "the GPU hold's fallback",
         FallbackReason::Benchmark => "a benchmark run's fallback",
         FallbackReason::ExternalVram => "the fallback while VRAM outside lmgw is short",
+        FallbackReason::Quota => "the fallback while its upstream is out of quota",
+        FallbackReason::Unreachable => "the fallback while its upstream is unreachable",
+        FallbackReason::Disabled => "the fallback while it is disabled",
+        FallbackReason::GpuSetup => "the fallback while the graphics card isn't ready",
+        FallbackReason::EngineDownload => "the fallback while its engine can't be downloaded",
         FallbackReason::Background | FallbackReason::Unavailable => "the fallback",
     };
     format!("'{fallback}' ({why} for '{alias}')")
@@ -118,9 +123,14 @@ async fn transcribes(state: &SharedState, name: &str) -> Result<(), GatewayError
         })
 }
 
-/// The gate for [`transcribe_voice_clip`] (module doc).
-pub(super) async fn open(state: &SharedState, alias: &str) -> Result<Opened, OpenFailed> {
-    let routed = crate::gate::resolve(state, alias, RouteCheck::Audio).await?;
+/// The gate for [`transcribe_voice_clip`] (module doc), as `origin`'s
+/// traffic (per-request background design §3).
+pub(super) async fn open(
+    state: &SharedState,
+    alias: &str,
+    origin: crate::runtime::registry::Origin,
+) -> Result<Opened, OpenFailed> {
+    let routed = crate::gate::resolve(state, alias, RouteCheck::Audio, origin).await?;
     // The model the resolve settled on — the hold's or a benchmark's
     // fallback included — before admission starts anything for it.
     let settled = routed.headers().fallback().unwrap_or(alias).to_string();

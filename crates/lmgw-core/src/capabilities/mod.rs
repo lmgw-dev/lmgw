@@ -18,6 +18,7 @@
 //! Notes — the plain-language half of the contract — live in [`notes`], which
 //! the builders call with the same facts they published.
 
+pub mod anthropic_blocks;
 pub mod exposed;
 pub mod hears;
 pub mod notes;
@@ -32,7 +33,7 @@ use crate::runtime::argv::flag_value;
 use crate::runtime::image::ImageCapabilities;
 
 pub use lmgw_api_types::capabilities::{
-    ModelCapabilities, ReasoningCaps, StructuredOutputCaps, ToolCallCaps,
+    ContextEditingCaps, ModelCapabilities, ReasoningCaps, StructuredOutputCaps, ToolCallCaps,
 };
 
 // ---------------------------------------------------------------------------
@@ -294,6 +295,10 @@ pub fn for_local_row(
             json_schema: Some(true),
             json_object: Some(true),
         }),
+        // Anthropic's own; a local row's route leaves it out with a note.
+        context_editing: None,
+        languages: Vec::new(),
+        multilingual: None,
         speech: None,
         source: "gguf+config".to_string(),
     };
@@ -609,6 +614,9 @@ pub fn for_aux(
             format: None,
         }),
         structured_output: None,
+        context_editing: None,
+        languages: Vec::new(),
+        multilingual: None,
         speech: None,
         source: source.to_string(),
     };
@@ -641,6 +649,12 @@ pub fn for_audio(model: &AudioModel) -> Derived {
 pub struct AudioFacts {
     /// `capabilities.speech` of a text-to-speech row.
     pub speech: Option<speech::SpeechCaps>,
+    /// `capabilities.languages` of any audio row: the ISO codes its package
+    /// names.
+    pub languages: Vec<String>,
+    /// `capabilities.multilingual`: the family says "multilingual" or
+    /// "N+ languages" instead of listing codes.
+    pub multilingual: Option<bool>,
     /// Lines about the row's package: a task its variant does not run,
     /// voices whose file is missing, voice clips without a transcript.
     pub notes: Vec<String>,
@@ -698,12 +712,15 @@ pub fn for_audio_with(model: &AudioModel, facts: Option<&AudioFacts>) -> Derived
             format: None,
         }),
         structured_output: None,
+        context_editing: None,
+        languages: facts.map(|f| f.languages.clone()).unwrap_or_default(),
+        multilingual: facts.and_then(|f| f.multilingual),
         speech: facts.and_then(|f| f.speech.clone()),
         source: "config".to_string(),
     };
     let mut notes = notes::notes_for_audio(model);
     if let Some(f) = facts {
-        notes.extend(f.speech.as_ref().map(speech::note));
+        notes.extend(f.speech.as_ref().map(|s| speech::note(s, &f.languages)));
         notes.extend(f.notes.iter().cloned());
     }
     Derived {
@@ -768,6 +785,9 @@ pub fn for_image(model: &ImageModel, probed: Option<&ImageCapabilities>) -> Deri
         reasoning: None,
         tool_calls: None,
         structured_output: None,
+        context_editing: None,
+        languages: Vec::new(),
+        multilingual: None,
         speech: None,
         source: "config".to_string(),
     };
@@ -828,7 +848,9 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
             Vec::new()
         } else {
             match protocol {
-                Protocol::Openai | Protocol::LlamaCpp => strings(&OPENAI_REASONING_CONTROL),
+                Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
+                    strings(&OPENAI_REASONING_CONTROL)
+                }
                 Protocol::Anthropic => strings(&ANTHROPIC_REASONING_CONTROL),
                 Protocol::Gemini => strings(&GEMINI_REASONING_CONTROL),
             }
@@ -844,6 +866,12 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
             budget_tokens: None,
             preserve_history: None,
             control,
+            // Messages' own `thinking` types: only an Anthropic route sends
+            // that field as the model's provider defines it.
+            thinking_types: match protocol {
+                Protocol::Anthropic => r.thinking_types.clone(),
+                _ => Vec::new(),
+            },
         }
     });
 
@@ -865,6 +893,22 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
         }
     });
 
+    // Only an Anthropic route sends a request's `context_management` on
+    // (gateway design §6.1): there `context_editing` is present, with
+    // whatever the catalog says per model; every other route drops the field
+    // with a note, so there it is absent.
+    // lmgw serves all of it there, a compaction edit and the on-demand
+    // `compaction` included (their `compaction` answer block comes back
+    // through the IR), so `edits` and `compaction` are the catalog's.
+    let context_editing = (protocol == Protocol::Anthropic && task == "chat").then(|| {
+        let c = info.context_management.clone().unwrap_or_default();
+        ContextEditingCaps {
+            supported: c.supported,
+            edits: c.edits,
+            compaction: c.compaction,
+        }
+    });
+
     let caps = ModelCapabilities {
         task,
         endpoints,
@@ -880,6 +924,9 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
                 json_schema: s.json_schema,
                 json_object: s.json_object,
             }),
+        context_editing,
+        languages: Vec::new(),
+        multilingual: None,
         speech: None,
         source: "catalog".to_string(),
     };

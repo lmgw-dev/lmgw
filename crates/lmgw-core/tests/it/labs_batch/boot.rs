@@ -86,6 +86,9 @@ async fn a_boot_deletes_a_set_run_a_crash_left_half_written() {
         true,
         Arc::new(RecordingPodman::default()),
         Arc::new(NoTelemetry("test: no GPU".into())),
+        // A machine with nothing on it: no driver, no `nvidia-ctk`, and no
+        // `XDG_RUNTIME_DIR`, so nothing here writes outside the data dir.
+        Arc::new(lmgw_machine::fake::FakeFacts::new()),
     )
     .await
     .unwrap();

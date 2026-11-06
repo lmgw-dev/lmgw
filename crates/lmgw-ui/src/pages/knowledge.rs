@@ -15,7 +15,7 @@ use leptos_router::hooks::use_params_map;
 use lmgw_api_types::JobRow;
 use serde_json::{json, Value};
 
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 use crate::scope::Scope;
 use crate::widgets::{use_toasts, NavTab, PageFrame, PageMode, SubNav, Tone};
 
@@ -375,7 +375,7 @@ fn KbRow(kb: Kb) -> impl IntoView {
             </td>
             <td class="num">
                 {grouped(kb.counts.files as u64)}
-                <span class="dim mono-sm">" · " {human_bytes(kb.counts.bytes.max(0) as u64)}</span>
+                <span class="dim mono-sm">" · " {fmt_bytes(kb.counts.bytes.max(0) as u64)}</span>
             </td>
             <td class="num">{grouped(kb.counts.chunks as u64)}</td>
             <td>
@@ -569,7 +569,7 @@ fn KbFacts() -> impl IntoView {
                             <span title=kb.embed_input_limit_source.clone()>{limit}</span>
                             <span>
                                 {grouped(kb.counts.chunks as u64)} " chunks · "
-                                {human_bytes(kb.resident_bytes.max(0) as u64)} " resident"
+                                {fmt_bytes(kb.resident_bytes.max(0) as u64)} " resident"
                             </span>
                         </div>
                         <For each=move || kb.notes.clone() key=|n| n.clone() let:n>

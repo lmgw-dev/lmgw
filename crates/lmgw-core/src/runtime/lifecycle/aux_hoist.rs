@@ -115,7 +115,8 @@ pub async fn hoist_aux_args(state: &SharedState) -> Vec<String> {
 /// container command, and the digest of its run args. The port and the dirs
 /// are the same on both sides of a comparison, so only the row tells.
 fn rendered(state: &SharedState, snap: &Snapshot, m: &AuxModel) -> Option<(Vec<String>, String)> {
-    let spec = aux_runtime(snap, m)
+    let runtime = aux_runtime(snap, m);
+    let mut spec = runtime
         .preview_spec(
             &snap.settings.container_prefix,
             0,
@@ -123,6 +124,10 @@ fn rendered(state: &SharedState, snap: &Snapshot, m: &AuxModel) -> Option<(Vec<S
             &state.data_dir,
         )
         .ok()?;
+    spec.set_globals(crate::runtime::cdi::podman_globals(
+        state,
+        &runtime.extra_run_args,
+    ));
     Some((
         render_engine_args(&spec),
         run_args_digest(&spec.extra_run_args),

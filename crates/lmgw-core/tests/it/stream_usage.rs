@@ -254,7 +254,7 @@ async fn each_ask(
 #[tokio::test]
 async fn an_openai_upstream_stream_shows_usage_only_when_asked() {
     each_ask(
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "/chat/completions",
         OPENAI_SSE,
@@ -316,7 +316,12 @@ async fn legacy_completions_forward_the_clients_stream_options_as_sent() {
         .respond_with(sse(ANSWER))
         .mount(&mock)
         .await;
-    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (_state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     for ask in Ask::ALL {
         let mut body = ask.body("my-model", "hi");
         let obj = body.as_object_mut().unwrap();
@@ -353,7 +358,12 @@ async fn a_failure_after_the_first_chunk_is_a_documented_error_frame() {
         .respond_with(sse(FAILING))
         .mount(&mock)
         .await;
-    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (_state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     for ask in [Ask::Absent, Ask::True] {
         let resp = reqwest::Client::new()
             .post(format!("{base}/v1/chat/completions"))

@@ -920,23 +920,23 @@ fn verify_uses_the_measured_probes() {
 fn devices_are_read_from_the_output_and_their_absence_is_the_error() {
     let official = verify_spec(Flavor::Official, GpuBackend::Cuda);
     let ok = "ggml_cuda_init: found 1 CUDA devices:\nAvailable devices:\n  CUDA0: NVIDIA GeForce \
-              RTX 4090 (24080 MiB, 23500 MiB free)\n";
+              RTX 3090 (24080 MiB, 23500 MiB free)\n";
     assert_eq!(
         devices_found(&official, ok).unwrap(),
-        vec!["CUDA0: NVIDIA GeForce RTX 4090 (24080 MiB, 23500 MiB free)"]
+        vec!["CUDA0: NVIDIA GeForce RTX 3090 (24080 MiB, 23500 MiB free)"]
     );
     // Without the GPU run args (§14.3): exit 0, and no device.
     let err = devices_found(&official, "Available devices:\n  (none)\n").unwrap_err();
     assert!(err.contains("did not load"), "{err}");
 
     let ik = verify_spec(Flavor::Ik, GpuBackend::Cuda);
-    let ik_out = "ggml_cuda_init: found 1 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 4090, \
+    let ik_out = "ggml_cuda_init: found 1 CUDA devices:\n  Device 0: NVIDIA GeForce RTX 3090, \
                   compute capability 8.9, VMM: yes, VRAM: 24080 MiB\nllama_model_load: error \
                   loading model: failed to open /nonexistent.gguf\n";
     assert_eq!(
         devices_found(&ik, ik_out).unwrap(),
         vec![
-            "Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB"
+            "Device 0: NVIDIA GeForce RTX 3090, compute capability 8.9, VMM: yes, VRAM: 24080 MiB"
         ]
     );
     assert_eq!(
@@ -955,18 +955,18 @@ fn devices_are_read_from_the_output_and_their_absence_is_the_error() {
 
     let audio = verify_spec(Flavor::Audio, GpuBackend::Cuda);
     let a_ok = "available_devices=2\nCPU:0 \"AMD Ryzen\" [cpu]\nCUDA:0 \"NVIDIA GeForce RTX \
-                4090\" [gpu]\nselect with: --backend <cuda|hip|vulkan|metal|cpu> --device <index>\n";
+                3090\" [gpu]\nselect with: --backend <cuda|hip|vulkan|metal|cpu> --device <index>\n";
     assert_eq!(
         devices_found(&audio, a_ok).unwrap(),
-        vec!["CUDA:0 \"NVIDIA GeForce RTX 4090\" [gpu]"]
+        vec!["CUDA:0 \"NVIDIA GeForce RTX 3090\" [gpu]"]
     );
     assert!(devices_found(&audio, "available_devices=1\nCPU:0 \"AMD Ryzen\" [cpu]\n").is_err());
 
     let sd = verify_spec(Flavor::Sdcpp, GpuBackend::Cuda);
-    let sd_ok = "CPU\tAMD Ryzen 9\nCUDA0\tNVIDIA GeForce RTX 4090\n";
+    let sd_ok = "CPU\tAMD Ryzen 9\nCUDA0\tNVIDIA GeForce RTX 3090\n";
     assert_eq!(
         devices_found(&sd, sd_ok).unwrap(),
-        vec!["CUDA0\tNVIDIA GeForce RTX 4090"]
+        vec!["CUDA0\tNVIDIA GeForce RTX 3090"]
     );
     assert!(devices_found(&sd, "CPU\tAMD Ryzen 9\n").is_err());
 }
@@ -1003,13 +1003,13 @@ fn compute_capabilities_become_a_sorted_unique_arch_list() {
 #[test]
 fn the_driver_cuda_version_comes_from_the_nvidia_smi_header() {
     let header = "+-----------------------------------------------------------------------------+\n\
-                  | NVIDIA-SMI 615.71        Driver Version: 615.71        CUDA Version: 13.1     |\n";
+                  | NVIDIA-SMI 600.10        Driver Version: 600.10        CUDA Version: 13.1     |\n";
     assert_eq!(parse_driver_cuda_version(header).as_deref(), Some("13.1"));
     assert_eq!(parse_driver_cuda_version("no header"), None);
-    // Driver 615.71.09 relabelled it (found in the container-builds e2e:
+    // Driver 600.10.01 relabelled it (found in the container-builds e2e:
     // build_env reported no driver maximum, so the CUDA warning never fired).
     let umd = "+-----------------------------------------------------------------------------------------+\n\
-               | NVIDIA-SMI 615.71.09              KMD Version: 615.71.09     CUDA UMD Version: 13.4     |\n";
+               | NVIDIA-SMI 600.10.01              KMD Version: 600.10.01     CUDA UMD Version: 13.4     |\n";
     assert_eq!(parse_driver_cuda_version(umd).as_deref(), Some("13.4"));
     assert_eq!(cuda_driver_warning("13.0.0", "13.1"), None);
     assert_eq!(cuda_driver_warning("13.1.0", "13.1"), None);

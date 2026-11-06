@@ -42,9 +42,10 @@ fn image_row(model_id: &str) -> NewImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -88,7 +89,7 @@ fn serve(state: &SharedState) -> String {
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     base
 }
 
@@ -158,7 +159,7 @@ async fn setup_cloud(mock: &MockServer) -> (SharedState, String) {
         &state.db,
         &store::NewUpstream {
             name: "bfl".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri().trim_end_matches('/')),
             api_key: Some("sk-up".into()),
@@ -187,6 +188,7 @@ async fn setup_cloud(mock: &MockServer) -> (SharedState, String) {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -375,6 +377,7 @@ async fn price_per_image(state: &SharedState, alias: &str, rate: f64) {
         lmgw_core::config::PriceScope::Alias,
         alias,
         lmgw_core::config::PriceUnit::PerImage,
+        lmgw_core::config::PriceTier::Standard,
         &sheet,
         Some(rate),
         None,
@@ -777,6 +780,7 @@ async fn a_model_that_does_not_serve_the_route_is_refused() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -831,6 +835,7 @@ async fn a_non_openai_upstream_is_refused() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -848,7 +853,7 @@ async fn a_non_openai_upstream_is_refused() {
     assert!(v["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("openai-protocol"));
+        .contains("requires an openai or openai_compatible upstream"));
 }
 
 /// An unknown model is the gateway's own 404, not a forwarded one.
@@ -938,7 +943,7 @@ async fn both_sd_server_error_shapes_become_one_envelope() {
         "the server's own sentence, not the raw JSON: {v}"
     );
     assert_eq!(v["error"]["code"], "upstream");
-    assert_eq!(v["error"]["type"], "api_error");
+    assert_eq!(v["error"]["type"], "invalid_request_error");
 
     // The 500 object: the `error` string is the *type* there and `message`
     // carries the text, so that is what the client and the log row get.
@@ -1181,8 +1186,7 @@ async fn a_held_image_model_falls_back_and_stamps_the_header() {
         Arc::new(move || Ok(port)),
     )));
     let mut row = image_row("z-image-turbo");
-    row.hold_fallback_mode = lmgw_core::config::HoldFallbackMode::Alias;
-    row.hold_fallback = Some("my-image".into());
+    row.fallback = Some("my-image".into());
     store::insert_image_model(&state.db, &row).await.unwrap();
     let mut s = state.snapshot().settings.clone();
     s.hold.active = true;

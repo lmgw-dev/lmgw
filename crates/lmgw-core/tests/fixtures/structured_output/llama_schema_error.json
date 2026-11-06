@@ -1,0 +1,13 @@
+{
+  "captured": "live probe 2026-10-24, image official-master b11714: chat route, scrubbed capture direct_minlength_neg (500 server_error)",
+  "upstream": "llama_cpp",
+  "status": 500,
+  "body": {
+    "error": {
+      "code": 500,
+      "message": "JSON schema error at #/properties/word: minLength must be a non-negative integer",
+      "type": "server_error"
+    }
+  },
+  "expect": "invalid_json_schema"
+}

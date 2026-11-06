@@ -75,7 +75,7 @@ const DRAFT_NAME: &str = "draft";
 const MODEL_PLACEHOLDER: &str = "{{model}}";
 
 fn refusal(e: &GatewayError) -> Response {
-    err_json(e.http_status(), e.code(), e.to_string())
+    err_json(e.http_status(), e.kind(), e.to_string())
 }
 
 /// A draft, and the thread it is tried as (module doc).
@@ -334,8 +334,12 @@ pub async fn test_profile(
         tool_choice: None,
         stream: true,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     match call(&state, &caller, &ir).await {
         Ok(answer) => Json(TestAnswer { system, ..answer }).into_response(),
@@ -408,7 +412,7 @@ struct Heard {
 impl crate::agent::DeltaSink for Heard {
     fn on_delta(&mut self, d: &StreamDelta) {
         match d {
-            StreamDelta::TextDelta(t) if !t.is_empty() => {
+            StreamDelta::TextDelta(t) | StreamDelta::RefusalDelta(t) if !t.is_empty() => {
                 self.first_token.get_or_insert_with(Instant::now);
                 self.reply.push_str(t);
             }
@@ -444,9 +448,14 @@ async fn call(
         )
         .await?;
     let started = Instant::now();
-    let routed = crate::gate::resolve(state, alias, crate::gate::RouteCheck::None)
-        .await
-        .map_err(|f| f.error)?;
+    let routed = crate::gate::resolve(
+        state,
+        alias,
+        crate::gate::RouteCheck::None,
+        crate::runtime::registry::Origin::Owner,
+    )
+    .await
+    .map_err(|f| f.error)?;
     let uses = crate::gate::request_facets(ir, None);
     let admitted = match routed.using(uses) {
         Ok(routed) => routed.admit(state).await,

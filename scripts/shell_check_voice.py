@@ -86,7 +86,7 @@ WP6_JS = r"""(async () => {
   return JSON.stringify('ready');
 })()"""
 
-# The test tone's notes (lmgw-ui pages/chat_voice/audio/pcm.rs test_tone).
+# The test tone's notes (lmgw-chat-ui chat_voice/audio/pcm.rs test_tone).
 CHIME = (523.25, 659.25, 783.99)
 
 

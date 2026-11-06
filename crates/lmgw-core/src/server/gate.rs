@@ -67,6 +67,13 @@ pub(super) async fn principal_mw(
                     other => other.to_string(),
                 }))
             }),
+        // Parsed, not judged, for the same reason (per-request background
+        // design §3) — and only on its own routes (§11.12): anywhere else it
+        // is not read at all, so a context realtime, the Chat or `/mcp`
+        // hands on in-process is the owner's whatever the client sent.
+        background: crate::openapi::takes_background(req.method().as_str(), req.uri().path())
+            .then(|| super::background::background_from_headers(req.headers()))
+            .flatten(),
         anthropic_beta: crate::egress::anthropic::client_betas(req.headers()),
         // Read before the snapshot the credential is resolved against: a
         // revocation raised from then on is one this request's connections
@@ -75,6 +82,12 @@ pub(super) async fn principal_mw(
         // The listener it came in on, and that listener's generation (the
         // serving loop puts it on every request).
         served_at: req.extensions().get::<ServedAt>().copied(),
+        host: req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| req.uri().authority().map(|a| a.to_string())),
         ..Default::default()
     };
     // Which listener (device link design §4.5): a router served without the
@@ -315,7 +328,10 @@ fn gate(
         // `key_expired` with the date. Expiry alone — no slot is taken and no
         // window counted: a feed or a host link holds no slot, and the model
         // calls inside a turn are checked one by one.
-        if cap == Cap::Chat {
+        // And on `Transfer` (device transfers design §10): an upload is one
+        // request that runs for minutes and spends nothing, so no slot and
+        // no window either.
+        if matches!(cap, Cap::Chat | Cap::Transfer) {
             if let Some(id) = ctx.principal.key_id() {
                 // Gone, or rotated, between the root's resolution and this
                 // gate (review W2-5): the credential opens nothing now. A

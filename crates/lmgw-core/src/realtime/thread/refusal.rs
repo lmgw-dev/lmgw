@@ -54,7 +54,7 @@ impl Refused {
         Self {
             status: e.http_status(),
             kind: e.openai_type().into(),
-            code: e.code().into(),
+            code: e.kind().into(),
             message: e.to_string(),
             held_by: None,
         }

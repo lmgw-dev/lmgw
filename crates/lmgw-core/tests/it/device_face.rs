@@ -59,7 +59,7 @@ async fn every_row_is_on_the_device_face_exactly_when_it_is_inference_or_chat() 
             .unwrap_or_else(|e| panic!("{verb} {path}: {e}"));
         let status = resp.status().as_u16();
         let own = DEVICE_ROUTES.contains(&(*method, *path));
-        let wanted_on_face = own || matches!(cap, Cap::Inference | Cap::Chat);
+        let wanted_on_face = own || matches!(cap, Cap::Inference | Cap::Chat | Cap::Transfer);
         assert_eq!(
             serves_on(Via::Devices, &verb.parse().unwrap(), path, *cap),
             wanted_on_face,

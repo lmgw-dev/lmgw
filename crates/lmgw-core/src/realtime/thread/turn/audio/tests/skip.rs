@@ -25,7 +25,7 @@ async fn a_skipped_attempt_relays_how_its_row_ended_the_response() {
     assert_eq!(said.frames[0].1["code"], "transcription_failed");
     assert_eq!(said.frames[1].1, json!({"aborted": true}));
     let e = said.result.unwrap().unwrap_err();
-    assert_eq!(e.code(), "transcription_failed", "{e}");
+    assert_eq!(e.kind(), "transcription_failed", "{e}");
     assert!(bodies(&mock).await.is_empty(), "nothing was sent");
 
     // A row the store refused: said as such, not as a journal gone.
@@ -33,7 +33,7 @@ async fn a_skipped_attempt_relays_how_its_row_ended_the_response() {
     assert_eq!(events(&said), ["error", "done"], "{:?}", said.frames);
     assert_eq!(said.frames[0].1["code"], "chat_history_write_failed");
     let e = said.result.unwrap().unwrap_err();
-    assert_eq!(e.code(), "chat_history_write_failed", "{e}");
+    assert_eq!(e.kind(), "chat_history_write_failed", "{e}");
 
     // A veto: quiet.
     let said = respond(&state, tid, audio(), settles(UserRow::Veto)).await;

@@ -106,6 +106,10 @@ jobs:
       # drive the real pdftotext/pdftoppm run instead of skipping themselves.
       - name: Install poppler-utils
         run: dnf -y install poppler-utils
+      # As in ci/check.sh: the RPM guard's test (sample RPMs via rpm-build, which
+      # install-build-deps.sh installs; no root, no network).
+      - name: RPM guard check (sample RPMs)
+        run: python3 ci/rpm_guard_test.py
 
       # The cargo registry and the compiled dependencies, without the
       # workspace's own crates (they change with every commit), keyed on the

@@ -667,7 +667,10 @@ async fn a_container_that_never_reports_healthy_fails_the_start() {
     let rt = runtime(Class::Chat, "stuck");
     let err = reg.acquire(&spec(&rt, 150)).await.unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("vram.load_timeout_seconds"), "{msg}");
+    assert!(
+        msg.contains("Settings → GPU → Admission → Load timeout"),
+        "{msg}"
+    );
     assert!(msg.contains("error loading model"), "{msg}");
     assert!(reg.list().is_empty());
 
@@ -725,7 +728,7 @@ async fn a_container_that_exits_while_loading_fails_the_start_at_once() {
     let msg = err.to_string();
     assert!(msg.contains("exited with code 1"), "{msg}");
     assert!(msg.contains("failed to allocate compute buffers"), "{msg}");
-    assert!(!msg.contains("vram.load_timeout_seconds"), "{msg}");
+    assert!(!msg.contains("Load timeout"), "{msg}");
     assert!(reg.list().is_empty());
 }
 
@@ -740,7 +743,10 @@ async fn a_running_container_is_waited_for_as_before() {
     let rt = runtime(Class::Chat, "slow");
     let err = reg.acquire(&spec(&rt, 2_500)).await.unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("vram.load_timeout_seconds"), "{msg}");
+    assert!(
+        msg.contains("Settings → GPU → Admission → Load timeout"),
+        "{msg}"
+    );
     assert!(
         fake.verbs().iter().any(|v| v == "inspect"),
         "the state was looked at: {:?}",
@@ -2094,11 +2100,12 @@ fn image_runtime(model_id: &str, modes: &[&str], edit: bool) -> ModelRuntime {
             extra_run_args: None,
             warm_start: false,
             idle_seconds: 600,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             peak_extra_bytes: None,
             peak_learned_at: None,
+            prompt_style: None,
+            preview_mode: None,
         }),
         sdcpp_caps: None,
         rung: None,

@@ -1,0 +1,45 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"text\":{\"format\":{\"schema\":{\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"type\":\"json_object\"}}}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "text": {
+        "format": {
+          "schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_object"
+        }
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

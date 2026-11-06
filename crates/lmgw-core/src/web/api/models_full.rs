@@ -40,17 +40,32 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
             param_overrides: (&a.param_overrides).into(),
             enabled: a.enabled,
             capabilities_override: a.capabilities_override.clone(),
+            fallback: a.fallback.clone(),
         })
         .collect();
     aliases.sort_by(|a, b| a.alias.cmp(&b.alias));
+    // Deferrals over the last 24 h, by the name a request asked for: each
+    // candidate alias's (§6), and each local row's whose background requests
+    // deferred (per-request background design §10). One grouped query for
+    // every name (`candidates::deferrals::deferrals_24h`'s own doc comment).
+    let deferral_counts = crate::candidates::deferrals::deferrals_24h(&st.db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("deferrals_24h query failed, showing zero for every model: {e}");
+            Default::default()
+        });
+    let deferrals =
+        |name: &str| crate::candidates::deferrals::for_alias(&deferral_counts, name).unwrap_or(0);
     // One cached header read per GGUF row for its licence
     // (`modelinfo::licence`): a warm call is a `stat` per row.
     let chat_dir = snap.settings.router.models_dir.clone();
     let aux_dir = snap.settings.aux_router.models_dir.clone();
     let mut local = Vec::with_capacity(snap.local_models.len());
     for m in &snap.local_models {
+        let public_name = snap.local_public_name(&m.model_id);
         local.push(dto::LocalModelView {
-            public_name: snap.local_public_name(&m.model_id),
+            deferrals_24h: deferrals(&public_name),
+            public_name,
             model: mirror(m).map_err(failed)?,
             licence: licence::of_file(st, &chat_dir, &m.gguf_path).await,
         });
@@ -58,8 +73,10 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
     let mut aux = Vec::with_capacity(snap.aux_models.len());
     for m in &snap.aux_models {
         let (threads, source) = crate::runtime::aux::threads_in_effect(m, crate::host::cpu());
+        let public_name = snap.aux_public_name(m);
         aux.push(dto::AuxModelView {
-            public_name: snap.aux_public_name(m),
+            deferrals_24h: deferrals(&public_name),
+            public_name,
             model: mirror(m).map_err(failed)?,
             licence: licence::of_file(st, &aux_dir, &m.gguf_path).await,
             threads_in_effect: threads,
@@ -70,9 +87,12 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
         .image_models
         .iter()
         .map(|m| {
+            let public_name = snap.image_public_name(&m.model_id);
             Ok(dto::ImageModelView {
-                public_name: snap.image_public_name(&m.model_id),
+                deferrals_24h: deferrals(&public_name),
+                public_name,
                 model: mirror(m)?,
+                derived_prompt_style: crate::image_recipes::derived_prompt_style(m),
             })
         })
         .collect::<Result<Vec<_>, String>>()
@@ -90,8 +110,10 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
         let note = st.vram.audio_residency_note(st, &snap, m).await;
         let (threads, source) =
             crate::runtime::audio::threads_in_effect(m, settings, crate::host::cpu());
+        let public_name = snap.audio_public_name(&m.model_id);
         audio.push(dto::AudioModelView {
-            public_name: snap.audio_public_name(&m.model_id),
+            deferrals_24h: deferrals(&public_name),
+            public_name,
             model: mirror(m).map_err(failed)?,
             residency_note: Some(note),
             residency_charged_bytes: crate::vram::residency::learned(m, settings),
@@ -105,17 +127,8 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
     // One `candidates::derive` per row (candidate-aliases design §4.6) — a
     // cached GGUF read per candidate, warm calls free (see that function's
     // own cost note). A plain loop, not `join_all`: this is a desktop app for
-    // one user, and a handful of aliases at most.
-    //
-    // The deferral count (§6) is one grouped query for every alias, read
-    // once before the loop rather than once per alias
-    // (`candidates::deferrals::deferrals_24h`'s own doc comment).
-    let deferral_counts = crate::candidates::deferrals::deferrals_24h(&st.db)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("deferrals_24h query failed, showing zero for every alias: {e}");
-            Default::default()
-        });
+    // one user, and a handful of aliases at most. The deferral count (§6) is
+    // the map read above.
     let mut candidate_aliases: Vec<dto::CandidateAliasView> = Vec::new();
     for c in snap.candidate_aliases.values() {
         let d = crate::candidates::derive::derive(st, &snap, c).await;
@@ -124,7 +137,6 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
             alias: c.alias.clone(),
             candidates: c.candidates.clone(),
             background: c.background,
-            fallback_mode: c.fallback_mode.as_str().to_string(),
             fallback: c.fallback.clone(),
             capabilities_disabled: c.capabilities_disabled.clone(),
             enabled: c.enabled,
@@ -193,6 +205,10 @@ impl From<&crate::ir::Params> for dto::Params {
             seed,
             stop,
             reasoning,
+            // A send's own lesson, never an override.
+            reasoning_summary_refused: _,
+            // A request's own (a Responses client's), never an override.
+            reasoning_summary: _,
         } = p.clone();
         Self {
             temperature,
@@ -217,6 +233,9 @@ impl From<&crate::ir::ReasoningControl> for dto::ReasoningControl {
             enabled,
             effort,
             budget_tokens,
+            // Not in the API shape yet: only a Messages request's own
+            // `thinking` type or the reasoning fit sets it, never an alias.
+            between_tools: _,
         } = r.clone();
         Self {
             enabled,

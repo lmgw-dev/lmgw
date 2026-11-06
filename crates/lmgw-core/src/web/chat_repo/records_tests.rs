@@ -75,7 +75,12 @@ impl Fixture {
     async fn user(&self, text: &str) -> i64 {
         match self
             .repo()
-            .append_user_message(&self.state, self.tid, text, &[], &[], None, &self.owner)
+            .append_user_message(
+                &self.state,
+                self.tid,
+                store::UserMessage::text(text),
+                &self.owner,
+            )
             .await
             .unwrap()
         {
@@ -228,7 +233,14 @@ async fn each_message_write_records_its_messages_by_its_author() {
 
     // A user message edited for a resend: it changed, what followed went.
     assert!(repo
-        .rewrite_user_message(&s, tid, spoken_user, "what day is it", &[], &f.owner)
+        .rewrite_user_message(
+            &s,
+            tid,
+            spoken_user,
+            "what day is it",
+            (&[], None),
+            &f.owner
+        )
         .await
         .unwrap());
     f.recorded(
@@ -423,7 +435,7 @@ async fn a_failed_write_a_miss_a_temporary_thread_and_a_thread_delete_record_no_
         .await
         .unwrap();
     ChatRepo::Temp
-        .append_user_message(&s, temp.id, "hi", &[], &[], None, &f.owner)
+        .append_user_message(&s, temp.id, store::UserMessage::text("hi"), &f.owner)
         .await
         .unwrap();
     assert_eq!(f.records().await, Vec::<Rec>::new(), "a temporary thread");

@@ -5,7 +5,7 @@
 //! own — so the dropped call sits beside its finished siblings in Logs.
 
 use super::{DOCS_SERVER, KB_SERVER, SELF_ADMIN_SERVER};
-use crate::mcp::{kb, selfadmin};
+use crate::mcp::{kb, media, selfadmin};
 use crate::state::SharedState;
 
 /// The server of the exposed tool `name`; `builtin`: a built-in toolset
@@ -18,6 +18,8 @@ pub(crate) async fn server_of(state: &SharedState, name: &str, builtin: bool) ->
             SELF_ADMIN_SERVER
         } else if kb::owns(name) {
             KB_SERVER
+        } else if media::owns(name) {
+            media::server_of(name)
         } else {
             DOCS_SERVER
         };

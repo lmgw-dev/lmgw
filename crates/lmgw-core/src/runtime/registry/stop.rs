@@ -27,7 +27,8 @@ impl Registry {
         model_id: &str,
         force: bool,
     ) -> Result<(), RuntimeError> {
-        self.stop_where(class, model_id, force, None, false).await
+        self.stop_where(class, model_id, force, None, false, &[])
+            .await
     }
 
     /// [`Self::stop`], only if the entry is still the container `generation`
@@ -54,15 +55,42 @@ impl Registry {
         generation: u64,
         force: bool,
     ) -> Result<(), RuntimeError> {
-        self.stop_where(class, model_id, force, Some(generation), false)
+        self.stop_where(class, model_id, force, Some(generation), false, &[])
             .await
+    }
+
+    /// Eviction's stop of container `generation`: never forced, and
+    /// `only_background` as [`Self::stop_idle_background`] — which also
+    /// stops a container whose one user is one of `own`, the claims the
+    /// request the eviction makes room for has left ([`Freeable`], openai
+    /// egress design §14.3), decided in the lock hold that marks it
+    /// stopping.
+    pub async fn stop_for_eviction(
+        self: &Arc<Self>,
+        class: Class,
+        model_id: &str,
+        generation: u64,
+        only_background: bool,
+        own: &[Freeable],
+    ) -> Result<(), RuntimeError> {
+        self.stop_where(
+            class,
+            model_id,
+            false,
+            Some(generation),
+            only_background,
+            own,
+        )
+        .await
     }
 
     /// The one stop: the refusal and the identity check are decided in the
     /// same lock hold that marks the entry `stopping`, so nothing can slip
     /// between "this is the container I judged" and "it is stopping".
     /// `only_background`: the judged container must still be
-    /// `Background`-owned too ([`Self::stop_idle_background`]).
+    /// `Background`-owned too ([`Self::stop_idle_background`]). `own`:
+    /// claims of which one keeps nothing busy when it is the container's one
+    /// user ([`Self::stop_for_eviction`]).
     pub(super) async fn stop_where(
         self: &Arc<Self>,
         class: Class,
@@ -70,6 +98,7 @@ impl Registry {
         force: bool,
         judged: Option<u64>,
         only_background: bool,
+        own: &[Freeable],
     ) -> Result<(), RuntimeError> {
         let key: Key = (class, model_id.to_string());
         let (name, stop_timeout, phase, verdict) = {
@@ -95,7 +124,11 @@ impl Registry {
                     });
                 }
             }
-            if e.in_flight > 0 && !force {
+            let sends = *e.sends.borrow();
+            let freed = own
+                .iter()
+                .any(|o| o.frees(class, model_id, e.generation, e.in_flight, sends));
+            if e.in_flight > 0 && !force && !freed {
                 return Err(RuntimeError::Busy {
                     class,
                     model_id: model_id.to_string(),
@@ -152,15 +185,30 @@ impl Registry {
         name: &str,
         stop_timeout: Duration,
     ) -> Option<String> {
-        let stop = self
-            .podman(&["stop", "-t", &STOP_GRACE_SECONDS.to_string(), name])
-            .await;
+        // Bounded too (2026-10-24): a podman that hangs on its own stop —
+        // a stuck storage lock — must not hold the stop's caller for good,
+        // the GPU hold's sweep under the settings lock among them. The grace
+        // `-t` gives, then `vram.unload_timeout_seconds`, as
+        // `remove_bounded`; the runner kills the child on drop.
+        let bound = Duration::from_secs(STOP_GRACE_SECONDS).saturating_add(stop_timeout);
+        let stop = tokio::time::timeout(
+            bound,
+            self.podman(&["stop", "-t", &STOP_GRACE_SECONDS.to_string(), name]),
+        )
+        .await;
         let problem = match stop {
-            Ok(out) if out.ok() => None,
+            Err(_) => {
+                return Some(format!(
+                    "podman stop {name} did not return within {bound:?} (the stop grace plus the \
+                     unload timeout, {})",
+                    crate::config::UNLOAD_TIMEOUT_LABEL
+                ))
+            }
+            Ok(Ok(out)) if out.ok() => None,
             // Already gone is the requested state, not a failure.
-            Ok(out) if is_no_such_container(&out.stderr) => None,
-            Ok(out) => Some(format!("podman stop: {}", out.stderr.trim())),
-            Err(e) => Some(format!("podman stop could not be run: {e}")),
+            Ok(Ok(out)) if is_no_such_container(&out.stderr) => None,
+            Ok(Ok(out)) => Some(format!("podman stop: {}", out.stderr.trim())),
+            Ok(Err(e)) => Some(format!("podman stop could not be run: {e}")),
         };
         // `podman stop` returns when the signal has been delivered and the
         // grace has elapsed; `wait` is what says the process is actually
@@ -175,8 +223,9 @@ impl Registry {
             Ok(Ok(_)) => None,
             Ok(Err(e)) => Some(format!("podman wait could not be run: {e}")),
             Err(_) => Some(format!(
-                "container '{name}' was still running {stop_timeout:?} after podman stop \
-                 (vram.unload_timeout_seconds)"
+                "container '{name}' was still running {stop_timeout:?} after podman stop (the \
+                 unload timeout, {})",
+                crate::config::UNLOAD_TIMEOUT_LABEL
             )),
         }
     }

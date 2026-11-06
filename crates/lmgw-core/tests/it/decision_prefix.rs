@@ -8,7 +8,7 @@
 //! upstream is a wiremock catalog: `jev` outputs decisions, `gpt` text, and
 //! `plain` states nothing.
 
-use lmgw_core::config::{AuxKind, HoldFallbackMode, Protocol, Settings, UpstreamKind};
+use lmgw_core::config::{AuxKind, Protocol, Settings, UpstreamKind};
 use lmgw_core::gguf::synth;
 use lmgw_core::ops::{self, CandidateAliasPatch};
 use lmgw_core::state::{AppState, SharedState};
@@ -84,7 +84,7 @@ async fn fixture() -> Fixture {
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -109,6 +109,7 @@ async fn fixture() -> Fixture {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: None,
+                fallback: None,
             },
         )
         .await
@@ -294,7 +295,6 @@ async fn a_candidate_alias_named_decide_id_collides() {
             alias: "decide/kev".into(),
             candidates: vec!["chat".into()],
             background: false,
-            fallback_mode: HoldFallbackMode::Inherit,
             fallback: None,
             capabilities_disabled: vec![],
             capabilities_enabled: vec![],
@@ -327,19 +327,22 @@ async fn a_candidate_alias_named_decide_id_collides() {
 }
 
 /// §2.4: a decision row's fallback must answer System One. One whose catalog
-/// states output modalities without `decisions` is refused when it is set;
-/// one stating `decisions`, or nothing, is accepted. Only decision rows are
-/// held to it, and turning a row into one checks the fallback it keeps.
+/// states output modalities without `decisions` is refused when it is set —
+/// first as a model of another type (openai egress design §14.2 item 4); one
+/// stating `decisions`, or nothing, is accepted. An embedder is held to its
+/// own type, and turning a row into a decision row checks the fallback it
+/// keeps.
 #[tokio::test]
 async fn a_decision_rows_fallback_must_answer_system_one_when_it_is_set() {
     let f = fixture().await;
     let decision = |id: &str, fallback: &str| {
         json!({"action": "create", "model_id": id, "gguf_path": "laya.gguf",
-               "kind": "decision", "hold_fallback_mode": "alias", "hold_fallback": fallback})
+               "kind": "decision", "fallback": fallback})
     };
     let refused = f.set(decision("laya", "chatter")).await.err().unwrap();
     assert!(
-        refused.contains("hold_fallback") && refused.contains("outputs text"),
+        refused.contains("'chatter' is a chat model")
+            && refused.contains("a fallback must be the same type of model"),
         "{refused}"
     );
     assert!(f.state.snapshot().aux_models.is_empty(), "nothing saved");
@@ -351,24 +354,45 @@ async fn a_decision_rows_fallback_must_answer_system_one_when_it_is_set() {
         .expect("a catalog that states nothing passes");
 
     let refused = f
-        .set(json!({"action": "update", "model_id": "laya", "hold_fallback": "chatter"}))
+        .set(json!({"action": "update", "model_id": "laya", "fallback": "chatter"}))
         .await
         .err()
         .unwrap();
-    assert!(refused.contains("outputs text"), "{refused}");
+    assert!(refused.contains("same type of model"), "{refused}");
 
+    let refused = f
+        .set(
+            json!({"action": "create", "model_id": "bge", "gguf_path": "bge.gguf",
+                     "kind": "embed", "fallback": "chatter"}),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        refused.contains("'chatter' is a chat model and 'embed/bge' is an embedding model"),
+        "{refused}"
+    );
     f.set(
         json!({"action": "create", "model_id": "bge", "gguf_path": "bge.gguf",
-                 "kind": "embed", "hold_fallback_mode": "alias", "hold_fallback": "chatter"}),
+                 "kind": "embed"}),
     )
     .await
-    .expect("an embedder's fallback is not held to System One");
+    .unwrap();
+    f.set(
+        json!({"action": "create", "model_id": "bge-2", "gguf_path": "bge.gguf",
+                 "kind": "embed", "fallback": "embed/bge"}),
+    )
+    .await
+    .expect("an embedder falls back to an embedder");
     let refused = f
-        .set(json!({"action": "update", "model_id": "bge", "kind": "decision"}))
+        .set(json!({"action": "update", "model_id": "bge-2", "kind": "decision"}))
         .await
         .err()
         .unwrap();
-    assert!(refused.contains("outputs text"), "{refused}");
+    assert!(
+        refused.contains("'embed/bge' is an embedding model and 'decide/bge-2' is a decision"),
+        "{refused}"
+    );
 
     // A save that changes neither the kind nor the fallback is not checked
     // again (no catalog fetch for an enable): a row stored before its
@@ -393,8 +417,7 @@ async fn a_decision_rows_fallback_must_answer_system_one_when_it_is_set() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("chatter".into()),
+            fallback: Some("chatter".into()),
         },
     )
     .await
@@ -406,7 +429,7 @@ async fn a_decision_rows_fallback_must_answer_system_one_when_it_is_set() {
             .unwrap_or_else(|e| panic!("{action}: {e}"));
     }
     let refused = f
-        .set(json!({"action": "update", "model_id": "laya-old", "hold_fallback": "silent"}))
+        .set(json!({"action": "update", "model_id": "laya-old", "fallback": "silent"}))
         .await;
     assert!(
         refused.is_ok(),

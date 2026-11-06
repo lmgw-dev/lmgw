@@ -317,7 +317,8 @@ async fn catalog_downloads_follow_the_spec_pin_unless_set_to_latest() {
     let msg = body["message"].as_str().unwrap();
     assert!(msg.contains(&format!("has no revision {GONE}")), "{msg}");
     assert!(
-        msg.contains("does not fall back to main") && msg.contains("audio.catalog_revision"),
+        msg.contains("does not fall back to main")
+            && msg.contains("Settings → Runtimes → Audio → Catalog downloads"),
         "{msg}"
     );
 

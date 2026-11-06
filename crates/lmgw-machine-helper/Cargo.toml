@@ -1,0 +1,27 @@
+[package]
+name = "lmgw-machine-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lmgw's root helper: installs the graphics card's container toolkit after one password, exactly as the plan the person confirmed says"
+
+# The root helper (machine-check design §3.1, WP6), installed as
+# /usr/libexec/lmgw/lmgw-machine-helper and started only through
+# /usr/bin/pkexec under the polkit action in polkit/. What runs as root is
+# this crate and lmgw-machine's plan and fact readers, nothing of lmgw-core:
+# the dependency set stays these three.
+[dependencies]
+lmgw-machine = { path = "../lmgw-machine" }
+# The JSON lines it prints (lmgw_machine::helper::Event). The version
+# lmgw-machine already uses.
+serde_json = "1.0.150"
+# getuid/geteuid, umask, close_range, and the descriptor calls of the real
+# host and the stdout queue (poll, pipe2, fcntl, FIONREAD, open, send).
+# Already in the lock.
+libc = "0.2.186"
+
+[dev-dependencies]
+lmgw-machine = { path = "../lmgw-machine", features = ["fake"] }
+# The real file writes, into a temporary directory. The version the
+# workspace uses.
+tempfile = "3.27.0"

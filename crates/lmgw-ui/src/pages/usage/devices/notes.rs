@@ -144,7 +144,15 @@ pub(super) fn PairingNotes(
         let r = row.get()?;
         let p = r.pairing.clone()?;
         let at = |t: &str| local_clock(t, now.get());
-        let words = logic::pairing_words(&p, &at);
+        // lmgw's own words as text; what the device says of itself in a
+        // span of its own, which no device-chosen text can pass for lmgw's.
+        let words = logic::pairing_words(&p, &at)
+            .into_iter()
+            .map(|part| match part {
+                logic::Part::Own(s) => view! { {s} }.into_any(),
+                logic::Part::Claim(s) => view! { <span class="device-claim">{s}</span> }.into_any(),
+            })
+            .collect_view();
         let ask = ask.get();
         let confirm = ask.as_ref().and_then(|a| a.confirm.clone());
         let alive = ask.as_ref().and_then(|a| a.token_until.clone());

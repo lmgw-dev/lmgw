@@ -7,11 +7,13 @@ use std::sync::Arc;
 use super::{CandidateCtx, CandidateReq};
 use crate::bench::lease::GpuBlock;
 use crate::candidates::derive::{cached_pick, derive, CandidatePick};
-use crate::config::{CandidateAlias, FallbackRoute, Route, Snapshot};
-use crate::error::GatewayError;
+use crate::config::{CandidateAlias, HopKey, Route, Snapshot};
+use crate::error::{Deferred, GatewayError};
+use crate::gate::chain::{self, Chain, Next, Stop, Walk as ChainWalk};
+use crate::gate::machine_setup::reason_of;
 use crate::gate::open::{
-    admit_route, fallback_serves, AdmissionPolicy, AtAdmission, FallbackReason, GateHeaders,
-    OpenFailed, Opened, RouteCheck,
+    admit_route, AdmissionPolicy, AtAdmission, FallbackReason, GateHeaders, OpenFailed, Opened,
+    RouteCheck,
 };
 use crate::runtime::registry::Origin;
 use crate::state::SharedState;
@@ -23,15 +25,19 @@ pub(crate) struct AtResolve {
     pub(crate) route: Route,
     pub(crate) headers: GateHeaders,
     pub(crate) req: CandidateReq,
+    /// The hop `route` is for: the alias, or the hop its fallback's chain
+    /// reached under the hold.
+    pub(crate) hop: String,
 }
 
 /// The candidate alias `ca`'s part of `resolve` (module doc of [`super`]).
 ///
 /// - **The GPU hold:** the alias fallback, reason `hold`, for both alias
 ///   kinds (§4.2–§4.3 "Hold active") — never a candidate's row fallback
-///   (§4.1). A fallback that is none, does not resolve, or is local is
-///   `gpu_hold`, naming why — the hold's refusal, logged `gpu_hold`, not a
-///   deferral. One that lacks a facet the alias enables answers all the
+///   (§4.1) — along its chain (openai egress design §14.3: a local fallback
+///   held too goes on to its own). A fallback that is none or does not
+///   resolve is `gpu_hold`, naming why — the hold's refusal, logged
+///   `gpu_hold`, not a deferral. One that lacks a facet the alias enables answers all the
 ///   same (changed 2026-10-06, the owner's ruling: a configured fallback is
 ///   always used), what it cannot take degraded and its row marked. A
 ///   benchmark's lease is answered the same way, with reason `benchmark` and
@@ -45,19 +51,30 @@ pub(crate) async fn at_resolve(
     state: &SharedState,
     snap: &Arc<Snapshot>,
     ca: &CandidateAlias,
+    check: RouteCheck,
 ) -> Result<AtResolve, GatewayError> {
     let pick = cached_pick(state, snap, ca).await;
     let req = CandidateReq {
         enabled: pick.enabled,
     };
     if let Some(block) = snap.gpu_block() {
-        let (fb, route) = hold_fallback(snap, ca, &block)?;
-        let mut headers = GateHeaders::default();
-        headers.fall_back(fb, block.fallback_reason());
+        let mut chain = Chain::default();
+        let (hop, route) = chain::walk_static(
+            state,
+            snap,
+            check,
+            &mut chain,
+            ca.alias.clone(),
+            None,
+            Stop::block(block, HopKey::Candidate(ca.id)),
+            snap.fallback_named(ca.fallback.as_deref()),
+        )
+        .await?;
         return Ok(AtResolve {
             route,
-            headers,
+            headers: GateHeaders::along(chain),
             req,
+            hop,
         });
     }
     let id = pick
@@ -75,25 +92,8 @@ pub(crate) async fn at_resolve(
         route: snap.chat_local_route(id),
         headers: GateHeaders::default(),
         req,
+        hop: ca.alias.clone(),
     })
-}
-
-/// The alias fallback under the GPU hold (or a benchmark's lease), or the
-/// `gpu_hold` / `gpu_benchmark` refusal naming why there is none. The site's
-/// route check is the caller's.
-fn hold_fallback(
-    snap: &Snapshot,
-    ca: &CandidateAlias,
-    block: &GpuBlock,
-) -> Result<(String, Route), GatewayError> {
-    let refused = |detail: String| block.refusal(ca.alias.clone(), detail);
-    match snap.alias_fallback(ca) {
-        FallbackRoute::None => Err(refused(String::new())),
-        FallbackRoute::Unusable { alias, why } => {
-            Err(refused(format!(" (fallback '{alias}' {why})")))
-        }
-        FallbackRoute::Usable { alias, route } => Ok((alias, route)),
-    }
 }
 
 /// Admission for a candidate alias: the walk (module doc of [`super`]).
@@ -112,6 +112,12 @@ fn hold_fallback(
 /// Every candidate hold it returns carries the request's policy with a
 /// [`CandidateCtx`], so a send that finds the candidate unable to take the
 /// request can run it again, and `x-lmgw-candidate` names the model.
+///
+/// `origin` is whose traffic the client said the request is (per-request
+/// background design §5): [`Origin::Background`] walks as a guest whatever
+/// the alias row says; the owner's walks as the row says — a background
+/// alias's requests are guests either way.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn walk(
     state: &SharedState,
     alias: &str,
@@ -119,6 +125,7 @@ pub(crate) async fn walk(
     check: RouteCheck,
     excluded: Vec<String>,
     because: Option<String>,
+    origin: Origin,
 ) -> Result<Opened, OpenFailed> {
     let snap = state.snapshot();
     let (row, pick) = match (snap.candidate_alias(alias), carried) {
@@ -139,11 +146,12 @@ pub(crate) async fn walk(
         alias,
         check,
         excluded,
+        origin,
     };
     if snap.gpu_block().is_some() {
         return w.held().await;
     }
-    if row.background {
+    if row.background || origin == Origin::Background {
         w.guest(because).await
     } else {
         w.owner().await
@@ -156,8 +164,10 @@ pub(crate) async fn walk(
 /// candidate, fit-checked by the send that follows the same way, then the
 /// alias fallback. Bounded by the list: every pass excludes one more.
 ///
-/// A hold that is not a candidate alias's has nothing to pick from, and
-/// `cause` is the answer.
+/// A hold that is not a candidate alias's has nothing to pick from: a plain
+/// model's guest (per-request background design §4) is answered by its
+/// row's fallback or the deferral ([`crate::gate::guest::lost`]), and for
+/// every other hold `cause` is the answer.
 pub(crate) async fn repick(
     state: &SharedState,
     hold: &LocalHold,
@@ -181,7 +191,20 @@ pub(crate) async fn repick_failed_climb(
     repick_as(state, hold, cause, true).await
 }
 
+/// The request leaves this model whatever the walk picks, and keeps its
+/// claim: another candidate or the alias fallback that fits only once this
+/// model goes may evict it when that claim is its only user
+/// (`vram::leaving`), and is not queued behind it.
 async fn repick_as(
+    state: &SharedState,
+    hold: &LocalHold,
+    cause: GatewayError,
+    own_error_last: bool,
+) -> Result<Opened, OpenFailed> {
+    vram::leaving(hold, repick_leaving(state, hold, cause, own_error_last)).await
+}
+
+async fn repick_leaving(
     state: &SharedState,
     hold: &LocalHold,
     cause: GatewayError,
@@ -191,6 +214,9 @@ async fn repick_as(
         return Err(refused(cause));
     };
     let Some(ctx) = policy.candidate.as_deref() else {
+        if hold.origin() == Origin::Background {
+            return crate::gate::guest::lost(state, hold, policy.check, cause).await;
+        }
         return Err(refused(cause));
     };
     let model = hold.model_id();
@@ -222,6 +248,7 @@ async fn repick_as(
         policy.check,
         excluded,
         Some(format!("'{model}' {why}")),
+        ctx.origin,
     )
     .await;
     match picked {
@@ -295,6 +322,9 @@ struct Walk<'a> {
     alias: &'a str,
     check: RouteCheck,
     excluded: Vec<String>,
+    /// What the client asked for ([`walk`]'s `origin`), carried to a
+    /// re-pick ([`CandidateCtx::origin`]).
+    origin: Origin,
 }
 
 impl Walk<'_> {
@@ -349,7 +379,7 @@ impl Walk<'_> {
             ))));
         };
         if let Some(error) = primary_failed {
-            return Err(self.primary_error(primary, error));
+            return self.primary_failed(primary, error).await;
         }
         if let Some((p, reason)) = self
             .pick
@@ -394,7 +424,7 @@ impl Walk<'_> {
     /// owner; else started into room that disturbs nobody (never waits,
     /// evicts only idle guests); else the first loaded, non-draining
     /// alternate; else the alias fallback (reason `background`); else `503
-    /// gpu_hold`, logged `gpu_deferred`, saying what is in the way.
+    /// gpu_deferred`, saying what is in the way.
     ///
     /// A primary that cannot be brought up — its start fails, a start it
     /// joined fails or is stopped, or it cannot fit even on an empty card
@@ -440,11 +470,15 @@ impl Walk<'_> {
             }
         }
         let detail = self.deferral(blocked, because, primary_failed.as_ref().map(|f| &f.error));
-        match (
-            self.fallback_answer(FallbackReason::Background).await,
-            primary_failed,
-        ) {
-            (Ok(opened), _) => {
+        // A primary this computer could not start (machine-check design
+        // §2.5) or whose engine could not be downloaded (§5): the fallback
+        // answers for that, not for background traffic's rule.
+        let reason = primary_failed
+            .as_ref()
+            .and_then(|f| reason_of(&f.error))
+            .unwrap_or(FallbackReason::Background);
+        match (self.fallback_answer(reason).await, primary_failed) {
+            (Next::Opened(opened), _) => {
                 tracing::info!(
                     alias = %self.alias,
                     "background traffic for '{}': {detail} — its fallback answers",
@@ -452,10 +486,12 @@ impl Walk<'_> {
                 );
                 Ok(opened)
             }
-            (Err(_), Some(failed)) => Err(failed),
-            (Err(why), None) => Err(refused(GatewayError::GpuDeferred {
+            (Next::Failed(f), _) => Err(f),
+            (Next::Ended(_), Some(failed)) => Err(failed),
+            (Next::Ended(why), None) => Err(refused(GatewayError::GpuDeferred {
                 model: self.alias.to_string(),
                 detail: format!("{detail}{why}"),
+                on: Deferred::Alias,
             })),
         }
     }
@@ -469,7 +505,7 @@ impl Walk<'_> {
     /// and why.
     async fn unavailable(&self, detail: String) -> Result<Opened, OpenFailed> {
         match self.fallback_answer(FallbackReason::Unavailable).await {
-            Ok(opened) => {
+            Next::Opened(opened) => {
                 tracing::warn!(
                     alias = %self.alias,
                     "'{}' cannot use any of its models: {detail} — its fallback answers; fix the \
@@ -478,7 +514,8 @@ impl Walk<'_> {
                 );
                 Ok(opened)
             }
-            Err(why) => Err(refused(GatewayError::CandidateUnavailable {
+            Next::Failed(f) => Err(f),
+            Next::Ended(why) => Err(refused(GatewayError::CandidateUnavailable {
                 alias: self.alias.to_string(),
                 detail: format!("{detail}{why}"),
             })),
@@ -506,6 +543,27 @@ impl Walk<'_> {
         }
     }
 
+    /// A start of the primary this walk joined failed (§12 entries 62, 74)
+    /// and nothing else took the request: a start this computer could not
+    /// make, or whose engine image could not be downloaded, goes to the
+    /// alias fallback (machine-check design §2.5, WP5: a configured fallback
+    /// always applies); any other failure is the answer, named for the
+    /// primary, as before.
+    async fn primary_failed(
+        &self,
+        primary: &str,
+        error: GatewayError,
+    ) -> Result<Opened, OpenFailed> {
+        let Some(reason) = reason_of(&error) else {
+            return Err(self.primary_error(primary, error));
+        };
+        match self.fallback_answer(reason).await {
+            Next::Opened(opened) => Ok(opened),
+            Next::Failed(f) => Err(f),
+            Next::Ended(clause) => Err(self.primary_error(primary, error.with_clause(&clause))),
+        }
+    }
+
     /// The refusal about the primary: its route and `x-lmgw-candidate`, as
     /// for an admission error about it.
     fn primary_error(&self, primary: &str, error: GatewayError) -> OpenFailed {
@@ -518,28 +576,31 @@ impl Walk<'_> {
         }
     }
 
-    /// The alias fallback, answering for `reason` — or, as `Err`, why it
-    /// cannot: empty for none, else a clause naming the fallback. A fallback
-    /// that does not resolve, is local, or does not take this request (the
-    /// site's route check) counts as none; one that lacks a facet the alias
-    /// enables answers (changed 2026-10-06).
-    async fn fallback_answer(&self, reason: FallbackReason) -> Result<Opened, String> {
-        match self.snap.alias_fallback(self.ca) {
-            FallbackRoute::None => Err(String::new()),
-            FallbackRoute::Unusable { alias: fb, why } => Err(format!(" (fallback '{fb}' {why})")),
-            FallbackRoute::Usable { alias: fb, route } => {
-                if !fallback_serves(self.state, &fb, &route, self.alias, self.check).await {
-                    return Err(format!(" (fallback '{fb}' cannot take this request)"));
-                }
-                let mut headers = GateHeaders::default();
-                headers.fall_back(fb, reason);
-                Ok(Opened {
-                    route,
-                    hold: None,
-                    headers,
-                })
-            }
-        }
+    /// The alias fallback, answering for `reason`, along its chain (openai
+    /// egress design §14.3): a local fallback is admitted as a request naming
+    /// it would be, and goes on to its own when it cannot answer either. As
+    /// [`Next::Ended`], why it cannot: empty for none, else a clause naming
+    /// the fallback. A fallback that does not resolve or does not take this
+    /// request (the site's route check) counts as none; one that lacks a
+    /// facet the alias enables answers (changed 2026-10-06).
+    async fn fallback_answer(&self, reason: FallbackReason) -> Next {
+        let walk = ChainWalk {
+            check: self.check,
+            origin: if self.ca.background {
+                Origin::Background
+            } else {
+                self.origin
+            },
+        };
+        chain::fall_back(
+            self.state,
+            walk,
+            Chain::default(),
+            (self.alias, HopKey::Candidate(self.ca.id)),
+            self.snap.fallback_named(self.ca.fallback.as_deref()),
+            reason,
+        )
+        .await
     }
 
     /// Why nothing local took a guest's request, for the deferral message
@@ -587,20 +648,11 @@ impl Walk<'_> {
             .gpu_block()
             .or_else(|| self.snap.gpu_block())
             .unwrap_or(GpuBlock::Hold);
-        let (fb, route) = hold_fallback(self.snap, self.ca, &block).map_err(refused)?;
-        if !fallback_serves(self.state, &fb, &route, self.alias, self.check).await {
-            return Err(refused(block.refusal(
-                self.alias,
-                format!(" (fallback '{fb}' cannot serve this endpoint)"),
-            )));
+        match self.fallback_answer(block.fallback_reason()).await {
+            Next::Opened(o) => Ok(o),
+            Next::Failed(f) => Err(f),
+            Next::Ended(clause) => Err(refused(block.refusal(self.alias, clause))),
         }
-        let mut headers = GateHeaders::default();
-        headers.fall_back(fb, block.fallback_reason());
-        Ok(Opened {
-            route,
-            hold: None,
-            headers,
-        })
     }
 
     /// Claim `id` if it is loaded ([`vram::join`]), never starting it. A
@@ -630,6 +682,7 @@ impl Walk<'_> {
         hold.set_policy(AdmissionPolicy {
             check: self.check,
             candidate: Some(self.ctx()),
+            chain: Chain::default(),
         });
         let mut headers = GateHeaders::default();
         headers.chose(id.to_string());
@@ -645,6 +698,7 @@ impl Walk<'_> {
             alias: self.alias.to_string(),
             excluded: self.excluded.clone(),
             row: Arc::clone(self.ca),
+            origin: self.origin,
         })
     }
 }

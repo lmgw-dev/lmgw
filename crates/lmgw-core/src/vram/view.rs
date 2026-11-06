@@ -41,15 +41,34 @@ pub struct ResidentView {
     /// What a `ready` audio container will still load on its first request
     /// and the driver cannot show yet (realtime design §9.4,
     /// [`residency`](crate::vram::residency)) — admission keeps it free on
-    /// top of the measured use. Its expected residency less what it was read
-    /// holding at rest (its CUDA context, or an eager row's weights); where
-    /// that could not be read, all of it for a lazy row and what comes on top
-    /// of its weights file for an eager one. Again after audio.cpp unloaded
-    /// it for idling. `None` while the model is loaded, and for every other
-    /// class.
+    /// top of the measured use. Its expected residency less what its
+    /// processes hold now; where that could not be read, less what it was
+    /// read holding at rest (its CUDA context, or an eager row's weights),
+    /// and where neither was read, all of it for a lazy row and what comes
+    /// on top of its weights file for an eager one. Again after audio.cpp
+    /// unloaded it for idling. `None` while the model is loaded — or holds
+    /// at least that much now, loaded by a request lmgw did not route — and
+    /// for every other class.
     pub pending_bytes: Option<u64>,
     /// Why the estimate is partial, when it is.
     pub note: Option<String>,
+}
+
+/// What the ledger keeps free on top of the memory in use, by reason — what
+/// [`VramView::free_bytes`] is lowered by, so a surface can say why the free figure
+/// is less than the driver's. With no device reading (budget only) only the
+/// image peaks are subtracted there: the rest is in the estimate already.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct KeptFree {
+    /// Containers still starting, and starts admitted whose container is not
+    /// up yet: weights on their way onto the card.
+    pub starting_bytes: u64,
+    /// What resident image pipelines have been measured to take above their
+    /// idle residency while they draw (the residents' `peak_extra_bytes`).
+    pub image_peak_bytes: u64,
+    /// What ready audio containers will still load on their first request
+    /// (the residents' `pending_bytes`).
+    pub pending_load_bytes: u64,
 }
 
 /// One request waiting for room.
@@ -63,6 +82,9 @@ pub struct WaiterView {
     pub waiting_ms: u64,
     /// What it is waiting on right now, in words.
     pub stage: String,
+    /// The same, typed (chat-media-tools design §5.3); absent for a stage
+    /// only words say.
+    pub phase: Option<super::stage_watch::WaitPhase>,
 }
 
 /// The whole plane in one object: what is measured, what is believed, what is
@@ -90,21 +112,31 @@ pub struct VramView {
     /// subtracting the ledger's estimate from the declared budget — usable, but
     /// only as good as the estimate, and the surface must not imply otherwise.
     pub free_measured: bool,
+    /// What `free_bytes` was lowered by on top of the memory in use, by
+    /// reason: memory the driver cannot show yet but admission keeps free.
+    /// With a measured free figure, `free_bytes` is the capacity's measured
+    /// free memory — the devices' free memory, or with `vram.budget_mb` the
+    /// budget less the devices' used memory — less these three (never below
+    /// zero). The devices' total less their used and free memory is in
+    /// neither: memory the probe reports as not available (NVML: the
+    /// driver's own reserve; an AMD APU: GTT the host's RAM cannot back).
+    pub kept_free: KeptFree,
     /// What the ledger believes is resident — the reconciliation counterpart to
     /// the devices' `used_bytes`.
     pub estimated_resident_bytes: u64,
     pub devices: Vec<GpuMemory>,
     pub resident: Vec<ResidentView>,
     pub queue: Vec<WaiterView>,
+    /// Starts whose model's engine image is still downloading, before
+    /// admission (machine-check design §5): no place in [`Self::queue`] and
+    /// nothing on the card; position 0, needs 0, phase `downloading`.
+    pub downloading: Vec<WaiterView>,
     pub note: String,
     /// The `hold.active` setting (gpu-hold design §6) — orthogonal to
     /// [`Self::enabled`]/[`Self::active`] above: hold is a switch on the
     /// resolve/start paths, not a capacity policy, so it is reported
     /// alongside them rather than folded in.
     pub hold_active: bool,
-    /// `settings.hold.fallback_alias`, for surfaces that show what a held
-    /// chat request without its own row override falls back to.
-    pub hold_fallback_alias: Option<String>,
     /// Resident models that are busy or still starting while hold is active
     /// (§5/§6) — continuously visible here, not only in the one-shot
     /// `hold_set` response. Empty whenever hold is not active: residency is
@@ -202,7 +234,10 @@ impl VramScheduler {
         let inactive_reason = if enabled {
             l.inactive_reason.clone()
         } else {
-            Some("vram.enabled is off — the ledger is reporting only".into())
+            Some(format!(
+                "GPU memory arbitration is off ({}) — the ledger is reporting only",
+                crate::config::ADMISSION_LABEL
+            ))
         };
         // §4.7's figures, measured only while the trigger is armed: with the
         // switch off (or admission off, or the hold on) the answer is the
@@ -247,13 +282,14 @@ impl VramScheduler {
             capacity_bytes: l.capacity.as_ref().map(|c| c.total).unwrap_or(0),
             free_bytes: l.capacity.as_ref().map(|c| c.free),
             free_measured: l.capacity.as_ref().is_some_and(|c| c.measured),
+            kept_free: l.capacity.as_ref().map(|c| c.kept_free).unwrap_or_default(),
             estimated_resident_bytes: l.estimated_resident,
             devices: l.devices,
             resident: l.residents,
             queue: self.queue_view(),
+            downloading: self.downloads_view(),
             note: ESTIMATE_NOTE.to_string(),
             hold_active,
-            hold_fallback_alias: snap.settings.hold.fallback_alias.clone(),
             draining,
             kv_pools: state.kv_pools.view(),
             lmgw_share_bytes,

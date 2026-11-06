@@ -61,6 +61,8 @@ pub enum Step {
     Wait(Arc<Notify>),
     /// Break the connection mid-body, as a reset upstream does.
     Fail,
+    /// An error chunk with this message: the upstream reports a failure.
+    Error(&'static str),
 }
 
 /// What one chat request is answered with.
@@ -152,6 +154,7 @@ pub async fn chat_fake() -> ChatFake {
 }
 
 async fn chat(State(f): State<Arc<Fake>>, Json(body): Json<Value>) -> Response {
+    let streamed = body["stream"] == json!(true);
     f.seen.chats.lock().unwrap().push(body);
     let mut turn = f
         .script
@@ -171,6 +174,14 @@ async fn chat(State(f): State<Arc<Fake>>, Json(body): Json<Value>) -> Response {
         Turn::Held(..) => unreachable!("released above"),
     };
     f.seen.started.fetch_add(1, Ordering::SeqCst);
+    // A request that asked for no stream gets the script whole, as a real
+    // upstream answers it; a script that holds or breaks mid-body streams
+    // all the same, which only a stream can do.
+    if !streamed {
+        if let Some(whole) = whole(&steps) {
+            return Json(whole).into_response();
+        }
+    }
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
     let seen = f.seen.clone();
     tokio::spawn(async move {
@@ -218,6 +229,49 @@ async fn chat(State(f): State<Arc<Fake>>, Json(body): Json<Value>) -> Response {
         .into_response()
 }
 
+/// The scripted stream as one `chat.completion`; `None` for a script that
+/// waits or breaks.
+fn whole(steps: &[Step]) -> Option<Value> {
+    let (mut text, mut reasoning) = (String::new(), String::new());
+    let mut calls: Vec<Value> = Vec::new();
+    let (mut finish, mut usage) = (Value::Null, Value::Null);
+    for step in steps {
+        match step {
+            Step::Text(t) => text.push_str(t),
+            Step::Reasoning(t) => reasoning.push_str(t),
+            Step::CallStart { index, id, name } => {
+                let at = *index as usize;
+                calls.resize(calls.len().max(at + 1), Value::Null);
+                calls[at] = json!({"id": id.unwrap_or("call_fake"), "type": "function",
+                                   "function": {"name": name, "arguments": ""}});
+            }
+            Step::CallArgs { index, args } => {
+                let call = calls.get_mut(*index as usize)?;
+                let so_far = call["function"]["arguments"].as_str()?.to_string();
+                call["function"]["arguments"] = json!(so_far + args);
+            }
+            Step::Finish(reason) => finish = json!(reason),
+            Step::Usage(p, c) => {
+                usage = json!({"prompt_tokens": p, "completion_tokens": c,
+                               "total_tokens": p + c});
+            }
+            Step::Wait(_) | Step::Fail | Step::Error(_) => return None,
+        }
+    }
+    let mut message = json!({"role": "assistant", "content": text});
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    if !calls.is_empty() {
+        message["tool_calls"] = Value::Array(calls);
+    }
+    Some(
+        json!({"id": "chatcmpl-fake", "object": "chat.completion", "created": 0,
+        "model": "m", "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": usage}),
+    )
+}
+
 fn chunk(step: &Step) -> Value {
     let choice = |delta: Value, finish: Option<&str>| {
         json!({"id": "chatcmpl-fake", "object": "chat.completion.chunk", "model": "m",
@@ -242,6 +296,7 @@ fn chunk(step: &Step) -> Value {
         Step::Usage(p, c) => json!({"id": "chatcmpl-fake", "object": "chat.completion.chunk",
             "model": "m", "choices": [],
             "usage": {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}}),
+        Step::Error(message) => json!({"error": {"message": message, "type": "server_error"}}),
         Step::Wait(_) | Step::Fail => unreachable!("handled by the sender"),
     }
 }
@@ -285,7 +340,7 @@ pub async fn gateway(
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     (state, addr.to_string())
 }
 
@@ -295,7 +350,7 @@ pub async fn add_chat_aliases(state: &SharedState, fake: &ChatFake) {
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('fake', 'openai', 'generic', ?1, '[]', 10000, 1, 0, '',
+         VALUES ('fake', 'openai_compatible', 'generic', ?1, '[]', 10000, 1, 0, '',
                  datetime('now'), datetime('now'), 0)",
     )
     .bind(&fake.url)
@@ -328,7 +383,7 @@ pub async fn gpu_gateway(g: &super::gpu_world::Gpu, tweak: impl FnOnce(&mut Sett
     let app = build_router(g.state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     addr.to_string()
 }
 

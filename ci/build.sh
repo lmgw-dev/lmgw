@@ -29,6 +29,11 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
+# tauri's rpm bundler (tauri-cli 2.12.0) gives each packaged file the mode of the file it
+# packs, and rpm installs it as root with that mode. Whatever this script creates (the
+# binary, the .desktop file) gets owner-only write from this umask, whatever the caller's.
+umask 022
+
 # The release this tree belongs to: the [workspace.package] version.
 BASE="$(grep -m1 -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' Cargo.toml | grep -oE '[0-9.]+' || true)"
 [[ -n "$BASE" ]] || { echo "ERROR: no X.Y.Z version in Cargo.toml" >&2; exit 1; }
@@ -114,12 +119,15 @@ sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*)\"[0-9]+\.[0-9]+\.[0-9]+\"/\1
 # binary or the bundle, so without this the previous pipeline's RPM (and the
 # binary's baked CARGO_PKG_VERSION) leak into this build: the manifest then
 # advertises $VERSION while shipping an older RPM, and the in-app updater loops
-# forever. Clear any stale bundle and force the two version-bearing crates to
-# recompile so the binary and the RPM both actually carry $VERSION. (Their deps
+# forever. Clear any stale bundle and force the version-bearing crates to
+# recompile so the binaries and the RPM all actually carry $VERSION. (Their deps
 # stay cached, so this is cheap.) dist/ likewise starts empty, so nothing from
-# an earlier run can be picked up by a publisher.
+# an earlier run can be picked up by a publisher. The root helper carries the
+# version too (its plan-changed line names it, machine-check design §3.5), and
+# its clean also means the target/release/lmgw-machine-helper the RPM packs, and
+# ci/rpm_guard.py compares the package's copy with, is this job's build.
 rm -rf target/release/bundle dist
-cargo clean -p lmgw -p lmgw-core
+cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper
 
 # The Leptos UI must exist before lmgw-core compiles: rust-embed bakes
 # crates/lmgw-ui/dist/ into the binary (the `cargo clean -p lmgw-core` above
@@ -127,6 +135,32 @@ cargo clean -p lmgw -p lmgw-core
 (cd crates/lmgw-ui && trunk build --release)
 if [[ ! -f crates/lmgw-ui/dist/index.html ]]; then
   echo "ERROR: trunk build produced no crates/lmgw-ui/dist/index.html" >&2
+  exit 1
+fi
+
+# The bundle packs checked-out files too (the icons, the licence files), with their mode in
+# the checkout. GitLab Runner's docker executor cloned with umask 0000 before .gitlab-ci.yml
+# set FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR, so they were 0666 and an lmgw 0.5.0 CI build installed
+# them world-writable under /usr. Take group and other write off every tracked regular file
+# (symlinks are skipped: chmod would follow them) whichever runner cloned it; a no-op on a
+# normal checkout. ci/rpm_guard.py below is the barrier, this only keeps it from tripping.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  # Only paths that exist: a tracked file deleted in the work tree must not abort a local build.
+  git ls-files -z --stage | grep -z '^100' | cut -z -f2- \
+    | while IFS= read -r -d '' f; do if [[ -e "$f" ]]; then printf '%s\0' "$f"; fi; done \
+    | xargs -0 -r chmod go-w --
+else
+  echo "ci/build.sh: not a git checkout, so no tracked file is chmod go-w'd; ci/rpm_guard.py" \
+       "still refuses a group- or world-writable entry" >&2
+fi
+
+# The root helper (machine-check design §3.1, §3.8): src-tauri/tauri.conf.json packs
+# target/release/lmgw-machine-helper as /usr/libexec/lmgw/lmgw-machine-helper, so it is built
+# before the bundle. Its mode in the RPM is the file's (0755 under the umask above), and
+# ci/rpm_guard.py pins the package's copy to this file's digest.
+cargo build --release -p lmgw-machine-helper
+if [[ ! -f target/release/lmgw-machine-helper || -L target/release/lmgw-machine-helper ]]; then
+  echo "ERROR: cargo built no target/release/lmgw-machine-helper" >&2
   exit 1
 fi
 
@@ -142,6 +176,14 @@ if [[ -z "${RPM_PATH}" || ! -f "${RPM_PATH}" ]]; then
   ls -la target/release/bundle/rpm/ >&2 2>/dev/null || echo "  (missing)" >&2
   exit 1
 fi
+
+# Nothing root installs may give anyone else a way in: ci/rpm_guard.py refuses a group- or
+# world-writable entry, a setuid/setgid/sticky bit, a file capability, an owner other than
+# root, any path outside ci/rpm-allowlist.toml and any scriptlet, a polkit policy whose
+# content is not the pinned one, and a root helper that is not the file built above, and
+# fails the build.
+python3 ci/rpm_guard.py "$RPM_PATH"
+
 RPM_NAME="$(basename "$RPM_PATH")"
 SHA="$(sha256sum "$RPM_PATH" | cut -d' ' -f1)"
 

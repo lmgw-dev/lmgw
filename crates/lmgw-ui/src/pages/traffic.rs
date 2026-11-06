@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{KeysResponse, LogsResponse, RequestRow, UsageTopResponse, VramStatus};
 
-use crate::fmt::{count_of, grouped, hue_for, human_bytes, log_time};
+use crate::fmt::{count_of, fmt_bytes, grouped, hue_for, log_time};
 
 // A row's measured quantities and its priced parts (billable units §8.4).
 mod row_cost;
@@ -562,7 +562,13 @@ pub fn Traffic() -> impl IntoView {
                 }
             }
         >
-            <Show when=move || gpu_open.get() || vram.with(|v| v.as_ref().is_some_and(|v| !v.queue.is_empty()))>
+            <Show when=move || {
+                gpu_open.get()
+                    || vram
+                        .with(|v| {
+                            v.as_ref().is_some_and(|v| !v.queue.is_empty() || !v.downloading.is_empty())
+                        })
+            }>
                 <GpuPanel vram=vram/>
             </Show>
             {move || error.get().map(|e| view! { <div class="chart-err">"Could not load — " {e}</div> })}
@@ -814,13 +820,14 @@ fn GpuButton(vram: Memo<Option<VramStatus>>, open: RwSignal<bool>) -> impl IntoV
                         Some(f) => {
                             format!(
                                 "GPU · {} free of {}",
-                                human_bytes(f),
-                                human_bytes(v.capacity_bytes),
+                                fmt_bytes(f),
+                                fmt_bytes(v.capacity_bytes),
                             )
                         }
                         None => "GPU".to_string(),
                     };
                     let waiting = v.queue.len();
+                    let fetching = crate::gpu_download::waiting(&v).len();
                     view! {
                         <button
                             class="btn ghost gpu-line"
@@ -837,6 +844,14 @@ fn GpuButton(vram: Memo<Option<VramStatus>>, open: RwSignal<bool>) -> impl IntoV
                                 .then(|| {
                                     view! {
                                         <span class="count attn">{format!("{waiting} waiting")}</span>
+                                    }
+                                })}
+                            {(fetching > 0)
+                                .then(|| {
+                                    view! {
+                                        <span class="count" title="Starts waiting for their download before they take anything from the card">
+                                            {format!("{fetching} downloading")}
+                                        </span>
                                     }
                                 })}
                             <span class="caret-icon" aria-hidden="true">"▸"</span>
@@ -857,18 +872,18 @@ fn GpuButton(vram: Memo<Option<VramStatus>>, open: RwSignal<bool>) -> impl IntoV
 /// so presenting the two as one number would be the wrong kind of tidy.
 #[component]
 fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
-    let used_pct = move || {
+    // In use and kept free apart (`gpu_figures::bar`): what admission keeps
+    // free for memory the driver cannot show yet is not in use, and counting
+    // it as used made the bar disagree with the popover.
+    let split = move || {
         vram.get()
-            .filter(|v| v.capacity_bytes > 0)
-            .map(|v| {
-                let free = v.free_bytes.unwrap_or(0);
-                let used = v.capacity_bytes.saturating_sub(free);
-                (used as f64 * 100.0 / v.capacity_bytes as f64).clamp(0.0, 100.0)
-            })
-            .unwrap_or(0.0)
+            .as_ref()
+            .and_then(crate::gpu_figures::bar)
+            .unwrap_or((0.0, 0.0))
     };
 
     view! {
+        <section class="card gpu-card">
         {move || {
             let v = vram.get().unwrap_or_default();
             let queue = v.queue.clone();
@@ -881,8 +896,10 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
             let measured = v.free_measured;
             let hold_active = v.hold_active;
             let draining_n = v.draining.len();
+            // The same lines as the popover's, so the two add up alike.
+            let kept_line = crate::gpu_figures::kept_free_line(&v);
+            let holders = crate::gpu_figures::holders_line(Some(&v));
             view! {
-                <section class="card gpu-card">
                     <div class="row">
                         <strong>"GPU memory"</strong>
                         <span class=if v.active { "chip ok" } else { "chip off" }>
@@ -895,8 +912,8 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                                 Some(f) => {
                                     format!(
                                         "{} free of {} ({})",
-                                        human_bytes(f),
-                                        human_bytes(capacity),
+                                        fmt_bytes(f),
+                                        fmt_bytes(capacity),
                                         if measured { "measured" } else { "derived from estimates" },
                                     )
                                 }
@@ -907,10 +924,20 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                     // `!= 0` rather than `> 0`: inside `view!` a bare `>`
                     // closes the tag.
                     <Show when=move || capacity != 0>
-                        <div class="progress" style="margin-top:8px">
-                            <i style=move || format!("width:{:.1}%", used_pct())></i>
+                        <div class="progress split" style="margin-top:8px">
+                            <i
+                                style=move || format!("width:{:.1}%", split().0)
+                                title="in use"
+                            ></i>
+                            <i
+                                class="kept"
+                                style=move || format!("width:{:.1}%", split().1)
+                                title="kept free by admission"
+                            ></i>
                         </div>
                     </Show>
+                    {kept_line.map(|k| view! { <div class="dim mini-note">{k}</div> })}
+                    <div class="dim mini-note">{holders}</div>
                     <div class="row" style="margin-top:8px">
                         {resident
                             .iter()
@@ -930,13 +957,13 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                                     "{} · {} · {}{}{}",
                                     r.container,
                                     r.state,
-                                    human_bytes(r.estimated_bytes),
+                                    fmt_bytes(r.estimated_bytes),
                                     match r.peak_extra_bytes {
-                                        Some(p) => format!(" + {} peak", human_bytes(p)),
+                                        Some(p) => format!(" + {} peak", fmt_bytes(p)),
                                         None => String::new(),
                                     },
                                     match r.pending_bytes {
-                                        Some(p) => format!(", {} of it to load", human_bytes(p)),
+                                        Some(p) => format!(", {} of it to load", fmt_bytes(p)),
                                         None => String::new(),
                                     },
                                 );
@@ -971,7 +998,7 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                         </Show>
                     </div>
                     <div class="dim mini-note">
-                        {format!("estimated resident {}", human_bytes(estimated))}
+                        {format!("estimated resident {}", fmt_bytes(estimated))}
                         {reason.map(|r| format!(" — {r}")).unwrap_or_default()}
                     </div>
                     <Show when=move || hold_active>
@@ -995,7 +1022,7 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                                             <span class="dim">
                                                 {format!(
                                                     "needs {} · {} · waiting {:.1}s",
-                                                    human_bytes(w.needs_bytes),
+                                                    fmt_bytes(w.needs_bytes),
                                                     w.stage,
                                                     w.waiting_ms as f64 / 1000.0,
                                                 )}
@@ -1006,9 +1033,52 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                                 .collect_view()}
                         </div>
                     </Show>
-                </section>
             }
         }}
+        <GpuDownloads vram=vram/>
+        </section>
+    }
+}
+
+/// The starts that wait for their download before admission (machine-check
+/// design §5): beside the queue, since they are waiting too, but holding no
+/// place in it and nothing on the card. Outside the panel's redraw, so a
+/// bar's motion is not restarted by every frame.
+#[component]
+fn GpuDownloads(vram: Memo<Option<VramStatus>>) -> impl IntoView {
+    let waiting = Memo::new(move |_| {
+        vram.with(|v| {
+            v.as_ref()
+                .map(crate::gpu_download::waiting)
+                .unwrap_or_default()
+        })
+    });
+    view! {
+        <Show when=move || waiting.with(|w| !w.is_empty())>
+            <div style="margin-top:10px">
+                <strong class="mono-sm">
+                    {move || match waiting.with(Vec::len) {
+                        1 => "1 start waiting for its download".to_string(),
+                        n => format!("{n} starts waiting for their download"),
+                    }}
+                </strong>
+                <For each=move || waiting.get() key=|w| (w.0.clone(), w.1.clone()) let:w>
+                    {
+                        let (class, model, alias) = w;
+                        let dl = crate::gpu_download::live_for(class.clone(), model.clone());
+                        view! {
+                            <div class="row mono-sm gpu-dl-wait" style="margin-top:4px">
+                                <span class="type-badge">{class}</span>
+                                <span title=format!("model {model}")>{alias}</span>
+                            </div>
+                            <crate::gpu_download::DlLine dl=Signal::derive(move || {
+                                dl.get().unwrap_or_default()
+                            })/>
+                        }
+                    }
+                </For>
+            </div>
+        </Show>
     }
 }
 
@@ -1028,17 +1098,28 @@ fn input_split(r: &RequestRow) -> Option<(i64, i64, i64)> {
 
 /// `request_logs.fallback_reason` (unified-KV design §12.32) as short display
 /// text: `hold` | `benchmark` | `external_vram` | `background` |
-/// `unavailable` named, anything else shown verbatim (a reason this UI does
-/// not know yet is still worth showing). `benchmark`: a benchmark run held
-/// the GPU (benchmark design §3.2), so the row's hold fallback answered.
+/// `unavailable` | `quota` | `unreachable` | `disabled` | `gpu_setup` |
+/// `engine_download` named, anything else shown verbatim (a reason this UI
+/// does not know yet is still worth showing). `benchmark`: a benchmark run
+/// held the GPU (benchmark design §3.2), so the row's own fallback answered.
+/// `gpu_setup`: the machine check said the graphics card is not ready
+/// (machine-check design §2.5).
 fn fallback_label(reason: &str) -> String {
+    format!("fallback · {}", fallback_words(reason))
+}
+
+/// A fallback reason in the dashboard's words: the Traffic badge's, and the
+/// labs' chips and provenance (machine-check design WP8b gave `gpu_setup`
+/// and `engine_download` theirs there too, D180).
+pub(crate) fn fallback_words(reason: &str) -> &str {
     match reason {
-        "hold" => "fallback · hold".to_string(),
-        "benchmark" => "fallback · benchmark".to_string(),
-        "external_vram" => "fallback · outside VRAM".to_string(),
-        "background" => "fallback · background".to_string(),
-        "unavailable" => "fallback · candidate unavailable".to_string(),
-        other => format!("fallback · {other}"),
+        "external_vram" => "outside VRAM",
+        "unavailable" => "candidate unavailable",
+        "quota" => "upstream quota",
+        "unreachable" => "upstream unreachable",
+        "gpu_setup" => "graphics card not ready",
+        "engine_download" => "engine download failed",
+        other => other,
     }
 }
 
@@ -1204,6 +1285,27 @@ fn TrafficRow(
                                 view! {
                                     <span class="dim">"Cost"</span>
                                     <span class="mono-sm">{c}</span>
+                                }
+                            })}
+                        // The OpenAI service tier the answer reported, and why
+                        // the cost is what it is when that is not plain (openai
+                        // egress design §5.7).
+                        {detail
+                            .service_tier
+                            .clone()
+                            .map(|tier| {
+                                view! {
+                                    <span class="dim">"Service tier"</span>
+                                    <span class="mono-sm">{tier}</span>
+                                }
+                            })}
+                        {detail
+                            .price_note
+                            .clone()
+                            .map(|note| {
+                                view! {
+                                    <span class="dim">"Price note"</span>
+                                    <span class="mono-sm">{note}</span>
                                 }
                             })}
                         {parts

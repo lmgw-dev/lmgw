@@ -66,6 +66,10 @@ pub struct RequestSummary {
     pub audio_in_ms: Option<i64>,
     pub chars_in: Option<i64>,
     pub images_out: Option<i64>,
+    /// The stored row's `service_tier` and `price_note` (openai egress
+    /// design §5.3), so a live row reads like a reloaded one.
+    pub service_tier: Option<String>,
+    pub price_note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +102,11 @@ pub enum Event {
     /// rotated or deleted — what the Keys page refetches on, instead of
     /// polling.
     Keys(lmgw_api_types::KeysChanged),
+    /// The machine check's summary, whenever its last result changed: a run
+    /// published, the settings judged again, a start on the graphics card
+    /// that failed because of this computer (machine-check design D182,
+    /// D183). A dashboard left open reads the check again on it.
+    Machine(lmgw_api_types::machine::MachineSummary),
 }
 
 /// Live counters for the dashboard.
@@ -285,20 +294,30 @@ impl RequestClass {
 /// upstream or a client failing. They get their own rollup outcome so "the
 /// gateway said no" never reads as "the provider broke" — a month of
 /// deliberate `gpu_hold` refusals would otherwise look like an outage.
+///
+/// Not `gpu_setup` nor `engine_download` (machine-check design §2.5, §5):
+/// a local model that could not start because the computer is not ready, or
+/// whose engine could not be downloaded, is lmgw failing to do the work,
+/// not declining it, and counts as a failure.
 pub const REFUSAL_KINDS: &[&str] = &[
     "gpu_hold",
     // A benchmark run holds the card (benchmark design §3.2): the hold's
     // twin, lmgw declining local work on purpose for the run's duration.
     "gpu_benchmark",
     // A background request deferred so as not to disturb the owner
-    // (candidate-aliases design §4.3): lmgw declining work on purpose, like
-    // the hold it answers as.
+    // (candidate-aliases design §4.3, per-request background design §8):
+    // lmgw declining work on purpose, as under the hold — on the wire with
+    // a code of its own, "retry later".
     "gpu_deferred",
     // An owner's candidate alias whose primary is unusable and nothing else
     // loaded (candidate-aliases design §4.2, §4.6): lmgw declining by its own
     // configuration, with no upstream involved — not an upstream error.
     "candidate_unavailable",
     "key_budget",
+    // A budgeted caller's request on a model with no price on file for what
+    // it is billed in, flex without a flex price among them (openai egress
+    // design §13.3, decision 24): lmgw declining what no budget could count.
+    "budget_unpriced",
     "key_scope",
     // Concurrency refusals are `key_rate` too — same variant, different
     // `limit_kind` — because they clear the same way: by waiting.
@@ -529,6 +548,11 @@ impl TelemetryBus {
         let _ = self.tx.send(Event::Updates(summary));
     }
 
+    /// Broadcast the machine check's summary (machine-check design D183).
+    pub fn machine(&self, summary: lmgw_api_types::machine::MachineSummary) {
+        let _ = self.tx.send(Event::Machine(summary));
+    }
+
     /// Broadcast that key `key_id`'s state moved: `what` is
     /// [`lmgw_api_types::KeysChanged::what`].
     pub fn keys(&self, key_id: i64, what: &str) {
@@ -719,6 +743,8 @@ mod tests {
             audio_in_ms: None,
             chars_in: None,
             images_out: None,
+            service_tier: None,
+            price_note: None,
         });
         let s = bus.stats_at(t0 + ms(500));
         assert_eq!(s.completion_tokens, 400);

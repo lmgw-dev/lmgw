@@ -124,6 +124,7 @@ pub struct BuildSeams {
     forge: RwLock<Option<Arc<dyn ForgeLookup>>>,
     forge_client: RwLock<Option<ForgeClient>>,
     registry_client: RwLock<Option<RegistryClient>>,
+    pull_api: RwLock<Option<Arc<dyn crate::backends::pull::PullApi>>>,
     updates: UpdateStore,
     lock_path: RwLock<Option<PathBuf>>,
     buildah_tmp: RwLock<Option<PathBuf>>,
@@ -207,6 +208,30 @@ impl BuildSeams {
             .registry_client
             .write()
             .unwrap_or_else(|p| p.into_inner()) = Some(client);
+    }
+
+    /// How a pull reaches Podman's API for its byte counts (machine-check
+    /// design §5): the private service the gateway installs at startup
+    /// ([`crate::backends::pull::ServicePull`]); before that, and in a test
+    /// state, none — a pull then runs `podman pull` and says the size is not
+    /// known.
+    pub fn pull_api(&self) -> Arc<dyn crate::backends::pull::PullApi> {
+        self.pull_api
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(crate::backends::pull::NoPullApi(
+                    "no service for Podman's API is installed (a test state), so podman pull \
+                     reports no byte counts"
+                        .into(),
+                ))
+            })
+    }
+
+    /// Install the pull API (the real one at startup, a fake in a test).
+    pub fn set_pull_api(&self, api: Arc<dyn crate::backends::pull::PullApi>) {
+        *self.pull_api.write().unwrap_or_else(|p| p.into_inner()) = Some(api);
     }
 
     /// The update check's stored results (§8, [`super::updates`]).
@@ -866,7 +891,10 @@ impl Execution {
                 worktree,
                 &base,
                 &inputs.assemble,
-                AssembleOpts::default(),
+                AssembleOpts {
+                    repo_url: Some(self.spec.repo_url.clone()),
+                    ..AssembleOpts::default()
+                },
                 Some(&echo),
             ))
             .await?;
@@ -919,7 +947,7 @@ impl Execution {
         self.log.line(&format!(
             "built {run_tag} = {}{}",
             short_id(&image),
-            size.map(|s| format!(", {:.2} GB", s as f64 / 1e9))
+            size.map(|s| format!(", {}", crate::hf::fmt_bytes(s)))
                 .unwrap_or_default()
         ));
 

@@ -133,6 +133,10 @@ impl TurnRunner for StepRunner {
                 usage: Usage::default(),
                 model: "m".into(),
                 timings: None,
+                service_tier: None,
+                upstream_items: None,
+                context_management: None,
+                usage_iterations: None,
             })
         })
     }
@@ -174,8 +178,12 @@ fn request() -> ChatRequest {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     }
 }
 
@@ -187,6 +195,7 @@ fn config() -> RunConfig {
                 name: "search".into(),
                 description: None,
                 parameters: json!({"type": "object", "properties": {}}),
+                strict: None,
             },
         )],
         Budget {

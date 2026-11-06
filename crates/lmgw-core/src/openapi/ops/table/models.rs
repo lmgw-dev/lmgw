@@ -84,6 +84,62 @@ pub(super) const OPS: &[OpDoc] = &[
         example: Some(r#"{"alias":"audio/qwen3-asr"}"#),
     },
     OpDoc {
+        name: "voice_generate",
+        tag: TAG,
+        summary: "Render candidate voice samples with a text-to-speech model (the Voices lab)",
+        description: Some(
+            "One round of the Voices lab: the alias (any text-to-speech model, local or cloud) \
+             is opened once and says the same text as `count` candidates (4 when absent; no \
+             cap, rendered one after another), each with a seed of its own — consecutive from \
+             `seed`, else drawn — which reaches a local row whose engine reads one \
+             (`seeds_sent`). The text is `text`, else the language's sentence (the owner's \
+             saved one, else the built-in one). `description` is the voice description or \
+             speaking style (the speech route's instructions), `voice` the voice for a model \
+             that speaks one it is told; `language` goes to a local row that takes one. A \
+             configured fallback answers as for any request, and the round names who \
+             answered (answered_by, fallback_reason). The round is kept under \
+             <data_dir>/voice-lab/rounds until discarded; each candidate's `url` serves its \
+             audio. A failure after the first candidate ends the round there (`stopped`). The \
+             same function lmgw__voice_generate and POST /voice-lab/api/rounds call.",
+        ),
+        tool: Some("lmgw__voice_generate"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::voice_lab::VoiceGenerateArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::voice_lab::VoiceRound>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: Some(
+            r#"{"alias":"audio/voicedesign","language":"en","description":"a warm, calm voice","count":4}"#,
+        ),
+    },
+    OpDoc {
+        name: "voice_sample_save",
+        tag: TAG,
+        summary: "Save a Voices lab candidate to the voice library as a sample",
+        description: Some(
+            "Writes a round's candidate to the voice library (<audio models dir>/voices) as \
+             <name>.wav, its leading and trailing silence cut (loudness untouched), with the \
+             text it says as its transcript (the library's prompt_text) — so every cloning \
+             model can speak with it by name. How it was made (alias, the model that \
+             answered, description, voice, seed, text, language, dates, licence when known) \
+             is recorded beside it. A name the library already has is refused with \
+             `name_taken` and nothing is written, unless `overwrite` is true: then the clip of \
+             that name is replaced. The same function lmgw__voice_sample_save and POST \
+             /voice-lab/api/samples call.",
+        ),
+        tool: Some("lmgw__voice_sample_save"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::voice_lab::VoiceSampleSaveArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::voice_lab::VoiceSampleSaved>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: Some("A sample of the same name is replaced only with overwrite."),
+        deprecated: false,
+        example: Some(
+            r#"{"round":"20260101-120000-000-abcdef","candidate":2,"name":"sample-voice"}"#,
+        ),
+    },
+    OpDoc {
         name: "image_model_set",
         tag: TAG,
         summary: "Create, update, delete, enable or disable an image (stable-diffusion.cpp) model",

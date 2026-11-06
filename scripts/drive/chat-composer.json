@@ -1,0 +1,470 @@
+[
+ {
+  "js": "'The Chat composer text box in both engines: never wider inside than it is (no sideways scroll, the WebKitGTK zoomed-placeholder bug), one line when empty with its hint over it, growing with its text and scrolling only past its cap, the hint rotating. html.tauri is set so the classic scrollbars of the app apply.Read-only apart from typing into the box (never sent); the last part docks the thread settings panel beside the thread the page reopens (its stored side state, removed after). Run:scripts/ui-drive.py scripts/drive/chat-composer.json --block-writes --dsf 1.25 --token-file <dir>.token --base http://<addr>, or scripts/webkit-check.py --backend broadway --zoom 1.25 --drive scripts/drive/chat-composer.json --token-file <dir>.token --base http://<addr>.'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  document.documentElement.classList.add('tauri');\n  const ta = () => document.querySelector('.composer textarea.composer-input');\n  window.__cm = () => {\n    const t = ta(); if (!t) return null;\n    const h = document.querySelector('.composer .composer-hint');\n    const cs = getComputedStyle(t), tr = t.getBoundingClientRect();\n    const hr = h && h.getBoundingClientRect();\n    return { cliW: t.clientWidth, scrW: t.scrollWidth, offH: t.offsetHeight, cliH: t.clientHeight,\n      scrH: t.scrollHeight, ox: cs.overflowX, oy: cs.overflowY, maxH: parseFloat(cs.maxHeight),\n      ph: t.hasAttribute('placeholder'), aria: t.getAttribute('aria-label'), title: t.title,\n      hint: h && { shown: getComputedStyle(h).display !== 'none' && hr.height > 0, text: h.textContent,\n        aria: h.getAttribute('aria-hidden'), top: hr.top - tr.top, bottom: tr.bottom - hr.bottom,\n        lineH: hr.height } };\n  };\n  window.__type = s => { const t = ta(); t.focus(); t.value = s;\n    t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  // + 1: a box of a fractional width (863.3 px) reads scrollWidth rounded\n  // up and clientWidth down; the bug this guards against is 25% wider.\n  window.__empty = () => { const m = __cm(); return !!m && !m.ph && m.scrW <= m.cliW + 1\n    && m.cliH === m.offH && m.offH < 34 && m.oy === 'hidden' && m.ox === 'hidden'\n    && m.hint.shown && m.hint.top >= -0.5 && m.hint.bottom >= -0.5 && m.hint.text.length > 0; };\n  return 'helpers';\n})()"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return !!m && m.hint.text === 'Message…' && m.aria === 'Message' && m.hint.aria === 'true' && /Shift\\+Enter/.test(m.title); })()",
+  "label": "the first hint is Message…, the box is named Message, the hint is aria-hidden, the tooltip has the keys"
+ },
+ {
+  "expect": "(() => { const hs = document.querySelectorAll('.composer-hint'); if (hs.length !== 1) return false; const cs = getComputedStyle(hs[0]); return cs.animationName === 'composer-hint' && cs.animationIterationCount === 'infinite' && cs.animationDuration === '5s' && cs.transitionDuration === '0s' && !hs[0].classList.contains('fading'); })()",
+  "label": "one hint, its whole cycle one infinite 5 s CSS animation and no transition (WebKitGTK blanks an element for a frame when an opacity transition ends)"
+ },
+ {
+  "js": "(() => { window.__rot = []; document.addEventListener('animationiteration', e => { if (e.target.classList && e.target.classList.contains('composer-hint')) window.__rot.push(e.target.textContent); }, true); return 'recording'; })()"
+ },
+ {
+  "wait": 5.6
+ },
+ {
+  "js": "JSON.stringify({ before: window.__rot, now: __cm().hint.text })",
+  "label": "the texts each iteration ended on, and the one shown now"
+ },
+ {
+  "expect": "(() => { const H = ['Message…', 'Shift+Enter for a new line', 'Type # to add knowledge']; const seq = window.__rot.concat([__cm().hint.text]); if (window.__rot.length < 1) return false; return seq.every((t, k) => k === 0 || t === H[(H.indexOf(seq[k - 1]) + 1) % H.length]) && seq[0] === 'Message…'; })()",
+  "label": "the hint moves on to the next one at each iteration of its animation, about every 5 s"
+ },
+ {
+  "shot": "composer_hint_rotated"
+ },
+ {
+  "size": "1920x1080"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080 empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "1920x1080: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_1920x1080_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080 long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "1920x1080: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_1920x1080_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080 many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "1920x1080: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_1920x1080_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "1920x1080: emptied, the box is one line again with its hint"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1440x900 empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "1440x900: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_1440x900_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1440x900 long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "1440x900: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_1440x900_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1440x900 many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "1440x900: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_1440x900_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "1440x900: emptied, the box is one line again with its hint"
+ },
+ {
+  "size": "1100x800"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1100x800 empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "1100x800: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_1100x800_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1100x800 long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "1100x800: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_1100x800_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1100x800 many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "1100x800: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_1100x800_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "1100x800: emptied, the box is one line again with its hint"
+ },
+ {
+  "size": "900x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "900x700 empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "900x700: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_900x700_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "900x700 long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "900x700: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_900x700_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "900x700 many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "900x700: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_900x700_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "900x700: emptied, the box is one line again with its hint"
+ },
+ {
+  "js": "(() => { localStorage.setItem('lmgw.ui.side.chat.settings', 'true'); return 'drawer'; })()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => {\n  document.documentElement.classList.add('tauri');\n  const ta = () => document.querySelector('.composer textarea.composer-input');\n  window.__cm = () => {\n    const t = ta(); if (!t) return null;\n    const h = document.querySelector('.composer .composer-hint');\n    const cs = getComputedStyle(t), tr = t.getBoundingClientRect();\n    const hr = h && h.getBoundingClientRect();\n    return { cliW: t.clientWidth, scrW: t.scrollWidth, offH: t.offsetHeight, cliH: t.clientHeight,\n      scrH: t.scrollHeight, ox: cs.overflowX, oy: cs.overflowY, maxH: parseFloat(cs.maxHeight),\n      ph: t.hasAttribute('placeholder'), aria: t.getAttribute('aria-label'), title: t.title,\n      hint: h && { shown: getComputedStyle(h).display !== 'none' && hr.height > 0, text: h.textContent,\n        aria: h.getAttribute('aria-hidden'), top: hr.top - tr.top, bottom: tr.bottom - hr.bottom,\n        lineH: hr.height } };\n  };\n  window.__type = s => { const t = ta(); t.focus(); t.value = s;\n    t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  // + 1: a box of a fractional width (863.3 px) reads scrollWidth rounded\n  // up and clientWidth down; the bug this guards against is 25% wider.\n  window.__empty = () => { const m = __cm(); return !!m && !m.ph && m.scrW <= m.cliW + 1\n    && m.cliH === m.offH && m.offH < 34 && m.oy === 'hidden' && m.ox === 'hidden'\n    && m.hint.shown && m.hint.top >= -0.5 && m.hint.bottom >= -0.5 && m.hint.text.length > 0; };\n  return 'helpers';\n})()"
+ },
+ {
+  "size": "1920x1080"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('.chat-settings')",
+  "label": "1920x1080: the thread settings panel is open (a thread is open)"
+ },
+ {
+  "size": "1920x1080"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080-drawer empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "1920x1080-drawer: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_1920x1080-drawer_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080-drawer long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "1920x1080-drawer: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_1920x1080-drawer_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1920x1080-drawer many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "1920x1080-drawer: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_1920x1080-drawer_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "1920x1080-drawer: emptied, the box is one line again with its hint"
+ },
+ {
+  "size": "1700x1000"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('.chat-settings')",
+  "label": "1700x1000: the thread settings panel is open (a thread is open)"
+ },
+ {
+  "size": "1700x1000"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1700x1000-drawer empty"
+ },
+ {
+  "expect": "__empty()",
+  "label": "1700x1000-drawer: the empty box is one line, no sideways scroll, its hint visible over it"
+ },
+ {
+  "shot": "composer_1700x1000-drawer_empty"
+ },
+ {
+  "js": "__type(\"https://example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1700x1000-drawer long word"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.scrW <= m.cliW + 1 && m.offH > 40 && m.oy === 'hidden' && !m.hint.shown; })()",
+  "label": "1700x1000-drawer: a long unbroken URL wraps (no sideways scroll), the box grew, no vertical bar below the cap, no hint"
+ },
+ {
+  "shot": "composer_1700x1000-drawer_long_word"
+ },
+ {
+  "js": "__type(\"line 0\\nline 1\\nline 2\\nline 3\\nline 4\\nline 5\\nline 6\\nline 7\\nline 8\\nline 9\\nline 10\\nline 11\\nline 12\\nline 13\\nline 14\\nline 15\\nline 16\\nline 17\\nline 18\\nline 19\\nline 20\\nline 21\\nline 22\\nline 23\\nline 24\\nline 25\\nline 26\\nline 27\\nline 28\\nline 29\\nline 30\\nline 31\\nline 32\\nline 33\\nline 34\\nline 35\\nline 36\\nline 37\\nline 38\\nline 39\\nline 40\\nline 41\\nline 42\\nline 43\\nline 44\\nline 45\\nline 46\\nline 47\\nline 48\\nline 49\\nline 50\\nline 51\\nline 52\\nline 53\\nline 54\\nline 55\\nline 56\\nline 57\\nline 58\\nline 59\")"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__cm()",
+  "label": "1700x1000-drawer many lines"
+ },
+ {
+  "expect": "(() => { const m = __cm(); return m.offH <= m.maxH + 0.5 && m.offH >= m.maxH - 1 && m.oy === 'auto' && m.scrH > m.cliH && m.scrW <= m.cliW + 1; })()",
+  "label": "1700x1000-drawer: sixty lines stop at the cap and scroll vertically only"
+ },
+ {
+  "shot": "composer_1700x1000-drawer_many_lines"
+ },
+ {
+  "js": "__type('')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "__empty()",
+  "label": "1700x1000-drawer: emptied, the box is one line again with its hint"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.ui.side.chat.settings'); return 'drawer reset'; })()"
+ }
+]

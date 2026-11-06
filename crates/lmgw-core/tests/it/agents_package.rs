@@ -190,6 +190,20 @@ struct Fake {
     images: Arc<Mutex<HashMap<String, Img>>>,
     /// What `pull` makes of the image it is given, if anything.
     on_pull: Arc<Mutex<HashMap<String, Img>>>,
+    /// When set, `pull` never ends; the flag is raised when its future is
+    /// dropped, which is what `kill_on_drop` does to a real `podman pull`.
+    hang_pull: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    /// When set, `image inspect` waits for a permit: a call that is past the
+    /// pull and the import, held where a hang-up can find it.
+    inspect_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
+}
+
+/// Raises its flag when dropped.
+struct RaiseOnDrop(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for RaiseOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Fake {
@@ -373,11 +387,22 @@ impl Spawner for Fake {
                     }
                 }
                 // `image inspect --format {{.Digest}}`
-                Some("image") => match img_of(args.last().unwrap()) {
-                    Some(i) if i.present => ok(&format!("{}\n", i.digest)),
-                    _ => failed(125, "Error: image not known"),
-                },
+                Some("image") => {
+                    let gate = self.inspect_gate.lock().unwrap().clone();
+                    if let Some(gate) = gate {
+                        gate.notified().await;
+                    }
+                    match img_of(args.last().unwrap()) {
+                        Some(i) if i.present => ok(&format!("{}\n", i.digest)),
+                        _ => failed(125, "Error: image not known"),
+                    }
+                }
                 Some("pull") => {
+                    let hang = self.hang_pull.lock().unwrap().clone();
+                    if let Some(flag) = hang {
+                        let _raise = RaiseOnDrop(flag);
+                        std::future::pending::<()>().await;
+                    }
                     let name = args.last().unwrap();
                     match self.on_pull.lock().unwrap().get(name).cloned() {
                         Some(next) => {
@@ -2009,4 +2034,81 @@ async fn moving_the_bind_address_elsewhere_keeps_a_still_legal_dev_url() {
         "{res}"
     );
     assert_eq!(detail(&base, "board").await["dev_url"], dev);
+}
+
+// ---------------------------------------------------------------------------
+// A hang-up and the pull (the install ops are not detached up to the pull)
+// ---------------------------------------------------------------------------
+
+/// Poll `cond` for up to five seconds.
+async fn until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..100 {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cond()
+}
+
+#[tokio::test]
+async fn a_hang_up_during_the_pull_stops_the_pull() {
+    let image = "localhost/board:1";
+    let fake = Fake::default().pull_yields(image, "sha256:one", Some(&doc("1.0.0", image, false)));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *fake.hang_pull.lock().unwrap() = Some(dropped.clone());
+    let (_state, base, _calls) = with(fake).await;
+
+    // The client gives up while the pull is still running.
+    let sent = base
+        .client()
+        .post(format!("{base}/api/op/agent_install"))
+        .json(&json!({ "image": image, "pull": "missing" }))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(sent.is_err(), "the pull is stubbed to hang");
+    assert!(
+        until(|| dropped.load(Ordering::SeqCst)).await,
+        "the hang-up must drop the pull, as it drops (and kills) a real podman pull"
+    );
+    assert!(!written(&base, "board").await);
+}
+
+#[tokio::test]
+async fn a_hang_up_after_the_pull_still_completes_the_install() {
+    let image = "localhost/board:1";
+    let fake = Fake::default().pull_yields(image, "sha256:one", Some(&doc("1.0.0", image, false)));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *fake.inspect_gate.lock().unwrap() = Some(gate.clone());
+    let (_state, base, _calls) = with(fake).await;
+
+    // The import has landed and the digest lookup after it is held; the
+    // client hangs up there.
+    let sent = base
+        .client()
+        .post(format!("{base}/api/op/agent_install"))
+        .json(&json!({ "image": image, "pull": "missing" }))
+        .timeout(Duration::from_millis(800))
+        .send()
+        .await;
+    assert!(sent.is_err(), "the digest lookup is held");
+    gate.notify_one();
+
+    let mut recorded = Value::Null;
+    for _ in 0..100 {
+        let (status, body) = get(&base, "/api/agents/board").await;
+        if status == 200 {
+            let d: Value = serde_json::from_str(&body).unwrap();
+            if d["provenance"]["image"] == image {
+                recorded = d;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        recorded["provenance"]["image"], image,
+        "the row and its provenance outlive the client: {recorded}"
+    );
 }

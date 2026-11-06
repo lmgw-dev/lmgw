@@ -11,6 +11,11 @@ use crate::widgets::{DirtyGuardHost, ToastHost};
 #[component]
 pub fn App() -> impl IntoView {
     crate::live::provide_live_bus();
+    // The Chat's transport is `fetch`: nothing to provide, except in a debug
+    // build's test host (`test_host`). Its other seams are the `/chat`
+    // route's (`chat_host`): the shell's stream as its live updates
+    // (chat-plane design D1), so the page opens no stream of its own.
+    crate::test_host::provide();
     // `/v1/models` once the session is open, for every model picker.
     crate::catalog::provide_model_catalog();
     // The local container images, for every image picker; fetched when one
@@ -23,6 +28,13 @@ pub fn App() -> impl IntoView {
     // descendant — so the one tooltip lives out here, beside the toasts.
     crate::charts::provide_tips();
     crate::ops_state::provide_ops_state();
+    // The machine check and the graphics card's setup, one for the app: a
+    // page left while the setup runs shows it again (machine-check D160).
+    // The Chat's view of it is the `/chat` route's (`chat_host`), in its
+    // host's `machine`.
+    crate::widgets::machine_check::provide_machine_state();
+    // The tray's moves into the window, without a reload (D162).
+    crate::shell::provide_shell_moves();
     // Unsaved edits ask before a link leaves their page (the host, which
     // navigates, is inside the router).
     crate::widgets::dirty_guard::provide_dirty_guard();
@@ -40,6 +52,7 @@ pub fn App() -> impl IntoView {
         <Router>
             <ToastHost/>
             <DirtyGuardHost/>
+            <crate::shell::ShellNavigate/>
             <ZoomHud/>
             <TipLayer/>
             <div class="app" class:rail=move || sidebar.rail.get()>
@@ -55,12 +68,13 @@ pub fn App() -> impl IntoView {
                             view! {
                                 <Routes fallback=pages::NotFound>
                                     <Route path=path!("") view=pages::Overview/>
-                                    <Route path=path!("chat") view=pages::Chat/>
+                                    <Route path=path!("chat") view=crate::chat_host::ChatRoute/>
                                     <Route path=path!("chat/profiles") view=pages::ChatProfiles/>
                                     <Route path=path!("audio-lab") view=pages::AudioLab/>
                                     <Route path=path!("image-lab") view=pages::ImageLab/>
                                     <Route path=path!("decision-lab") view=pages::DecisionLab/>
                                     <Route path=path!("decision-lab/batches/:id") view=pages::DecisionBatch/>
+                                    <Route path=path!("voice-lab") view=pages::VoiceLab/>
                                     <Route path=path!("agents") view=pages::Agents/>
                                     <Route path=path!("agents/:id/:tab?") view=pages::AgentDetailPage/>
                                     // The Workflows surface became the agent catalog
@@ -68,6 +82,7 @@ pub fn App() -> impl IntoView {
                                     <Route path=path!("workflows") view=pages::WorkflowsMoved/>
                                     <Route path=path!("models") view=pages::Models/>
                                     <Route path=path!("models/catalog") view=pages::ModelCatalogPage/>
+                                    <Route path=path!("models/find") view=pages::ModelFindPage/>
                                     <Route path=path!("models/local/:id") view=pages::LocalModelEdit/>
                                     <Route path=path!("downloads") view=pages::Downloads/>
                                     <Route path=path!("backends/:tab?") view=pages::Backends/>

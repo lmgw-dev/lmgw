@@ -148,8 +148,12 @@ pub async fn check(
 /// sha256 when present. On a hash mismatch the partial file is removed so a
 /// retry re-downloads cleanly.
 ///
-/// `dest` is the caller's fixed path, never one built from `rpm.file` (see
-/// the crate docs).
+/// `dest` is the caller's path, never one built from `rpm.file` (see the crate
+/// docs). It is created fresh: `O_EXCL | O_NOFOLLOW`, mode 0600. A file or a
+/// symlink already there is unlinked first (the link itself, never what it
+/// points at), so a leftover of an earlier run does not block a retry, and a
+/// link planted in between is refused by the exclusive create instead of
+/// followed. Put it in a directory only the user can write ([`crate::private_dir`]).
 pub async fn download_rpm(
     http: &reqwest::Client,
     feed: &Feed,
@@ -159,7 +163,7 @@ pub async fn download_rpm(
     let req = feed.auth.apply(http.get(&rpm.url), &feed.url, &rpm.url);
     let mut resp = req.send().await?.error_for_status()?;
 
-    let mut file = tokio::fs::File::create(dest).await?;
+    let mut file = create_fresh(dest).await?;
     let mut hasher = Sha256::new();
     while let Some(chunk) = resp.chunk().await? {
         hasher.update(&chunk);
@@ -178,4 +182,23 @@ pub async fn download_rpm(
         }
     }
     Ok(())
+}
+
+/// Create `dest` for writing as a new file, 0600, never through a symlink.
+async fn create_fresh(dest: &Path) -> std::io::Result<tokio::fs::File> {
+    let open = || {
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        opts
+    };
+    match open().open(dest).await {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tokio::fs::remove_file(dest).await?;
+            open().open(dest).await
+        }
+        other => other,
+    }
 }

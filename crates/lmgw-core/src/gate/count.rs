@@ -18,7 +18,7 @@
 
 use serde_json::Value;
 
-use crate::config::{LlamaParams, LocalModel};
+use crate::config::{LlamaParams, LocalModel, Upstream};
 use crate::egress::llama_cpp::count::{
     apply_template_request, prompt_tokenize_request, rendered_prompt, token_count,
 };
@@ -54,13 +54,29 @@ pub struct MediaParts {
     pub audio: u64,
 }
 
-/// Count a request's media parts, by kind (§3.3).
-pub fn media_parts(ir: &crate::ir::ChatRequest) -> MediaParts {
+/// Count a request's media parts, by kind (§3.3), past any compaction
+/// block in effect, as the row on `row` is sent them: a Files API image
+/// only where that row is sent it ([`crate::ir::AnthropicBlock::image_sent_to`],
+/// gateway design §6.1, changed 2026-11-06). `None` is a row that is sent
+/// no Anthropic block: a candidate alias's local rows, the Chat's turns,
+/// whose requests carry none.
+pub fn media_parts(ir: &crate::ir::ChatRequest, row: Option<&Upstream>) -> MediaParts {
+    // Of the conversation in effect: what an upstream reads past a
+    // compaction block (`ir::compaction::folded`; Anthropic drops the
+    // content before it too).
+    let ir = crate::ir::compaction::folded(ir);
     let mut out = MediaParts::default();
     for m in &ir.messages {
         for p in &m.content {
             match p {
                 crate::ir::ContentPart::Image { .. } => out.images += 1,
+                // A Files API image, where the row is sent it; elsewhere a
+                // dropped part, named `content.image`.
+                crate::ir::ContentPart::AnthropicBlock(b)
+                    if row.is_some_and(|up| b.image_sent_to(up)) =>
+                {
+                    out.images += 1
+                }
                 crate::ir::ContentPart::Audio { .. } => out.audio += 1,
                 _ => {}
             }
@@ -597,8 +613,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         }

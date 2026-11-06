@@ -41,6 +41,18 @@ variables:
   # with XDG_CACHE_HOME set, ort-sys extracts straight into it (no
   # ort.pyke.io subdirectory), next to Trunk's files.
   ORT_CACHE_DIR: "$CI_PROJECT_DIR/.cache/ort.pyke.io"
+  # GitLab Runner's docker executor runs its clone, cache and artifact steps
+  # under `umask 0000` unless this feature flag is on, so every checked-out
+  # file was 0666, and tauri's rpm bundler copies a file's mode into the RPM:
+  # an lmgw 0.5.0 CI build root-installed its icons and licence files world-writable.
+  # With the flag the runner drops that umask call and instead chowns the
+  # build directory to the build image's user (`id -u`/`id -g`, root in
+  # fedora:latest). A job variable sets it unless the runner's config.toml
+  # pins it under [runners.feature_flags]; the job log's "Running with
+  # gitlab-runner" header lists it when it is on. ci/build.sh normalises the
+  # modes anyway, and ci/rpm_guard.py fails the build on any RPM that still
+  # ships a writable or privileged entry.
+  FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR: "true"
 
 build:
   stage: build
@@ -49,6 +61,20 @@ build:
   # rather have reproducible builds than auto-tracking.
   image: fedora:latest
   interruptible: true
+  # A runner's first, cold build has no cache yet and outlasts the default
+  # one-hour limit; the limit stays visible here. GitLab caps it at the
+  # runner's own maximum job timeout, if one is set (Admin → Runners).
+  timeout: 2h
+  variables:
+    # Test builds trade a little runtime speed and binary size for parallel
+    # codegen: Cargo.toml's `lto = true, codegen-units = 1` makes the big
+    # crates' codegen and LTO single-threaded, the critical path of this job
+    # whatever the runner's core count. Cargo reads these over Cargo.toml and
+    # trunk's cargo call inherits them, so the wasm UI build gains too. Public
+    # releases (.github/workflows/release.yml, same ci/build.sh) keep fat LTO
+    # and one codegen unit. Not RUSTFLAGS: that would replace the config's.
+    CARGO_PROFILE_RELEASE_LTO: "thin"
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
   cache:
     key: cargo-lmgw
     paths:
@@ -63,6 +89,9 @@ build:
   before_script:
     - bash ci/install-build-deps.sh
   script:
+    # The guard's own test first (rpm-build and python3 come from ci/install-build-deps.sh):
+    # a guard that stopped refusing things must fail here, not pass every RPM.
+    - python3 ci/rpm_guard_test.py
     - bash ci/build.sh
   artifacts:
     paths:

@@ -1,0 +1,13 @@
+{
+  "captured": "live probe 2026-10-24, image official-master b11714: legacy /v1/completions with a top-level json_schema (message from the scrubbed capture so_legacy)",
+  "upstream": "llama_cpp",
+  "status": 400,
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "Field 'json_schema': \"json_schema\": JSON schema conversion failed:\nJSON schema error at #: unrecognized type nonsense",
+      "type": "invalid_request_error"
+    }
+  },
+  "expect": "invalid_json_schema"
+}

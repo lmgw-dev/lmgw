@@ -25,7 +25,10 @@
 //!   argv, which is what gets logged;
 //! - `file://` (and plain-path) submodule URLs stay blocked, as git does by
 //!   default: a PR's `.gitmodules` could otherwise copy any repository on
-//!   this machine into the build context.
+//!   this machine into the build context; a relative one may not climb past
+//!   the build repository's host (`git/submodules.rs`);
+//! - `fetch.recurseSubmodules=false`: the fetch `submodule update` runs in a
+//!   submodule stays out of its nested ones, which assemble drives itself.
 //!
 //! # The pool (§14.1)
 //!
@@ -40,6 +43,10 @@
 //! for its duration). A git killed mid-mutation (a canceled run drops its
 //! future, and git with it) leaves its `*.lock` files; whoever takes the
 //! pool lock next knows they are stale and removes them.
+//!
+//! The pool's config is common to every worktree, so no run writes its
+//! submodules there (`git/submodules.rs`); opening the pool removes what older
+//! builds left.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,6 +65,8 @@ use super::model::Forge;
 use super::presets;
 use super::validate;
 
+mod submodules;
+
 /// `merge-tree --write-tree --merge-base` (the squash-apply) needs 2.40.
 pub const MIN_GIT_VERSION: (u32, u32) = (2, 40);
 
@@ -73,7 +82,7 @@ pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
 /// and `maintenance.autoDetach` keep an automatic gc inside the git call that
 /// triggered it — under the pool lock, and killed with it — rather than in a
 /// detached child that could hold `packed-refs.lock` after the lock is gone.
-const HARDENING: [&str; 16] = [
+const HARDENING: [&str; 17] = [
     "credential.helper=",
     "url.https://github.com/.insteadOf=git@github.com:",
     "url.https://github.com/.insteadOf=ssh://git@github.com/",
@@ -81,6 +90,7 @@ const HARDENING: [&str; 16] = [
     "commit.gpgSign=false",
     "core.fsmonitor=false",
     "submodule.recurse=false",
+    "fetch.recurseSubmodules=false",
     "rerere.enabled=false",
     "color.ui=false",
     "core.quotePath=false",
@@ -332,7 +342,7 @@ impl Git {
         if !out.ok() {
             return Err(format!(
                 "git {} failed (exit {}): {}",
-                args.first().copied().unwrap_or(""),
+                subcommand(args),
                 out.status,
                 out.said()
             ));
@@ -398,9 +408,18 @@ impl Git {
     }
 }
 
+/// The first of `args` that is not a `-c <key=value>` pair.
+fn subcommand<'a>(args: &[&'a str]) -> &'a str {
+    let mut i = 0;
+    while args.get(i) == Some(&"-c") {
+        i += 2;
+    }
+    args.get(i).copied().unwrap_or("")
+}
+
 fn spawn_error(e: std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::NotFound {
-        "git is not installed (or not on PATH) — the Backends page needs it: `sudo dnf install \
+        "git is not installed (or not on PATH) — the Engines page needs it: `sudo dnf install \
          git`"
             .into()
     } else {
@@ -443,7 +462,7 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Whether git is there and new enough (§10 "git dependency"): the version
-/// string, or the sentence the Backends page shows.
+/// string, or the sentence the Engines page shows.
 pub async fn git_available(git: &Git) -> Result<String, String> {
     let (ma, mi, pa) = git.version().await?;
     let (need_ma, need_mi) = MIN_GIT_VERSION;
@@ -470,7 +489,8 @@ fn remote_error(url: &str, what: &str, out: &GitOutput) -> String {
         let host = validate::repo_host(url).unwrap_or_else(|| url.to_string());
         return format!(
             "{url} asks for credentials — if it is a private repository, add a forge token for \
-             {host} (Settings); git said: {said}"
+             {host} ({}); git said: {said}",
+            lmgw_api_types::settings_labels::FORGE_TOKENS_AT
         );
     }
     format!("{what} {url} failed (exit {}): {said}", out.status)
@@ -797,6 +817,7 @@ impl Pool {
                 )
                 .await?;
         }
+        pool.clear_submodule_config().await;
         drop(_guard);
         Ok(pool)
     }
@@ -1498,9 +1519,15 @@ impl Pool {
     ///    PR on ik): `merge-tree --merge-base=<fork point>` + `commit-tree`;
     /// 3. on a conflict: the merge is aborted and the report names the
     ///    extra, the files and the extras merged before it — and stops;
-    /// 4. after all of them: `submodule sync`, `update --init --recursive
-    ///    --force`, `foreach git clean -ffdx`, and a top-level `clean -ffdx`
-    ///    (a submodule an extra removed would otherwise stay in the context).
+    /// 4. after all of them: the submodules' URLs re-read from the merged
+    ///    `.gitmodules`, their remotes synced, `update --force` (nested
+    ///    levels `--init --recursive`), `foreach git clean -ffdx`, and a
+    ///    top-level `clean -ffdx` (a submodule an extra removed would
+    ///    otherwise stay in the context).
+    ///
+    /// The top level's submodule URLs come from the worktree's own
+    /// `.gitmodules` every time and reach git only as per-invocation config;
+    /// nothing is written to the pool's shared config (see `git/submodules.rs`).
     ///
     /// `Err` is for git failing; a conflict is an `Ok` report.
     pub async fn assemble(
@@ -1527,11 +1554,11 @@ impl Pool {
             }
         };
         let reference = format!("--reference={}", path_str(&self.dir)?);
-        let mut update_at_base = vec!["submodule", "update", "--init", "--recursive"];
-        if opts.share_submodule_objects {
-            update_at_base.push(&reference);
-        }
-        self.git.run_ok(wt, &update_at_base, None, progress).await?;
+        let reference = opts.share_submodule_objects.then_some(reference.as_str());
+        let repo_url = opts.repo_url.as_deref();
+        let subs = self.gitmodules(worktree, repo_url).await?;
+        self.submodules_update(worktree, &subs, reference, false, progress)
+            .await?;
 
         let mut report = AssembleReport {
             base: base.to_string(),
@@ -1598,13 +1625,11 @@ impl Pool {
             }
         }
 
-        let mut update_final = vec!["submodule", "update", "--init", "--recursive", "--force"];
-        if opts.share_submodule_objects {
-            update_final.push(&reference);
-        }
+        let subs = self.gitmodules(worktree, repo_url).await?;
+        self.submodules_sync(worktree, &subs, progress).await?;
+        self.submodules_update(worktree, &subs, reference, true, progress)
+            .await?;
         for args in [
-            &["submodule", "sync", "--recursive"][..],
-            update_final.as_slice(),
             &[
                 "submodule",
                 "foreach",
@@ -1834,85 +1859,6 @@ impl Pool {
         Ok(files)
     }
 
-    /// Keep this run's submodule commits in the pool, so the next run's
-    /// `submodule update --reference` finds their objects locally instead of
-    /// re-cloning (§14.1: sd.cpp's four submodules are about 50 MB and 7 s a
-    /// run). Best effort: a failure costs only the next run's download.
-    async fn harvest_submodules(&self, worktree: &Path, progress: Option<Progress<'_>>) {
-        let note = |line: String| {
-            if let Some(p) = progress {
-                p(&line);
-            }
-        };
-        let status = match self
-            .git
-            .run_ok(
-                Some(worktree),
-                &["submodule", "status", "--recursive"],
-                None,
-                None,
-            )
-            .await
-        {
-            Ok(o) => o.stdout,
-            Err(e) => return note(format!("note: submodule objects not kept for reuse: {e}")),
-        };
-        for line in status.lines() {
-            let Some((sha, path)) = parse_submodule_status(line) else {
-                continue;
-            };
-            let sub = worktree.join(path);
-            let url = match self
-                .git
-                .run_ok(
-                    Some(&sub),
-                    &["config", "--get", "remote.origin.url"],
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(o) => o.stdout.trim().to_string(),
-                Err(_) => continue,
-            };
-            let local = commit_ref(&remote_key(&url), sha);
-            if self.ref_exists(&local).await {
-                continue;
-            }
-            let Ok(sub_path) = path_str(&sub) else {
-                continue;
-            };
-            let refspec = format!("+{sha}:{local}");
-            let _guard = match self.lock_pool().await {
-                Ok(g) => g,
-                Err(e) => {
-                    note(format!("note: submodule {path} not kept for reuse: {e}"));
-                    continue;
-                }
-            };
-            let fetched = self
-                .git
-                .run_ok(
-                    Some(&self.dir),
-                    &[
-                        "fetch",
-                        "--no-tags",
-                        "--no-write-fetch-head",
-                        "--quiet",
-                        "--",
-                        sub_path,
-                        &refspec,
-                    ],
-                    None,
-                    None,
-                )
-                .await;
-            if let Err(e) = fetched {
-                note(format!("note: submodule {path} not kept for reuse: {e}"));
-            }
-        }
-    }
-
     /// [`Self::assemble`] in a throwaway worktree under
     /// [`Self::work_dir`], removed afterwards (§7 "Check merge", superseded
     /// by §14.1: the same code as a run, never a bare `merge-tree`, because
@@ -1937,25 +1883,6 @@ impl Pool {
         removed?;
         Ok(report)
     }
-}
-
-/// ` <sha> <path> (<describe>)` (also `+`/`U`-prefixed) → `(sha, path)`;
-/// `None` for an uninitialized (`-`) submodule.
-fn parse_submodule_status(line: &str) -> Option<(&str, &str)> {
-    let flag = line.chars().next()?;
-    if flag == '-' {
-        return None;
-    }
-    let rest = &line[flag.len_utf8()..];
-    let (sha, path) = rest.split_once(' ')?;
-    if !is_hex(sha) {
-        return None;
-    }
-    let path = match path.rsplit_once(" (") {
-        Some((p, _)) if path.ends_with(')') => p,
-        _ => path,
-    };
-    Some((sha, path))
 }
 
 enum Step {
@@ -1987,17 +1914,24 @@ pub struct ResolvedExtraSpec {
     pub upstream_tip: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssembleOpts {
     /// Clone submodules `--reference` the pool, and keep their commits in it
     /// afterwards, so the next run fetches only what changed.
     pub share_submodule_objects: bool,
+    /// The build's repository URL: what a relative submodule URL
+    /// (`../../owner/repo.git`) resolves against, as it does against a clone's
+    /// `origin` (the pool has no remotes). With `None`, a relative URL at the
+    /// top level is an error.
+    #[serde(default)]
+    pub repo_url: Option<String>,
 }
 
 impl Default for AssembleOpts {
     fn default() -> Self {
         Self {
             share_submodule_objects: true,
+            repo_url: None,
         }
     }
 }
@@ -2209,20 +2143,6 @@ mod tests {
         assert_eq!(k, remote_key("https://GitHub.com/ggml-org/llama.cpp.git/"));
         assert_eq!(k, remote_key("git@github.com:ggml-org/llama.cpp.git"));
         assert_ne!(k, remote_key("https://github.com/ikawrakow/ik_llama.cpp"));
-    }
-
-    #[test]
-    fn submodule_status_lines_parse() {
-        let sha = "a".repeat(40);
-        assert_eq!(
-            parse_submodule_status(&format!(" {sha} ggml (heads/master)")),
-            Some((sha.as_str(), "ggml"))
-        );
-        assert_eq!(
-            parse_submodule_status(&format!("+{sha} thirdparty/lib webp")),
-            Some((sha.as_str(), "thirdparty/lib webp"))
-        );
-        assert_eq!(parse_submodule_status(&format!("-{sha} ggml")), None);
     }
 
     #[test]

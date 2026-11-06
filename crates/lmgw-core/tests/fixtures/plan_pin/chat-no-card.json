@@ -1,0 +1,39 @@
+{
+  "class": "chat",
+  "configured_as": [],
+  "configured_note": "Models already serving this GGUF, and how they differ from the plan. Values the plan read out of the file are facts; the rest are defaults a deliberate variant (a CPU-only twin, a short-context twin) may be overriding on purpose — so this is a proposal to review, not a correction to apply blindly. The one exception is 'unset', which lists configuration the file provably cannot support.",
+  "model_id": "demo-chat",
+  "next_step": "pass these to lmgw__local_model_set action=create (adding model_id), then lmgw__container target=chat action=apply, then lmgw__local_model_test",
+  "params": {
+    "cache_type_k": "q8_0",
+    "cache_type_v": "q8_0",
+    "ctx_size": 131072,
+    "draft_gguf_path": "demo/demo-chat-dflash-drafter.gguf",
+    "flash_attn": "on",
+    "gguf_path": "demo/demo-chat-Q4_K_M.gguf",
+    "jinja": true,
+    "mmproj_path": "demo/mmproj-demo-F16.gguf",
+    "n_gpu_layers": 999,
+    "spec_draft_n_max": 7,
+    "spec_type": "draft-dflash",
+    "ubatch_size": 1280
+  },
+  "rationale": {
+    "cache_type_k": "halves KV cache versus the f16 default, at negligible quality cost",
+    "cache_type_v": "halves KV cache versus the f16 default, at negligible quality cost",
+    "ctx_size": "the model's trained context (131072) — its real ceiling, not a reduced default",
+    "draft_gguf_path": "sibling speculative drafter",
+    "flash_attn": "reduces attention memory",
+    "gguf_path": "the file this plan was made for",
+    "jinja": "the GGUF embeds a chat template; without --jinja it is ignored and tool calling will not work",
+    "mmproj_path": "sibling projector (gemma4uv), so the model can accept images",
+    "n_gpu_layers": "offload every layer",
+    "spec_draft_n_max": "the drafter's block size is 8 (dflash.block_size); llama.cpp drafts at most block_size − 1 = 7 tokens per step",
+    "spec_type": "dictated by the drafter's architecture ('dflash') — a mismatched spec_type fails at load",
+    "ubatch_size": "llama.cpp decodes this gemma4uv projector's images with non-causal attention, so a whole image has to fit in one physical batch, and at llama.cpp's default of 512 a larger image aborts the server with GGML_ASSERT \"non-causal attention requires n_ubatch >= n_tokens\". The projector's largest image sets the number: Gemma 4 images stop at about 1100 tokens (its largest budget is 1120), and this adds a margin. No higher, because every ubatch token costs compute buffer in VRAM. The default batch_size (2048) already covers it"
+  },
+  "target": "chat",
+  "warnings": [
+    "projector support is not verified by the plan — run lmgw__local_model_test after applying"
+  ]
+}

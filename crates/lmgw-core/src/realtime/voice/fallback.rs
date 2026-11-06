@@ -41,7 +41,8 @@ use crate::realtime::protocol::Voice;
 pub(crate) enum Engine {
     /// audio.cpp: its voice list says.
     AudioCpp,
-    /// The OpenAI protocol on a generic upstream: OpenAI's voice names.
+    /// An OpenAI-shaped protocol (`openai` or `openai_compatible`) on a
+    /// generic upstream: OpenAI's voice names.
     OpenAi,
     /// Anything else, described.
     Other(String),
@@ -51,7 +52,7 @@ impl Engine {
     pub fn of(protocol: Protocol, kind: UpstreamKind) -> Self {
         match (protocol, kind) {
             (_, UpstreamKind::AudioCpp) => Self::AudioCpp,
-            (Protocol::Openai, UpstreamKind::Generic) => Self::OpenAi,
+            (Protocol::Openai | Protocol::OpenaiCompatible, UpstreamKind::Generic) => Self::OpenAi,
             (p, k) => Self::Other(format!(
                 "a {} upstream of the {} protocol",
                 k.as_str(),

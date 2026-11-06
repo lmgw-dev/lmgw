@@ -87,7 +87,10 @@ impl Tally {
 /// reached the upstream. A status the upstream answered with is a refusal,
 /// and certain.
 pub(super) fn leaves_doubt(e: &GatewayError) -> bool {
-    matches!(e, GatewayError::Transport(_) | GatewayError::Timeout)
+    matches!(
+        e,
+        GatewayError::Transport(_) | GatewayError::Timeout | GatewayError::Stalled(_)
+    )
 }
 
 #[cfg(test)]

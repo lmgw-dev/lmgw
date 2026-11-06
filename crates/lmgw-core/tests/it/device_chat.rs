@@ -12,6 +12,10 @@
 //!   Admin Chat thread (L3), and not for a chat thread;
 //! - `collections`: the list, folder counts, search, exports and a folder
 //!   delete leave Admin Chat out;
+//! - `plane`, `plane_tools`: the Chat's reads beside its threads
+//!   (chat-plane design §2) — the settings, the knowledge bases and the
+//!   source viewer, the thread rows, the tool picker's toolsets — as the
+//!   owner and as a device read them;
 //! - `profiles`: personality profiles as a device lists, edits and assigns
 //!   them (personality-profiles design D13, D14);
 //! - `writes`: creating an admin thread, tool labels and knowledge bases a
@@ -82,6 +86,8 @@ mod approval_tighten;
 mod bind;
 mod client_send;
 mod collections;
+mod plane;
+mod plane_tools;
 mod profiles;
 mod profiles_admin;
 mod reach_order;

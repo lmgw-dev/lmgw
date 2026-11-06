@@ -215,6 +215,19 @@ fn digest_without_tag(r: &str) -> Option<String> {
     })
 }
 
+/// Every name [`resolve`] can match `reference` under: its spellings, and
+/// those of its digest form. A registry observation is stored under the name
+/// the reference matched, so this tells whether one is about `reference`
+/// without listing the local images.
+pub(crate) fn reference_names(reference: &str) -> Vec<String> {
+    let r = reference.trim();
+    let by_digest = digest_without_tag(r);
+    spellings(r)
+        .into_iter()
+        .chain(by_digest.iter().flat_map(|d| spellings(d)))
+        .collect()
+}
+
 /// The local image `reference` (a tag, a digest reference — with or without
 /// a tag before the digest — or an ID of at least 12 hex characters) names,
 /// and the name it matched (`None` for an ID).
@@ -232,11 +245,7 @@ pub(crate) fn resolve<'a>(
             return Some((img, None));
         }
     }
-    let by_digest = digest_without_tag(r);
-    for s in spellings(r)
-        .into_iter()
-        .chain(by_digest.iter().flat_map(|d| spellings(d)))
-    {
+    for s in reference_names(r) {
         if let Some(img) = images
             .iter()
             .find(|i| i.names.contains(&s) || i.digests.contains(&s))
@@ -340,6 +349,17 @@ impl UsageIndex {
             });
         }
         Ok(Self { images, uses })
+    }
+
+    /// Whether image `id` (full or a prefix, with or without `sha256:`) is on
+    /// this machine.
+    pub fn has_image(&self, id: &str) -> bool {
+        let id = id.trim_start_matches("sha256:");
+        !id.is_empty()
+            && self
+                .images
+                .iter()
+                .any(|i| i.id.starts_with(id) || id.starts_with(&i.id))
     }
 
     /// The ID `reference` names right now.
@@ -462,6 +482,30 @@ pub(crate) fn configured_images(snap: &Snapshot) -> Vec<ConfiguredImage> {
                 reference: reference.to_string(),
             })
         })
+        .collect()
+}
+
+/// The images a model row runs: every model's override, and a class default
+/// while at least one of its class's rows follows it (no image of its own).
+/// What the nav's update badge counts (§8, `updates::summary`). A class
+/// default no row follows is configured but runs nothing: a fresh install's
+/// four defaults are, and a podman store that already holds those images
+/// (another install's, or a dev instance's shared one) gave a first launch
+/// an update badge for engines the owner never chose. The registry check
+/// itself still asks about every configured image, so the Engines page
+/// shows a class default's update and offers its pull.
+pub(crate) fn images_in_use(snap: &Snapshot) -> Vec<ConfiguredImage> {
+    let blank = |image: &Option<String>| image.as_deref().is_none_or(|i| i.trim().is_empty());
+    let followed = |class: &str| match class {
+        "chat" => snap.local_models.iter().any(|m| blank(&m.image)),
+        "aux" => snap.aux_models.iter().any(|m| blank(&m.image)),
+        "audio" => snap.audio_models.iter().any(|m| blank(&m.image)),
+        "image" => snap.image_models.iter().any(|m| blank(&m.image)),
+        _ => false,
+    };
+    configured_images(snap)
+        .into_iter()
+        .filter(|c| c.kind != ImageUseKind::ClassDefault || followed(c.class))
         .collect()
 }
 

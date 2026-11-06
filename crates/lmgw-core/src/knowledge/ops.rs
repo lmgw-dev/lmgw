@@ -412,7 +412,11 @@ pub async fn resume(state: &SharedState, kb_id: i64) -> Result<api::ResumeResult
         let refused = match last_job(state, kb.id).await {
             Some(j) if j.kind == JobKind::KbReembed.as_str() && j.status == "failed" => j
                 .error
-                .filter(|e| super::ingest_split::is_oversize(e))
+                // The re-embed's own note; a job stored before it named its
+                // refusals by the upstream's words.
+                .filter(|e| {
+                    e.contains(super::reembed::OVERSIZE_NOTE) || super::ingest_split::is_oversize(e)
+                })
                 .map(|_| {
                     format!(
                         "the last re-embed was refused by '{}' as larger than one input",

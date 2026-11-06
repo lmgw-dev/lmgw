@@ -22,7 +22,43 @@ fn input_item() -> Value {
             named placeholder elsewhere, another URL as a resource naming it, and any other \
             item as its JSON text), an mcp_call echo, or an \
             {type:mcp_approval_response,approval_request_id,approve,reason} verdict on a \
-            previous response's pending call.",
+            previous response's pending call. On an upstream that implements the Responses \
+            API itself (the OpenAI platform, a compatible row flagged for it) every other \
+            item the API defines goes there as sent: an {type:item_reference,id} (or an \
+            untyped {id}), a hosted tool's record (web_search_call, file_search_call, \
+            code_interpreter_call, image_generation_call, computer_call and its output, …), \
+            and content parts lmgw's loop has no reading for (input_file, an input_image by \
+            file_id). lmgw's own loop refuses each of them by name (400 unsupported). For a \
+            client key, an item_reference id and any input item's own id (a reasoning \
+            item's rs_…, a message's msg_…, a hosted call's) pass only when a native answer \
+            given to that key carried the item, and a file_id anywhere in the body never \
+            does (lmgw does not proxy /v1/files, so no client key made one): either answers \
+            404 as an unknown previous_response_id does. The owner key passes.",
+    })
+}
+
+/// A tool the upstream runs itself: forwarded natively, refused by the loop.
+fn hosted_tool() -> Value {
+    json!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {"type": "string", "not": {"enum": ["function", "mcp"]},
+                "description": "web_search, file_search, code_interpreter, \
+                    image_generation, computer_use_preview, shell, … as the upstream's own \
+                    Responses API defines them."}
+        },
+        "additionalProperties": true,
+        "description": "A hosted tool: goes with the body to an upstream that implements \
+            the Responses API itself, which runs it; lmgw's own loop refuses it (400 \
+            unsupported), and so does a request that also needs the loop (mcp tools lmgw \
+            serves, a previous_response_id lmgw stored), naming both. For a client key, a \
+            tool that names something stored under the provider account (a file_search \
+            vector_store_ids entry, a code_interpreter container id or file_ids, a shell \
+            container_reference or skill_id) answers 404 as an unknown id does; the owner key \
+            passes. Fees such a tool bills beyond its tokens (web search, file search, \
+            containers, image generation) are not priced yet: its row is unpriced, with a \
+            price_note naming the calls, and budgets count its token part as a lower bound."
     })
 }
 
@@ -35,6 +71,14 @@ fn mcp_tool() -> Value {
             "server_label": {"type": "string", "description": "Matches a registered MCP \
                 server's own tool prefix (or its name when it has none) — lmgw resolves this \
                 against its own servers, never against a client-supplied server_url."},
+            "server_url": {"type": "string", "description": "A server for the upstream to \
+                dial (OpenAI's hosted MCP tool); lmgw never dials it. A block whose \
+                server_url is not this gateway's own /mcp is not lmgw's to serve: it goes \
+                to an upstream that takes /v1/responses natively, and a request served by \
+                lmgw's own loop is refused with a 400 naming it. This gateway's own /mcp \
+                reads as no server_url."},
+            "connector_id": {"type": "string", "description": "One of OpenAI's connectors: \
+                never lmgw's to serve, handled as a foreign server_url."},
             "allowed_tools": {
                 "oneOf": [
                     {"type": "array", "items": {"type": "string"}},
@@ -81,14 +125,29 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                     system message; an explicit empty string drops it on a chained call."},
                 "tools": {
                     "type": "array",
-                    "items": {"oneOf": [function_tool(), mcp_tool()]},
+                    "items": {"oneOf": [function_tool(), mcp_tool(), hosted_tool()]},
                     "description": "function tools the loop hands back to the client; mcp \
-                        tools run server-side on lmgw's own registered MCP servers. Hosted \
-                        tools (web_search, file_search, code_interpreter, image_generation, \
-                        computer_use) are refused."
+                        tools run server-side on lmgw's own registered MCP servers, and keep \
+                        the request in lmgw's own loop on an upstream that implements the \
+                        Responses API itself (an mcp label lmgw does not serve goes there \
+                        with the body). Hosted tools (web_search, file_search, \
+                        code_interpreter, image_generation, computer_use_preview, …) go \
+                        natively to such an upstream, which runs them, and are refused by \
+                        lmgw's own loop."
                 },
                 "tool_choice": {"description": "\"auto\" | \"none\" | \"required\" | \
-                    {type:function,name}."},
+                    {type:function,name} everywhere; any other form the upstream's API \
+                    defines ({type:web_search_preview}, {type:allowed_tools,…}, \
+                    {type:mcp,server_label}, …) goes natively to an upstream that implements \
+                    the Responses API itself and is refused by lmgw's own loop."},
+                "service_tier": {"type": "string", "description": "OpenAI's processing tier \
+                    (auto, default, flex, priority, fast, scale, ultrafast), forwarded as sent; on an \
+                    OpenAI platform row lmgw sends auto when it is unset, and prices the answer at \
+                    the tier the answer reports. A request by a caller with a budget (its key's, \
+                    or the gateway's) on a cloud model with no price on file for what it is billed \
+                    in is refused before the send: 403 budget_unpriced, naming the model and the \
+                    missing price. A flex request needs a flex price: no other tier's price bounds \
+                    a flex answer's spend, which is cheaper."},
                 "stream": {"type": "boolean", "default": false},
                 "store": {"type": "boolean", "description": "Whether lmgw keeps this \
                     response, so a later call can continue it with previous_response_id \
@@ -110,7 +169,10 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                     goes ahead of this call's input, and mcp_approval_response items settle \
                     the calls it stopped at. 400 while the gateway's response store is \
                     switched off; 404 when no stored response has this id (it was evicted, \
-                    or created with storing off)."},
+                    or created with storing off). On an upstream that implements the \
+                    Responses API itself, an id lmgw holds continues in lmgw's own loop and \
+                    any other id goes to the upstream with the body; with mcp tools lmgw \
+                    serves, such an id is a 400, since neither side can serve both."},
                 "reasoning": {
                     "type": "object",
                     "properties": {"effort": {"type": "string"}},
@@ -119,16 +181,20 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                 },
                 "text": {
                     "type": "object",
-                    "description": "text.format is translated to the chat-completions \
-                        response_format (json_schema/json_object) for OpenAI-protocol \
-                        upstreams.",
+                    "description": "text.format (json_schema, json_object, text) is the \
+                        structured output every upstream gets in its own spelling, as on \
+                        /v1/chat/completions; a native Responses upstream gets the body as \
+                        sent. Its refusals are 400 response_format_unsupported / \
+                        invalid_json_schema with param text.format.",
                     "additionalProperties": true
                 },
                 "include": {"type": "array", "items": {"type": "string"}},
-                "background": {"type": "boolean", "description": "Refused: responses always \
-                    run synchronously."},
-                "truncation": {"type": "string", "description": "Refused when \"auto\": lmgw \
-                    never silently drops conversation history."}
+                "background": {"type": "boolean", "description": "true is refused on every \
+                    path: a background response finishes after its answer has left, so lmgw \
+                    could never record what it spent or hold it to a budget."},
+                "truncation": {"type": "string", "description": "\"auto\" goes natively to \
+                    an upstream that implements the Responses API itself; lmgw's own loop \
+                    refuses it, since it never silently drops conversation history."}
             },
             "additionalProperties": true
         }),
@@ -199,7 +265,12 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
                 "created_at": {"type": "integer"},
                 "status": {"type": "string", "enum": ["queued", "in_progress", "completed", "incomplete", "failed", "cancelled"]},
                 "model": {"type": "string"},
-                "output": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+                "output": {"type": "array", "items": {"type": "object", "additionalProperties": true},
+                    "description": "Items are loosely typed here. An output_text part of a \
+                        message item carries `logprobs: []`: lmgw relays no log probabilities \
+                        yet; OpenAI's schema requires the field."},
+                "access_programs": {"type": "null", "description": "Always null; present \
+                    because OpenAI's schema requires the field."},
                 "error": {"type": ["object", "null"]},
                 "incomplete_details": {"type": ["object", "null"], "required": ["reason"],
                     "properties": {"reason": {"type": "string"}}},
@@ -242,7 +313,9 @@ pub(crate) fn stream_event(g: &mut SchemaGenerator) -> Schema {
                 "sequence_number": {"type": "integer"}
             },
             "additionalProperties": true,
-            "description": "SSE event: response.<name>, data: <this object>."
+            "description": "SSE event: response.<name>, data: <this object>. The \
+                response.output_text.delta and .done events carry `logprobs: []` (lmgw relays \
+                no log probabilities yet; OpenAI's schema requires the field)."
         }),
     )
 }
@@ -260,6 +333,23 @@ pub(crate) fn input_items(g: &mut SchemaGenerator) -> Schema {
             "properties": {
                 "object": {"type": "string", "enum": ["list"]},
                 "data": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+            }
+        }),
+    )
+}
+
+/// `POST /v1/responses/input_tokens`: OpenAI's token count of a Responses
+/// create body (`TokenCountsResource`).
+pub(crate) fn input_tokens(g: &mut SchemaGenerator) -> Schema {
+    schemas::named(
+        g,
+        "ResponseInputTokens",
+        schemars::json_schema!({
+            "type": "object",
+            "required": ["object", "input_tokens"],
+            "properties": {
+                "object": {"type": "string", "enum": ["response.input_tokens"]},
+                "input_tokens": {"type": "integer"}
             }
         }),
     )

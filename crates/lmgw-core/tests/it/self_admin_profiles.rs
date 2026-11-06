@@ -1,7 +1,7 @@
 //! The answers of the personality-profile tools (`lmgw__profiles`,
 //! `lmgw__profile_set`, `lmgw__profile_delete`), which no OpenAPI document
 //! describes: each tool's text is read into its type and written out again,
-//! and the two texts are equal byte for byte. The text is the answer's pretty
+//! and the two texts are equal byte for byte. The text is the answer's compact
 //! JSON with sorted keys, so a key a type adds, drops, renames or turns from
 //! absent into `null` shows up here. A profile the tools show is the one the
 //! route lists, with its examples as text.

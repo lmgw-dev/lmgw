@@ -295,7 +295,7 @@ fn LiveStrip(stage: String, done: u64, total: Option<u64>, pct: Option<u64>) -> 
                 </div>
             </div>
             <div class="dim bn-live-note">
-                "The GPU is the benchmark's until the run ends: local models answer from their hold fallback or are refused (503 gpu_benchmark). Phases appear below as they finish."
+                "The GPU is the benchmark's until the run ends: local models answer with their own fallback or are refused (503 gpu_benchmark). Phases appear below as they finish."
             </div>
         </div>
     }

@@ -180,12 +180,12 @@ impl Registry {
     ) -> Result<Arc<LlamaFacts>, String> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(
-                "GET /props was not asked: vram.load_timeout_seconds was spent by the time \
-                 the server was up — this llama-server's modalities, slot context and build \
-                 are unknown until it starts again or a local model test reads them"
-                    .into(),
-            );
+            return Err(format!(
+                "GET /props was not asked: the load timeout ({}) was spent by the time the \
+                 server was up — this llama-server's modalities, slot context and build are \
+                 unknown until it starts again or a local model test reads them",
+                crate::config::LOAD_TIMEOUT_LABEL
+            ));
         }
         self.read_llama_props(port, left)
             .await

@@ -1,0 +1,248 @@
+{
+  "legacy_completions": [
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "json_schema": {
+            "name": "answer",
+            "schema": {
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      },
+      "out": {
+        "sent": {
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "json_schema": {
+              "name": "answer",
+              "schema": {
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "strict": true
+            },
+            "type": "json_schema"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "schema": {
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "type": "json_object"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "text"
+        }
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "text"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok."
+      },
+      "out": {
+        "sent": {
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    },
+    {
+      "body": {
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "regex"
+        }
+      },
+      "out": {
+        "sent": {
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "regex"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": "root ::= \"ok\"",
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "grammar": "root ::= \"ok\"",
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": "",
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "grammar": "",
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": null,
+        "prompt": "Reply with ok.",
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "out": {
+        "sent": {
+          "grammar": null,
+          "prompt": "Reply with ok.",
+          "response_format": {
+            "type": "json_object"
+          }
+        }
+      }
+    },
+    {
+      "body": {
+        "grammar": "root ::= \"ok\"",
+        "json_schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "prompt": "Reply with ok."
+      },
+      "out": {
+        "sent": {
+          "grammar": "root ::= \"ok\"",
+          "json_schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "prompt": "Reply with ok."
+        }
+      }
+    }
+  ]
+}

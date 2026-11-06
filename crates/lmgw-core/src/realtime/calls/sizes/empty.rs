@@ -218,7 +218,7 @@ fn is_id(key: &str) -> bool {
 fn marker(size: usize, limit: &str) -> String {
     format!(
         "[omitted: {} over this call's {limit} event limit]",
-        super::human(size)
+        lmgw_api_types::units::fmt_bytes(size as u64)
     )
 }
 

@@ -2872,7 +2872,7 @@ depend on the core WPs and can go in any order, in this one checkout.
   DocRoute; it adds no `/api/op` and no `x-lmgw` header.
 
 **WP11 Review and acceptance.**
-- An Opus review split by area: seam and agent, binding and journal, shell, UI.
+- A review split by area: seam and agent, binding and journal, shell, UI.
 - Fixes, then UI verification with `scripts/ui-matrix.py`, the new `scripts/drive/*.json` and
   `scripts/webkit-check.py`.
 - A review page for the owner.

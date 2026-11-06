@@ -55,8 +55,13 @@ pub fn UsageKeys() -> impl IntoView {
         );
         pending.set(later.ok());
     });
+    // A `transfer` frame is no change of a key: the Devices card's
+    // Transfers section reads it (device transfers design §11.1).
     Effect::new(move |_| {
-        if live.keys.get().is_some() {
+        if live
+            .keys
+            .with(|k| k.as_ref().is_some_and(|k| k.what != "transfer"))
+        {
             refetch();
         }
     });
@@ -467,7 +472,7 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
                     <tr>
                         <th>"Key"</th>
                         <th>"Scope"</th>
-                        <th>"Spend vs budget"</th>
+                        <th class="col-spend">"Spend vs budget"</th>
                         <th class="num-h col-p2">"rpm"</th>
                         <th class="num-h col-p2">"tpm"</th>
                         <th

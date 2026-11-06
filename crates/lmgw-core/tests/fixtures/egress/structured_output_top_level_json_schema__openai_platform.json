@@ -1,0 +1,46 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"text\":{\"format\":{\"name\":\"response\",\"schema\":{\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"type\":\"json_schema\"}}}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "text": {
+        "format": {
+          "name": "response",
+          "schema": {
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": "json_schema"
+        }
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

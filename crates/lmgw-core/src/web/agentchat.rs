@@ -44,6 +44,8 @@ use lmgw_api_types::mcp_apps::{ToolReadyFrame, ToolResultFrame};
 use super::chat_caller::Caller;
 use super::chat_knowledge::KbTools;
 use super::chat_turn::{self, Events, Reply, Stopped, Turn, TurnFrame, NOT_SAVED};
+use crate::agent::claim::media::MediaClaim;
+use crate::agent::claim::{CallOn, LoopClaim};
 use crate::agent::{
     self, Budget, Cancel, DeltaSink, EventSink, LoopEvent, ResolvedTool, RunConfig, StopReason,
     ToolExecutor, TurnRunner,
@@ -55,8 +57,8 @@ use crate::ingress::responses::McpToolSpec;
 use crate::ingress::ClientProto;
 use crate::ir::{flatten_tool_result, ChatRequest, Completion, ContentPart, Message, Role, Usage};
 use crate::mcp::exec::{
-    self as mcp_exec, self_admin_tools, DocsExecutor, KbExecutor, McpExecutor, SelfAdminExecutor,
-    SplitExecutor, KB_LABEL, SELF_ADMIN_LABEL,
+    self as mcp_exec, self_admin_tools, DocsExecutor, KbExecutor, McpExecutor, MediaExecutor,
+    SelfAdminExecutor, SplitExecutor, KB_LABEL, SELF_ADMIN_LABEL,
 };
 use crate::mcp::scope::ScopedExecutor;
 use crate::proxy::{self, PerRoute, StopSignal};
@@ -64,10 +66,10 @@ use crate::state::SharedState;
 use crate::store::ThreadMcp;
 use crate::telemetry::{ADMIN_PROTO, CHAT_TOOL_PROTO};
 
-mod claim;
 mod gated;
 mod heard;
 pub(super) mod refused;
+mod trim;
 mod unheard;
 
 /// `chat_threads.kind` for an Admin Chat thread.
@@ -95,6 +97,9 @@ pub struct ToolPlan {
     /// folder's): every entry's tools run under the strictest rule set for
     /// the server it names (client-apps design §6.6).
     pub floor: crate::mcp::exec::ApprovalFloor,
+    /// The media tools' default models of the thread and its folder, laid
+    /// over Settings → Chat's (chat-media-tools design §3.8).
+    pub media: crate::mcp::media::MediaLayers,
 }
 
 impl ToolPlan {
@@ -167,8 +172,13 @@ struct ChatRunner {
     /// GPU admission for the whole loop (§9b) — see
     /// [`crate::vram::LocalHold`] for why a tool loop holds one guard
     /// rather than one per turn — let go while a heard turn's tools wait
-    /// for its user row ([`claim`]).
-    claim: claim::LoopClaim,
+    /// for its user row ([`heard`]), and before an image or audio tool call
+    /// that lands on the GPU (`agent::claim::media`).
+    claim: std::sync::Arc<LoopClaim>,
+    /// The thread's stored pictures, back as pictures for each model call
+    /// (chat-media-tools design §6.4): a tool call of this turn left its
+    /// picture in the loop's request as a ref.
+    media: super::chat_media::Hydrator,
     /// The turn continues the thread's last reply: the loop's first request
     /// ends with it, and says so ([`chat_turn::mark_continuation`]).
     continuing: bool,
@@ -222,6 +232,18 @@ impl PerRoute for ChatRunner {
         ir: &'a ChatRequest,
     ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
         Box::pin(async move {
+            // The pictures this turn's tool calls made, which the loop's
+            // request names by ref (chat-media-tools design §6.4), first:
+            // what follows judges the request as it goes out.
+            let hydrated = self
+                .media
+                .hydrated(&ir.messages)
+                .await
+                .map(|messages| ChatRequest {
+                    messages,
+                    ..ir.clone()
+                });
+            let ir = hydrated.as_ref().unwrap_or(ir);
             // A fallback that cannot see gets the turn's PDFs as their text and
             // its other images as placeholders, first: everything below fits
             // that (`chat_turn::blind`).
@@ -248,7 +270,7 @@ impl PerRoute for ChatRunner {
             // A model that cannot take the audio, once the user row is settled:
             // this call goes with the row's words (`unheard`, review V2).
             let (fit, as_text) = match fitted {
-                Err(e) if e.code() == chat_turn::AUDIO_NOT_HEARD => {
+                Err(e) if e.kind() == chat_turn::AUDIO_NOT_HEARD => {
                     let text = match &self.unheard {
                         Some(spoken) => spoken.as_transcript(&self.state, ir).await?,
                         None => None,
@@ -288,7 +310,12 @@ impl PerRoute for ChatRunner {
                 fitted: None,
                 degraded,
             };
-            if blind.is_none() && as_text.is_none() && !continuing && !fit.params_changed {
+            if hydrated.is_none()
+                && blind.is_none()
+                && as_text.is_none()
+                && !continuing
+                && !fit.params_changed
+            {
                 // The request as the loop built it is what this route takes —
                 // no copy of the whole history for nothing.
                 return Ok(None);
@@ -337,31 +364,12 @@ impl TurnRunner for ChatRunner {
                     crate::telemetry::RequestClass::Chat,
                 )
                 .await?;
-            let hold = match self.claim.for_call().await {
-                Ok(hold) => hold,
-                // A block came on while the claim was let go: the call goes
-                // where the gate sends any request under it (`claim`'s module
-                // doc, review V12).
-                Err(_) if self.state.snapshot().gpu_block().is_some() => {
-                    let opened = match claim::under_block(&self.state, ir).await {
-                        Ok(opened) => opened,
-                        Err(f) => {
-                            let route = f.route.as_deref().unwrap_or(&self.route);
-                            let fallback = f.headers.fallback_reason();
-                            let (alias, proto) = (&ir.model_alias, self.proto);
-                            refused::record(
-                                &self.state,
-                                (self.caller.key(), alias),
-                                proto,
-                                route,
-                                fallback,
-                                started,
-                                &f.error,
-                            )
-                            .await;
-                            return Err(f.error);
-                        }
-                    };
+            // The claim, regained when a tool call let it go — or, when a GPU
+            // block or a lost candidate refused that, where the gate sends the
+            // call (`agent::claim`, review V12).
+            let hold = match self.claim.call_on(&self.state, ir).await {
+                Ok(CallOn::Claim(hold)) => hold,
+                Ok(CallOn::Rerouted(opened)) => {
                     return proxy::stream_once_on(
                         &self.state,
                         opened.hold.as_ref(),
@@ -376,21 +384,22 @@ impl TurnRunner for ChatRunner {
                     )
                     .await;
                 }
-                Err(e) => {
-                    // A claim let go and refused again: its request row, as any
-                    // refusal of the loop's (`refused`).
-                    let (alias, route) = (&ir.model_alias, &self.route);
+                Err(r) => {
+                    // Refused again: its request row, as any refusal of the
+                    // loop's (`refused`).
+                    let route = r.route.as_deref().unwrap_or(&self.route);
+                    let fallback = if r.gate { r.fallback } else { self.fallback };
                     refused::record(
                         &self.state,
-                        (self.caller.key(), alias),
+                        (self.caller.key(), &ir.model_alias),
                         self.proto,
                         route,
-                        self.fallback,
+                        fallback,
                         started,
-                        &e,
+                        &r.error,
                     )
                     .await;
-                    return Err(e);
+                    return Err(r.error);
                 }
             };
             // `stream_once_on` is erased (`crate::erased`), so this poll frame
@@ -433,6 +442,9 @@ struct ChatSink {
     /// A stored thread's: which call started an MCP task, for its result
     /// frame's `task` (MCP Tasks design §4.3). `None` for a temporary one.
     tasks: Option<super::chat_tasks::FrameTasks>,
+    /// The files the turn's media calls stored, for each result frame's
+    /// `attachments` (chat-media-tools design §6.2).
+    media_files: Option<std::sync::Arc<super::chat_media::ThreadFiles>>,
 }
 
 impl ChatSink {
@@ -475,9 +487,17 @@ impl EventSink for ChatSink {
                     }
                     true
                 }
+                // The turn's row carries it (Logs); the thread has no use for it.
+                // A seal rides in the turn's IR, which the record keeps.
+                LoopEvent::ServiceTier(_) | LoopEvent::ReasoningSeal(_) => true,
                 // Nothing said after a stop is relayed or kept.
-                LoopEvent::Text(_) | LoopEvent::Reasoning(_) if self.stop.is_raised() => true,
-                LoopEvent::Text(t) => {
+                LoopEvent::Text(_) | LoopEvent::Refusal(_) | LoopEvent::Reasoning(_)
+                    if self.stop.is_raised() =>
+                {
+                    true
+                }
+                // The Chat shows a refusal as the reply it is.
+                LoopEvent::Text(t) | LoopEvent::Refusal(t) => {
                     self.first_at.get_or_insert_with(Instant::now);
                     self.text.push_str(&t);
                     self.emit_raw(TurnFrame::of("delta", &frames::TextFrame { text: t }))
@@ -559,6 +579,11 @@ impl EventSink for ChatSink {
                         ui_resource: self.ui_resources.get(&name).cloned(),
                         structured_content: structured,
                         content: Some(content),
+                        attachments: self
+                            .media_files
+                            .as_ref()
+                            .map(|f| f.take_made(&call_id))
+                            .unwrap_or_default(),
                         call_id: Some(call_id),
                         task,
                         name,
@@ -645,7 +670,12 @@ pub(super) async fn run_send(
     let resolved = turn
         .or_stop(
             &tx,
-            crate::gate::resolve(&state, &ir.model_alias, crate::gate::RouteCheck::None),
+            crate::gate::resolve(
+                &state,
+                &ir.model_alias,
+                crate::gate::RouteCheck::None,
+                crate::runtime::registry::Origin::Owner,
+            ),
         )
         .await;
     let routed = match resolved {
@@ -701,6 +731,8 @@ pub(super) async fn run_send(
             // The thread's own gate (client-apps design §6.1), no looser
             // than any rule the owner set for the server it names (§6.6).
             require_approval: plan.floor.rule(&snap, &agg, &m.server_label, &plan.mcp),
+            server_url: None,
+            connector_id: None,
         })
         .collect();
     if plan.kb.is_some() {
@@ -711,6 +743,8 @@ pub(super) async fn run_send(
             // gate them (client-apps design §6.6): tool mode adds the
             // toolset, it never ungates it — with the entry removed too.
             require_approval: plan.floor.rule(&snap, &agg, KB_LABEL, &plan.mcp),
+            server_url: None,
+            connector_id: None,
         });
     }
     // Every label that failed did so only because its device is offline, or
@@ -718,6 +752,9 @@ pub(super) async fn run_send(
     // design §5.3 as changed 2026-10-15): reported, and the turn runs
     // without them.
     let mut only_absent = false;
+    // The media tools' default models the listed tools name (chat-media-tools
+    // §3.8): the executor below runs a model-less call on them.
+    let mut media_defaults = lmgw_api_types::chat_media::MediaDefaults::default();
     if !specs.is_empty() {
         // The owner's own turn: the owner attached these labels, and the
         // gateway's scope reaches them. A device's turn resolves under its
@@ -727,7 +764,12 @@ pub(super) async fn run_send(
         let resolved = match turn
             .or_stop(
                 &tx,
-                Box::pin(mcp_exec::resolve_attached(&state, &specs, &scope)),
+                Box::pin(mcp_exec::resolve_attached_in_thread(
+                    &state,
+                    &specs,
+                    &scope,
+                    &plan.media,
+                )),
             )
             .await
         {
@@ -754,6 +796,7 @@ pub(super) async fn run_send(
         offered.extend(resolved.servers);
         ui_resources.extend(resolved.ui_resources);
         tools.extend(resolved.tools);
+        media_defaults = resolved.media_defaults;
         only_absent = !resolved.failed.is_empty() && resolved.failed.iter().all(|f| f.absent);
     }
 
@@ -875,7 +918,12 @@ pub(super) async fn run_send(
         route,
         fallback: headers.fallback_reason(),
         proto,
-        claim: claim::LoopClaim::new(admission),
+        // A regain that loads the chat model again says so as the first
+        // admission does (chat-media-tools design §5.3).
+        claim: std::sync::Arc::new(
+            LoopClaim::new(admission).reporting(super::chat_voice::RegainFrames::new(tx.clone())),
+        ),
+        media: super::chat_media::Hydrator::new(state.clone(), turn.repo, turn.thread_id),
         continuing: turn.is_continue(),
         hears: turn.hears(),
         // The spoken parts are the request's last message: the loop's
@@ -927,6 +975,38 @@ pub(super) async fn run_send(
     // Tool mode: the thread's bases and nothing else, whatever their
     // `mcp_visible` switch says (§9.4), with the thread's budget as the
     // tools' default.
+    // The image and audio tools in a thread (chat-media-tools design §6.1):
+    // their files are the thread's, named `att:N`, and the loop's claim is
+    // let go before a call that needs the GPU.
+    // Their model rows carry the thread's label (`admin` in an Admin Chat
+    // thread, as its voice and card actions do); their tool rows are
+    // `chat-tool`, as the thread's other tools'.
+    let media_files = super::chat_media::ThreadFiles::new(state.clone(), turn.repo, turn.thread_id);
+    let model_proto = if plan.admin {
+        crate::ingress::ClientProto::AdminChat
+    } else {
+        crate::ingress::ClientProto::Chat
+    };
+    split = split.with_media(
+        MediaExecutor::new(state.clone(), ctx.clone())
+            .with_proto(CHAT_TOOL_PROTO)
+            .with_model_proto(model_proto)
+            .charged_to(charged.clone())
+            .for_thread(media_files.clone())
+            // The defaults a call that leaves out `model` uses (§3.8): the
+            // ones the tool block named at the turn's start.
+            .with_defaults(media_defaults)
+            .with_hooks(std::sync::Arc::new(MediaClaim::new(
+                state.clone(),
+                runner.claim.clone(),
+            )))
+            // Each call's progress frames and its own cancel (§6.2, §6.5).
+            .with_live(super::chat_media::ThreadLive::new(
+                state.clone(),
+                turn.thread_id,
+                tx.clone(),
+            )),
+    );
     if let Some(kb) = &plan.kb {
         split = split.with_kb(
             KbExecutor::new(state.clone(), ctx.clone())
@@ -958,7 +1038,7 @@ pub(super) async fn run_send(
     let base_len = ir.messages.len();
     // What the loop's refusal below says its requests carried
     // (`TurnFrame::sent`).
-    let images = crate::gate::media_parts(&ir).images > 0;
+    let images = crate::gate::media_parts(&ir, None).images > 0;
     let tasks = match turn.repo.is_temp() {
         true => None,
         false => Some(Box::pin(super::chat_tasks::FrameTasks::new(&state, turn.thread_id)).await),
@@ -972,6 +1052,7 @@ pub(super) async fn run_send(
         first_at: None,
         ui_resources,
         tasks,
+        media_files: Some(media_files.clone()),
     };
 
     let mut stopped = None;
@@ -1062,15 +1143,23 @@ pub(super) async fn run_send(
     // A turn that ran no tool leaves an empty record once its answer is
     // trimmed off: that is no record, and stored as none — the reply then
     // replays like a plain one, reasoning included, and can be continued.
-    let ir_json = Some(trim_trailing_text(&messages, &sink.text))
-        .filter(|record| !record.is_empty())
-        .and_then(|record| serde_json::to_string(&record).ok());
+    // A record holding no call is none too, its seals saved in the reply's
+    // own column where each item stood in the reply's text (openai egress
+    // design §7.3.2); a resumed turn's follows the prior turn's record.
+    let prefix = turn.continued_text().map_or(0, str::len);
+    let (record, reasoning_seals) = trim::record_or_seals(
+        trim::trim_trailing_text(&messages, &sink.text),
+        prefix,
+        turn.is_resume(),
+    );
+    let ir_json = record.and_then(|record| serde_json::to_string(&record).ok());
     let wrote_nothing = sink.text.is_empty() && sink.reasoning.is_empty() && ir_json.is_none();
     let saved = Box::pin(turn.persist(
         &state,
         Reply {
             text: &sink.text,
             reasoning: &sink.reasoning,
+            reasoning_seals,
             prompt_tokens: sink.usage.prompt_tokens.map(|v| v as i64),
             completion_tokens: sink.usage.completion_tokens.map(|v| v as i64),
             ir_messages: ir_json.as_deref(),
@@ -1078,6 +1167,7 @@ pub(super) async fn run_send(
             stopped: stopped.is_some(),
             failed: err.is_some(),
             pending: waiting.clone(),
+            tool_files: media_files.stored(),
         },
     ))
     .await;
@@ -1171,7 +1261,7 @@ fn prefix_record(record: &mut [Message], prefix: &str) {
         return;
     };
     match first.content.iter_mut().find_map(|p| match p {
-        ContentPart::Text { text } => Some(text),
+        ContentPart::Text { text, .. } => Some(text),
         _ => None,
     }) {
         Some(text) => text.insert_str(0, prefix),
@@ -1187,32 +1277,4 @@ fn prefix_record(record: &mut [Message], prefix: &str) {
                 .insert(at, ContentPart::text(prefix.to_string()));
         }
     }
-}
-
-/// The stored IR must not repeat the final answer that `content` already holds,
-/// or a reopened thread shows it twice. Only the trailing text is dropped — the
-/// assistant's tool calls and their results, which `content` cannot represent,
-/// are exactly what this column is for.
-fn trim_trailing_text(turn: &[Message], text: &str) -> Vec<Message> {
-    let mut out = turn.to_vec();
-    if text.is_empty() {
-        return out;
-    }
-    if let Some(last) = out.last_mut() {
-        // A turn that ends on calls (a gated stop's, waiting for their
-        // decision) has no final answer: its text leads those calls, and
-        // stays with them.
-        let calls = last
-            .content
-            .iter()
-            .any(|p| matches!(p, ContentPart::ToolUse { .. }));
-        if last.role == Role::Assistant && !calls {
-            last.content
-                .retain(|p| !matches!(p, ContentPart::Text { .. }));
-            if last.content.is_empty() {
-                out.pop();
-            }
-        }
-    }
-    out
 }

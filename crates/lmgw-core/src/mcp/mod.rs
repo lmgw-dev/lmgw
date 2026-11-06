@@ -32,6 +32,8 @@ pub mod kb;
 mod known;
 mod lazy_list;
 mod listed_call;
+/// The `image__*` and `audio__*` toolsets (chat-media-tools design §3).
+pub mod media;
 /// The aggregate's exposed names: a collision prefixes, never shadows (§7).
 pub mod names;
 /// `/mcp`'s resources and the MCP Apps metadata (client-apps design §7).
@@ -429,13 +431,31 @@ pub const RESERVED_KB_PREFIX: &str = "kb";
 /// The full `kb__` string that [`RESERVED_KB_PREFIX`] guards.
 pub const RESERVED_KB_NAMESPACE: &str = "kb__";
 
+/// Namespaces reserved for the built-in image and audio toolsets ([`media`],
+/// chat-media-tools design §3.1): a southbound server that could claim
+/// `image__generate` would be handed every prompt a chat model meant for the
+/// gateway's own image models, and the pictures it sent back would pose as
+/// theirs.
+pub const RESERVED_IMAGE_PREFIX: &str = "image";
+
+/// The full `image__` string that [`RESERVED_IMAGE_PREFIX`] guards.
+pub const RESERVED_IMAGE_NAMESPACE: &str = "image__";
+
+/// [`RESERVED_IMAGE_PREFIX`]'s twin for the audio tools.
+pub const RESERVED_AUDIO_PREFIX: &str = "audio";
+
+/// The full `audio__` string that [`RESERVED_AUDIO_PREFIX`] guards.
+pub const RESERVED_AUDIO_NAMESPACE: &str = "audio__";
+
 /// Every namespace a southbound server may not occupy, as `(prefix, namespace)`
 /// — one list so a new built-in toolset cannot be added to one guard and
 /// forgotten in the other.
-pub const RESERVED_NAMESPACES: [(&str, &str); 3] = [
+pub const RESERVED_NAMESPACES: [(&str, &str); 5] = [
     (RESERVED_TOOL_PREFIX, RESERVED_TOOL_NAMESPACE),
     (RESERVED_DOCS_PREFIX, RESERVED_DOCS_NAMESPACE),
     (RESERVED_KB_PREFIX, RESERVED_KB_NAMESPACE),
+    (RESERVED_IMAGE_PREFIX, RESERVED_IMAGE_NAMESPACE),
+    (RESERVED_AUDIO_PREFIX, RESERVED_AUDIO_NAMESPACE),
 ];
 
 /// A tool dropped from the aggregate, retained so the UI/log can show *which*
@@ -751,7 +771,7 @@ impl McpManager {
     /// Publish a `tools/list_changed` nudge to every open `GET /mcp` subscriber
     /// (§8). Best-effort: with no subscribers the send is a no-op (returns
     /// `Err`), which we deliberately ignore — there is nothing to notify.
-    fn notify_tools_changed(&self) {
+    pub(crate) fn notify_tools_changed(&self) {
         let _ = self.tools_changed.send(());
     }
 

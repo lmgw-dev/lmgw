@@ -30,11 +30,13 @@ use crate::error::GatewayError;
 use crate::gate::GateHeaders;
 use crate::ingress::ClientProto;
 use crate::ir::Usage;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
 use super::*;
 
+mod alignment;
 mod asr_language;
 pub(super) mod measure;
 mod speech;
@@ -67,7 +69,7 @@ pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), Gat
     // llama-server serves /v1/audio/transcriptions on the same surface.
     if !route.upstream.protocol.speaks_openai_http() {
         return Err(GatewayError::Unsupported(format!(
-            "/v1/audio/* requires an openai-protocol upstream; alias '{alias}' resolves to \
+            "/v1/audio/* requires an OpenAI-shaped upstream (openai, openai_compatible or llama_cpp); alias '{alias}' resolves to \
              '{}' ({})",
             route.upstream.name,
             route.upstream.protocol.as_str(),
@@ -92,6 +94,7 @@ pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), Gat
 /// upstream's own message; error bodies are small, so buffering one is worth
 /// it to avoid logging a bare "HTTP 500" and relaying a foreign error shape.
 pub(super) async fn audio_send<F>(
+    state: &SharedState,
     hold: Option<&crate::vram::LocalHold>,
     route: &Route,
     build: F,
@@ -105,11 +108,12 @@ where
     let resp =
         crate::vram::send_local(hold, route, route.upstream.request_timeout(), build).await?;
     let status = resp.status();
+    state.upstream_quota.answered(route, status);
     if status.is_success() {
         return Ok(resp);
     }
     let bytes = resp.bytes().await.unwrap_or_default();
-    Err(for_protocol(crate::config::Protocol::Openai).map_error(status.as_u16(), &bytes))
+    Err(for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes))
 }
 
 /// A passthrough call that reached its upstream's response headers — the
@@ -143,9 +147,10 @@ pub(super) struct MediaOutcome {
 }
 
 /// Response headers worth carrying back from the upstream. `content-length`
-/// is safe to forward because nothing decompresses in between (the client is
-/// built without gzip/brotli), and without it a 300 KB WAV (or a base64 PNG)
-/// arrives chunked with no size for the client to show or seek against.
+/// is safe to forward: the client decodes a gzip answer, and then reqwest
+/// drops its `content-length` with its `content-encoding`, so a length that
+/// is here is the body's. Without it a 300 KB WAV (or a base64 PNG) arrives
+/// chunked with no size for the client to show or seek against.
 const MEDIA_PASSTHROUGH_HEADERS: [header::HeaderName; 3] = [
     header::CONTENT_TYPE,
     header::CONTENT_LENGTH,
@@ -212,11 +217,12 @@ pub(super) async fn finish_media(
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
             )
             .await;
             return out;
@@ -247,11 +253,31 @@ pub(super) async fn finish_media(
     // What a cloud answer says it used, and an image answer's images, read
     // as they pass (`usage`).
     let mut tap = usage::UsageTap::new(state, &route, &resp, answer);
+    // The length the answer declares, which the client's response states
+    // too: once that much went out, hyper drops the body — the channel
+    // closing then is the answer's end, not the client's going.
+    let mut left = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
     tokio::spawn(async move {
         let mut upstream = resp.bytes_stream();
         let mut error: Option<(String, String)> = None;
         let mut head: Option<(String, Vec<u8>)> = learns_rate.map(|m| (m, Vec::new()));
-        while let Some(chunk) = upstream.next().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                // The client's end is gone (hyper read the connection's EOF):
+                // heard here, not only at the next chunk that fails to send,
+                // which an engine still synthesizing or transcribing puts
+                // far away — with the model's claim held all the while.
+                () = tx.closed(), if left != Some(0) => {
+                    error = Some(("canceled".into(), "client disconnected".into()));
+                    break;
+                }
+                next = upstream.next() => next,
+            };
+            let Some(chunk) = next else { break };
             match chunk {
                 Ok(b) => {
                     tap.feed(&b);
@@ -265,6 +291,7 @@ pub(super) async fn finish_media(
                             head = None;
                         }
                     }
+                    left = left.map(|l| l.saturating_sub(b.len() as u64));
                     if tx.send(Ok(b)).await.is_err() {
                         error = Some(("canceled".into(), "client disconnected".into()));
                         break;
@@ -302,6 +329,7 @@ pub(super) async fn finish_media(
                 rung: None,
                 degraded: None,
                 quantities,
+                service_tier: Default::default(),
             },
             status.as_u16(),
             Some(ttfb_ms),
@@ -368,12 +396,15 @@ fn note_buffered_answer(
 }
 
 /// Resolve the alias, rewrite `model` to the concrete upstream id, and send —
-/// the shared JSON path behind both audio endpoints.
+/// the shared JSON path behind both audio endpoints. `origin` is whose
+/// traffic the request is (`RequestCtx::origin`, per-request background
+/// design §3).
 async fn audio_json_call(
     state: &SharedState,
     endpoint: &str,
     body: &Value,
     started: Instant,
+    origin: Origin,
 ) -> Result<MediaOutcome, Failed> {
     let alias = body.get("model").and_then(Value::as_str).ok_or((
         None,
@@ -390,7 +421,7 @@ async fn audio_json_call(
         route,
         hold: admission,
         headers,
-    } = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio)
+    } = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio, origin)
         .await
         .map_err(|f| (f.route, f.headers, f.error))?;
     let mut out = body.clone();
@@ -411,7 +442,7 @@ async fn send_json(
     if let Some(hold) = admission.as_ref() {
         hold.note_sending();
     }
-    let sent = audio_send(admission.as_ref(), &route, |r| {
+    let sent = audio_send(state, admission.as_ref(), &route, |r| {
         let url = format!("{}{endpoint}", r.upstream.base());
         Ok(apply_bearer_auth(
             state.http.post(url).json(out),
@@ -479,7 +510,7 @@ pub async fn handle_task_run(state: SharedState, ctx: RequestCtx, body: Value) -
     {
         return r;
     }
-    let tasked = task::task_call(&state, "/tasks/run", &body, started).await;
+    let tasked = task::task_call(&state, "/tasks/run", &body, started, ctx.origin()).await;
     let mut resp = finish_audio(&state, &ctx, alias, started, tasked.result).await;
     if let Some(v) = tasked.report.header_value() {
         resp.headers_mut().insert(SPEECH_HEADER, v);
@@ -507,7 +538,7 @@ pub async fn handle_task_stream(state: SharedState, ctx: RequestCtx, body: Value
     {
         return r;
     }
-    let tasked = task::task_call(&state, "/tasks/stream", &body, started).await;
+    let tasked = task::task_call(&state, "/tasks/stream", &body, started, ctx.origin()).await;
     let mut resp = finish_audio(&state, &ctx, alias, started, tasked.result).await;
     if let Some(v) = tasked.report.header_value() {
         resp.headers_mut().insert(SPEECH_HEADER, v);
@@ -535,12 +566,19 @@ pub(crate) async fn voices_if_running(
     state: &SharedState,
     alias: &str,
 ) -> Option<(GateHeaders, Result<Bytes, GatewayError>)> {
-    // The gate's routing stages only — never admission, which is the point.
-    let routed =
-        match crate::gate::resolve(state, alias, crate::gate::RouteCheck::AudioVoices).await {
-            Ok(r) => r,
-            Err(f) => return Some((f.headers, Err(f.error))),
-        };
+    // The gate's routing stages only — never admission, which is the point
+    // (so whose traffic it is changes nothing).
+    let routed = match crate::gate::resolve(
+        state,
+        alias,
+        crate::gate::RouteCheck::AudioVoices,
+        Origin::Owner,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(f) => return Some((f.headers, Err(f.error))),
+    };
     let mut route = routed.resolved().clone();
     let local = crate::vram::classify(&route);
     if let Some(target) = &local {
@@ -582,7 +620,7 @@ pub(super) async fn voices_body(
     hold: Option<&crate::vram::LocalHold>,
     route: &Route,
 ) -> Result<Bytes, GatewayError> {
-    let resp = audio_send(hold, route, |r| {
+    let resp = audio_send(state, hold, route, |r| {
         // `RequestBuilder::query` is behind a reqwest feature this build does
         // not enable, so the concrete model id is encoded with the shared
         // helper.
@@ -744,7 +782,7 @@ pub async fn handle_audio_upload(
         {
             return r;
         }
-        let result = audio_json_call(&state, which.path(), &body, started)
+        let result = audio_json_call(&state, which.path(), &body, started, ctx.origin())
             .await
             .map_err(|(r, f, e)| (r, f, explain_missing_route(which, e)));
         return finish_audio(&state, &ctx, alias, started, result).await;
@@ -775,7 +813,7 @@ pub async fn handle_audio_upload(
     {
         return r;
     }
-    let result = multipart_call(&state, &alias, &fields, which, started, None).await;
+    let result = multipart_call(&state, &alias, &fields, which, started, ctx.origin(), None).await;
     finish_audio(&state, &ctx, alias, started, result).await
 }
 
@@ -790,13 +828,15 @@ pub async fn handle_audio_upload(
 /// call at the gate or at the send, as a `canceled` error. Raced here rather
 /// than around the whole call, so a stop once the gate opened still names
 /// the route it opened on the row — as the chat path's does (package A
-/// review #4).
+/// review #4). `origin` is whose traffic the call is (per-request background
+/// design §3).
 pub(super) async fn multipart_call(
     state: &SharedState,
     alias: &str,
     fields: &[MultipartField],
     which: AudioUpload,
     started: Instant,
+    origin: Origin,
     stop: Option<&StopSignal>,
 ) -> Result<MediaOutcome, Failed> {
     let before_answer = || canceled("stopped by the caller before the upstream answered");
@@ -804,7 +844,7 @@ pub(super) async fn multipart_call(
     let opened = tokio::select! {
         biased;
         () = stopped(stop) => return Err((None, GateHeaders::default(), before_answer())),
-        o = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio) => o,
+        o = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio, origin) => o,
     };
     let opened = opened.map_err(|f| (f.route, f.headers, f.error))?;
     multipart_send(state, opened, fields, which, started, stop).await
@@ -848,13 +888,23 @@ pub(super) async fn multipart_send(
     let sent = tokio::select! {
         biased;
         () = stopped(stop) => None,
-        s = audio_send(admission.as_ref(), &route, encode) => Some(s),
+        s = audio_send(state, admission.as_ref(), &route, encode) => Some(s),
     };
     let Some(sent) = sent else {
         return Err((Some(Box::new(route)), headers, before_answer()));
     };
     match sent {
         Ok(resp) => {
+            // The alignment route answers one typed shape, whatever family
+            // aligned ([`alignment`]); a refusal is relayed like any other.
+            let resp = if which == AudioUpload::Alignment && resp.status().is_success() {
+                match alignment::typed(state, &route, fields, resp).await {
+                    Ok(typed) => typed,
+                    Err(e) => return Err((Some(Box::new(route)), headers, e)),
+                }
+            } else {
+                resp
+            };
             note_buffered_answer(admission.as_ref(), &resp, false);
             Ok(MediaOutcome {
                 ttfb_ms: started.elapsed().as_millis() as i64,

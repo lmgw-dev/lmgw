@@ -85,13 +85,13 @@ pub(super) fn substitute(
         let whole = m
             .content
             .iter()
-            .position(|p| matches!(p, ContentPart::Text { text } if text == t));
+            .position(|p| matches!(p, ContentPart::Text { text, .. } if text == t));
         if let Some(i) = whole {
             m.content.remove(i);
             continue;
         }
         for p in m.content.iter_mut() {
-            if let ContentPart::Text { text } = p {
+            if let ContentPart::Text { text, .. } = p {
                 if let Some(head) = text.strip_suffix(t.as_str()) {
                     *text = head.strip_suffix("\n\n").unwrap_or(head).to_string();
                     break;

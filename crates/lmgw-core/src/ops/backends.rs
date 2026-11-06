@@ -95,6 +95,19 @@ fn moving_tag_users(usage: &UsageIndex, moving: &str) -> Vec<ImageUse> {
     users
 }
 
+/// Say on each run whether its image is on this machine, from the one image
+/// listing `usage` holds. Without it (podman could not be asked) the answer
+/// stays unknown rather than "deleted".
+fn mark_present<'a>(
+    runs: impl IntoIterator<Item = &'a mut lmgw_api_types::builds::BuildRun>,
+    usage: Option<&UsageIndex>,
+) {
+    let Some(usage) = usage else { return };
+    for r in runs {
+        r.image_present = r.image_id.as_deref().map(|id| usage.has_image(id));
+    }
+}
+
 /// One Builds-tab row: the build, its newest and its current (promoted) run,
 /// its live job, who uses its moving tag, and its update badge — the last
 /// check's remote facts evaluated against the build and its runs as they are
@@ -115,6 +128,8 @@ async fn view_of(
     let current_run = store::promoted_build_run(&state.db, build.id)
         .await
         .map_err(db)?;
+    let (mut last_run, mut current_run) = (last_run, current_run);
+    mark_present(last_run.iter_mut().chain(current_run.iter_mut()), usage);
     let live_job_id = state
         .jobs
         .live_by_key(JobKind::BuildRun, &run::job_key(build.id))
@@ -173,9 +188,11 @@ pub async fn build_get(
 ) -> Result<BuildGetResponse, String> {
     let build = get_build(state, args.id).await?;
     let (index, usage_error) = usage(state).await;
-    let (runs, more) = store::list_build_runs_page(&state.db, build.id, args.before, args.limit)
-        .await
-        .map_err(db)?;
+    let (mut runs, more) =
+        store::list_build_runs_page(&state.db, build.id, args.before, args.limit)
+            .await
+            .map_err(db)?;
+    mark_present(runs.iter_mut(), index.as_ref());
     Ok(BuildGetResponse {
         view: view_of(state, build, index.as_ref()).await?,
         runs,
@@ -197,7 +214,7 @@ pub async fn build_get(
 pub async fn build_set(
     state: &SharedState,
     args: BuildSetArgs,
-) -> Result<BuildSetResponse, String> {
+) -> Result<BuildSetResponse, crate::principal::Refusal> {
     let resp = build_set_inner(state, args).await?;
     // An edit can start "definition changed since last run"; a delete ends
     // a badge (§8).
@@ -218,7 +235,7 @@ async fn cpus_enforceable(state: &SharedState, spec: &BuildSpec) -> Result<Vec<S
 async fn build_set_inner(
     state: &SharedState,
     args: BuildSetArgs,
-) -> Result<BuildSetResponse, String> {
+) -> Result<BuildSetResponse, crate::principal::Refusal> {
     let built = |b: Build, notes: Vec<String>| BuildSetResponse {
         build: Some(b),
         notes,
@@ -268,19 +285,39 @@ async fn delete_build(
     state: &SharedState,
     id: i64,
     delete_images: bool,
-) -> Result<BuildSetResponse, String> {
+) -> Result<BuildSetResponse, crate::principal::Refusal> {
     let build = get_build(state, id).await?;
     if let Some(job) = state.jobs.live_by_key(JobKind::BuildRun, &run::job_key(id)) {
         return Err(format!(
             "build '{}' has a run in progress (job {}) — cancel it (job_cancel) or let it finish, \
              then delete the build",
             build.spec.slug, job.id
-        ));
+        )
+        .into());
     }
     // Read before the row goes: afterwards its runs no longer name it.
     let runs = store::list_runs_for_build(&state.db, id)
         .await
         .map_err(db)?;
+    // From the row's delete on, a task of its own (*changed 2026-10-24*,
+    // see [`crate::detached::detached`]): a dropped request would leave the
+    // deleted build's images and caches on disk, with no row left to delete
+    // them from.
+    let st = state.clone();
+    crate::detached::detached("deleting the build", async move {
+        delete_build_now(&st, id, build, runs, delete_images).await
+    })
+    .await?
+}
+
+/// [`delete_build`] from the row's delete on.
+async fn delete_build_now(
+    state: &SharedState,
+    id: i64,
+    build: Build,
+    runs: Vec<lmgw_api_types::builds::BuildRun>,
+    delete_images: bool,
+) -> Result<BuildSetResponse, crate::principal::Refusal> {
     store::delete_build(&state.db, id).await.map_err(db)?;
     let mut resp = BuildSetResponse::default();
     if delete_images {
@@ -483,8 +520,15 @@ pub async fn build_run(
     state: &SharedState,
     args: BuildRunArgs,
     trigger: BuildTrigger,
-) -> Result<BuildRunStarted, String> {
-    run::start_run(state, args.id, trigger, args.rebuild).await
+) -> Result<BuildRunStarted, crate::principal::Refusal> {
+    // A task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): the run's row is written before its
+    // job is spawned, and a dropped request would leave a row no job runs.
+    let st = state.clone();
+    crate::detached::detached("starting the build", async move {
+        Ok(run::start_run(&st, args.id, trigger, args.rebuild).await?)
+    })
+    .await?
 }
 
 /// `build_run_log` (§15): a byte-offset chunk of a run's log (at most
@@ -511,22 +555,38 @@ pub async fn build_run_log(
 pub async fn build_promote(
     state: &SharedState,
     args: BuildPromoteArgs,
-) -> Result<PromoteResponse, String> {
-    let resp = run::promote_run(state, args.run_id).await?;
-    // "Make current" changes the run the badge compares against (§8).
-    updates::publish(state).await;
-    Ok(resp)
+) -> Result<PromoteResponse, crate::principal::Refusal> {
+    // A task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): a dropped request would leave the tag
+    // moved and the run marked current with the badge comparing against the
+    // old one.
+    let st = state.clone();
+    crate::detached::detached("making the run current", async move {
+        let resp = run::promote_run(&st, args.run_id).await?;
+        // "Make current" changes the run the badge compares against (§8).
+        updates::publish(&st).await;
+        Ok(resp)
+    })
+    .await?
 }
 
 /// `build_verify` (§15, "Verify now").
 pub async fn build_verify(
     state: &SharedState,
     args: BuildVerifyArgs,
-) -> Result<VerifyReport, String> {
-    let report = run::verify_run(state, args.run_id).await?;
-    // A run turning `succeeded` can become the one the badge compares against.
-    updates::publish(state).await;
-    Ok(report)
+) -> Result<VerifyReport, crate::principal::Refusal> {
+    // A task of its own (*changed 2026-10-24*, see
+    // [`crate::detached::detached`]): a dropped request would leave the
+    // run's new status written and the badge comparing against the old one.
+    let st = state.clone();
+    crate::detached::detached("verifying the run", async move {
+        let report = run::verify_run(&st, args.run_id).await?;
+        // A run turning `succeeded` can become the one the badge compares
+        // against.
+        updates::publish(&st).await;
+        Ok(report)
+    })
+    .await?
 }
 
 /// `build_updates_check` (§15, §8 **Check now**): one build (`id`), or every
@@ -1029,7 +1089,8 @@ pub async fn build_patch(state: &SharedState, p: BuildPatch) -> Result<BuildSet,
             delete_images: p.delete_images.unwrap_or(false),
         },
     )
-    .await?;
+    .await
+    .map_err(|r| r.message)?;
     let next_step = resp.build.as_ref().map(|b| {
         format!(
             "lmgw__build_run id={} starts a run (it takes minutes; poll lmgw__builds id={} and \

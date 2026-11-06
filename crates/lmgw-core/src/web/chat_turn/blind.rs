@@ -70,7 +70,7 @@ impl Blind {
         ir: &ChatRequest,
     ) -> Option<ChatRequest> {
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if self.text_form.is_none() && !carries_images(ir) {
+        if self.text_form.is_none() && !carries_images(ir, &route.upstream) {
             return None;
         }
         let unseen = blind_fallback(state, route, &ir.model_alias).await?;
@@ -96,8 +96,9 @@ impl Blind {
                 );
             }
         }
-        let (out, n) = if carries_images(&out) {
-            self.announced.without_images(&out, &unseen)
+        let (out, n) = if carries_images(&out, &route.upstream) {
+            self.announced
+                .without_images(&out, &route.upstream, &unseen)
         } else {
             (out, 0)
         };

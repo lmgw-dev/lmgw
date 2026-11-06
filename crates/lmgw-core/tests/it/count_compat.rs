@@ -61,6 +61,7 @@ async fn gateway(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -168,8 +169,17 @@ async fn messages_count_on_anthropic_renders_the_reasoning_header() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let sent: Value =
-        serde_json::from_slice(&mock.received_requests().await.unwrap()[0].body).unwrap();
+    let sent: Value = serde_json::from_slice(
+        &mock
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .find(|r| r.url.path() == "/v1/messages/count_tokens")
+            .unwrap()
+            .body,
+    )
+    .unwrap();
     assert_eq!(sent["thinking"], json!({"type": "disabled"}));
     assert!(sent.get("output_config").is_none(), "{sent}");
 
@@ -228,6 +238,7 @@ async fn messages_count_on_anthropic_keeps_the_rest_of_output_config() {
         .await
         .unwrap()
         .iter()
+        .filter(|r| r.url.path() == "/v1/messages/count_tokens")
         .map(|r| serde_json::from_slice(&r.body).unwrap())
         .collect();
     assert_eq!(sent[0]["thinking"], json!({"type": "adaptive"}));
@@ -330,7 +341,7 @@ async fn messages_count_on_generic_openai_flattens_and_says_so() {
     // A model tiktoken knows: flattened, and nothing else.
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "gpt-4o",
     )
@@ -347,7 +358,7 @@ async fn messages_count_on_generic_openai_flattens_and_says_so() {
     // number at all.
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "some-open-model",
     )
@@ -461,7 +472,7 @@ async fn messages_count_errors_are_anthropic_shaped() {
     let mock = MockServer::start().await;
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "gpt-4o",
     )
@@ -528,12 +539,12 @@ async fn messages_count_relays_an_upstream_refusal_in_anthropic_shape() {
         json!({"model": "my-model", "messages": []}),
     )
     .await;
-    // The provider's status and words, in the envelope every lmgw Anthropic
-    // route gives an upstream error (`api_error`, as on `/v1/messages`).
+    // The provider's status and words, typed by the status as every lmgw
+    // Anthropic route types an upstream error (api-compat design §9).
     assert_eq!(resp.status(), 400);
     let err: Value = resp.json().await.unwrap();
     assert_eq!(err["type"], "error");
-    assert_eq!(err["error"]["type"], "api_error");
+    assert_eq!(err["error"]["type"], "invalid_request_error");
     assert!(
         err["error"]["message"]
             .as_str()
@@ -554,10 +565,8 @@ async fn held(fallback: bool) -> (Gpu, Gw) {
     gpu.model("chat-model", GIB).await;
     if fallback {
         gpu.cloud("cloud-chat", None).await;
-        let mut s = gpu.state.snapshot().settings.clone();
-        s.hold.fallback_alias = Some("cloud-chat".into());
-        store::save_settings(&gpu.state.db, &s).await.unwrap();
-        gpu.state.reload_snapshot().await.unwrap();
+        crate::support::fallbacks::every_chat_model_falls_back_to(&gpu.state, Some("cloud-chat"))
+            .await;
     }
     lmgw_core::ops::hold_set(&gpu.state, true).await.unwrap();
     let gw = common::serve(gpu.state.clone()).await;
@@ -965,7 +974,11 @@ async fn tokenize_without_model_is_a_llama_400() {
 
 #[tokio::test]
 async fn tokenize_on_a_cloud_model_is_501_not_supported() {
-    for protocol in [Protocol::Openai, Protocol::Anthropic, Protocol::Gemini] {
+    for protocol in [
+        Protocol::OpenaiCompatible,
+        Protocol::Anthropic,
+        Protocol::Gemini,
+    ] {
         let mock = MockServer::start().await;
         Mock::given(any())
             .respond_with(ResponseTemplate::new(500))
@@ -1145,7 +1158,7 @@ async fn count_tokens_flags_a_guessed_tokenizer() {
 
     let (_s, gw) = gateway(
         "http://127.0.0.1:1",
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "gpt-9-something",
     )
@@ -1163,7 +1176,7 @@ async fn count_tokens_flags_a_guessed_tokenizer() {
     // A model tiktoken knows is its own exact count.
     let (_s, gw) = gateway(
         "http://127.0.0.1:1",
-        Protocol::Openai,
+        Protocol::OpenaiCompatible,
         UpstreamKind::Generic,
         "gpt-4o",
     )

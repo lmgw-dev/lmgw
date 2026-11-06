@@ -6,7 +6,7 @@
 //! the thread list that resolves nothing. Mock upstreams and stored rows
 //! only; nothing is started.
 
-use lmgw_core::config::{HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{Protocol, UpstreamKind};
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewAlias, NewAudioModel, NewUpstream};
 use serde_json::{json, Value};
@@ -46,12 +46,7 @@ async fn audio_row(
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: if fallback.is_some() {
-                HoldFallbackMode::Alias
-            } else {
-                HoldFallbackMode::Inherit
-            },
-            hold_fallback: fallback.map(str::to_string),
+            fallback: fallback.map(str::to_string),
         },
     )
     .await
@@ -67,7 +62,7 @@ async fn rows(state: &SharedState, provider: &wiremock::MockServer) {
         &state.db,
         &NewUpstream {
             name: "provider".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", provider.uri()),
             api_key: Some("sk-test".into()),
@@ -93,13 +88,14 @@ async fn rows(state: &SharedState, provider: &wiremock::MockServer) {
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "tts", "endpoints": ["/v1/audio/speech"], "source": "owner"
             } })),
+            fallback: None,
         },
     )
     .await
     .unwrap();
     audio_row(state, "gpu-tts", "tts", None, Some("cloud-tts")).await;
     audio_row(state, "cpu-asr", "asr", Some("cpu"), Some("cloud-tts")).await;
-    audio_row(state, "gpu-asr", "asr", None, Some("audio/gpu-tts")).await;
+    audio_row(state, "gpu-asr", "asr", None, Some("audio/cpu-asr")).await;
     state.reload_snapshot().await.unwrap();
 }
 
@@ -151,8 +147,9 @@ async fn the_resolution_names_hold_fallbacks_cpu_rows_and_aliases_off_this_machi
     assert_eq!(r["problems"], json!([]));
 
     // The provider's alias itself: off this machine, no hold involved. A
-    // GPU ASR row whose fallback is itself local: the hold would refuse,
-    // and the page can say why.
+    // GPU ASR row whose fallback is itself local — the CPU row, which the
+    // hold leaves alone: a hop of its chain (openai egress design §14.3),
+    // offered as the fallback.
     store_voice(
         &state,
         tid,
@@ -164,11 +161,11 @@ async fn the_resolution_names_hold_fallbacks_cpu_rows_and_aliases_off_this_machi
     assert_eq!(r["tts"]["managed"], false);
     assert_eq!(r["tts"]["cpu"], false);
     assert_eq!(r["tts"]["fallback"], Value::Null);
-    assert_eq!(r["asr"]["fallback"], Value::Null);
     assert_eq!(
-        r["asr"]["fallback_unusable"],
-        json!({ "alias": "audio/gpu-tts", "why": "is itself a local model" })
+        r["asr"]["fallback"],
+        json!({ "alias": "audio/cpu-asr", "local": true })
     );
+    assert_eq!(r["asr"]["fallback_unusable"], Value::Null);
 }
 
 #[tokio::test]

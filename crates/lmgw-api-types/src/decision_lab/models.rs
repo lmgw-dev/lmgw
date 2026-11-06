@@ -46,8 +46,9 @@ pub struct DecisionLabModel {
     /// The GPU hold (or a benchmark's lease) pauses it now: a GPU row while
     /// the hold is on. A CPU row and a cloud model never are.
     pub held: bool,
-    /// The alias that answers for it while it is held, when that alias can.
-    pub hold_fallback: Option<String>,
+    /// The model or alias that answers for it while it is held, when that
+    /// one can (its configured fallback, the first hop of its chain).
+    pub fallback: Option<String>,
     /// It reads images: its running server's `vision`, else an `image` among
     /// its input modalities.
     pub reads_images: bool,
@@ -78,7 +79,7 @@ pub struct DecisionPrice {
     /// Why its route did not resolve (a candidate alias picks its model per
     /// request); `rows` is empty then.
     pub unresolved: Option<String>,
-    /// While a local row is held and its `hold_fallback` can answer, the
+    /// While a local row is held and its `fallback` can answer, the
     /// price of the alias that answers every request instead (the rows the
     /// gateway then records it at). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]

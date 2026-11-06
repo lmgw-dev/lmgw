@@ -1,7 +1,8 @@
 //! Self-update from a release feed: an app polls a small JSON manifest
 //! (`latest.json`) that its CI publishes with every release, compares it to
 //! the running build's version, and — on a newer one — downloads the RPM it
-//! names and hands it to `pkexec dnf install`.
+//! names and hands it to `pkexec dnf install` (both by absolute path, see
+//! [`install`]).
 //!
 //! - [`manifest`]: the manifest's types and the version order ([`is_newer`]);
 //! - [`feed`]: where the manifest lives and how to authenticate there
@@ -26,14 +27,17 @@
 //!
 //! **The download path is the caller's.** [`download_rpm`] writes where it is
 //! told and [`install_rpm`] installs what it is given. Pass a fixed basename
-//! under a directory the app owns (e.g. `std::env::temp_dir()` joined with
-//! `"<app>-update.rpm"`) — never a path derived from the manifest, whose
-//! `rpm.file` comes from the feed.
+//! under a directory only the user can write ([`private_dir`]: `<app>` under
+//! `$XDG_RUNTIME_DIR`, 0700) — not a fixed name in a shared `/tmp`, and never a
+//! path derived from the manifest, whose `rpm.file` comes from the feed.
+//! [`download_rpm`] creates the file fresh (`O_EXCL | O_NOFOLLOW`, 0600).
 
 pub mod feed;
 pub mod install;
 pub mod manifest;
+pub mod private;
 
 pub use feed::{check, download_rpm, fetch_manifest, Error, Feed, FeedAuth};
 pub use install::{can_self_install, install_rpm, InstallError};
 pub use manifest::{is_newer, ReleaseManifest, RpmArtifact, UpdateInfo};
+pub use private::private_dir;

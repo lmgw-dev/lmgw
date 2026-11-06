@@ -5,7 +5,7 @@
 //! Shared rather than mirrored, for the reason [`image_lab`](crate::image_lab)
 //! and [`scope`](crate::scope) are: the server stores exactly these shapes (a
 //! run's `inputs` embeds the build definition as it was built) and the
-//! Backends page edits them, so a second definition on either side would be
+//! Engines page edits them, so a second definition on either side would be
 //! the first thing to drift. Validation, tags and the config hash stay
 //! server-side (`lmgw_core::backends`). The one piece of tag logic here is the
 //! engine → image repository mapping and the moving tag built from it, which
@@ -119,9 +119,8 @@ impl Forge {
     }
 }
 
-/// The GPU backend a build targets. Labelled **GPU backend** on the
-/// Backends page, so it does not read as the page's own subject. Picks the
-/// preset's Dockerfile candidate.
+/// The GPU backend a build targets, labelled **GPU backend** on the Engines
+/// page. Picks the preset's Dockerfile candidate.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -340,7 +339,7 @@ pub struct BuildSpec {
     /// Extra `--build-arg` lines, one `KEY=VALUE` per line.
     pub build_args: String,
     /// Keep podman's layer cache (`--layers=true`). Off by default: no
-    /// multi-GB intermediates are left behind.
+    /// multi-GiB intermediates are left behind.
     pub keep_layers: bool,
     /// How many previous runs' immutable tags to keep. `None` = keep all.
     pub keep_runs: Option<u32>,
@@ -458,7 +457,7 @@ impl BuildRunStatus {
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BuildTrigger {
-    /// A click on the Backends page (or the `/api` op behind it).
+    /// A click on the Engines page (or the `/api` op behind it).
     #[default]
     Manual,
     /// `lmgw__build_run`.
@@ -560,6 +559,13 @@ pub struct BuildRun {
     pub cfg_hash: Option<String>,
     /// Full image ID (no `sha256:`).
     pub image_id: Option<String>,
+    /// Whether `image_id` is on this machine now, read from one podman image
+    /// listing per answer. `image_id` is history (which image the run made)
+    /// and stays after the image is deleted; this says whether the image can
+    /// still be tagged, verified or deleted. `None` when the run made no image,
+    /// and when podman could not be asked: unknown is not "deleted". Filled by
+    /// the `builds` and `build_get` ops, never stored.
+    pub image_present: Option<bool>,
     /// Every tag this run put on its image (immutable, and the moving tag
     /// when promoted).
     pub tags: Vec<String>,
@@ -864,7 +870,7 @@ pub const MAX_BUILD_UPDATE_CHECK_HOURS: u32 = 8760;
 /// `Some` on a build view once the build has been checked against a run it
 /// can be compared with; `None` before its first check, and for a build with
 /// no succeeded (or unverified) run. A status with no `reasons` is **up to
-/// date as of `checked_at`** — `has_update` is what the Backends nav
+/// date as of `checked_at`** — `has_update` is what the Engines nav
 /// badge counts. What could not be checked is in `errors`, never in `reasons`:
 /// a rate-limited forge is not an update.
 ///
@@ -1425,19 +1431,22 @@ pub struct BuildUpdatesResponse {
     pub updates: Vec<BuildUpdateEntry>,
 }
 
-/// The live `updates` frame on `/api/events`: sent when a dashboard connects, and again whenever a
-/// check ends,
-/// a run finishes, a build is saved, promoted or verified, or an image is
-/// pulled — so the Backends badge is current without the page polling
-/// anything.
+/// The live `updates` frame on `/api/events`: sent when a dashboard
+/// connects, and again whenever a check ends, a run finishes, a build is
+/// saved, promoted or verified, an image is pulled, or a model row starts or
+/// stops running an image — so the Engines badge is current without the
+/// page polling anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdatesSummary {
     /// Builds whose update status has `has_update` true.
     pub builds_with_updates: u32,
-    /// Registry images in use whose registry update has `update_available`
-    /// true.
+    /// Registry images a model row runs (its own image, or its class's
+    /// default while it has none) whose registry update has
+    /// `update_available` true. A class default no row follows is checked
+    /// too, and its update is on the Engines page, but it is not counted
+    /// here.
     pub images_with_updates: u32,
     /// When the last full check (every build and image) ended; `None` before
     /// the first one.
@@ -1456,7 +1465,9 @@ pub struct ContainerImagePullStarted {
     pub image: String,
 }
 
-/// `JobRow.detail` for `kind = "image_pull"`: podman's latest output line.
+/// `JobRow.detail` for `kind = "image_pull"`: podman's latest output line,
+/// and the bytes downloaded so far (machine-check design §5). The job's
+/// own `done`/`total` are the same bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1466,6 +1477,16 @@ pub struct ImagePullJobDetail {
     /// not on this machine.
     pub old_id: Option<String>,
     pub last_line: String,
+    /// Compressed layer bytes downloaded so far, as Podman's API reports
+    /// them; 0 while nothing was reported, and on the `podman pull` command's
+    /// path, which reports none.
+    pub done_bytes: u64,
+    /// The whole download: the compressed size of the layers the registry's
+    /// manifest lists for this machine, less those Podman found it already
+    /// had. `None` when it is not known; `size_note` then says why.
+    pub total_bytes: Option<u64>,
+    /// Why the size is not known, when it is not: "size not known — …".
+    pub size_note: Option<String>,
 }
 
 /// The result of a finished `image_pull` job (stored on its job row). A pull
@@ -1484,12 +1505,14 @@ pub struct ImagePullResult {
     /// The reference now names a different image than before.
     pub updated: bool,
     pub used_by: Vec<ImageUse>,
-    /// podman's whole output, line by line.
+    /// podman's output, line by line: the `podman pull` command's whole
+    /// output, or through Podman's API each blob's changes (not its byte
+    /// counts) and a closing line of what came down.
     pub log: Vec<String>,
 }
 
 /// `container_image_pull_status` response: one `image_pull` job as it
-/// stands — how the Backends page learns what a finished pull did (the jobs
+/// stands — how the Engines page learns what a finished pull did (the jobs
 /// feed carries only running jobs, and a job row's result is not on it).
 /// `result` is set once the job is `done`; `error` once it `failed`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1501,7 +1524,8 @@ pub struct ContainerImagePullStatus {
     pub image: String,
     /// `queued | running | done | failed | canceled`.
     pub status: String,
-    /// The latest progress while it runs (podman's last line).
+    /// The latest progress while it runs (podman's last line, the bytes so
+    /// far).
     pub detail: Option<ImagePullJobDetail>,
     pub result: Option<ImagePullResult>,
     pub error: Option<String>,

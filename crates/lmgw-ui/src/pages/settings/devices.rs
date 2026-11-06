@@ -3,7 +3,8 @@
 //! confirmation (§4.1) — and the bounds of the device link's trust: a
 //! pairing token's lifetime, the two certificates' validity, the device
 //! listener's three timeouts and the failed-enrolment rate, each in its
-//! stated range (`lmgw_api_types::device_link`).
+//! stated range (`lmgw_api_types::device_link`); and how long a transfer
+//! offer between devices lasts (device transfers design §7).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -130,6 +131,20 @@ pub(super) const DEVICES: &[Def] = &[
     .s()
     .hint("the same, from one address (IPv6 by /64), whose oldest goes; 1 to 4096")
     .terms("device connection limit per peer address handshake unauthenticated"),
+    f(
+        "network",
+        "devices",
+        "devices.transfer_expiry_days",
+        "Transfer offers last",
+        range(wire::TRANSFER_EXPIRY_DAYS),
+    )
+    .s()
+    .unit("days")
+    .hint(
+        "a file one device offers another through lmgw is deleted if it is not fetched by then; \
+         applies to the next offer; 1 to 3650",
+    )
+    .terms("device transfer offer file expiry expire relay storage days"),
 ];
 
 /// The listener's three settings as saved: on, scope, port (the effective
@@ -357,7 +372,7 @@ pub(super) fn ListenerPanel(page: Page, id: String, hidden: Signal<bool>) -> imp
             {move || {
                 let (line, tone) = state_line(&status.get());
                 view! {
-                    <span class="chip" class:warn=tone == "warn" class:off=tone == "off">
+                    <span class="chip chip-line" class:warn=tone == "warn" class:off=tone == "off">
                         <span class="dot"></span>
                         {line}
                     </span>

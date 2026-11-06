@@ -24,30 +24,45 @@ use crate::store::{self};
 /// all toggle this, and two of them arriving at the same answer within a tick
 /// of each other is normal. The response still reports the current state so a
 /// caller never has to guess.
-pub async fn hold_set(state: &SharedState, active: bool) -> Result<dto::HoldSet, String> {
-    let snap = state.snapshot();
-    if snap.settings.hold.active == active {
-        // Nothing changed, so no run was aborted.
-        return Ok(dto::HoldSet {
-            ok: true,
-            active,
-            fallback_alias: snap.settings.hold.fallback_alias.clone(),
-            stopped: Vec::new(),
-            draining: draining_now(state, active),
-            failed: Vec::new(),
-            kept_on_cpu: on_cpu_now(state, active),
-            benchmark_aborted: None,
-            message: format!(
-                "the GPU hold was already {} — nothing to do",
-                if active { "on" } else { "off" }
-            ),
-        });
+///
+/// From the change on it runs as a task of its own (*changed 2026-10-24*, see
+/// [`crate::detached::detached`]): a dropped request can no longer cut the
+/// sweep, the frame or the MCP reconcile after the write, which would leave
+/// the hold on and the card still in use.
+pub async fn hold_set(
+    state: &SharedState,
+    active: bool,
+) -> Result<dto::HoldSet, crate::principal::Refusal> {
+    // The fast path for a no-op, only while no settings write is in flight:
+    // the snapshot then is what the last write published. With one in
+    // flight — an "on" that has not published yet — the snapshot can still
+    // say the old state, and "already off" would be the wrong answer to an
+    // "off" sent after it, leaving the hold on. That case waits for the lock
+    // in `change`, which asks again under it.
+    if let Ok(_free) = state.settings_write.try_lock() {
+        if state.snapshot().settings.hold.active == active {
+            return Ok(unchanged(state, active));
+        }
     }
 
+    let task_st = state.clone();
+    crate::detached::detached("switching the GPU hold", async move {
+        change(&task_st, active).await.map_err(Into::into)
+    })
+    .await?
+}
+
+/// [`hold_set`]'s change, once it is one.
+async fn change(state: &SharedState, active: bool) -> Result<dto::HoldSet, String> {
     let (sweep, bench_aborted) = {
         let _guard = state.settings_write.lock().await;
-        // Re-read under the lock: the snapshot above was taken outside it.
+        // Re-read under the lock: the snapshot above was taken outside it,
+        // and a change that held the lock meanwhile may have made this one
+        // a no-op.
         let mut s = state.snapshot().settings.clone();
+        if s.hold.active == active {
+            return Ok(unchanged(state, active));
+        }
         s.hold.active = active;
         store::save_settings(&state.db, &s)
             .await
@@ -93,7 +108,6 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<dto::HoldSet,
     crate::vram::broadcast(state);
     state.reconcile_mcp().await;
 
-    let snap = state.snapshot();
     let message = if active {
         // The failures are in the sentence, not only in the list, because the
         // caller may be a tray click whose only feedback is this one line —
@@ -112,10 +126,18 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<dto::HoldSet,
                 sweep.kept_on_cpu.join(", ")
             ));
         }
-        if let Some(run) = bench_aborted {
-            m.push_str(&format!(
-                "; benchmark run {run} was aborted and its container removed"
-            ));
+        if let Some(run) = &bench_aborted {
+            match &run.removal_error {
+                None => m.push_str(&format!(
+                    "; benchmark run {} was aborted and its container removed",
+                    run.run_id
+                )),
+                Some(e) => m.push_str(&format!(
+                    "; benchmark run {} was aborted but its container could NOT be removed and \
+                     may still be holding GPU memory: {e}",
+                    run.run_id
+                )),
+            }
         }
         if !sweep.failed.is_empty() {
             m.push_str(&format!(
@@ -133,15 +155,32 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<dto::HoldSet,
     Ok(dto::HoldSet {
         ok: true,
         active,
-        fallback_alias: snap.settings.hold.fallback_alias.clone(),
         stopped: sweep.stopped,
         draining: sweep.draining,
         failed: sweep.failed,
         kept_on_cpu: sweep.kept_on_cpu,
         // Absent unless this call aborted a run (never, on a release).
-        benchmark_aborted: bench_aborted,
+        benchmark_aborted: bench_aborted.map(|a| a.run_id),
         message,
     })
+}
+
+/// [`hold_set`]'s answer when the hold already is `active`: nothing changed,
+/// so no run was aborted.
+fn unchanged(state: &SharedState, active: bool) -> dto::HoldSet {
+    dto::HoldSet {
+        ok: true,
+        active,
+        stopped: Vec::new(),
+        draining: draining_now(state, active),
+        failed: Vec::new(),
+        kept_on_cpu: on_cpu_now(state, active),
+        benchmark_aborted: None,
+        message: format!(
+            "the GPU hold was already {} — nothing to do",
+            if active { "on" } else { "off" }
+        ),
+    }
 }
 
 /// What the registry currently believes is still working, for the no-op arm of
@@ -175,4 +214,54 @@ fn on_cpu_now(state: &SharedState, active: bool) -> Vec<String> {
         .filter(|v| !v.placement.is_gpu())
         .map(|v| format!("{}/{}", v.class.as_str(), v.model_id))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// An "off" sent while an "on" is in flight (here: the settings lock
+    /// held, the snapshot still off) is not answered "already off": it waits
+    /// for the "on", then releases the hold.
+    #[tokio::test]
+    async fn an_off_behind_an_on_in_flight_releases_the_hold() {
+        let state = crate::state::AppState::init_for_tests().await.unwrap();
+        assert!(!state.snapshot().settings.hold.active);
+        let held = state.settings_write.lock().await;
+
+        let st = state.clone();
+        let on = tokio::spawn(async move { hold_set(&st, true).await });
+        // The "on" queues on the lock first.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let st = state.clone();
+        let off = tokio::spawn(async move { hold_set(&st, false).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !off.is_finished(),
+            "the off did not answer from the snapshot of before the on"
+        );
+
+        drop(held);
+        let on = on.await.unwrap().unwrap();
+        assert!(
+            on.active && !on.message.contains("already"),
+            "{}",
+            on.message
+        );
+        let off = off.await.unwrap().unwrap();
+        assert!(
+            !off.active && !off.message.contains("already"),
+            "{}",
+            off.message
+        );
+        assert!(!state.snapshot().settings.hold.active, "the hold is off");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_hold_is_a_no_op() {
+        let state = crate::state::AppState::init_for_tests().await.unwrap();
+        let r = hold_set(&state, false).await.unwrap();
+        assert_eq!(r.message, "the GPU hold was already off — nothing to do");
+    }
 }

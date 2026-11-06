@@ -13,6 +13,10 @@ lmgw-api-types = { path = "../lmgw-api-types", features = ["schema"] }
 # gives quickdoc-core its own OpenAI-compatible embedder, which is what lets the
 # crate be iterated against a running gateway without a second instance (§3).
 quickdoc-core = { path = "../quickdoc-core", features = ["http"] }
+# What lmgw reads about the computer it runs on (machine-check design WP1):
+# the driver's versions, the rpm database, and CDI specs — lmgw's own spec is
+# judged with it before every GPU start (`runtime::cdi`).
+lmgw-machine = { path = "../lmgw-machine" }
 # The self-update mechanism (manifest, version order, verified download, the
 # dnf install step), shared with the desktop clients; `update` builds lmgw's
 # feed for it.
@@ -112,6 +116,10 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # machine with no NVIDIA driver link and start fine — a missing library is an
 # `Nvml::init()` error the ledger reports as degraded, never a link failure.
 nvml-wrapper = "0.12.1"
+# The SSE decoder's boundary search runs over bytes (`crate::sse`): a resume
+# point may sit inside a multi-byte char, where a `str` slice would panic.
+# Already in the lock through regex.
+memchr = "2.8"
 rand = "0.10.1"
 # Whisper's log-mel front end for Smart Turn (`realtime/turn/mel.rs`, realtime
 # design §6.3, §13): a 400-point f64 real FFT per 10 ms hop. Pure Rust (pulls
@@ -177,7 +185,12 @@ secret-service = { version = "5.2", features = ["rt-tokio-crypto-rust"] }
 # link design §2.2, §4.2): TLS 1.3, `WebPkiClientVerifier` over the device
 # CA, no resumption. The rustls reqwest already builds, aws-lc-rs provider.
 rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "multipart"] }
+# `gzip`: Hugging Face's listings come compressed, a whole page of a search
+# about a quarter of its size (find-a-model design D141). The feature is
+# process-wide: only `AppState::hub_http` uses it, every other client of the
+# build opts out with `no_gzip`, and a file's bytes are asked for as
+# `identity` (`hf::get_with_commit`).
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "multipart", "gzip"] }
 # Southbound MCP client (§5). `transport-streamable-http-client-reqwest`
 # transitively enables `transport-streamable-http-client` + `client-side-sse`
 # (the latter is the SSE *response* parser the streamable transport uses, not a
@@ -229,6 +242,16 @@ unicode-segmentation = "1.13.3"
 # (`crate::audio::charset`). Already in the lock through stringprep, at this
 # version.
 unicode-normalization = "0.1.25"
+# Full Unicode case folding (CaseFolding.txt C+F: `ß` -> `ss`, final `ς` ->
+# `σ`) for matching an aligner's words to the client's transcript
+# (`proxy::audio::alignment::offsets`); `to_lowercase` is not folding. Its
+# one dependency is unicode-normalization, above.
+caseless = "0.2.2"
+# Myers diff of the aligner's words against the transcript's: the equal runs
+# anchor each word to its exact spot (`proxy::audio::alignment::offsets`).
+# No dependencies of its own; already in the lock through insta, which
+# builds it for the tests.
+similar = { version = "2.7.0", default-features = false }
 
 [features]
 # The vendored libopus 1.6.1, built with cmake and linked statically, for a
@@ -236,6 +259,10 @@ unicode-normalization = "0.1.25"
 opus-bundled = ["opusic-c/bundled"]
 
 [dev-dependencies]
+# The tests state a machine in memory (`fake::FakeFacts`) instead of reading
+# the one the suite runs on: lmgw's own CDI spec, and the boots that take the
+# machine as a host seam.
+lmgw-machine = { path = "../lmgw-machine", features = ["fake"] }
 # The service-mode proxy tests stand up a fake container that speaks a raw
 # HTTP upgrade, which needs the same two crates the proxy itself uses. The
 # device suites' proxy (tests/it/support/device_pair.rs) is a client too.
@@ -252,7 +279,19 @@ lmgw-client = { path = "../lmgw-client", features = ["tls"] }
 # `default-features = false`: lmgw never validates a remote `$schema` URI
 # against a fetched meta-schema, only the document's own inline schemas.
 jsonschema = { version = "0.58", default-features = false }
+# And the providers' pinned schemas validate every egress body and /v1 answer
+# the suite produces (tests/it/common/api_compat, api-compat design level 1):
+# `ctor` installs that check's watcher at the test process's start and fails
+# the process at its exit when something broke a schema (the version
+# tauri-utils already locks); `proptest` generates the IR conversations it
+# pushes through every egress (tests/it/api_compat/ir_props.rs), without fork
+# or timeout support since the cases are pure and fast.
+ctor = "0.8.0"
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
+# Gzips a mock hub's answer, as the live hub sends it (tests/it/hf_find). The
+# version reqwest's decompression already locks.
+flate2 = "1.1.9"
 # How long a test waits is read from .config/nextest.toml as nextest reads it
 # (tests/it/common/patience.rs). The version tauri-build already locks.
 toml = "1.1.2"

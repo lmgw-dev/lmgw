@@ -6,7 +6,7 @@
 //! `tool_inventory.rs`, next to the states that make them interesting.
 
 use lmgw_api_types as dto;
-use lmgw_core::config::{HoldFallbackMode, McpTransport};
+use lmgw_core::config::McpTransport;
 use lmgw_core::ops::{self, CandidateAliasPatch};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewCandidateAlias, NewLocalModel, NewMcpServer};
@@ -53,8 +53,7 @@ fn local_row(id: &str, vision: bool) -> NewLocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: Some(json!({
             "capabilities": {
                 "vision": vision,
@@ -152,7 +151,6 @@ async fn the_status_names_candidate_aliases_only_once_one_is_configured() {
                 alias: alias.into(),
                 candidates: candidates.into_iter().map(String::from).collect(),
                 background: false,
-                fallback_mode: HoldFallbackMode::Inherit,
                 fallback: None,
                 capabilities_disabled: vec![],
                 capabilities_enabled: vec![],

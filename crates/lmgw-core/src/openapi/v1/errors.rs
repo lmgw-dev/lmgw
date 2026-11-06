@@ -48,9 +48,10 @@ pub(crate) fn register(g: &mut SchemaGenerator, dialect: Dialect) -> Schema {
 }
 
 /// `GatewayError::to_openai_json`: `error.code` is the
-/// gateway's own machine word ([`crate::error::GatewayError::code`], e.g.
-/// `gpu_hold`, `not_found`), not an HTTP status — `param` is always `null` in
-/// this implementation, kept for OpenAI SDK shape compatibility.
+/// gateway's own machine word ([`crate::error::GatewayError::kind`], e.g.
+/// `gpu_hold`, `not_found`), not an HTTP status — `param` names the format
+/// field for the two structured-output codes and is `null` otherwise
+/// (structured-output design §8).
 fn openai_error(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,
@@ -66,11 +67,23 @@ fn openai_error(g: &mut SchemaGenerator) -> Schema {
                         "message": {"type": "string"},
                         "type": {"type": "string", "description": "e.g. invalid_request_error, \
                             authentication_error, not_found_error, rate_limit_error, api_error."},
-                        "param": {"type": ["string", "null"], "description": "Always null: lmgw \
-                            does not attribute an error to one request field."},
+                        "param": {"type": ["string", "null"], "description": "The request \
+                            field the error is about: response_format (chat completions, \
+                            completions) or text.format (/v1/responses) for the codes \
+                            response_format_unsupported and invalid_json_schema; null for every \
+                            other error."},
                         "code": {"type": "string", "description": "lmgw's own machine-readable \
-                            error code (e.g. gpu_hold, gpu_benchmark), not the HTTP \
-                            status."}
+                            error code (e.g. gpu_hold, gpu_benchmark, gpu_deferred, gpu_setup — \
+                            a 503: the local model could not start on the graphics card, and \
+                            the message says what on the computer lmgw runs on is not ready \
+                            (fixed there, not by retrying), engine_download — a 502: the engine \
+                            the local model runs in could not be downloaded, \
+                            response_format_unsupported — the model or its upstream cannot \
+                            produce the asked structured output type, invalid_json_schema — \
+                            the upstream rejected the schema, its message kept, \
+                            budget_unpriced — a budgeted caller's request on a cloud model \
+                            with no price on file for what it is billed in, flex without a flex \
+                            price among them), not the HTTP status."}
                     }
                 }
             }
@@ -103,7 +116,7 @@ fn anthropic_error(g: &mut SchemaGenerator) -> Schema {
 }
 
 /// `proxy::tokenize::llama_error`: `lmgw_code` is
-/// [`crate::error::GatewayError::code`], kept alongside llama.cpp's own
+/// [`crate::error::GatewayError::kind`], kept alongside llama.cpp's own
 /// `type` word so a client already checking for `gpu_hold` still can. Not
 /// used by the gate layer's own 401/403/429 or a declared-Content-Length 413,
 /// which stay in the shared `/v1` OpenAI dialect.
@@ -135,7 +148,8 @@ fn llamacpp_error(g: &mut SchemaGenerator) -> Schema {
                             ]
                         },
                         "lmgw_code": {"type": "string", "description": "lmgw's own machine-readable error code, \
-                            e.g. gpu_hold, gpu_benchmark."}
+                            e.g. gpu_hold, gpu_benchmark, gpu_deferred, gpu_setup, \
+                            engine_download."}
                     }
                 }
             }

@@ -18,7 +18,11 @@ pub(super) const OPS: &[OpDoc] = &[
              `per_mchar`, `per_image` and `per_request` take one `price`, per minute of input \
              audio, per 1M input characters, per generated image and per answered request. A \
              scope holds one row per unit, and a request costs the sum of every unit priced \
-             for it; a manual row wins over a catalog row of the same scope and unit.",
+             for it; a manual row wins over a catalog row of the same scope and unit. \
+             `service_tier` (default `standard`) is the OpenAI price tier the row is for: \
+             an OpenAI platform answer is priced with the rows of the tier it reported, and a \
+             tier with no row leaves it unpriced with a `price_note`, never priced at \
+             `standard`.",
         ),
         tool: Some("lmgw__price_set"),
         args: OpArgs::Hand(args::price_set),

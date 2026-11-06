@@ -1,0 +1,13 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, aistudio/gemini-2.5-flash-lite (retired), a valid json_schema: not about the format, stays generic",
+  "upstream": "gemini",
+  "status": 404,
+  "body": {
+    "error": {
+      "code": 404,
+      "message": "This model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code to use models/gemini-3.5-flash-lite for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started).",
+      "status": "NOT_FOUND"
+    }
+  },
+  "expect": null
+}

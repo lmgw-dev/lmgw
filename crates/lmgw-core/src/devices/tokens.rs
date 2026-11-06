@@ -60,7 +60,7 @@ pub async fn sync(state: &AppState) {
                 let der = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
                 crate::server::DevicePeer::read(&der).ok().map(|p| p.serial)
             });
-            (t.key_id, t.expires_at, serial)
+            (t.key_id, t.token_hash, t.expires_at, serial)
         })),
         // The set keeps what it held: a token it misses makes a handshake
         // require a certificate (the enrolment's device meets

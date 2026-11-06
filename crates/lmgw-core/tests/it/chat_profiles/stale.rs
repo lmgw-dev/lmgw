@@ -20,7 +20,7 @@ async fn a_folder_write_naming_a_gone_profile_is_refused_in_its_transaction() {
     let e = store::create_chat_folder(pool, "late", &gone, None)
         .await
         .unwrap_err();
-    assert_eq!(e.code(), "unknown_profile", "{e}");
+    assert_eq!(e.kind(), "unknown_profile", "{e}");
     assert!(store::list_chat_folders(pool, store::AdminThreads::Shown)
         .await
         .unwrap()
@@ -42,7 +42,7 @@ async fn a_folder_write_naming_a_gone_profile_is_refused_in_its_transaction() {
     )
     .await
     .unwrap_err();
-    assert_eq!(e.code(), "unknown_profile", "{e}");
+    assert_eq!(e.kind(), "unknown_profile", "{e}");
     let f = store::get_chat_folder(pool, id).await.unwrap().unwrap();
     assert_eq!(
         (f.name.as_str(), f.defaults.profile_id),

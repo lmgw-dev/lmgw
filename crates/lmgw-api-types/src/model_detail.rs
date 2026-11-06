@@ -75,13 +75,18 @@ pub struct AuxModelDetail {
     /// `podman run` args override, one entry per argument; null inherits.
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
-    /// `inherit`, `none` or `alias`.
-    pub hold_fallback_mode: String,
-    pub hold_fallback: Option<String>,
+    /// The one fallback (openai egress design §14.2), as written; `null` =
+    /// none.
+    pub fallback: Option<String>,
     /// The `podman run …` command line this model renders to.
     pub command_line: String,
     /// Static findings; empty is not proof it loads.
     pub problems: Vec<String>,
+    /// The note of a context fitted to the graphics card (find-a-model
+    /// design D26): Get it's or "Fit again"'s; `None` when the row's
+    /// context isn't a fit's shorter one.
+    #[serde(default)]
+    pub fit_note: Option<crate::model_find::FitNote>,
 }
 
 /// An image-generation pipeline read back.
@@ -108,8 +113,9 @@ pub struct ImageModelDetail {
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
     pub idle_seconds: i64,
-    pub hold_fallback_mode: String,
-    pub hold_fallback: Option<String>,
+    /// The one fallback (openai egress design §14.2), as written; `null` =
+    /// none.
+    pub fallback: Option<String>,
     pub capabilities_override: Option<serde_json::Value>,
     /// Bytes one generation was measured to need above idle residency;
     /// null until one has run.
@@ -156,8 +162,9 @@ pub struct AudioModelDetail {
     /// `podman run` args override, one entry per argument; null inherits.
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
-    pub hold_fallback_mode: String,
-    pub hold_fallback: Option<String>,
+    /// The one fallback (openai egress design §14.2), as written; `null` =
+    /// none.
+    pub fallback: Option<String>,
     /// What the container was measured to hold on the GPU.
     pub residency: Option<LearnedResidency>,
     /// The image the container starts from (the row's, else the class's).

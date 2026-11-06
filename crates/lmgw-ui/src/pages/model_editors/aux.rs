@@ -11,8 +11,9 @@ use lmgw_api_types::{public_names, AuxModel, AuxModelDetail, AuxModelSaved, Sett
 use super::aux_fields::{self, AuxFields, CpuGpuArgsNote, CpuHoldNote, EngineFields};
 use super::aux_plan::{self, Filling, PlanCard, PlanTargets, ShownPlan};
 use super::aux_save::{save_body, takes_no_pooling, Draft};
-use super::{hold_body, hold_signals, run_args_note, HoldFallback};
+use super::run_args_note;
 use crate::model_ops::ContainerStatusRow;
+use crate::pages::fallback_field::{fallback_value, same_type_tasks, FallbackField, Saves};
 use crate::widgets::{use_toasts, ImageClass, ImagePicker, Modal, ModalFooter, ModalSize, Select};
 
 #[component]
@@ -45,16 +46,6 @@ pub fn AuxEditor(
     }
 }
 
-/// The models a row of `kind` may fall back to while the GPU is held: the
-/// same kind, which the gateway checks too for a decision row.
-fn fallback_tasks(kind: &str) -> &'static [&'static str] {
-    match kind {
-        "decision" => &["decision"],
-        "rerank" => &["rerank"],
-        _ => &["embedding"],
-    }
-}
-
 #[component]
 fn AuxForm(
     m: AuxModel,
@@ -63,7 +54,8 @@ fn AuxForm(
 ) -> impl IntoView {
     let toasts = use_toasts();
     let create = m.id == 0;
-    let id = m.id;
+    // A second save is an update of what the first created (review C-a).
+    let saves = Saves::new(m.id);
     let model_id = RwSignal::new(m.model_id.clone());
     let gguf_path = RwSignal::new(m.gguf_path.clone());
     // The plan compares a saved row on the file it was saved with.
@@ -84,7 +76,7 @@ fn AuxForm(
             .unwrap_or_default(),
     );
     let warm_start = RwSignal::new(m.warm_start);
-    let (hold_mode, hold_alias) = hold_signals(&m.hold_fallback_mode, &m.hold_fallback);
+    let fallback = fallback_value(&m.fallback);
     let saved_model_id = RwSignal::new(if create {
         String::new()
     } else {
@@ -95,7 +87,11 @@ fn AuxForm(
     let settings = Signal::derive(move || class_settings.get().and_then(|r| r.ok()));
     // The server's view of the saved row: what it finds wrong with it (a
     // projector that is not a file, a flag the kind refuses).
+    // Bumped by a save: the row is read again (its problems, and a fit note
+    // a save of another context dropped).
+    let reread = RwSignal::new(0u32);
     let detail = LocalResource::new(move || {
+        reread.get();
         let mid = saved_model_id.get();
         async move {
             if mid.trim().is_empty() {
@@ -161,23 +157,20 @@ fn AuxForm(
         if saving.get_untracked() {
             return;
         }
-        let body = hold_body(hold_mode, hold_alias).and_then(|(mode, alias)| {
-            save_body(&Draft {
-                id: (!create).then_some(id),
-                model_id: model_id.get_untracked(),
-                gguf_path: gguf_path.get_untracked(),
-                kind: kind.get_untracked(),
-                pooling: pooling.get_untracked(),
-                ctx_size: ctx_size.get_untracked(),
-                idle_seconds: idle.get_untracked(),
-                args: args.get_untracked(),
-                image: image.get_untracked(),
-                extra_run_args: extra_run_args.get_untracked(),
-                warm_start: warm_start.get_untracked(),
-                hold_fallback_mode: mode,
-                hold_fallback: alias,
-                fields: fields.draft(),
-            })
+        let body = save_body(&Draft {
+            id: (!saves.creating()).then(|| saves.id()),
+            model_id: model_id.get_untracked(),
+            gguf_path: gguf_path.get_untracked(),
+            kind: kind.get_untracked(),
+            pooling: pooling.get_untracked(),
+            ctx_size: ctx_size.get_untracked(),
+            idle_seconds: idle.get_untracked(),
+            args: args.get_untracked(),
+            image: image.get_untracked(),
+            extra_run_args: extra_run_args.get_untracked(),
+            warm_start: warm_start.get_untracked(),
+            fallback: fallback.get_untracked(),
+            fields: fields.draft(),
         });
         let body = match body {
             Ok(b) => b,
@@ -193,10 +186,20 @@ fn AuxForm(
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
-                    open.set(false);
+                    // What the saves said about the fallback stays on the
+                    // form, under the field, until the owner closes it.
+                    if saves.answered(v.id, v.fallback_notes) {
+                        open.set(false);
+                    }
+                    reread.update(|n| *n += 1);
                     on_saved();
                 }
-                Err(e) => toasts.err(e.to_string()),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        toasts.err(e);
+                    }
+                }
             }
         });
     };
@@ -217,6 +220,28 @@ fn AuxForm(
                     }
                 })
         }}
+        // The note of a context Get it fitted to the card, and "Fit again"
+        // (find-a-model design D26): a save of it is the row's, so the
+        // form takes the saved values.
+        <Show when=move || !saved_model_id.with(|m| m.trim().is_empty())>
+            <super::fit_again::FitAgainNote
+                target="aux"
+                model_id=Signal::derive(move || saved_model_id.get())
+                note=Signal::derive(move || detail.get().flatten().and_then(|d| d.fit_note))
+                on_saved=Callback::new(move |changes: Vec<lmgw_api_types::model_get::FitChange>| {
+                    for c in changes {
+                        let to = c.to.map(|v| v.to_string()).unwrap_or_default();
+                        match c.key.as_str() {
+                            "ctx_size" => ctx_size.set(to),
+                            "ubatch_size" => fields.ubatch_size.set(to),
+                            "batch_size" => fields.batch_size.set(to),
+                            _ => {}
+                        }
+                    }
+                    on_saved();
+                })
+            />
+        </Show>
         <div class="card-flow editor-flow">
             <section class="card edit-section">
                 <h3>"Model"</h3>
@@ -280,11 +305,11 @@ fn AuxForm(
                         title="Read the GGUF's header and fill the kind, pooling, context, batch sizes, projector and (for a new row) where it runs; nothing is saved"
                         on:click=move |_| {
                             let path = gguf_path.get_untracked();
-                            let filling = if create {
+                            let filling = if saves.creating() {
                                 Filling::New
                             } else {
                                 Filling::Saved {
-                                    id,
+                                    id: saves.id(),
                                     same_file: saved_gguf_path
                                         .with_value(|s| s.trim() == path.trim()),
                                 }
@@ -323,26 +348,17 @@ fn AuxForm(
                     />
                     "start at boot (warm start)"
                 </label>
-                <div class="field">
-                    <label>"Hold fallback"</label>
-                    {move || {
-                        let tasks = fallback_tasks(&kind.get());
-                        view! {
-                            <HoldFallback
-                                mode=hold_mode
-                                alias=hold_alias
-                                inherit_label="Inherit · none"
-                                tasks=tasks
-                            />
-                        }
-                    }}
-                </div>
-                <p class="dim mini-note">
-                    "Where this model's requests go while a GPU hold (Settings → GPU → Hold) is "
-                    "active, to a model of the same kind. Aux models never inherit the global "
-                    "fallback — a different embedder silently corrupts a vector index — so "
-                    "\"Inherit\" here means the same as \"None\": refuse with a 503."
-                </p>
+                <FallbackField
+                    value=fallback
+                    tasks=Signal::derive(move || same_type_tasks(&kind.get()))
+                    own_name=Signal::derive(move || public_name().unwrap_or_default())
+                    saves=saves
+                    hint="Answers whenever this model can't: while the GPU is held (a row on the \
+                          CPU is not), when VRAM outside lmgw is short, for background requests \
+                          that would disturb other work, and while the row is disabled. A model \
+                          of the same kind: a different embedder writes vectors of another space, \
+                          so a fallback for a vector index is a choice to make knowingly."
+                />
                 <CpuHoldNote f=fields/>
                 <div class="field">
                     <label>"Image override"</label>
@@ -388,17 +404,5 @@ fn AuxForm(
                 {move || if saving.get() { "Saving…" } else { "Save model" }}
             </button>
         </ModalFooter>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fallback_tasks;
-
-    #[test]
-    fn a_fallback_is_picked_among_models_of_the_row_s_kind() {
-        assert_eq!(fallback_tasks("decision"), ["decision"]);
-        assert_eq!(fallback_tasks("rerank"), ["rerank"]);
-        assert_eq!(fallback_tasks("embed"), ["embedding"]);
     }
 }

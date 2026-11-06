@@ -51,9 +51,12 @@ pub struct RequestLogRow {
     /// guarded unified-KV pool (ladder design §3.2, unified-KV design §3.3
     /// step 1). `NULL` = not clamped — migration 0041.
     pub max_tokens_clamped: Option<i64>,
-    /// Why a fallback answered instead of the requested local model: `hold`,
-    /// `external_vram`, `background` or `unavailable` (candidate-aliases
-    /// design §4.7, §12 entry 70).
+    /// Why a fallback answered instead of the requested model or alias:
+    /// [`crate::gate::FallbackReason::as_str`] — `hold`, `external_vram`,
+    /// `background`, `unavailable` (candidate-aliases design §4.7, §12 entry
+    /// 70), `benchmark`, `quota`, `unreachable`, `disabled` (openai egress
+    /// design §14), `gpu_setup` or `engine_download` (machine-check design
+    /// §2.5, §5).
     /// `NULL` = no fallback — migration 0042.
     pub fallback_reason: Option<String>,
     /// The rung a ladder row answered from, 1-based like every other rung
@@ -88,6 +91,13 @@ pub struct RequestLogRow {
     /// The listener the request came in on (device link design §4.5):
     /// `plain` or `devices` — migration 0081.
     pub via: String,
+    /// The `service_tier` an `openai` answer reported, verbatim; `NULL` for
+    /// every other row — migration 0092.
+    pub service_tier: Option<String>,
+    /// Why the row's cost is what it is, when that is not plain: a tier with
+    /// no price on file, an answer that ended before its usage was reported
+    /// — migration 0092.
+    pub price_note: Option<String>,
 }
 
 fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
@@ -141,6 +151,8 @@ fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
         price_per_request: row.get("price_per_request"),
         approved_by: row.get("approved_by"),
         via: row.get("via"),
+        service_tier: row.get("service_tier"),
+        price_note: row.get("price_note"),
     }
 }
 
@@ -207,6 +219,18 @@ pub struct NewRequestLog {
     /// The listener the request came in on (device link design §4.5): the
     /// plain one, or the device listener.
     pub via: crate::server::Via,
+    /// The `service_tier` an `openai` answer reported, verbatim
+    /// ([`crate::pricing::ServedTier::reported`]); `None` for every other
+    /// row and an answer that named none.
+    pub service_tier: Option<String>,
+    /// Why the row's cost is what it is, when that is not plain (openai
+    /// egress design §5.3): a tier with no price on file, an answer that
+    /// ended before its usage was reported.
+    pub price_note: Option<String>,
+    /// The alias the cost was priced under when it is not
+    /// `requested_alias`: the fallback alias that answered
+    /// ([`crate::config::Route::priced_alias`]). `None` = the requested one.
+    pub priced_alias: Option<String>,
 }
 
 impl Default for NewRequestLog {
@@ -244,6 +268,9 @@ impl Default for NewRequestLog {
             images_out: None,
             approved_by: None,
             via: crate::server::Via::Plain,
+            service_tier: None,
+            price_note: None,
+            priced_alias: None,
         }
     }
 }
@@ -326,10 +353,10 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
             predicted_n, fallback_reason, rung, degraded,
             audio_in_ms, chars_in, images_out, cost_units_micro,
             price_per_audio_minute, price_per_mchar, price_per_image, price_per_request,
-            approved_by, via)
+            approved_by, via, service_tier, price_note, priced_alias, budget_floor_micro)
          VALUES (?39,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,
-                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51,?52)",
+                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51,?52,?53,?54,?55,?56)",
     )
     .bind(&l.client_key)
     .bind(&l.ingress_proto)
@@ -387,6 +414,14 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(l.cost.used_units.request)
     .bind(&l.approved_by)
     .bind(l.via.as_str())
+    // The tier the answer reported and why its cost is what it is (openai
+    // egress design §5.3), so a flex row says so after the prices change.
+    .bind(&l.service_tier)
+    .bind(&l.price_note)
+    .bind(&l.priced_alias)
+    // What budgets count for an unpriced row with a lower bound (migration
+    // 0094; openai egress design §6.1, §13).
+    .bind(l.cost.budget_floor_micro)
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();
@@ -489,10 +524,11 @@ async fn roll_up(
             ttfb_sum, ttfb_count, total_sum, total_count, total_min, total_max,
             decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted,
             audio_in_ms, chars_in, images_out,
-            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out)
+            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out,
+            budget_floor_micro)
          VALUES (?26, ?1, ?2, ?3, ?4, ?5,
             1, ?6, ?7, ?8, ?25, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?27, ?28, ?29, ?30, ?31, ?32)
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
          ON CONFLICT(bucket_utc, key_id, alias, upstream_id, class, outcome) DO UPDATE SET
             requests              = requests + 1,
             tokens_in             = tokens_in + excluded.tokens_in,
@@ -526,7 +562,8 @@ async fn roll_up(
                                        + excluded.cost_unknown_audio_in_ms,
             cost_unknown_chars_in    = cost_unknown_chars_in + excluded.cost_unknown_chars_in,
             cost_unknown_images_out  = cost_unknown_images_out
-                                       + excluded.cost_unknown_images_out",
+                                       + excluded.cost_unknown_images_out,
+            budget_floor_micro       = budget_floor_micro + excluded.budget_floor_micro",
     )
     .bind(key_id)
     .bind(&l.requested_alias)
@@ -567,6 +604,7 @@ async fn roll_up(
     .bind(remainder(audio_in_ms))
     .bind(remainder(chars_in))
     .bind(remainder(images_out))
+    .bind(l.cost.budget_floor_micro.unwrap_or(0))
     .execute(&mut **tx)
     .await?;
 

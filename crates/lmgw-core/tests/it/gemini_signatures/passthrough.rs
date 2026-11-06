@@ -44,7 +44,7 @@ async fn native_responses_gateway(mock: &MockServer) -> Gw {
         &state.db,
         &NewUpstream {
             name: "native".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: Some("sk-up".into()),
@@ -68,6 +68,7 @@ async fn native_responses_gateway(mock: &MockServer) -> Gw {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

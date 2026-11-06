@@ -21,15 +21,24 @@ use sqlx::{Row, SqlitePool};
 mod approval_floor;
 mod aux_decision_fields;
 mod billable_units;
+mod chat_media_tools;
+mod chat_message_origin;
 mod chat_message_task;
 mod chat_profiles;
+mod chat_reasoning_seals;
 mod device_keys;
 mod device_link_pairing;
+mod device_name;
 mod device_rows;
+mod hf_models_dest_identity;
 mod key_device_tools;
 mod lab_sets;
 mod lab_store;
 mod llama_cpp;
+mod native_item_contents;
+mod one_fallback;
+mod openai_compatible;
+mod service_tier_prices;
 mod upstream_catalog_all_modalities;
 
 /// An in-memory database migrated up to `version` and no further — the state an
@@ -482,7 +491,7 @@ async fn loading_a_router_mode_settings_blob_lifts_its_container_names() {
         "bind_addr": "127.0.0.1:8001",
         "router": {
             "container_name": "acme-chat",
-            "listen_port": 9292,
+            "listen_port": 9393,
             "models_dir": "/srv/models",
             "models_max": 3,
             "auto_start": true,
@@ -1002,10 +1011,7 @@ async fn an_image_row_round_trips_through_the_store_with_its_defaults() {
     assert_eq!(bare.image, None, "NULL inherits the class image");
     assert_eq!(bare.extra_run_args, None);
     assert_eq!(bare.capabilities_override, None);
-    assert_eq!(
-        bare.hold_fallback_mode,
-        lmgw_core::config::HoldFallbackMode::Inherit
-    );
+    assert_eq!(bare.fallback, None, "no fallback until one is set");
 
     let new = lmgw_core::store::NewImageModel {
         model_id: "z-image-turbo".into(),
@@ -1027,9 +1033,10 @@ async fn an_image_row_round_trips_through_the_store_with_its_defaults() {
         extra_run_args: Some(vec!["--device".into(), "nvidia.com/gpu=all".into()]),
         warm_start: true,
         idle_seconds: 900,
-        hold_fallback_mode: lmgw_core::config::HoldFallbackMode::Alias,
-        hold_fallback: Some("openai/gpt-image-1".into()),
+        fallback: Some("openai/gpt-image-1".into()),
         capabilities_override: Some(serde_json::json!({"notes": ["hand-set"]})),
+        prompt_style: Some(lmgw_api_types::chat_media::PromptStyle::Keywords),
+        preview_mode: Some(lmgw_api_types::chat_media::PreviewMode::Vae),
     };
     let id = lmgw_core::store::insert_image_model(&pool, &new)
         .await
@@ -1051,10 +1058,18 @@ async fn an_image_row_round_trips_through_the_store_with_its_defaults() {
     );
     assert!(row.edit && row.warm_start);
     assert_eq!(row.idle_seconds, 900);
-    assert_eq!(row.hold_fallback.as_deref(), Some("openai/gpt-image-1"));
+    assert_eq!(row.fallback.as_deref(), Some("openai/gpt-image-1"));
     assert_eq!(
         row.capabilities_override,
         Some(serde_json::json!({"notes": ["hand-set"]}))
+    );
+    assert_eq!(
+        row.prompt_style,
+        Some(lmgw_api_types::chat_media::PromptStyle::Keywords)
+    );
+    assert_eq!(
+        row.preview_mode,
+        Some(lmgw_api_types::chat_media::PreviewMode::Vae)
     );
 
     // And it reaches the snapshot the runtime derives its descriptors from.
@@ -1369,7 +1384,7 @@ async fn migration_0037_keeps_every_agent_tokens_plaintext_and_its_agent_link() 
 /// backfilled.
 #[tokio::test]
 async fn migration_0043_adds_ladder_and_rung_with_the_right_defaults() {
-    let pool = lmgw_core::store::open_in_memory().await.unwrap();
+    let pool = db_at_version(43).await;
     let versions = applied_versions(&pool).await;
     assert!(versions.contains(&43), "{versions:?}");
 
@@ -1409,7 +1424,7 @@ async fn migration_0043_adds_ladder_and_rung_with_the_right_defaults() {
 /// this phase's uniqueness rule reads.
 #[tokio::test]
 async fn migration_0044_adds_candidate_aliases_with_the_right_defaults() {
-    let pool = lmgw_core::store::open_in_memory().await.unwrap();
+    let pool = db_at_version(44).await;
     let versions = applied_versions(&pool).await;
     assert!(versions.contains(&44), "{versions:?}");
 
@@ -1521,8 +1536,7 @@ async fn migration_0053_adds_the_audio_residency_columns_as_null() {
         image: r.image.clone(),
         extra_run_args: r.extra_run_args.clone(),
         warm_start: true,
-        hold_fallback_mode: r.hold_fallback_mode,
-        hold_fallback: r.hold_fallback.clone(),
+        fallback: r.fallback.clone(),
     };
     lmgw_core::store::update_audio_model(&pool, row.id, &save)
         .await

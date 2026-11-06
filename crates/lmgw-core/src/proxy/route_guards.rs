@@ -1,13 +1,16 @@
 //! The route-kind guards the request gate runs before dispatch
 //! ([`crate::gate::open`]): a media model on a text route, a reranker
-//! answering `/v1/embeddings`, an embedder answering `/v1/rerank`, and the
-//! decision kind's both ways ([`decision`]).
+//! answering `/v1/embeddings`, an embedder answering `/v1/rerank`, an
+//! encoder on a route that generates ([`encoder`]), and the decision kind's
+//! both ways ([`decision`]).
 
 use crate::config::{AuxKind, Route};
 use crate::error::GatewayError;
 
 mod decision;
 pub(crate) use decision::{decision_route_guard, refuse_decision_row};
+mod encoder;
+pub(crate) use encoder::refuse_encoder_for_generation;
 
 /// Refuse a **media** model — image or audio — on one of the text routes,
 /// **before admission**, because merely resolving one is enough for the next

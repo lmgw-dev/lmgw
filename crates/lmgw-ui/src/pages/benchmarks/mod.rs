@@ -319,7 +319,7 @@ pub fn fmt_unit(unit: &str, v: f64) -> String {
     match unit {
         "tok/s" => format!("{} tok/s", fmt_rate(v)),
         "ms" => fmt_ms(v),
-        "bytes" => crate::fmt::human_bytes(v.max(0.0) as u64),
+        "bytes" => crate::fmt::fmt_bytes(v.max(0.0) as u64),
         "tok/J" => format!("{} tok/J", fmt_tokj(v)),
         other => format!("{v:.2} {other}"),
     }
@@ -550,7 +550,7 @@ pub fn GpuBenchRow(open: RwSignal<bool>) -> impl IntoView {
                             </span>
                         </div>
                         <div class="gpu-row dim">
-                            "Holds the whole card until it ends: local models answer from their hold fallback or are refused (503 gpu_benchmark). "
+                            "Holds the whole card until it ends: local models answer with their own fallback or are refused (503 gpu_benchmark). "
                             <span on:click=move |_| open.set(false)>
                                 <leptos_router::components::A href=href>"Open the run"</leptos_router::components::A>
                             </span>

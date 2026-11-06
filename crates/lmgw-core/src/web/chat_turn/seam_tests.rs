@@ -81,7 +81,7 @@ pub(super) async fn world(base: &str, kind: &str) -> (SharedState, ChatThread, i
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: base.to_string(),
             api_key: None,
@@ -105,6 +105,7 @@ pub(super) async fn world(base: &str, kind: &str) -> (SharedState, ChatThread, i
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

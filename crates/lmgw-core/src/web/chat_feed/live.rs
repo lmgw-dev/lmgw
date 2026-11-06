@@ -732,11 +732,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The hold as the feed says it (`hello`, `state`, `hold`).
-pub(crate) fn hold_of(h: &crate::config::HoldSettings) -> FeedHold {
+/// The hold as the feed says it (`hello`, `state`, `hold`): the owner's GPU
+/// hold, and whether a benchmark run holds the graphics card (chat-plane
+/// design D6), both as `snap` has them.
+pub(crate) fn hold_of(snap: &crate::config::Snapshot) -> FeedHold {
     dto::FeedHold {
-        active: h.active,
-        fallback_alias: h.fallback_alias.clone(),
+        active: snap.settings.hold.active,
+        benchmark: snap.gpu_lease.is_some(),
     }
 }
 
@@ -1019,8 +1021,8 @@ mod tests {
         feed.published(FeedHold::default(), 4);
         assert!(drain(&mut rx).is_empty());
         let held = FeedHold {
-            active: false,
-            fallback_alias: Some("cloud".into()),
+            active: true,
+            ..Default::default()
         };
         feed.published(held.clone(), 4);
         assert_eq!(drain(&mut rx)[0].0, event::HOLD);

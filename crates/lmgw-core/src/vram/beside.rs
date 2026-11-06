@@ -35,6 +35,19 @@ pub(crate) struct GroupCapacity {
     pub outside: Option<u64>,
 }
 
+/// The card now, for a fit beside what runs (find-a-model design D120):
+/// [`GroupCapacity`]'s figures from the same ledger read, and lmgw's own
+/// models on the card, each its charge plus the peak admission keeps free
+/// for it, as [`crowded`] adds them up. A reservation counts: its start is
+/// under way and its bytes are about to be on the card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OnCardNow {
+    pub capacity: u64,
+    pub headroom: u64,
+    pub outside: Option<u64>,
+    pub residents: Vec<(crate::runtime::Class, String, u64)>,
+}
+
 /// A stage that cannot get room beside the claims its group keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Crowded {
@@ -61,6 +74,23 @@ impl VramScheduler {
             capacity,
             headroom: snap.settings.vram.headroom_mb.saturating_mul(MIB),
             outside: outside_of(&l),
+        })
+    }
+
+    /// The card now ([`OnCardNow`]), from one ledger read. `None` while
+    /// admission has nothing to measure against.
+    pub(crate) async fn on_card_now(
+        &self,
+        state: &SharedState,
+        snap: &Snapshot,
+    ) -> Option<OnCardNow> {
+        let l = self.ledger(state, snap).await;
+        let capacity = l.capacity.as_ref().map(|c| c.total).filter(|t| *t > 0)?;
+        Some(OnCardNow {
+            capacity,
+            headroom: snap.settings.vram.headroom_mb.saturating_mul(MIB),
+            outside: outside_of(&l),
+            residents: residents_now(&l.residents),
         })
     }
 
@@ -92,48 +122,75 @@ impl VramScheduler {
         let fp = self.footprint(snap, target.class, &target.model_id).await?;
         let l = self.ledger(state, snap).await;
         let cap = l.capacity.as_ref()?;
-        let is = |r: &ResidentView, t: &Target| r.container == t.class && r.model == t.model_id;
-        let is_kept = |r: &ResidentView| kept.iter().any(|k| is(r, k));
-        let kept_bytes: u64 = l
-            .residents
-            .iter()
-            .filter(|r| is_kept(r))
-            .map(|r| r.estimated_bytes)
-            .sum();
-        if !l.residents.iter().any(is_kept) {
-            return None;
-        }
-        // What evicting one gives back: its charge, the peak kept free for
-        // it, and — where the driver is the measurement, which subtracted it
-        // from the free figure — what it has still to load. A reservation (a
-        // start another waiter has pending, `ledger`) is no victim: its
-        // bytes are out of `free` already and it cannot be evicted (WP11
-        // server review n2), as `outside_of` reads it too.
-        let evictable: u64 = l
-            .residents
-            .iter()
-            .filter(|r| !is_kept(r) && !is(r, target) && r.state != "reserved")
-            .map(|r| {
-                let pending = if cap.measured {
-                    r.pending_bytes.unwrap_or(0)
-                } else {
-                    0
-                };
-                r.estimated_bytes
-                    .saturating_add(r.peak_extra_bytes.unwrap_or(0))
-                    .saturating_add(pending)
-            })
-            .fold(0u64, u64::saturating_add);
         let needs = fp
             .total_bytes
             .saturating_add(snap.settings.vram.headroom_mb.saturating_mul(MIB));
-        let room = cap.free.saturating_add(evictable);
-        (needs > room).then_some(Crowded {
-            needs,
-            room,
-            kept: kept_bytes,
-        })
+        crowded(cap.free, &l.residents, target, kept, needs)
     }
+}
+
+/// [`VramScheduler::crowded_beside`]'s arithmetic on one ledger's figures:
+/// `free` is the capacity's free memory, `needs` the target's footprint plus
+/// the headroom.
+fn crowded(
+    free: u64,
+    residents: &[ResidentView],
+    target: &Target,
+    kept: &[Target],
+    needs: u64,
+) -> Option<Crowded> {
+    let is = |r: &ResidentView, t: &Target| r.container == t.class && r.model == t.model_id;
+    let is_kept = |r: &ResidentView| kept.iter().any(|k| is(r, k));
+    let kept_bytes: u64 = residents
+        .iter()
+        .filter(|r| is_kept(r))
+        .map(|r| r.estimated_bytes)
+        .sum();
+    if !residents.iter().any(is_kept) {
+        return None;
+    }
+    // What evicting one gives back: its charge and the peak kept free for
+    // it. The charge is all of it in both capacity modes. Where the driver
+    // is the measurement, eviction frees what the container holds on the
+    // card (in `used`) and drops what is kept free for it (the starting or
+    // pending part, out of `free` already) — and for an audio container
+    // that has not loaded, those two are its expected residency, the charge:
+    // the pending figure is that residency less what it holds
+    // ([`super::residency::pending`]), so adding it on top credited the
+    // pending load twice. Without a device reading the charge is in `free`
+    // whole. A reservation (a start another waiter has pending, `ledger`) is
+    // no victim: its bytes are out of `free` already and it cannot be
+    // evicted (WP11 server review n2), as `outside_of` reads it too.
+    let evictable: u64 = residents
+        .iter()
+        .filter(|r| !is_kept(r) && !is(r, target) && r.state != "reserved")
+        .map(|r| {
+            r.estimated_bytes
+                .saturating_add(r.peak_extra_bytes.unwrap_or(0))
+        })
+        .fold(0u64, u64::saturating_add);
+    let room = free.saturating_add(evictable);
+    (needs > room).then_some(Crowded {
+        needs,
+        room,
+        kept: kept_bytes,
+    })
+}
+
+/// lmgw's own models on the card, as a fit beside them charges them
+/// ([`OnCardNow`]): each its charge plus the peak kept free for it.
+fn residents_now(residents: &[ResidentView]) -> Vec<(crate::runtime::Class, String, u64)> {
+    residents
+        .iter()
+        .map(|r| {
+            (
+                r.container,
+                r.model.clone(),
+                r.estimated_bytes
+                    .saturating_add(r.peak_extra_bytes.unwrap_or(0)),
+            )
+        })
+        .collect()
 }
 
 /// Memory on the card that is not lmgw's: the devices' used bytes less what
@@ -156,3 +213,6 @@ fn outside_of(l: &Ledger) -> Option<u64> {
     }
     Some(used.saturating_sub(own))
 }
+
+#[cfg(test)]
+mod tests;

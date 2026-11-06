@@ -21,7 +21,7 @@
 
 use std::time::Instant;
 
-use crate::ir::{ChatRequest, StreamDelta, Timings, Usage};
+use crate::ir::{StreamDelta, Timings, Usage};
 use crate::proxy::{self, StreamOutcome};
 
 /// What the relay has read of the stream so far.
@@ -30,21 +30,51 @@ pub(super) struct Read {
     usage: Usage,
     timings: Option<Timings>,
     ttfb_ms: Option<i64>,
+    /// The last `service_tier` the stream reported.
+    service_tier: Option<String>,
     /// Characters of output (text, reasoning, tool calls) delivered.
     pub produced: usize,
+    /// The output text delivered, as a platform row without usage is
+    /// counted by (text and tool arguments, no reasoning; openai egress
+    /// design §13.4). Kept only when counting.
+    relayed: Option<String>,
 }
 
 impl Read {
+    /// A reader that keeps the output text as well when `count_text` is set
+    /// (an `openai` row).
+    pub fn counting(count_text: bool) -> Self {
+        Self {
+            relayed: count_text.then(String::new),
+            ..Self::default()
+        }
+    }
+
+    /// The output text kept ([`Self::counting`]), empty when none was.
+    pub fn take_relayed(&mut self) -> String {
+        self.relayed.take().unwrap_or_default()
+    }
+
     /// Note one delta, as `drive_upstream` does in its own outcome.
     pub fn note(&mut self, d: &StreamDelta, started: Instant) {
         self.produced += proxy::produced_chars(d);
+        if let Some(text) = self.relayed.as_mut() {
+            match d {
+                StreamDelta::TextDelta(t) | StreamDelta::RefusalDelta(t) => text.push_str(t),
+                StreamDelta::ToolCallArgsDelta { fragment, .. } => text.push_str(fragment),
+                _ => {}
+            }
+        }
         match d {
-            StreamDelta::TextDelta(_) | StreamDelta::ToolCallStart { .. } => {
+            StreamDelta::TextDelta(_)
+            | StreamDelta::RefusalDelta(_)
+            | StreamDelta::ToolCallStart { .. } => {
                 self.ttfb_ms
                     .get_or_insert_with(|| started.elapsed().as_millis() as i64);
             }
             StreamDelta::Usage(u) => self.usage.merge(u),
             StreamDelta::Timings(t) => self.timings = Some(*t),
+            StreamDelta::ServiceTier(t) => self.service_tier = Some(t.clone()),
             _ => {}
         }
     }
@@ -55,27 +85,24 @@ impl Read {
             ttfb_ms: self.ttfb_ms,
             usage: self.usage,
             timings: self.timings,
+            service_tier: self.service_tier.clone(),
             aborted: true,
             ..Default::default()
         }
     }
 }
 
-/// The usage and the `canceled` note of a stream that ended early without
-/// an error — the turn's stop, or a reader that went away — or `None` for
-/// one that ran to its end or failed.
-pub(super) fn usage(
-    outcome: &StreamOutcome,
-    ir: &ChatRequest,
-    produced: usize,
-) -> Option<(Usage, String)> {
-    (outcome.aborted && outcome.error.is_none())
-        .then(|| proxy::stopped_usage(outcome.usage, outcome.timings.as_ref(), ir, produced))
+/// Whether a stream ended early without an error — the turn's stop, or a
+/// reader that went away — rather than running to its end or failing: its
+/// row is `canceled`, with what it cost so far (`proxy::stopped_cost`).
+pub(super) fn is_stop(outcome: &StreamOutcome) -> bool {
+    outcome.aborted && outcome.error.is_none()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::ChatRequest;
 
     fn request() -> ChatRequest {
         ChatRequest {
@@ -86,8 +113,12 @@ mod tests {
             tool_choice: None,
             stream: true,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         }
     }
 
@@ -107,7 +138,14 @@ mod tests {
         assert_eq!(read.produced, 8);
         let outcome = read.stopped();
         assert!(outcome.aborted && outcome.ttfb_ms.is_some());
-        let (u, note) = usage(&outcome, &request(), read.produced).unwrap();
+        assert!(is_stop(&outcome));
+        let (u, note) = proxy::stopped_usage(
+            outcome.usage,
+            outcome.timings.as_ref(),
+            &request(),
+            read.produced,
+            None,
+        );
         // The upstream's prompt count stays; the output is estimated.
         assert_eq!((u.prompt_tokens, u.completion_tokens), (Some(40), Some(2)));
         assert!(note.contains("completion tokens estimated"), "{note}");
@@ -119,12 +157,33 @@ mod tests {
             completed: true,
             ..Default::default()
         };
-        assert!(usage(&whole, &request(), 3).is_none());
+        assert!(!is_stop(&whole));
         let failed = StreamOutcome {
             aborted: true,
             error: Some(("upstream".into(), "boom".into())),
             ..Default::default()
         };
-        assert!(usage(&failed, &request(), 3).is_none());
+        assert!(!is_stop(&failed));
+    }
+
+    #[test]
+    fn only_a_counting_reader_keeps_the_output_text() {
+        let started = Instant::now();
+        let deltas = [
+            StreamDelta::ReasoningDelta("hmm".into()),
+            StreamDelta::TextDelta("Hallo".into()),
+            StreamDelta::ToolCallArgsDelta {
+                index: 0,
+                fragment: "{}".into(),
+            },
+        ];
+        let mut counting = Read::counting(true);
+        let mut plain = Read::counting(false);
+        for d in &deltas {
+            counting.note(d, started);
+            plain.note(d, started);
+        }
+        assert_eq!(counting.take_relayed(), "Hallo{}");
+        assert_eq!(plain.take_relayed(), "");
     }
 }

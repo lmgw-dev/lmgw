@@ -17,12 +17,15 @@ pub struct UpstreamsResponse {
 pub struct UpstreamView {
     pub id: i64,
     pub name: String,
-    /// `openai | anthropic | gemini | llama_cpp`. `llama_cpp` is llama.cpp's
-    /// own server (llama-server, ik_llama.cpp) and is always kind
-    /// `llama_server`.
+    /// `openai | openai_compatible | anthropic | gemini | llama_cpp`.
+    /// `openai` is the OpenAI platform (api.openai.com) only and always kind
+    /// `generic`; `openai_compatible` is every other OpenAI-shaped provider.
+    /// `llama_cpp` is llama.cpp's own server (llama-server, ik_llama.cpp) and
+    /// is always kind `llama_server`.
     pub protocol: String,
     /// `generic | llama_server | audio_cpp`. `llama_server` goes with
-    /// protocol `llama_cpp` or `anthropic`.
+    /// protocol `llama_cpp` or `anthropic`; `audio_cpp` (an external
+    /// audio.cpp server) with `openai_compatible`.
     pub kind: String,
     pub base_url: String,
     pub has_api_key: bool,
@@ -32,20 +35,62 @@ pub struct UpstreamView {
     pub enabled: bool,
     pub expose_all: bool,
     pub expose_prefix: String,
+    /// `/v1/responses` is forwarded to it natively rather than synthesized
+    /// from `/v1/chat/completions`. A choice on `openai_compatible` rows only:
+    /// implied on `openai`, and `false` on every other protocol.
     pub supports_responses: bool,
     /// The catalog request asks for every output modality
     /// (`GET …/models?output_modalities=all`), so OpenRouter lists its
     /// decision, embedding, rerank, speech, transcription, image and video
-    /// models too. Only an `openai` row of kind `generic` sends it; on by
-    /// default, off for an endpoint that refuses it (Gemini's
+    /// models too. Only an `openai_compatible` row of kind `generic` sends
+    /// it; on by default, off for an endpoint that refuses it (Gemini's
     /// OpenAI-compatible one).
     pub catalog_all_modalities: bool,
+    /// Set on an `openai` row whose host is not api.openai.com or a
+    /// regional `*.api.openai.com` one: lmgw sends it the OpenAI platform's
+    /// own dialect, which another provider may refuse. The same note the
+    /// write and the Test answer with. `None` on every other row.
+    pub host_note: Option<String>,
     /// A `llama_cpp` row's server: what `GET /props` said, when, or why it
     /// is unknown — one entry for the server, and for a router one more per
     /// model (its `model`). Empty on every other protocol,
     /// and on a `llama_cpp` row until a chat request or its Test makes lmgw
     /// ask in the background.
     pub llama_facts: Vec<UpstreamLlamaFacts>,
+    /// Set while lmgw remembers the row out of quota (openai egress design
+    /// §14.6): its account answered `insufficient_quota`, so models and
+    /// aliases on it that have a fallback answer with the fallback until
+    /// the next check. `None` otherwise.
+    pub quota: Option<UpstreamQuota>,
+}
+
+/// What lmgw remembers of an upstream's exhausted quota (openai egress
+/// design §14.6). In memory: a restart forgets it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UpstreamQuota {
+    /// Unix seconds of the first quota answer since it was last clear.
+    pub since: i64,
+    /// The provider's code (`insufficient_quota`,
+    /// `credit_balance_exhausted`, …), when it sent one.
+    pub code: Option<String>,
+    /// The provider's message, verbatim.
+    pub message: String,
+    /// Unix seconds of the next check: the next request after it goes to
+    /// the upstream again. The upstream's `Retry-After` when it sent one,
+    /// otherwise `quota_recheck_seconds` after the answer.
+    pub next_check: i64,
+}
+
+/// An upstream lmgw remembers out of quota, as `GET /api/status` lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UpstreamQuotaStatus {
+    pub id: i64,
+    pub name: String,
+    pub quota: UpstreamQuota,
 }
 
 /// What an external llama.cpp server said about itself, or a router about
@@ -92,6 +137,9 @@ pub struct UpstreamLlamaFacts {
 pub struct UpstreamTested {
     /// Always `true`; a failed test is an error answer instead.
     pub ok: bool,
+    /// The row's `host_note` ([`UpstreamView::host_note`]): it answered, and
+    /// it is an `openai` row on a host that is not OpenAI's.
+    pub note: Option<String>,
 }
 
 /// `POST /api/op/model_visibility`: models of an `expose_all` upstream's live

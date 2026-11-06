@@ -235,6 +235,36 @@ async fn a_climb_short_of_outside_vram_is_answered_by_the_fallback() {
     assert!(ladder_view(&f).climbing.is_none());
 }
 
+/// A climb that cannot happen hands the request to a local fallback that
+/// fits only once the ladder's own model may go (review B2): the request's
+/// claim on the ladder goes first, so the fallback evicts it and answers,
+/// rather than queueing behind the request's own claim until the queue
+/// timeout.
+#[tokio::test]
+async fn a_local_fallback_that_fits_only_without_the_ladder_takes_its_room() {
+    let f = ladder_fixture(12 * GIB, 0).await;
+    // Rung 3 needs 8.5 GiB, never there with 5 outside; `chat-model` needs 6:
+    // 12 − 5 − 2 (the base) − 0.5 headroom = 4.5 beside the ladder, 6.5
+    // without it.
+    f.attribute(5 * GIB);
+    crate::support::fallbacks::set_fallback(&f.state, "local_models", LADDER, Some("chat-model"))
+        .await;
+    let resp = ladder_chat(&f, Dialect::OpenAi, false, 200, 16).await;
+    let status = resp.status();
+    let reason = fallback_reason(&resp).map(String::from);
+    let fell_to = header(&resp, "x-lmgw-fallback").map(String::from);
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(fell_to.as_deref(), Some("chat-model"));
+    assert_eq!(reason.as_deref(), Some("external_vram"));
+    assert_eq!(f.stops(), vec![LADDER.to_string()], "the ladder made room");
+    assert!(
+        f.runs().contains(&"chat-model".to_string()),
+        "{:?}",
+        f.runs()
+    );
+}
+
 /// Legacy `/v1/completions` on a ladder: its largest prompt is counted with
 /// `/tokenize` beside the send, and it climbs like a chat — to rung 2 here —
 /// with the rung and the clamp on the response and the log row.

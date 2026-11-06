@@ -27,6 +27,7 @@
 //! On the device listener only: the plain listener's face answers it 404
 //! (`server::DEVICE_ROUTES`), before its body is read.
 
+use crate::detached::detached;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -43,7 +44,21 @@ use crate::principal::Refusal;
 use crate::state::SharedState;
 use crate::store::{self, Enrolled, EnrolledRow};
 
-/// The handler.
+/// The handler. What the request is owed before it may write anything (the
+/// rate check, the body, its parse, the key and app id checks) runs in the
+/// handler's own future, so the device listener's pre-authentication bounds
+/// still reach it: eviction under `unauthenticated_per_peer/_max`,
+/// `unauthenticated_timeout_s` and stop's `close_all` drop that future. The
+/// commit and everything after it run as a task of their own (*changed
+/// 2026-10-23*): hyper drops a handler future when its client closes the
+/// connection, and the tail (the reload, which reconciles the MCP servers
+/// and can take seconds, then the pending note, the revocation and the
+/// transfers' settling) would be lost with it, leaving the link handed out
+/// and its listener open to handshakes without a certificate. The
+/// pairing client of a story player raced one request across the link's
+/// URLs and dropped the slower connection, which showed it. Awaiting the
+/// task's handle keeps the answer; dropping the handle stops nothing. The
+/// task keeps the request's span.
 pub async fn enrol(State(st): State<SharedState>, req: Request) -> Response {
     let peer = req
         .extensions()
@@ -97,7 +112,9 @@ async fn answer(
         refusal(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            &format!("the body is not an enrolment ({{token, public_key, client}}, JSON): {e}"),
+            &format!(
+                "the body is not an enrolment ({{token, public_key, device_name, client, app_id}}, JSON): {e}"
+            ),
         )
     })?;
     let unsupported =
@@ -126,19 +143,85 @@ async fn answer(
             &ca_unavailable(st),
         ));
     };
-    let days = st.snapshot().settings.devices.client_cert_days;
-    let key_hash = super::tls::key_hash(&spki);
-    let from = peer.to_string();
-    let client = ask.client.as_deref().map(client_text);
+    let client = ask.client.as_deref().map(free_text);
     let client = client.as_deref().filter(|c| !c.is_empty());
-    let token_hash = tokens::hash(&ask.token);
+    let name = ask.device_name.as_deref().map(free_text);
+    let name = name.as_deref().filter(|n| !n.is_empty());
+    // Checked before the token is used (device transfers design §2): a
+    // malformed app id is the body's fault, and the link still pairs.
+    if let Some(why) = ask
+        .app_id
+        .as_deref()
+        .and_then(lmgw_api_types::transfer::app_id_refusal)
+    {
+        return Err(refusal(StatusCode::BAD_REQUEST, "bad_request", &why));
+    }
+    let job = Job {
+        st: st.clone(),
+        peer,
+        ca,
+        days: st.snapshot().settings.devices.client_cert_days,
+        key_hash: super::tls::key_hash(&spki),
+        from: peer.to_string(),
+        token_hash: tokens::hash(&ask.token),
+        name: name.map(str::to_string),
+        client: client.map(str::to_string),
+        app_id: ask.app_id,
+        spki,
+        wall,
+    };
+    detached("the enrolment", commit(job))
+        .await
+        .map_err(IntoResponse::into_response)?
+}
+
+/// What the enrolment's task owns: the request as `answer` checked it.
+struct Job {
+    st: SharedState,
+    peer: std::net::IpAddr,
+    ca: std::sync::Arc<super::tls::Ca>,
+    spki: Vec<u8>,
+    days: u32,
+    wall: chrono::DateTime<Utc>,
+    token_hash: String,
+    key_hash: String,
+    from: String,
+    name: Option<String>,
+    client: Option<String>,
+    app_id: Option<String>,
+}
+
+/// The enrolment from its commit on, as a task of its own (see [`enrol`]).
+async fn commit(job: Job) -> Result<Enrolment, Response> {
+    let Job {
+        st,
+        peer,
+        ca,
+        spki,
+        days,
+        wall,
+        token_hash,
+        key_hash,
+        from,
+        name,
+        client,
+        app_id,
+    } = job;
+    let st = &st;
+    let failed = |what: &str| {
+        st.devices
+            .failures
+            .count(peer, what, tokio::time::Instant::now(), Utc::now())
+    };
     let enrolled = store::enrol_device(
         &st.db,
         &store::EnrolAsk {
             token_hash: &token_hash,
             key_hash: &key_hash,
             from: &from,
-            client,
+            name: name.as_deref(),
+            client: client.as_deref(),
+            app_id: app_id.as_deref(),
             now: wall,
         },
         |name| {
@@ -175,6 +258,31 @@ async fn answer(
                 }
                 store::Joined::Renewed | store::Joined::Waiting => false,
             };
+            // Used: lmgw's window hands its link to no desktop client any
+            // more, whose own key would only contest it (the token lives
+            // on for this key's repeat, §3.3's note), until the device makes
+            // a request with this certificate (D8's note of 2026-10-15). Said
+            // here, before the slow reload, and only while the row's token is
+            // still the one this enrolment used: an owner who minted a new
+            // one meanwhile keeps its link and its pending state. Nothing
+            // that consumes the note can act before the snapshot knows a new
+            // key: the note ends the token at the device's first request with
+            // this certificate, which the gate admits only for a key the
+            // snapshot holds, and the reload below is what publishes it. (The
+            // answer, a repeat's too, comes from this commit. A request with
+            // a new key's certificate before the reload is refused and leaves
+            // the note. A renewed key is in the snapshot already, confirmed,
+            // and the gate checks no serial, so its device can be admitted
+            // and consume the note before the reload: that request is D8's
+            // proof that the answer arrived, and a failed reload changes
+            // nothing, as the key and its confirmation are unchanged.)
+            if st
+                .devices
+                .pending
+                .answered(row.key_id, &token_hash, &serial)
+            {
+                st.devices.minted.forget(row.key_id);
+            }
             if let Err(e) = st.reload_snapshot().await {
                 tracing::warn!(
                     "device '{}' enrolled, and the configuration could not be reloaded ({e}); \
@@ -185,12 +293,6 @@ async fn answer(
                     st.key_written(row.key_id, crate::state::KeyWritten::Pending);
                 }
             }
-            // Used: lmgw's window hands its link to no desktop client any
-            // more, whose own key would only contest it (the token lives
-            // on for this key's repeat, §3.3's note), until the device makes
-            // a request with this certificate (D8's note of 2026-10-15).
-            st.devices.minted.forget(row.key_id);
-            st.devices.pending.answered(row.key_id, &serial);
             if ended {
                 st.devices
                     .revocations
@@ -198,19 +300,32 @@ async fn answer(
             }
             let code = lmgw_api_types::device_link::confirm_code(&sha256(&spki));
             let bare = super::short_name(&row.name);
+            // The device's own name, sanitized, for the log as for the card.
+            // Debug-quoted, so a name cannot close its quotes and fake the
+            // rest of the line.
+            let named = name
+                .as_deref()
+                .map(|n| format!(" (called {n:?} on the device)"))
+                .unwrap_or_default();
             match joined {
                 store::Joined::Renewed => tracing::info!(
-                    "device '{bare}' renewed its certificate from {peer} (code {code}); its \
+                    "device '{bare}'{named} renewed its certificate from {peer} (code {code}); its \
                      key and its confirmation stay"
                 ),
                 store::Joined::Waiting => tracing::info!(
-                    "device '{bare}' enrolled a new key from {peer} with code {code}; it waits \
+                    "device '{bare}'{named} enrolled a new key from {peer} with code {code}; it waits \
                      for the owner's confirmation, and the device's current key works until then"
                 ),
                 store::Joined::Replaced { .. } => tracing::info!(
-                    "device '{bare}' enrolled from {peer} with code {code}; it waits for the \
+                    "device '{bare}'{named} enrolled from {peer} with code {code}; it waits for the \
                      owner's confirmation"
                 ),
+            }
+            // The row's app id is the enrolment's now, unless the key waits
+            // for its confirmation (device transfers design §2, I28): what
+            // was offered to it as another app ends.
+            if joined != store::Joined::Waiting {
+                crate::transfers::app_id_settled(st, row.key_id, &row.name).await;
             }
             st.telemetry.keys(row.key_id, "enrolled");
             Ok(enrolment(row, ca_b64, &spki))
@@ -278,7 +393,11 @@ async fn answer(
             ),
         )),
         Enrolled::NotIssued(e) => match e {
-            super::tls::IssueError::PublicKey(k) => Err(unsupported(k.to_string())),
+            super::tls::IssueError::PublicKey(k) => Err(refusal(
+                StatusCode::BAD_REQUEST,
+                code::PUBLIC_KEY_UNSUPPORTED,
+                &k.to_string(),
+            )),
             super::tls::IssueError::Sign(why) => {
                 tracing::warn!("device enrolment from {peer}: {why}");
                 Err(refusal(
@@ -314,13 +433,14 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(bytes).into()
 }
 
-/// The enrolment's `client` as the card shows it: without control, format
-/// (direction overrides and isolates, zero-width characters) and line
+/// The enrolment's `client` or `name` as the card shows it: without control,
+/// format (direction overrides and isolates, zero-width characters) and line
 /// separator characters, which would make the card's line or a log line
-/// read as something else; trimmed. Free text, never trusted for anything.
-fn client_text(client: &str) -> String {
-    client
-        .chars()
+/// read as something else; trimmed. Free text, never trusted for anything,
+/// and not capped here: the body limit bounds it, and the card's pairing
+/// line wraps it.
+fn free_text(text: &str) -> String {
+    text.chars()
         .filter(|c| !super::is_invisible(*c))
         .collect::<String>()
         .trim()
@@ -376,14 +496,14 @@ mod tests {
     #[test]
     fn the_client_text_keeps_what_reads_as_itself() {
         assert_eq!(
-            client_text("  Kai mobile 0.1.0 (Android 16) "),
+            free_text("  Kai mobile 0.1.0 (Android 16) "),
             "Kai mobile 0.1.0 (Android 16)"
         );
         assert_eq!(
-            client_text("Kai\u{202E}elibom\u{202C} 1\n2\u{200B}\u{2066}x\u{2069}"),
+            free_text("Kai\u{202E}elibom\u{202C} 1\n2\u{200B}\u{2066}x\u{2069}"),
             "Kaielibom 12x"
         );
-        assert_eq!(client_text("\u{2028}\u{feff}\t"), "");
-        assert_eq!(client_text("Kai für Ärzte 1.0"), "Kai für Ärzte 1.0");
+        assert_eq!(free_text("\u{2028}\u{feff}\t"), "");
+        assert_eq!(free_text("Kai für Ärzte 1.0"), "Kai für Ärzte 1.0");
     }
 }

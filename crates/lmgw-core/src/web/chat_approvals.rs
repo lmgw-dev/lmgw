@@ -103,7 +103,7 @@ fn ids(list: &[String]) -> String {
 }
 
 fn refused_by(e: &crate::error::GatewayError) -> Refused {
-    Refused::new(e.http_status(), e.code(), e.to_string())
+    Refused::new(e.http_status(), e.kind(), e.to_string())
 }
 
 /// The refusal of a device approving calls beyond its own reach (module

@@ -241,8 +241,16 @@ impl McpManager {
     pub(super) async fn connect(&self, server: &McpServer) -> Result<Connected, String> {
         let (running, tools, container) = match server.transport {
             McpTransport::Stdio if server.is_isolated() => {
-                let container = Container::create(server, &self.instance()).await?;
-                match bounded(server, self.handshake(server, Some(container.id()))).await {
+                // lmgw's own CDI spec, made fresh and passed before `create`
+                // and `start` when the server's container gets the graphics
+                // card (machine-check design §3.6.4), within the load
+                // timeout: before the handshake's clock, like the create.
+                let globals = self.podman_globals(server).await?;
+                let cdi = self.app().map(|app| app.cdi());
+                let container =
+                    Container::create(server, &self.instance(), &globals, cdi.as_deref()).await?;
+                let start = (container.id(), globals.as_slice());
+                match bounded(server, self.handshake(server, Some(start))).await {
                     Ok((running, tools)) => (running, tools, Some(container)),
                     Err(e) => {
                         container.discard().await;
@@ -267,6 +275,26 @@ impl McpManager {
         })
     }
 
+    /// The Podman global options an isolated `server`'s create and start
+    /// carry: lmgw's CDI spec dir, made fresh, when anything in its argv
+    /// gives the container the graphics card ([`crate::runtime::cdi`]);
+    /// none without a gateway (a test's manager).
+    async fn podman_globals(&self, server: &McpServer) -> Result<Vec<String>, String> {
+        match self.app() {
+            Some(app) => container::podman_globals(&app, server).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// [`crate::runtime::cdi::OwnSpec::refuse_unpointed`] for a podman argv
+    /// this manager runs; nothing to check without a gateway.
+    pub(super) fn refuse_unpointed(&self, argv: &[String]) -> Result<(), String> {
+        match self.app() {
+            Some(app) => app.cdi().refuse_unpointed(argv),
+            None => Ok(()),
+        }
+    }
+
     /// The instance this gateway's containers are labelled with: its
     /// `container_prefix` ([`container::LABEL_MCP`]).
     fn instance(&self) -> String {
@@ -279,8 +307,8 @@ impl McpManager {
     /// running peer, then `list_all_tools` (paged internally — no cap, §7).
     /// Returns the live service + discovered tools, or a human error string.
     /// `container` is a Podman-isolated server's container, created already
-    /// ([`connect`](Self::connect)): it is started here, attached to its
-    /// stdio.
+    /// ([`connect`](Self::connect)), and the Podman global options its create
+    /// carried: it is started here with them, attached to its stdio.
     ///
     /// **Spawn asymmetry (M1 review):** for the bare stdio case `stdio_argv`
     /// returns just `(command, args)` and env/cwd are the spawner's job; for
@@ -290,27 +318,35 @@ impl McpManager {
     async fn handshake(
         &self,
         server: &McpServer,
-        container: Option<&str>,
+        container: Option<(&str, &[String])>,
     ) -> Result<Handshake, String> {
         let handler = self.handler_for(server);
         let running = match server.transport {
             McpTransport::Stdio => {
-                let (program, args) = match container {
-                    Some(id) => ("podman".to_string(), server.container_start_argv(id)),
-                    None => server.stdio_argv(),
+                let (mut cmd, program) = match container {
+                    Some((id, globals)) => {
+                        let argv = server.container_start_argv(globals, id);
+                        self.refuse_unpointed(&argv)?;
+                        let mut cmd = tokio::process::Command::new("podman");
+                        cmd.args(&argv);
+                        crate::child::system_tool_tokio(&mut cmd);
+                        (cmd, "podman".to_string())
+                    }
+                    None => {
+                        // A bare server: the owner's own command, run as the
+                        // owner wrote it.
+                        let (program, args) = server.stdio_argv(&[]);
+                        if program.trim().is_empty() {
+                            return Err("stdio server has no command/container image".into());
+                        }
+                        let mut cmd = tokio::process::Command::new(&program);
+                        cmd.args(&args);
+                        // None of lmgw's descriptors, but its environment as
+                        // the owner set it up.
+                        crate::child::stdio_only(cmd.as_std_mut());
+                        (cmd, program)
+                    }
                 };
-                if program.trim().is_empty() {
-                    return Err("stdio server has no command/container image".into());
-                }
-                let mut cmd = tokio::process::Command::new(&program);
-                cmd.args(&args);
-                if container.is_some() {
-                    crate::child::system_tool_tokio(&mut cmd);
-                } else {
-                    // The owner's own program: none of lmgw's descriptors,
-                    // but its environment as the owner set it up.
-                    crate::child::stdio_only(cmd.as_std_mut());
-                }
                 if !server.is_isolated() {
                     // Bare subprocess: env + cwd are the spawner's responsibility.
                     if !server.env.is_empty() {
@@ -432,5 +468,12 @@ fn build_http_transport(
     }
     let config =
         StreamableHttpClientTransportConfig::with_uri(url.trim().to_string()).custom_headers(map);
-    Ok(StreamableHttpClientTransport::from_config(config))
+    // The default client would decode gzip (the build has the feature on for
+    // the hub's reads, find-a-model design D141); a server's stream stays as
+    // it was.
+    let client = reqwest::Client::builder()
+        .no_gzip()
+        .build()
+        .map_err(|e| format!("building the MCP HTTP client: {e}"))?;
+    Ok(StreamableHttpClientTransport::with_client(client, config))
 }

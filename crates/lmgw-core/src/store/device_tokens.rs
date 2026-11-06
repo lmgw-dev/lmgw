@@ -167,6 +167,8 @@ pub async fn new_device_token(
         "UPDATE api_keys
             SET waiting_key_hash = NULL, waiting_cert_serial = NULL,
                 waiting_cert_not_after = NULL, waiting_cert_notice_after = NULL,
+                waiting_app_id = NULL, waiting_enrolled_at = NULL, waiting_enrolled_from = NULL,
+                waiting_client_info = NULL, waiting_device_name = NULL,
                 contested_at = NULL, contested_from = NULL
           WHERE id = ?1",
     )
@@ -195,7 +197,9 @@ async fn clear_key(tx: &mut SqliteConnection, key_id: i64) -> DbResult<()> {
             SET key_hash = ?2, cert_serial = NULL, cert_not_after = NULL,
                 cert_notice_after = NULL, confirmed_at = NULL, waiting_key_hash = NULL,
                 waiting_cert_serial = NULL, waiting_cert_not_after = NULL,
-                waiting_cert_notice_after = NULL
+                waiting_cert_notice_after = NULL, waiting_app_id = NULL,
+                waiting_enrolled_at = NULL, waiting_enrolled_from = NULL,
+                waiting_client_info = NULL, waiting_device_name = NULL
           WHERE id = ?1 AND kind = 'device'",
     )
     .bind(key_id)
@@ -236,6 +240,7 @@ pub async fn device_tokens(pool: &SqlitePool) -> DbResult<Vec<TokenRow>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliveToken {
     pub key_id: i64,
+    pub token_hash: String,
     pub expires_at: DateTime<Utc>,
     /// The certificate its enrolment answered (standard base64 DER), once
     /// it was used.
@@ -245,7 +250,7 @@ pub struct AliveToken {
 /// The tokens alive at `now`.
 pub async fn alive_tokens(pool: &SqlitePool, now: DateTime<Utc>) -> DbResult<Vec<AliveToken>> {
     let rows = sqlx::query(
-        "SELECT key_id, expires_at, certificate FROM device_pairing_tokens
+        "SELECT key_id, token_hash, expires_at, certificate FROM device_pairing_tokens
           WHERE ended_at IS NULL AND expires_at > ?1",
     )
     .bind(stamp(now))
@@ -257,6 +262,7 @@ pub async fn alive_tokens(pool: &SqlitePool, now: DateTime<Utc>) -> DbResult<Vec
             let at: String = r.get("expires_at");
             DateTime::parse_from_rfc3339(&at).ok().map(|t| AliveToken {
                 key_id: r.get("key_id"),
+                token_hash: r.get("token_hash"),
                 expires_at: t.with_timezone(&Utc),
                 answered: r.get("certificate"),
             })
@@ -293,7 +299,12 @@ pub struct EnrolAsk<'a> {
     pub key_hash: &'a str,
     /// The peer address.
     pub from: &'a str,
+    /// The device's own name as the enrolment said it, sanitized.
+    pub name: Option<&'a str>,
     pub client: Option<&'a str>,
+    /// The app id the enrolment declared (device transfers design §2),
+    /// checked already.
+    pub app_id: Option<&'a str>,
     pub now: DateTime<Utc>,
 }
 
@@ -446,25 +457,37 @@ pub async fn enrol_device<E>(
     let write = match joined {
         // The certificate is new; the key, and the owner's word on it, are
         // not.
+        // The app id is the enrolment's (device transfers design §2, I4):
+        // the row's own for a key it holds, the waiting key's for one that
+        // waits — the owner's Confirm makes it the row's (I3). So are the
+        // enrolment's time, address, client and device name (*changed
+        // 2026-10-23*): a key that waits writes its own twins, and the
+        // confirmed device's line keeps what its key enrolled with.
         Joined::Renewed => {
             "UPDATE api_keys
                 SET cert_serial = ?3, cert_not_after = ?4, cert_notice_after = ?5,
-                    enrolled_at = ?6, enrolled_from = ?7, client_info = ?8
+                    enrolled_at = ?6, enrolled_from = ?7, client_info = ?8,
+                    device_name = ?10, app_id = ?9
               WHERE id = ?1 AND key_hash = ?2"
         }
         Joined::Waiting => {
             "UPDATE api_keys
                 SET waiting_key_hash = ?2, waiting_cert_serial = ?3,
                     waiting_cert_not_after = ?4, waiting_cert_notice_after = ?5,
-                    enrolled_at = ?6, enrolled_from = ?7, client_info = ?8
+                    waiting_enrolled_at = ?6, waiting_enrolled_from = ?7,
+                    waiting_client_info = ?8, waiting_device_name = ?10, waiting_app_id = ?9
               WHERE id = ?1"
         }
         Joined::Replaced { .. } => {
             "UPDATE api_keys
                 SET key_hash = ?2, cert_serial = ?3, cert_not_after = ?4, cert_notice_after = ?5,
-                    enrolled_at = ?6, enrolled_from = ?7, client_info = ?8, confirmed_at = NULL,
+                    enrolled_at = ?6, enrolled_from = ?7, client_info = ?8,
+                    device_name = ?10, confirmed_at = NULL,
                     waiting_key_hash = NULL, waiting_cert_serial = NULL,
-                    waiting_cert_not_after = NULL, waiting_cert_notice_after = NULL
+                    waiting_cert_not_after = NULL, waiting_cert_notice_after = NULL,
+                    app_id = ?9, waiting_app_id = NULL,
+                    waiting_enrolled_at = NULL, waiting_enrolled_from = NULL,
+                    waiting_client_info = NULL, waiting_device_name = NULL
               WHERE id = ?1"
         }
     };
@@ -477,6 +500,8 @@ pub async fn enrol_device<E>(
         .bind(&now)
         .bind(ask.from)
         .bind(ask.client)
+        .bind(ask.app_id)
+        .bind(ask.name)
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE device_pairing_tokens SET certificate = ?2 WHERE key_id = ?1")
@@ -663,8 +688,14 @@ pub async fn confirm_device(
                 SET key_hash = waiting_key_hash, cert_serial = waiting_cert_serial,
                     cert_not_after = waiting_cert_not_after,
                     cert_notice_after = waiting_cert_notice_after, confirmed_at = ?2,
+                    app_id = waiting_app_id, enrolled_at = waiting_enrolled_at,
+                    enrolled_from = waiting_enrolled_from, client_info = waiting_client_info,
+                    device_name = waiting_device_name,
                     waiting_key_hash = NULL, waiting_cert_serial = NULL,
-                    waiting_cert_not_after = NULL, waiting_cert_notice_after = NULL
+                    waiting_cert_not_after = NULL, waiting_cert_notice_after = NULL,
+                    waiting_app_id = NULL, waiting_enrolled_at = NULL,
+                    waiting_enrolled_from = NULL, waiting_client_info = NULL,
+                    waiting_device_name = NULL
               WHERE id = ?1",
         )
         .bind(key_id)

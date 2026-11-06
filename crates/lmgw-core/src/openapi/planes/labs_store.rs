@@ -212,10 +212,16 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 "GET",
                 "/labs/api/artifacts/{id}",
                 "Read an artifact's bytes",
-                "The file as stored, with the media type sniffed from its bytes, \
-                 X-Content-Type-Options: nosniff and Content-Security-Policy: sandbox, so a \
-                 file opened in a browser runs nothing. 404 not_found for an artifact that \
-                 is not there, 404 file_missing when its row is there and its file is not.",
+                "The file as stored, streamed from lmgw's disk, with the media type sniffed \
+                 from its bytes, X-Content-Type-Options: nosniff and Content-Security-Policy: \
+                 sandbox, so a file opened in a browser runs nothing; Accept-Ranges: bytes \
+                 and ETag \"sha256:<hex>\". One Range (bytes=a-b, bytes=a- or bytes=-n) \
+                 answers 206 with Content-Range, as a media player resumes or seeks; If-Range \
+                 with the ETag applies it, any other If-Range serves the whole file, and so \
+                 does a Range lmgw does not read (several ranges, another unit). 416 \
+                 range_not_satisfiable, with Content-Range: bytes */size, for a range that \
+                 names no byte of the file. 404 not_found for an artifact that is not there, \
+                 404 file_missing when its row is there and its file is not.",
             )
         },
     ]

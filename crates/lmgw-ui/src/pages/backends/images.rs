@@ -14,7 +14,7 @@ use super::{
     Bk, PullTarget,
 };
 use crate::backends_api as api;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
 use crate::widgets::{ConfirmButton, MenuItem, Modal, ModalFooter, RowMenu};
 
@@ -235,8 +235,8 @@ fn disk_line(d: &DiskInfo) -> impl IntoView {
     let list = orphans.join("\n");
     view! {
         <div class="bk-foot">
-            <span>"Images on disk " <b>{human_bytes(d.images_total)}</b></span>
-            <span>{human_bytes(d.reclaimable)} " reclaimable"</span>
+            <span>"Images on disk " <b>{fmt_bytes(d.images_total)}</b></span>
+            <span>{fmt_bytes(d.reclaimable)} " reclaimable"</span>
             {if n == 0 {
                 view! { <span>"no build leftovers"</span> }.into_any()
             } else {
@@ -402,10 +402,21 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
     };
     let status_cell = move || {
         if let Some(l) = live_pull.get() {
+            // The bytes where Podman's API counts them (machine-check
+            // design §5); the size note when it does not.
+            let dl = crate::gpu_download::Dl::of_detail("", &l.detail);
+            let label = match dl.amount() {
+                Some(a) => format!("pulling · {a}"),
+                None => "pulling".to_string(),
+            };
+            let title = match &dl.note {
+                Some(n) => format!("{}\n{n}", l.detail.last_line),
+                None => l.detail.last_line.clone(),
+            };
             return view! {
-                <span class="chip live" title=l.detail.last_line.clone()>
+                <span class="chip live" title=title>
                     <span class="dot"></span>
-                    "pulling"
+                    {label}
                 </span>
             }
             .into_any();
@@ -531,7 +542,7 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
                 {move || engine.get().map(engine_label).unwrap_or("—")}
             </td>
             <td class="bk-early mono-sm">{move || backend.get().unwrap_or_else(|| "—".to_string())}</td>
-            <td class="num">{move || human_bytes(size.get())}</td>
+            <td class="num">{move || fmt_bytes(size.get())}</td>
             <td class="bk-early dim" title=move || local_ts(&created.get())>{move || ago(&created.get())}</td>
             <td class="col-p2 bk-cut-s">{provenance}</td>
             <td class="bk-cut">
@@ -784,6 +795,11 @@ fn ImageDeleteBody(id: String) -> impl IntoView {
                 .await
                 .map(|r| r.images.into_iter().find(|i| i.id == want))
                 .map_err(|e| e.to_string());
+            // A run still naming the image reads the stale lists: refresh them.
+            if matches!(res, Ok(None)) {
+                bk.load_builds();
+                bk.load_images();
+            }
             found.set(Some(res));
         });
     };
@@ -795,6 +811,7 @@ fn ImageDeleteBody(id: String) -> impl IntoView {
         })
     };
     let ready = move || found.with(|f| matches!(f, Some(Ok(Some(_)))));
+    let gone = move || found.with(|f| matches!(f, Some(Ok(None))));
     let delete = move |force: bool| {
         if busy.get_untracked() {
             return;
@@ -870,19 +887,22 @@ fn ImageDeleteBody(id: String) -> impl IntoView {
         }}
         <ModalFooter>
             <button class="btn ghost" on:click=move |_| bk.image_delete.set(None)>
-                "Keep it"
+                {move || if gone() { "Close" } else { "Keep it" }}
             </button>
             {move || {
                 let force = !users().is_empty();
-                view! {
-                    <button
-                        class="btn danger"
-                        disabled=move || busy.get() || !ready()
-                        on:click=move |_| delete(force)
-                    >
-                        {if force { "Delete anyway" } else { "Delete image" }}
-                    </button>
-                }
+                (!gone())
+                    .then(|| {
+                        view! {
+                            <button
+                                class="btn danger"
+                                disabled=move || busy.get() || !ready()
+                                on:click=move |_| delete(force)
+                            >
+                                {if force { "Delete anyway" } else { "Delete image" }}
+                            </button>
+                        }
+                    })
             }}
         </ModalFooter>
     }

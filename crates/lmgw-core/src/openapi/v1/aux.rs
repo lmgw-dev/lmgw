@@ -29,12 +29,22 @@ pub(crate) fn completions_request(g: &mut SchemaGenerator) -> Schema {
                 "max_tokens": {"type": "integer"},
                 "n_predict": {"type": "integer", "description": "llama.cpp spelling of \
                     max_tokens; folded into it for local models with a guard or a ladder."},
-                "max_completion_tokens": {"type": "integer"}
+                "max_completion_tokens": {"type": "integer"},
+                "response_format": {
+                    "type": "object",
+                    "description": "As on /v1/chat/completions. llama.cpp's own \
+                        /v1/completions reads no response_format, so for a llama.cpp row it \
+                        is sent as the top-level json_schema that route reads; a type with \
+                        no such spelling is 400 response_format_unsupported, and a JSON type \
+                        next to a grammar 400 bad_request, with nothing sent.",
+                    "additionalProperties": true
+                }
             },
             "additionalProperties": true,
-            "description": "Forwarded to an OpenAI-protocol upstream verbatim: this route \
-                refuses anything else (an Anthropic or Gemini alias gets 400 rather than a \
-                request its upstream cannot answer)."
+            "description": "Forwarded to an OpenAI-protocol upstream verbatim (a llama.cpp \
+                row's response_format excepted, see there): this route refuses anything else \
+                (an Anthropic or Gemini alias gets 400 rather than a request its upstream \
+                cannot answer)."
         }),
     )
 }

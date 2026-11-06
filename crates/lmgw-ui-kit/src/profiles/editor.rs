@@ -44,6 +44,7 @@ pub fn ProfileEditor(
     #[prop(optional)] on_discard_new: Option<Callback<()>>,
     #[prop(optional)] dirty: Option<RwSignal<bool>>,
 ) -> impl IntoView {
+    let http = crate::http::use_http();
     let stored = RwSignal::new(profile);
     let base = RwSignal::new(Form::of(stored.get_untracked().as_ref()));
     let st = State::new(&base.get_untracked());
@@ -94,8 +95,8 @@ pub fn ProfileEditor(
         saving.set(true);
         scope.spawn(async move {
             let res = match &current {
-                None => api::create(&f.create()).await,
-                Some(p) => api::patch(p.id, &f.patch(&b)).await,
+                None => api::create(http, &f.create()).await,
+                Some(p) => api::patch(http, p.id, &f.patch(&b)).await,
             };
             saving.set(false);
             match res {
@@ -118,7 +119,7 @@ pub fn ProfileEditor(
         };
         saving.set(true);
         scope.spawn(async move {
-            let res = api::reset(p.id).await;
+            let res = api::reset(http, p.id).await;
             saving.set(false);
             match res {
                 Ok(p) => applied(p),
@@ -131,7 +132,7 @@ pub fn ProfileEditor(
             return;
         };
         scope.spawn(async move {
-            match api::delete(p.id).await {
+            match api::delete(http, p.id).await {
                 Ok(d) => {
                     if let Some(cb) = on_deleted {
                         cb.run(d);

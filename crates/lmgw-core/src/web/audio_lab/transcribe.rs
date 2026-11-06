@@ -21,7 +21,9 @@ use std::path::Path;
 use bytes::Bytes;
 use lmgw_api_types::audio_lab::TranscriptProvenance;
 
-use super::{clip_entries, read_prompt_text, safe_clip_name, voice_name, voices_dir};
+use super::{
+    clip_entries, no_audio_models_dir, read_prompt_text, safe_clip_name, voice_name, voices_dir,
+};
 use super::{write_prompt_text, PROMPT_TEXT_FILE};
 use crate::proxy;
 use crate::state::SharedState;
@@ -39,11 +41,10 @@ pub(crate) fn alias_for(state: &SharedState, asked: Option<&str>) -> Result<Stri
         .trim()
         .to_string();
     if set.is_empty() {
-        return Err(
-            "no transcription model: name a speech-to-text model (alias), or set one under \
-             Settings → Runtimes → Audio → Clip transcripts"
-                .into(),
-        );
+        return Err(format!(
+            "no transcription model: name a speech-to-text model (alias), or set one under {}",
+            lmgw_api_types::settings_labels::CLIP_TRANSCRIPTS_AT
+        ));
     }
     Ok(set)
 }
@@ -99,11 +100,7 @@ pub(crate) async fn transcribe_clip(
     name: &str,
     alias: &str,
 ) -> Result<Written, ClipError> {
-    let dir = voices_dir(state).ok_or_else(|| {
-        ClipError::Refused(
-            "audio models dir is not configured (Settings → Runtimes → Audio)".into(),
-        )
-    })?;
+    let dir = voices_dir(state).ok_or_else(|| ClipError::Refused(no_audio_models_dir()))?;
     // Before the model hears anything: the transcript is a write into the
     // library, which a dev instance may not make outside its data dir.
     state
@@ -134,6 +131,7 @@ pub(crate) async fn transcribe_clip(
             "{by} heard no speech in {name} — nothing was recorded"
         )));
     }
+    let _lock = crate::voice_lab::library_write().await;
     let mut texts = read_prompt_text(&dir);
     texts.insert(voice_name(&name).to_string(), text.clone());
     write_prompt_text(&dir, &texts)
@@ -189,8 +187,7 @@ pub(crate) struct Bulk {
 /// where it happens rather than repeating itself; what was transcribed
 /// before it stays recorded.
 pub(crate) async fn transcribe_missing(state: &SharedState, alias: &str) -> Result<Bulk, String> {
-    let dir = voices_dir(state)
-        .ok_or("audio models dir is not configured (Settings → Runtimes → Audio)")?;
+    let dir = voices_dir(state).ok_or_else(no_audio_models_dir)?;
     state.refuse_shared_models_dir(&dir)?;
     let missing = clips_without_transcript(&dir);
     let mut bulk = Bulk {

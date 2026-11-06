@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use super::super::lab_history::{runless, ExportScope, Runless};
 use super::Lab;
-use crate::fmt::{human_bytes, local_datetime};
+use crate::fmt::{fmt_bytes, local_datetime};
 use crate::pages::docs::download;
 use crate::widgets::{MenuItem, RowMenu};
 
@@ -106,7 +106,7 @@ pub(super) fn request_text(run: &LabRunView) -> String {
                     "{} = {} ({}){}",
                     f.name,
                     f.filename,
-                    human_bytes(f.bytes as u64),
+                    fmt_bytes(f.bytes as u64),
                     f.artifact
                         .as_ref()
                         .map(|a| format!(" · {a}"))
@@ -283,7 +283,7 @@ fn CardBody(lab: Lab, g: LabGroupView, menu: Signal<Vec<MenuItem>>) -> impl Into
     let inputs: Vec<String> = g
         .artifacts
         .iter()
-        .map(|a| format!("{} ({})", a.name, human_bytes(a.size)))
+        .map(|a| format!("{} ({})", a.name, fmt_bytes(a.size)))
         .collect();
     let id = g.id;
     let in_flight = g.in_flight;
@@ -330,11 +330,19 @@ fn RunBody(lab: Lab, run: LabRunView) -> impl IntoView {
         .join(" · ");
     let can_edit = lab.can_edit();
     let failure = (!ok).then(|| failure_line(&run));
+    // Its model could not start on the graphics card because of the
+    // computer (machine-check design D179, D188): the check's line, while
+    // the card is not ready, whatever "Not now" holds.
+    let gpu_setup = run.error_code.as_deref() == Some("gpu_setup");
     let no_shots = shots.is_empty();
     let empty = ok && no_shots;
     let raw = run.response.clone();
     view! {
         {failure.map(|f| view! { <div class="notice err">{format!("⚠ {f}")}</div> })}
+        {gpu_setup
+            .then(|| {
+                view! { <crate::widgets::machine_check::MachineInCard/> }
+            })}
         {empty.then(|| view! { <div class="notice err">"⚠ the answer carried no picture"</div> })}
         <div class="gallery" hidden=no_shots>
             {shots
@@ -366,7 +374,7 @@ fn RunBody(lab: Lab, run: LabRunView) -> impl IntoView {
                                         }
                                     })}
                                 <span class="spacer" style="flex:1"></span>
-                                <span class="dim mono-sm">{human_bytes(s.bytes)}</span>
+                                <span class="dim mono-sm">{fmt_bytes(s.bytes)}</span>
                             </figcaption>
                         </figure>
                     }

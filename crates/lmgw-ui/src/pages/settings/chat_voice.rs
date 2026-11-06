@@ -20,7 +20,7 @@
 use leptos::prelude::*;
 use lmgw_api_types::chat_voice::{AUDIO_INPUTS, TURN_DETECTIONS};
 
-use super::{f, Ctl, Def, Page};
+use super::{f, labels, Ctl, Def, Page};
 use crate::widgets::Field;
 
 /// The Chat's TTS model, then realtime's: what the voice and style fields
@@ -33,7 +33,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
         "chat",
         "chat-voice",
         "chat_stt_alias",
-        "Speech to text",
+        labels::SPEECH_TO_TEXT,
         Ctl::Model(&["asr"], None, "the Realtime speech-to-text model"),
     )
     .hint(
@@ -45,7 +45,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
         "chat",
         "chat-voice",
         "chat_tts_alias",
-        "Text to speech",
+        labels::TEXT_TO_SPEECH,
         Ctl::Model(
             lmgw_api_types::realtime::SPEECH_TASKS,
             None,

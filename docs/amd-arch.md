@@ -95,8 +95,10 @@ every run-args block below includes `--group-add keep-groups` — without it the
 container opens the device as nobody and finds no GPU.
 
 SELinux is not enabled on Arch, so the `--security-opt label=disable` in lmgw's
-default run args is a harmless no-op. Leave it or drop it, it makes no
-difference; the `:Z` volume suffixes lmgw renders are likewise ignored.
+run args is a harmless no-op there. Keep it anyway: lmgw mounts the models
+directory without a relabel (`<models dir>:/models:ro`, no `:Z`), so on a
+distribution with SELinux enforcing (Fedora) a container without it cannot read
+its models, and the values below are the ones lmgw writes on every system.
 
 ---
 
@@ -143,7 +145,7 @@ produces garbage output under an override, that is the override, not lmgw.
 
 The published ghcr.io images above are the fast path. If you'd rather build
 from a specific ref, a PR, or with a gfx target the published image doesn't
-carry, use the **Backends** page (`/backends`) instead of a hand-rolled
+carry, use the **Engines** page (`/backends`) instead of a hand-rolled
 `podman build` — see [docs/backends.md](backends.md). Its Vulkan and ROCm
 profiles exist for all three engines except ik_llama.cpp (no ROCm or CPU
 Dockerfile upstream any more) and audio.cpp (no ROCm Dockerfile upstream at
@@ -158,9 +160,40 @@ useful data lmgw doesn't have yet.
 
 ## 4. The Settings values to change
 
-Three class blocks in **Settings** carry the NVIDIA defaults. The run-args box
-is **one token per line** — flag and value on separate lines — because lmgw
-passes each line through as a single `podman run` argument.
+Four class blocks in **Settings → Runtimes** (Chat, Aux, Audio, Image) carry the
+NVIDIA defaults. The run-args box is **one token per line** — flag and value on
+separate lines — because lmgw passes each line through as a single `podman run`
+argument.
+
+**lmgw can switch them for you.** On an AMD card its machine check says "lmgw
+is set up for NVIDIA cards. It can switch to the settings for AMD cards." and
+lists every field the switch changes, as it is and as it would become, and the
+running models it would stop. The switch writes the Vulkan images below for all
+four classes (the audio backend included) and swaps the device flags in their run
+arguments, keeping any argument of your own (`--shm-size`, a `-v` mount); the
+models' own run arguments and images that are set for NVIDIA cards follow, and
+models running with the old settings are stopped, so their next request starts
+them with the new ones (one answering a request at that moment keeps running and
+is named). No password is needed. The dashboard's button for it comes with the
+machine check's panel in Settings → GPU, which is not built yet; until then it is
+the `machine_settings_fit` op: first without `confirm`, to see what it would
+change, then with `confirm` set to the `changes` that answer listed. If the
+settings changed in between, nothing is written, and the answer lists the switch
+as it is now (`outdated` says what differs):
+
+```sh
+curl -sS -X POST http://127.0.0.1:8787/api/op/machine_settings_fit \
+  -H 'Authorization: Bearer <owner key>' \
+  -H 'content-type: application/json' -d '{"fit": "amd_vulkan"}' > switch.json
+jq '{fit, confirm: .changes}' switch.json \
+  | curl -sS -X POST http://127.0.0.1:8787/api/op/machine_settings_fit \
+      -H 'Authorization: Bearer <owner key>' \
+      -H 'content-type: application/json' -d @-
+```
+
+`{"fit": "nvidia_cuda"}` switches back to lmgw's NVIDIA defaults, with your own
+arguments kept. The switch writes Vulkan only; ROCm stays a choice you make by
+hand, below. A card without `/dev/kfd` is fine for Vulkan; ROCm needs it.
 
 ### Chat container · llama-server, and Aux container · llama-server
 
@@ -172,14 +205,14 @@ embeddings.
 | field | value |
 | --- | --- |
 | Image | `ghcr.io/ggml-org/llama.cpp:server-vulkan` |
-| Extra podman run args | `--device` / `/dev/dri` / `--group-add` / `keep-groups` (four lines) |
+| Extra podman run args | `--device` / `/dev/dri` / `--group-add` / `keep-groups` / `--security-opt` / `label=disable` (six lines) |
 
 **ROCm**
 
 | field | value |
 | --- | --- |
 | Image | `ghcr.io/ggml-org/llama.cpp:server-rocm` |
-| Extra podman run args | `--device` / `/dev/kfd` / `--device` / `/dev/dri` / `--group-add` / `keep-groups` / `--security-opt` / `seccomp=unconfined` |
+| Extra podman run args | `--device` / `/dev/kfd` / `--device` / `/dev/dri` / `--group-add` / `keep-groups` / `--security-opt` / `seccomp=unconfined` / `--security-opt` / `label=disable` |
 
 On an unsupported gfx target add two more lines: `-e` and
 `HSA_OVERRIDE_GFX_VERSION=11.0.2`.
@@ -187,15 +220,18 @@ On an unsupported gfx target add two more lines: `-e` and
 Same thing over the API, if you prefer not to click:
 
 ```sh
-curl -sS http://127.0.0.1:8787/api/op/settings_set_full \
+curl -sS -X POST http://127.0.0.1:8787/api/op/settings_set_full \
+  -H 'Authorization: Bearer <owner key>' \
   -H 'content-type: application/json' -d '{
     "router": {
       "image": "ghcr.io/ggml-org/llama.cpp:server-vulkan",
-      "extra_run_args": ["--device","/dev/dri","--group-add","keep-groups"]
+      "extra_run_args": ["--device","/dev/dri","--group-add","keep-groups",
+                         "--security-opt","label=disable"]
     },
     "aux_router": {
       "image": "ghcr.io/ggml-org/llama.cpp:server-vulkan",
-      "extra_run_args": ["--device","/dev/dri","--group-add","keep-groups"]
+      "extra_run_args": ["--device","/dev/dri","--group-add","keep-groups",
+                         "--security-opt","label=disable"]
     }
   }'
 ```
@@ -211,11 +247,21 @@ audio.cpp publishes **no ROCm image**. Vulkan is the only GPU option:
 | --- | --- |
 | Image | `ghcr.io/0xshug0/audio.cpp:full-vulkan` |
 | Backend | `vulkan` |
-| Extra podman run args | `--device` / `/dev/dri` / `--group-add` / `keep-groups` |
+| Extra podman run args | `--device` / `/dev/dri` / `--group-add` / `keep-groups` / `--security-opt` / `label=disable` |
 
 The `hip` entry in the Backend dropdown is audio.cpp's own list, not a promise
 that an image exists for it. If Vulkan misbehaves, `full-cpu` + backend `cpu`
 works for TTS at laptop speeds.
+
+### Image class · stable-diffusion.cpp
+
+stable-diffusion.cpp publishes **no ROCm image** either (image-generation
+design §2.5):
+
+| field | value |
+| --- | --- |
+| Image | `ghcr.io/leejet/stable-diffusion.cpp:master-vulkan` |
+| Extra podman run args | `--device` / `/dev/dri` / `--group-add` / `keep-groups` / `--security-opt` / `label=disable` |
 
 ---
 
@@ -242,7 +288,7 @@ can spare it right now.
 
 Two knobs if that is not the number you want:
 
-* **Settings → GPU → Admission → Budget** (MiB) overrides the measurement entirely. On a 32 GB
+* **Settings → GPU → Admission → Budget** (MiB) overrides the measurement entirely. On a 32 GiB
   laptop where you also want to run a browser, declaring e.g. `12288` is more
   honest than letting lmgw plan against every page the kernel would hand out.
   `0` means "use the measurement".
@@ -252,7 +298,7 @@ Two knobs if that is not the number you want:
 
 If you want a bigger GTT ceiling than the kernel's default, that is a boot
 parameter, not an lmgw setting: `amdgpu.gttsize=<MiB>` (and on newer kernels
-`ttm.pages_limit=<pages>`). Strix Halo owners generally want this; a 16 GB
+`ttm.pages_limit=<pages>`). Strix Halo owners generally want this; a 16 GiB
 laptop generally does not.
 
 ---

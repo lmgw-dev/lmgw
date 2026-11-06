@@ -11,6 +11,7 @@ set -euo pipefail
 # rustls, ort's build-time download included), and neither does tauri-cli with
 # its default features. opus-devel is lmgw's own: WebRTC calls link the
 # system libopus (realtime calls design §11; the RPM depends on `opus`).
+# python3 runs ci/rpm_guard.py on the built RPM (the fedora image lacks it).
 dnf -y install \
   rust cargo \
   rust-std-static-wasm32-unknown-unknown \
@@ -23,6 +24,7 @@ dnf -y install \
   opus-devel \
   pkgconf-pkg-config \
   rpm-build \
+  python3 \
   gcc gcc-c++ make \
   curl wget file git
 

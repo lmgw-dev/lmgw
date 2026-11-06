@@ -1,0 +1,30 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"chat-gguf\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"top_k\":20}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "chat-gguf",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "top_k": 20
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

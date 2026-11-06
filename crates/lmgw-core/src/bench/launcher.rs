@@ -28,6 +28,7 @@ use serde::Deserialize;
 use crate::agent::Cancel;
 use crate::erased::Erased;
 use crate::runtime::argv::{podman_run_argv, RenderSpec};
+use crate::runtime::cdi::OwnSpec;
 use crate::runtime::registry::{ephemeral_port, log_excerpt_of, CmdOutput, CommandRunner};
 
 /// The label that marks a bench container; its value is the run id.
@@ -53,14 +54,17 @@ pub trait BenchLauncher: Send + Sync {
 
 /// The production launcher: `podman` through a [`CommandRunner`] (the
 /// registry's own, so a test gateway without a runtime refuses here too),
-/// and the kernel's next free port.
+/// and the kernel's next free port. A call that gives the container the
+/// graphics card without lmgw's CDI spec dir is refused
+/// ([`OwnSpec::refuse_unpointed`]).
 pub struct PodmanLauncher {
     runner: Arc<dyn CommandRunner>,
+    cdi: Arc<OwnSpec>,
 }
 
 impl PodmanLauncher {
-    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
-        Self { runner }
+    pub fn new(runner: Arc<dyn CommandRunner>, cdi: Arc<OwnSpec>) -> Self {
+        Self { runner, cdi }
     }
 }
 
@@ -70,7 +74,12 @@ impl BenchLauncher for PodmanLauncher {
     }
 
     fn podman<'a>(&'a self, argv: &'a [String]) -> Erased<'a, std::io::Result<CmdOutput>> {
-        Box::pin(async move { self.runner.run("podman", argv).await })
+        Box::pin(async move {
+            self.cdi
+                .refuse_unpointed(argv)
+                .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
+            self.runner.run("podman", argv).await
+        })
     }
 }
 
@@ -157,7 +166,8 @@ impl BenchContainer<'_> {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(LoadError::Failed(format!(
-                    "no HTTP 200 from {url} within vram.load_timeout_seconds ({timeout:?})"
+                    "no HTTP 200 from {url} within the load timeout ({timeout:?}, {})",
+                    crate::config::LOAD_TIMEOUT_LABEL
                 )));
             }
             let probe = http.get(&url).timeout(left).send();
@@ -359,6 +369,7 @@ pub async fn image_facts(
         "inspect",
         "--format",
         "{{.Id}} {{json .Labels}}",
+        "--",
         image,
     ]
     .map(String::from);

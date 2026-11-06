@@ -1,0 +1,52 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hello\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"max_output_tokens\":16,\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"text\":{\"format\":{\"name\":\"response\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"],\"type\":\"object\"},\"strict\":true,\"type\":\"json_schema\"}}}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hello",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "max_output_tokens": 16,
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false,
+      "text": {
+        "format": {
+          "name": "response",
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok"
+            ],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "json_schema"
+        }
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

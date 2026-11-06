@@ -1,0 +1,47 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"hi\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"content\":\"Hello! How can I help?\",\"role\":\"assistant\"},{\"content\":[{\"text\":\"Tell me a joke.\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"instructions\":\"Be brief.\",\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "hi",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": "Hello! How can I help?",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "text": "Tell me a joke.",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "instructions": "Be brief.",
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

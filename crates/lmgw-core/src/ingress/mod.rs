@@ -7,7 +7,23 @@ pub mod openai;
 pub mod responses;
 
 use crate::error::GatewayError;
-use crate::ir::{Completion, StreamDelta};
+use crate::ir::{Completion, Role, StreamDelta};
+
+/// A `refusal` content part on a message that is not the assistant's: the
+/// model's refusal is an assistant part on both of OpenAI's wires, and
+/// OpenAI refuses it anywhere else with a 400, so lmgw does too rather than
+/// drop it (openai egress design §7.2.3).
+pub(crate) fn refusal_part_misplaced(role: Role) -> GatewayError {
+    let role = match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    GatewayError::BadRequest(format!(
+        "a 'refusal' content part belongs to an assistant message, not to a '{role}' one"
+    ))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientProto {
@@ -59,6 +75,19 @@ impl ClientProto {
                 openai::serialize_completion(alias, c)
             }
             Self::AnthropicMessages => anthropic::serialize_completion(alias, c),
+        }
+    }
+
+    /// An error's status in the client's protocol: Anthropic's wire answers
+    /// an exhausted upstream quota with its `402`
+    /// ([`GatewayError::anthropic_status`]), every other wire and error
+    /// with [`GatewayError::http_status`].
+    pub fn error_status(&self, e: &GatewayError) -> axum::http::StatusCode {
+        match self {
+            Self::AnthropicMessages => e.anthropic_status(),
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
+                e.http_status()
+            }
         }
     }
 

@@ -13,7 +13,7 @@ use super::{
     build_words, compare_href, fmt_ms, fmt_rate, fmt_tokj, run_href, status_look, use_bn, Bn,
 };
 use crate::bench_api::LiveBench;
-use crate::fmt::{hue_for, human_bytes};
+use crate::fmt::{fmt_bytes, hue_for};
 use crate::pages::backends::{ago, local_ts, sha7};
 use crate::widgets::{ConfirmButton, MenuItem, PageFrame, PageMode, RowMenu};
 
@@ -335,7 +335,7 @@ fn RunRow(id: i64, picked: RwSignal<Vec<i64>>) -> impl IntoView {
     };
     let tokj = h(|s| s.headline.decode_tokens_per_joule.map(fmt_tokj));
     let load = h(|s| s.headline.load_ms.map(|v| fmt_ms(v as f64)));
-    let vram = h(|s| s.headline.load_vram_bytes.map(human_bytes));
+    let vram = h(|s| s.headline.load_vram_bytes.map(fmt_bytes));
     let probes = move || {
         s.with(|s| {
             if s.probes_judged == 0 {

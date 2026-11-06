@@ -231,6 +231,9 @@ mod tests {
                 json_schema: Some(j),
                 json_object: None,
             }),
+            context_editing: None,
+            languages: Vec::new(),
+            multilingual: None,
             speech: None,
             source: "gguf+config".to_string(),
         }

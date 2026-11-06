@@ -69,5 +69,7 @@ pub(in crate::proxy) fn summary(log_id: i64, row: NewRequestLog, status: u16) ->
         audio_in_ms: row.audio_in_ms,
         chars_in: row.chars_in,
         images_out: row.images_out,
+        service_tier: row.service_tier,
+        price_note: row.price_note,
     }
 }

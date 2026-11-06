@@ -7,9 +7,7 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use super::*;
-use crate::config::{
-    HoldFallbackMode, LlamaParams, LocalModel, ModelAlias, Snapshot, Upstream, UpstreamKind,
-};
+use crate::config::{LlamaParams, LocalModel, ModelAlias, Snapshot, Upstream, UpstreamKind};
 use crate::state::AppState;
 
 const CLOUD: i64 = 10;
@@ -49,6 +47,7 @@ fn alias(name: &str, upstream_id: i64, caps: Option<serde_json::Value>) -> (Stri
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: caps.map(|c| json!({ "capabilities": c })),
+            fallback: None,
         },
     )
 }
@@ -66,7 +65,7 @@ async fn gateway() -> SharedState {
     snap.upstreams = HashMap::from([
         (
             CLOUD,
-            upstream(CLOUD, Protocol::Openai, UpstreamKind::Generic),
+            upstream(CLOUD, Protocol::OpenaiCompatible, UpstreamKind::Generic),
         ),
         (
             CLAUDE,
@@ -110,8 +109,7 @@ async fn gateway() -> SharedState {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: HoldFallbackMode::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: Some(json!({ "capabilities": hears_audio() })),
         ladder: vec![],
     }];
@@ -284,7 +282,7 @@ fn hears_from_capabilities_already_read() {
     }))
     .unwrap();
     let mut route = Route {
-        upstream: upstream(CLOUD, Protocol::Openai, UpstreamKind::Generic),
+        upstream: upstream(CLOUD, Protocol::OpenaiCompatible, UpstreamKind::Generic),
         upstream_model: "m".into(),
         param_defaults: Default::default(),
         fallback: Default::default(),

@@ -11,6 +11,7 @@ use lmgw_api_types::{
 };
 use serde_json::{json, Map, Value};
 
+use super::fallback_field::{fallback_arg, fallback_value, same_type_tasks, FallbackField, Saves};
 use crate::catalog::CatalogEntry;
 use crate::model_ops::ContainerStatusRow;
 
@@ -19,6 +20,8 @@ mod aux;
 mod aux_fields;
 pub(super) mod aux_plan;
 mod aux_save;
+pub(super) mod fit_again;
+mod image_chat;
 mod run_args_note;
 use crate::widgets::model_picker::ListStatus;
 use crate::widgets::{
@@ -35,90 +38,6 @@ fn num_field<T: std::str::FromStr>(label: &str, raw: &str) -> Result<Option<T>, 
     raw.parse::<T>()
         .map(Some)
         .map_err(|_| format!("{label}: '{raw}' is not a number"))
-}
-
-/// The three ways a model can answer while the GPU hold is on (gpu-hold
-/// design §2/§3.2), as the mode picker offers them. `inherit` is labelled by
-/// the caller: only chat rows inherit the global fallback — aux, audio and
-/// image rows never do, so for them it reads as "none" rather than promising
-/// a fallback that never applies.
-fn hold_modes(inherit_label: &'static str) -> Signal<Vec<(String, String)>> {
-    Signal::derive(move || {
-        vec![
-            ("inherit".to_string(), inherit_label.to_string()),
-            ("none".to_string(), "None — refuse with a 503".to_string()),
-            ("alias".to_string(), "Route to another model".to_string()),
-        ]
-    })
-}
-
-/// A model's GPU-hold fallback: the mode, and — when it routes elsewhere —
-/// which model, picked from the gateway catalog. Local models are listed but
-/// not pickable: the hold is exactly when this GPU is not available to them.
-/// `tasks` narrows the picker to models that can stand in (an embedding row
-/// falls back to an embedding model, not a chat one).
-#[component]
-pub(super) fn HoldFallback(
-    mode: RwSignal<String>,
-    alias: RwSignal<String>,
-    inherit_label: &'static str,
-    tasks: &'static [&'static str],
-) -> impl IntoView {
-    view! {
-        <div class="hold-pick">
-            <Select value=mode options=hold_modes(inherit_label)/>
-            <Show when=move || mode.get() == "alias">
-                <ModelPicker
-                    value=alias
-                    tasks=tasks
-                    recent_key="hold"
-                    disallow=(
-                        Callback::new(|e: CatalogEntry| e.local),
-                        "the fallback must not need this GPU",
-                    )
-                />
-            </Show>
-        </div>
-    }
-}
-
-/// A stored `hold_fallback_mode`/`hold_fallback` pair as the two signals
-/// [`HoldFallback`] edits. `pub(super)`: the candidate-alias editor
-/// (`candidate_alias_editor.rs`) builds its own fallback picker instead of
-/// [`HoldFallback`] (its `disallow` also needs to exclude other candidate
-/// aliases, which that component has no parameter for), but the mode/value
-/// convention — and the leniency of what counts as a valid stored mode — is
-/// exactly this one.
-pub(super) fn hold_signals(
-    mode: &str,
-    alias: &Option<String>,
-) -> (RwSignal<String>, RwSignal<String>) {
-    let mode = match mode {
-        "alias" | "none" => mode,
-        _ => "inherit",
-    };
-    (
-        RwSignal::new(mode.to_string()),
-        RwSignal::new(alias.clone().unwrap_or_default()),
-    )
-}
-
-/// The save body's `(hold_fallback_mode, hold_fallback)`, or why it cannot
-/// be saved: routing to another model needs that model. `pub(super)`: see
-/// [`hold_signals`]'s doc comment.
-pub(super) fn hold_body(
-    mode: RwSignal<String>,
-    alias: RwSignal<String>,
-) -> Result<(String, Option<String>), String> {
-    let m = mode.get_untracked();
-    if m != "alias" {
-        return Ok((m, None));
-    }
-    let a = alias.get_untracked().trim().to_string();
-    if a.is_empty() {
-        return Err("hold fallback: pick the model to route to, or choose another mode".into());
-    }
-    Ok((m, Some(a)))
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +83,12 @@ fn AliasForm(
     on_saved: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let toasts = use_toasts();
-    let create = a.id == 0;
-    let id = a.id;
+    // The row as saved so far: a second save is an update of what the first
+    // created, never another create (review C-a).
+    let saves = Saves::new(a.id);
+    let catalog = crate::catalog::use_model_catalog();
+    // What the gateway publishes the alias as, while it is saved under it.
+    let saved_name = a.alias.clone();
     let alias = RwSignal::new(a.alias.clone());
     let upstream_id = RwSignal::new(if a.upstream_id > 0 {
         a.upstream_id.to_string()
@@ -173,6 +96,7 @@ fn AliasForm(
         String::new()
     });
     let upstream_model = RwSignal::new(a.upstream_model_id.clone());
+    let fallback = fallback_value(&a.fallback);
     // Owner override of the derived /v1/models capability facts
     // (model-capabilities design §7) — same "JSON object as text, empty
     // clears" convention as `chat_template_kwargs` on the local model form.
@@ -382,9 +306,12 @@ fn AliasForm(
                 return;
             }
         };
+        let mut clear: Vec<&str> = Vec::new();
+        let fallback_v = fallback_arg(&mut clear, fallback);
+        let (action, id) = saves.target();
         let args = json!({
-            "action": if create { "create" } else { "update" },
-            "id": if create { Value::Null } else { json!(id) },
+            "action": action,
+            "id": id,
             "alias": alias.get_untracked().trim(),
             "upstream_id": uid,
             "upstream_model": upstream_model.get_untracked().trim(),
@@ -393,6 +320,8 @@ fn AliasForm(
             // (`ops::parse_capabilities_override`) reads as "clear" — same
             // convention as `chat_template_kwargs` on the local model form.
             "capabilities_override": capabilities_override.get_untracked().trim(),
+            "fallback": fallback_v,
+            "clear": clear.join(","),
         });
         saving.set(true);
         spawn_local(async move {
@@ -401,10 +330,19 @@ fn AliasForm(
             match res {
                 Ok(saved) => {
                     toasts.ok(saved.message);
-                    open.set(false);
+                    // What the saves said about the fallback stays on the
+                    // form, under the field, until the owner closes it.
+                    if saves.answered(saved.id, saved.fallback_notes) {
+                        open.set(false);
+                    }
                     on_saved();
                 }
-                Err(e) => toasts.err(e.to_string()),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        toasts.err(e);
+                    }
+                }
             }
         });
     };
@@ -506,6 +444,35 @@ fn AliasForm(
                     {text("Reasoning budget (tokens)", reasoning_budget)}
                 </div>
                 <p class="field-hint">"Blank leaves the upstream's default. A request's own fields win over these."</p>
+            </section>
+            <section class="card edit-section">
+                <h3>"When it can't answer"</h3>
+                <FallbackField
+                    value=fallback
+                    // The alias's type (decision 29): its override's, its
+                    // upstream model's, or what the gateway publishes for
+                    // it — so an unreachable catalog still narrows the
+                    // picker (review UI3). A memo: the picker is rebuilt
+                    // when the type changes, not per keystroke.
+                    tasks=Signal::from(Memo::new(move |_| {
+                        let m = upstream_model.get();
+                        let upstream = entries
+                            .with(|e| e.iter().find(|x| x.id == m.trim()).and_then(|x| x.task.clone()));
+                        let gateway = catalog.entries.with(|e| {
+                            e.iter().find(|x| x.id == saved_name).and_then(|x| x.task.clone())
+                        });
+                        same_type_tasks(&super::fallback_field::alias_task(
+                            &capabilities_override.get(),
+                            upstream,
+                            gateway,
+                        ))
+                    }))
+                    own_name=Signal::derive(move || alias.get().trim().to_string())
+                    saves=saves
+                    hint="Answers when this alias can't: when its upstream is out of quota or \
+                          can't be reached, and while the alias or its upstream is disabled. A \
+                          model of the same type."
+                />
             </section>
             <section class="card edit-section">
                 <h3>"Capability override"</h3>
@@ -642,7 +609,8 @@ fn AudioForm(
 ) -> impl IntoView {
     let toasts = use_toasts();
     let create = m.id == 0;
-    let id = m.id;
+    // A second save is an update of what the first created (review C-a).
+    let saves = Saves::new(m.id);
     let model_id = RwSignal::new(m.model_id.clone());
     let family = RwSignal::new(m.family.clone());
     let path = RwSignal::new(m.path.clone());
@@ -674,7 +642,7 @@ fn AudioForm(
             .unwrap_or_default(),
     );
     let warm_start = RwSignal::new(m.warm_start);
-    let (hold_mode, hold_alias) = hold_signals(&m.hold_fallback_mode, &m.hold_fallback);
+    let fallback = fallback_value(&m.fallback);
     let saved_model_id = RwSignal::new(if create {
         String::new()
     } else {
@@ -683,6 +651,13 @@ fn AudioForm(
     let class_settings =
         LocalResource::new(|| crate::api::get::<SettingsFull>("/api/settings-full"));
     let settings = Signal::derive(move || class_settings.get().and_then(|r| r.ok()));
+    let own_name = Signal::derive(move || {
+        let prefix = settings
+            .get()
+            .map(|s| s.audio.public_prefix)
+            .unwrap_or_default();
+        lmgw_api_types::public_names::prefixed(&prefix, model_id.get().trim())
+    });
     let saving = RwSignal::new(false);
     let task_opts = Signal::derive(|| {
         AUDIO_TASKS
@@ -822,22 +797,16 @@ fn AudioForm(
         if busy_ms.is_none() {
             clear.push("busy_timeout_ms");
         }
-        let (hf_mode, hf_alias) = match hold_body(hold_mode, hold_alias) {
-            Ok(h) => h,
-            Err(e) => {
-                toasts.err(e);
-                return;
-            }
-        };
+        let fallback_v = fallback_arg(&mut clear, fallback);
+        let (action, id) = saves.target();
         let body = json!({
-            "action": if create { "create" } else { "update" },
-            "id": if create { Value::Null } else { json!(id) },
+            "action": action,
+            "id": id,
             "model_id": model_id.get_untracked().trim(),
             "family": family.get_untracked().trim(),
             "path": path.get_untracked().trim(),
             "task": task.get_untracked(),
-            "hold_fallback_mode": hf_mode,
-            "hold_fallback": hf_alias,
+            "fallback": fallback_v,
             "mode": mode.get_untracked(),
             "load_options": load_opts,
             "session_options": session_opts,
@@ -872,10 +841,19 @@ fn AudioForm(
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
-                    open.set(false);
+                    // What the saves said about the fallback stays on the
+                    // form, under the field, until the owner closes it.
+                    if saves.answered(v.id, v.fallback_notes) {
+                        open.set(false);
+                    }
                     on_saved();
                 }
-                Err(e) => toasts.err(e.to_string()),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        toasts.err(e);
+                    }
+                }
             }
         });
     };
@@ -1011,7 +989,7 @@ fn AudioForm(
                                         <div class="copy-line">
                                             <span class="mono-sm">{c.server_path.clone()}</span>
                                             <span class="dim">
-                                                {format!(" ({})", crate::fmt::human_bytes(c.size))}
+                                                {format!(" ({})", crate::fmt::fmt_bytes(c.size))}
                                             </span>
                                             <CopyBtn text=c.server_path.clone()/>
                                         </div>
@@ -1037,20 +1015,16 @@ fn AudioForm(
                     />
                     "start at boot (warm start)"
                 </label>
-                <div class="field">
-                    <label>"Hold fallback"</label>
-                    <HoldFallback
-                        mode=hold_mode
-                        alias=hold_alias
-                        inherit_label="Inherit · none"
-                        tasks=&["tts", "asr"]
-                    />
-                </div>
-                <p class="dim mini-note">
-                    "Where this model's requests go while a GPU hold (Settings → GPU → Hold) is active. "
-                    "Audio models never inherit the global fallback, only their own row does, so "
-                    "\"Inherit\" here means the same as \"None\": refuse with a 503."
-                </p>
+                <FallbackField
+                    value=fallback
+                    tasks=Signal::derive(move || same_type_tasks(&task.get()))
+                    own_name=own_name
+                    saves=saves
+                    hint="Answers whenever this model can't: while the GPU is held (a row on the \
+                          CPU is not), when VRAM outside lmgw is short, for background requests \
+                          that would disturb other work, and while the row is disabled. A model \
+                          of the same task."
+                />
                 <audio_placement::CpuHoldNote p=placement settings=settings/>
                 <div class="field">
                     <label>"Image override"</label>
@@ -1323,7 +1297,8 @@ fn ImageForm(
     let toasts = use_toasts();
     let modal = crate::widgets::use_modal();
     let create = m.id == 0;
-    let id = m.id;
+    // A second save is an update of what the first created (review C-a).
+    let saves = Saves::new(m.id);
     let model_id = RwSignal::new(m.model_id.clone());
 
     // --- files -------------------------------------------------------------
@@ -1488,13 +1463,28 @@ fn ImageForm(
             .unwrap_or_default(),
     );
     let warm_start = RwSignal::new(m.warm_start);
-    let (hold_mode, hold_alias) = hold_signals(&m.hold_fallback_mode, &m.hold_fallback);
+    let fallback = fallback_value(&m.fallback);
     let capabilities_override = RwSignal::new(
         m.capabilities_override
             .as_ref()
             .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
             .unwrap_or_default(),
     );
+    // In the Chat (`image_chat`): empty is "not set", the recipe's style
+    // and the default preview.
+    let prompt_style = RwSignal::new(
+        m.prompt_style
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_default(),
+    );
+    let preview_mode = RwSignal::new(
+        m.preview_mode
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_default(),
+    );
+    let derived_style = use_context::<super::models::Editors>()
+        .and_then(|e| e.image_derived.get_untracked())
+        .filter(|_| !create);
     let saved_once = RwSignal::new(false);
     let saved_model_id = RwSignal::new(if create {
         String::new()
@@ -1652,13 +1642,6 @@ fn ImageForm(
                 return;
             }
         };
-        let (hf_mode, hf_alias) = match hold_body(hold_mode, hold_alias) {
-            Ok(h) => h,
-            Err(e) => {
-                toasts.err(e);
-                return;
-            }
-        };
         // Empty inherits the class settings; `image` clears on an empty
         // string, the rest have to be named — `extra_run_args` so an override
         // saved before goes too, and an
@@ -1670,9 +1653,18 @@ fn ImageForm(
         if capabilities_override.get_untracked().trim().is_empty() {
             clear.push("capabilities_override");
         }
+        let (style, mode) = (prompt_style.get_untracked(), preview_mode.get_untracked());
+        if style.is_empty() {
+            clear.push("prompt_style");
+        }
+        if mode.is_empty() {
+            clear.push("preview_mode");
+        }
+        let fallback_v = fallback_arg(&mut clear, fallback);
+        let (action, id) = saves.target();
         let body = json!({
-            "action": if create { "create" } else { "update" },
-            "id": if create { Value::Null } else { json!(id) },
+            "action": action,
+            "id": id,
             "model_id": model_id.get_untracked().trim(),
             "files": files,
             "args": args,
@@ -1683,9 +1675,10 @@ fn ImageForm(
             "image": image.get_untracked().trim(),
             "extra_run_args": if era_empty { Value::Null } else { json!(era) },
             "warm_start": warm_start.get_untracked(),
-            "hold_fallback_mode": hf_mode,
-            "hold_fallback": hf_alias,
+            "fallback": fallback_v,
             "capabilities_override": capabilities_override.get_untracked().trim(),
+            "prompt_style": style,
+            "preview_mode": mode,
             "clear": clear.join(","),
         });
         saving.set(true);
@@ -1702,6 +1695,7 @@ fn ImageForm(
                         m.saved();
                     }
                     saved_once.set(true);
+                    saves.answered(v.id, v.fallback_notes);
                     save_warnings.set(v.warnings.unwrap_or_default());
                     save_command_line.set(v.command_line.unwrap_or_default());
                     toasts.ok(v.message);
@@ -1713,11 +1707,26 @@ fn ImageForm(
                     detail_reload.update(|n| *n += 1);
                     on_saved();
                 }
-                Err(e) => toasts.err(e.to_string()),
+                Err(e) => {
+                    let e = e.to_string();
+                    if !saves.refused(&e) {
+                        toasts.err(e);
+                    }
+                }
             }
         });
     };
 
+    // A TAE file in the row's files: what the tiny-decoder preview needs.
+    let has_tae = Signal::derive(move || {
+        role_sigs.with_value(|r| {
+            r.iter()
+                .any(|(k, v)| *k == "taesd" && !v.get().trim().is_empty())
+        }) || other_files.with(|o| {
+            o.iter()
+                .any(|(k, v)| (k == "tae" || k == "taesd") && !v.trim().is_empty())
+        })
+    });
     view! {
         {move || {
             let problems = detail.get().flatten().map(|d| d.problems).unwrap_or_default();
@@ -1999,6 +2008,14 @@ fn ImageForm(
             </div>
         </section>
 
+        <image_chat::ImageChatFields
+            prompt_style=prompt_style
+            preview_mode=preview_mode
+            model_id=saved_model_id
+            has_tae=has_tae
+            derived=derived_style
+        />
+
         <section class="card edit-section">
             <h3>"Container"</h3>
             <div class="row">
@@ -2024,20 +2041,22 @@ fn ImageForm(
                 <input class="input mono" prop:value=move || idle.get()
                     on:input=move |ev| idle.set(event_target_value(&ev))/>
             </div>
-            <div class="field" style="margin-top:8px">
-                <label>"Hold fallback"</label>
-                <HoldFallback
-                    mode=hold_mode
-                    alias=hold_alias
-                    inherit_label="Inherit · none"
-                    tasks=&["image_generation", "image_edit"]
-                />
-            </div>
-            <p class="dim mini-note">
-                "Where this model's requests go while a GPU hold (Settings → GPU → Hold) is active. "
-                "Image models never inherit the global fallback, only their own row does, so "
-                "\"Inherit\" here means the same as \"None\": refuse with a 503."
-            </p>
+            <FallbackField
+                value=fallback
+                tasks=Signal::derive(|| same_type_tasks("image_generation"))
+                own_name=Signal::derive(move || {
+                    let prefix = class_settings
+                        .get()
+                        .and_then(|r| r.ok())
+                        .map(|s| s.image.public_prefix)
+                        .unwrap_or_default();
+                    lmgw_api_types::public_names::prefixed(&prefix, model_id.get().trim())
+                })
+                saves=saves
+                hint="Answers whenever this model can't: while the GPU is held, when VRAM \
+                      outside lmgw is short, for background requests that would disturb other \
+                      work, and while the row is disabled. Another image model."
+            />
             <div class="field" style="margin-top:8px">
                 <label>"Image override"</label>
                 <ImagePicker

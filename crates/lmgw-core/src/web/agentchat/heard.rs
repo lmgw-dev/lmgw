@@ -17,7 +17,7 @@
 //!   the model goes on with its calls not run (verification review).
 //!
 //! The response's stop, a cut, ends the wait as it ends any tool call (the
-//! loop's cancel). **The loop's GPU claim is let go for the wait** (`claim`):
+//! loop's cancel). **The loop's GPU claim is let go for the wait** (`agent::claim`):
 //! the row waits for an ASR call that may need the room it pins.
 //!
 //! **A pause in mid-sentence** may still run a tool on the first half: its
@@ -34,7 +34,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use super::chat_turn::{tools_may_run, RowWatch, ToolsHeld};
-use super::claim::LoopClaim;
+use crate::agent::claim::LoopClaim;
 use crate::agent::{ToolExecutor, ToolOutcome};
 use crate::erased::Erased;
 use crate::proxy::StopHandle;

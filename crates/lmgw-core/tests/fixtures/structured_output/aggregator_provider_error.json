@@ -1,0 +1,17 @@
+{
+  "captured": "live probe 2026-10-22 through a dev copy of the gateway: POST /v1/chat/completions, kilo/meta-llama/llama-3.2-1b-instruct, a valid json_schema: the aggregator's own 502 with the provider's text only in metadata.raw, stays generic",
+  "upstream": "openai_compatible",
+  "status": 502,
+  "body": {
+    "error": {
+      "message": "Provider returned error",
+      "code": 502,
+      "metadata": {
+        "raw": "{\"errors\":[{\"message\":\"AiError: Ai: JSON Schema mode is not supported with stream mode. (scrubbed)\",\"code\":5023}],\"success\":false,\"result\":{},\"messages\":[]}",
+        "provider_name": "Cloudflare",
+        "is_byok": false
+      }
+    }
+  },
+  "expect": null
+}

@@ -145,7 +145,9 @@ pub struct Stage {
     pub fallback_unusable: Option<FallbackUnusable>,
 }
 
-/// A hold fallback, and whether it is local (a usable one never is).
+/// The fallback that answers for a blocked model, and whether it is a local
+/// model: a local one may be a fallback too, and answers where it may run
+/// (a row on the CPU under the hold).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -155,7 +157,7 @@ pub struct Fallback {
 }
 
 /// A named hold fallback that cannot answer: `why` is the clause the hold's
-/// refusal names it with ("does not resolve", "is itself a local model").
+/// refusal names it with ("does not resolve", "is itself a candidate alias").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

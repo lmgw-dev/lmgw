@@ -581,8 +581,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             residency: None,
         };
         let models_dir = d.path().display().to_string();

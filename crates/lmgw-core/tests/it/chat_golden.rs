@@ -36,9 +36,18 @@ pub(crate) use system::{
 // ---------------------------------------------------------------------------
 
 /// `body` with its wall-clock values zeroed: `ttfb_ms`, `total_ms`, and the
-/// `ms` of a tool result or a retrieval. A `null` stays `null`.
+/// `ms` of a tool result or a retrieval. A `null` stays `null`. The
+/// comments (`:`, `: `) are left out: the tail flush a quarter second after
+/// a burst of frames and axum's keep-alive, where they fall is the clock's
+/// too.
 pub(crate) fn normalize(body: &str) -> String {
-    let mut out = body.to_string();
+    let mut out = format!("\n\n{body}");
+    for c in ["\n\n:\n\n", "\n\n: \n\n"] {
+        while out.contains(c) {
+            out = out.replace(c, "\n\n");
+        }
+    }
+    let mut out = out[2..].to_string();
     for key in ["\"ttfb_ms\":", "\"total_ms\":", "\"ms\":"] {
         let mut s = String::with_capacity(out.len());
         let mut rest = out.as_str();
@@ -306,7 +315,7 @@ async fn send_regenerate_and_edit() {
         .respond_with(sse_reply(FULL_SSE))
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
 
     golden("send", &send(&gw, tid, "hi there").await);
@@ -384,7 +393,7 @@ async fn a_temporary_chat() {
         .respond_with(sse_reply(openai_sse("hello there", 5, 2)))
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({"temporary": true})).await;
     assert!(tid < 0);
     golden("temporary", &send(&gw, tid, "hi").await);
@@ -406,7 +415,7 @@ async fn an_auto_mode_retrieval() {
         &state.db,
         &NewUpstream {
             name: "chat-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: chat.uri(),
             api_key: None,
@@ -430,6 +439,7 @@ async fn an_auto_mode_retrieval() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -473,7 +483,7 @@ async fn an_mcp_tool_thread() {
         openai_call("Checking. ", "c1", "stub__echo", "{\"text\":\"hi\"}")
     );
     mount_in_order(&mock, &[first, openai_sse("it said hi", 20, 4)]).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
     let tid = tool_thread(&gw).await;
     golden(
@@ -494,7 +504,7 @@ async fn an_admin_chat() {
         ],
     )
     .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     save_settings(&state, |s| s.self_admin = SelfAdmin::ReadOnly).await;
     let tid = thread(&gw, json!({"kind": "admin"})).await;
     golden(
@@ -518,7 +528,7 @@ async fn a_tool_thread_out_of_budget() {
         json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
     );
     mount_in_order(&mock, &[two_calls]).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     save_settings(&state, |s| s.responses_max_tool_calls = 1).await;
     register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
     let tid = tool_thread(&gw).await;
@@ -529,7 +539,7 @@ async fn a_tool_thread_out_of_budget() {
 #[tokio::test]
 async fn a_tool_thread_with_no_usable_server() {
     let mock = MockServer::start().await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
     post(
         &gw,
@@ -552,7 +562,7 @@ async fn a_tool_thread_whose_upstream_fails() {
         )
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::ZERO).await).await;
     let tid = tool_thread(&gw).await;
     golden("tool_upstream_error", &send(&gw, tid, "hi").await);
@@ -581,7 +591,7 @@ async fn a_tool_turn_superseded_mid_tool() {
         .respond_with(sse_reply(openai_sse("fine", 3, 1)))
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     register_stub(&state, &mcp_stub(Duration::from_secs(30)).await).await;
     let tid = tool_thread(&gw).await;
 
@@ -606,7 +616,7 @@ async fn a_tool_turn_superseded_mid_tool() {
 #[tokio::test]
 async fn an_unknown_model() {
     let mock = MockServer::start().await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = post(&gw, "/chat/api/threads", json!({"model_alias": "ghost"}))
         .await
         .json::<Value>()
@@ -629,7 +639,7 @@ async fn an_upstream_error() {
         )
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
     golden("upstream_error", &send(&gw, tid, "hello").await);
 }
@@ -652,7 +662,7 @@ async fn a_turn_superseded_before_its_first_token() {
         .with_priority(2)
         .mount(&mock)
         .await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::OpenaiCompatible).await;
     let tid = thread(&gw, json!({})).await;
     let mut first = post(
         &gw,

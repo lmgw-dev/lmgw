@@ -1,0 +1,88 @@
+/* Find a model (src/widgets/model_finder.rs, find-a-model design §5): the box,
+   the one card with its lines, the fold, the progress and the two lists. The
+   component sits in its host's scroller (the page body of /models/find), so it
+   is one column that grows: no box inside it scrolls (ui-matrix's nested_v).
+   Long names and lines wrap, never scroll sideways. Nothing fades: WebKitGTK
+   blanks an element one frame after an opacity transition ends. */
+
+.mf { display: flex; flex-direction: column; gap: 12px; max-width: 760px; min-width: 0; }
+.mf.compact { gap: 8px; max-width: none; }
+
+/* the box */
+.mf-box { display: flex; gap: 8px; align-items: center; }
+.mf-input { flex: 1 1 auto; min-width: 0; }
+.mf-hint { margin: 0; font-size: var(--fs-sm); line-height: 1.5; max-width: 62ch; }
+.mf-notice { line-height: 1.5; }
+
+/* the card */
+.mf-card { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; min-width: 0; }
+.compact .mf-card { padding: 10px 12px; }
+.mf-card-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 2px; }
+.mf-title { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 4px 10px; }
+.mf-title h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em;
+  overflow-wrap: anywhere; }
+.mf-by { font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.mf-mark { flex: none; margin-top: 1px; }
+.mf-can { margin: 0; color: var(--text); }
+.mf-line { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.mf-line.mf-warn { color: var(--amber); }
+.mf-other .link-btn, .mf-uploads .link-btn { color: var(--accent); padding: 0; font-size: inherit; }
+.mf-other .link-btn:hover:not(:disabled), .mf-uploads .link-btn:hover { text-decoration: underline; }
+.mf-other .link-btn:disabled { color: var(--text-3); cursor: default; }
+.mf-metered { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.mf-card .mc-banner.in-card { margin: 2px 0; }
+
+/* D9's question */
+.mf-ask { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px;
+  background: var(--surface-hi); }
+.mf-ask-row { gap: 6px 8px; }
+.mf-ask-gb { width: 72px; }
+.mf-ask-confirm { flex-basis: 100%; font-size: var(--fs-sm); color: var(--text-2); }
+
+/* the fold */
+.mf-fold { margin-top: 2px; }
+.mf-fold > summary { cursor: pointer; color: var(--text-2); font-size: var(--fs-sm);
+  overflow-wrap: anywhere; }
+.mf-fold > summary:hover { color: var(--text); }
+.mf-fold-body { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 2px 14px;
+  font-size: var(--fs-sm); line-height: 1.5; }
+.mf-fold-body p { margin: 0; overflow-wrap: anywhere; }
+.mf-notes-list { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--text-2);
+  line-height: 1.5; }
+.mf-notes > summary { cursor: pointer; color: var(--text-3); font-size: var(--fs-sm); }
+.mf-notes ul { margin: 4px 0 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--text-2); }
+
+/* the actions, the progress and the end */
+.mf-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px;
+  padding-top: 10px; border-top: 1px solid var(--border); }
+.mf-actions > .dim { font-size: var(--fs-sm); min-width: 0; }
+.mf-spacer { flex: 1 1 auto; }
+.mf-progress, .mf-ready { display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
+  padding-top: 10px; border-top: 1px solid var(--border); }
+.mf-progress > .mf-actions, .mf-ready > .mf-actions { border-top: 0; padding-top: 0; margin-top: 2px; }
+.mf-stage { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+.mf-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.mf-file { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); min-width: 0; }
+.mf-file-name { flex: 1 1 auto; min-width: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.mf-bar { flex: none; width: 140px; height: 6px; border-radius: 3px; background: var(--surface-hi);
+  overflow: hidden; }
+.mf-bar-fill { display: block; height: 100%; background: var(--accent); }
+.mf-ready-for { font-weight: 500; }
+
+/* the lists */
+.mf-list { display: flex; flex-direction: column; gap: 6px; }
+.mf-list > .mini-head { margin: 4px 0 0; }
+.mf-choices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.mf-choice { width: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
+  padding: 6px 10px; border: 1px solid transparent; border-radius: 8px; background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.mf-choice:hover:not(:disabled) { background: var(--surface-hi); border-color: var(--border); }
+.mf-choice:disabled { cursor: default; opacity: .6; }
+.mf-choice-name { font-weight: 500; overflow-wrap: anywhere; }
+.mf-choice-detail { font-size: var(--fs-sm); }
+.mf-choice-note { flex-basis: 100%; font-size: var(--fs-sm); color: var(--text-3); }
+.mf-more { align-self: flex-start; }
+
+/* the Overview's empty-state line (find-a-model design §8.2) */
+.ov-find { display: block; margin-top: 6px; }

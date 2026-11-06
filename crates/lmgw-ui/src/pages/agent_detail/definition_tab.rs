@@ -37,6 +37,7 @@ pub(super) fn DefinitionTab(
     let error = RwSignal::new(None::<String>);
     let dup_open = RwSignal::new(false);
     let del_open = RwSignal::new(false);
+    let pane: NodeRef<leptos::html::Div> = NodeRef::new();
     let resettable = d.resettable;
     let portability = d.portability.clone();
     // What this manifest asks the owner for (mounts §5.8). The definition is
@@ -309,9 +310,9 @@ pub(super) fn DefinitionTab(
 
         // One scroller, the pane (ux:U-2): what needs the owner's eye — the
         // report's warnings, the token advisory, "will not run elsewhere" —
-        // comes first, and the editor below is as tall as the manifest, so it
-        // never scrolls inside the pane that scrolls it.
-        <div class="fill-pane def-pane">
+        // comes first, and the editor below is as tall as the wrapped
+        // manifest, so it never scrolls inside the pane that scrolls it.
+        <div class="fill-pane def-pane" node_ref=pane>
             <For each=rest key=|w| w.clone() let:w>
                 <div class="notice warn">{w}</div>
             </For>
@@ -348,13 +349,7 @@ pub(super) fn DefinitionTab(
                         </div>
                     }
                 })}
-            <textarea
-                class="input ta mono manifest-editor"
-                spellcheck="false"
-                rows=move || text.with(|t| t.lines().count() + 1)
-                prop:value=move || text.get()
-                on:input=move |ev| text.set(event_target_value(&ev))
-            ></textarea>
+            <ManifestEditor text=text pane=pane/>
             {(!not_portable)
                 .then(|| {
                     view! {

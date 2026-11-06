@@ -301,7 +301,20 @@ async fn the_binary_answers_keep_their_content_types() {
     let clip = get(&w, "/audio-lab/api/refs/me.wav").await;
     assert_eq!(clip.status(), 200);
     assert_eq!(clip.headers()["content-type"], "audio/wav");
-    assert_eq!(clip.bytes().await.unwrap().len(), 44 + 3200);
+    assert_eq!(clip.headers()["accept-ranges"], "bytes");
+    let whole = clip.bytes().await.unwrap();
+    assert_eq!(whole.len(), 44 + 3200);
+    // A player's resume (web::ranged): the rest from byte 1000, as 206.
+    let part =
+        w.gw.client()
+            .get(format!("{}/audio-lab/api/refs/me.wav", w.gw))
+            .header("range", "bytes=1000-")
+            .send()
+            .await
+            .unwrap();
+    assert_eq!(part.status(), 206);
+    assert_eq!(part.headers()["content-range"], "bytes 1000-3243/3244");
+    assert_eq!(part.bytes().await.unwrap(), whole.slice(1000..));
 
     let speech =
         w.gw.client()
@@ -333,5 +346,28 @@ async fn the_binary_answers_keep_their_content_types() {
         let v: Value = r.json().await.unwrap();
         assert_eq!(v["text"], "hello there");
         assert_eq!(v.get("words").is_some(), detailed, "{v}");
+    }
+}
+
+/// WP13: a clip in the voice library is an upload, so the preview route
+/// sends nosniff and the sandbox policy on the 200, the 206 and the 416.
+#[tokio::test]
+async fn a_stored_clip_is_served_sandboxed_on_200_206_and_416() {
+    use crate::support::stored::assert_sandboxed;
+    let w = lab_world().await;
+    for (range, want) in [
+        (None, 200),
+        (Some("bytes=0-9"), 206),
+        (Some("bytes=999999-"), 416),
+    ] {
+        let mut req =
+            w.gw.client()
+                .get(format!("{}/audio-lab/api/refs/me.wav", w.gw));
+        if let Some(r) = range {
+            req = req.header("range", r);
+        }
+        let r = req.send().await.unwrap();
+        assert_eq!(r.status().as_u16(), want, "{range:?}");
+        assert_sandboxed(r.headers(), &format!("{range:?}"));
     }
 }

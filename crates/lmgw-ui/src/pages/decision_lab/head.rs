@@ -118,7 +118,7 @@ pub(super) fn facts(m: &DecisionLabModel) -> Vec<Fact> {
     ));
     if m.held {
         out.push(Fact {
-            text: match &m.hold_fallback {
+            text: match &m.fallback {
                 Some(f) => format!("held — answers through {f}"),
                 None => "held — no fallback: 503".into(),
             },
@@ -306,7 +306,7 @@ mod tests {
             f.backend = DecisionBackend::Gpu;
         }
         m.held = true;
-        m.hold_fallback = Some("jev".into());
+        m.fallback = Some("jev".into());
         let f = facts(&m);
         assert!(f
             .iter()
@@ -315,7 +315,7 @@ mod tests {
         let held = f.last().unwrap();
         assert_eq!(held.text, "held — answers through jev");
         assert_eq!(held.tone, Tone::Warn);
-        m.hold_fallback = None;
+        m.fallback = None;
         assert_eq!(facts(&m).last().unwrap().text, "held — no fallback: 503");
     }
 

@@ -127,7 +127,15 @@ impl Relay<'_, '_> {
         self.streamed = true;
         let ev = match d {
             StreamDelta::TextDelta(t) if !t.is_empty() => LoopEvent::Text(t.clone()),
+            StreamDelta::RefusalDelta(t) if !t.is_empty() => LoopEvent::Refusal(t.clone()),
             StreamDelta::ReasoningDelta(r) if !r.is_empty() => LoopEvent::Reasoning(r.clone()),
+            StreamDelta::ReasoningSeal(s) => LoopEvent::ReasoningSeal(s.clone()),
+            // No wire of the loop's has a compaction block: its summary is
+            // text, as every route without one reads it (`ir::compaction`).
+            StreamDelta::Compaction(c) => match c.summary().filter(|s| !s.is_empty()) {
+                Some(s) => LoopEvent::Text(s.to_string()),
+                None => return true,
+            },
             StreamDelta::ToolCallStart { index, id, name } => {
                 let global = self.next_index + self.started;
                 self.started += 1;

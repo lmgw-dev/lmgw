@@ -76,7 +76,7 @@ async fn a_device_cannot_launder_an_access_setting_through_an_agent() {
             "replace": false}"#,
     )
     .await;
-    assert!(said.contains("\"id\": \"opener\""), "installed: {said}");
+    assert!(said.contains("\"id\":\"opener\""), "installed: {said}");
     let row = store::get_agent(&w.state.db, "opener")
         .await
         .unwrap()
@@ -296,7 +296,7 @@ async fn a_device_replaces_only_an_agent_it_created() {
                 "replace": true}"#
         };
         let said = tool_in_turn(&w, &desk.client, tid, "lmgw__agent_set", args).await;
-        assert!(said.contains("\"id\": \"mine\""), "{name}: {said}");
+        assert!(said.contains("\"id\":\"mine\""), "{name}: {said}");
     }
     let row = store::get_agent(&w.state.db, "mine")
         .await
@@ -358,7 +358,7 @@ async fn a_device_deletes_only_an_agent_it_created() {
     );
 
     let said = tool_in_turn(&w, &desk.client, tid, "lmgw__agent_set", MINE).await;
-    assert!(said.contains("\"id\": \"mine\""), "{said}");
+    assert!(said.contains("\"id\":\"mine\""), "{said}");
     let said = tool_in_turn(
         &w,
         &desk.client,
@@ -387,7 +387,7 @@ async fn an_owner_s_write_adopts_a_device_s_agent() {
 
     for adopt in ["the dashboard", "the owner's tool call"] {
         let said = tool_in_turn(&w, &desk.client, tid, "lmgw__agent_set", MINE).await;
-        assert!(said.contains("\"id\": \"mine\""), "{adopt}: {said}");
+        assert!(said.contains("\"id\":\"mine\""), "{adopt}: {said}");
         assert_eq!(
             mine().await.unwrap().created_by_key,
             Some(desk.id),
@@ -405,7 +405,7 @@ async fn an_owner_s_write_adopts_a_device_s_agent() {
             }
             _ => {
                 let said = tool_in_turn(&w, &w.gw.client(), owners, "lmgw__agent_set", MINE).await;
-                assert!(said.contains("\"id\": \"mine\""), "{adopt}: {said}");
+                assert!(said.contains("\"id\":\"mine\""), "{adopt}: {said}");
             }
         }
         let adopted = mine().await.unwrap();

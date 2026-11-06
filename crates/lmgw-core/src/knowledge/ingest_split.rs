@@ -6,12 +6,15 @@
 //! windows of its file suggested, and a guessed tokenizer is a guess. When the
 //! embedder still refuses a chunk as larger than one input, the ingest splits
 //! that chunk in half — recursively, until the halves are taken or a piece
-//! cannot be cut any more — and the file says so in a note. The refusal's own
-//! wording is the signal ([`is_oversize`]); nothing is pre-shrunk.
+//! cannot be cut any more — and the file says so in a note. The refusal's
+//! error variant is the signal, and for a plain upstream error its own
+//! wording ([`is_oversize_error`]); nothing is pre-shrunk.
 
+use crate::error::GatewayError;
 use crate::knowledge::store::NewKbChunk;
 use crate::quickdoc::query::TiktokenCounter;
 use quickdoc_core::embed::TokenCounter;
+use quickdoc_core::QuickdocError;
 use sha2::{Digest, Sha256};
 
 use super::chunk::embed_text;
@@ -49,15 +52,50 @@ fn upstream_status(error: &str) -> Option<u16> {
     rest.split(')').next()?.trim().parse().ok()
 }
 
-/// Whether an embedding error says the input was larger than the model takes:
+/// Whether an embedding call's error is a refusal of the input as larger than
+/// the model takes, decided on its variant: the context refusals — lmgw's
+/// own check, llama-server's typed backstop, the OpenAI platform's
+/// `context_length_exceeded` in either wording — are; an upstream error the
+/// egress left plain (`Upstream`: an older llama-server's wording, another
+/// provider's) is when its words say so ([`is_oversize`]); nothing else is —
+/// a rate or quota refusal ([`GatewayError::UpstreamLimited`]), a hold, a
+/// transport error, whatever its message holds.
+pub fn is_oversize_error(e: &GatewayError) -> bool {
+    match e {
+        GatewayError::ContextExceeded { .. } | GatewayError::ContextExceededAsWorded { .. } => true,
+        // By the status the error carries, not the one its text spells: the
+        // relayed variant's text has no `upstream error (NNN):` lead.
+        GatewayError::Upstream { .. } | GatewayError::UpstreamRelayed(_) => {
+            e.upstream_status()
+                .is_some_and(|s| OVERSIZE_STATUSES.contains(&s))
+                && e.upstream_message().is_some_and(has_oversize_phrase)
+        }
+        _ => false,
+    }
+}
+
+/// Whether an embedder's error is [`is_oversize_error`]'s refusal, as the
+/// in-process embedder reports it.
+pub fn refused_as_oversize(e: &QuickdocError) -> bool {
+    matches!(e, QuickdocError::EmbedderOversize(_))
+}
+
+/// Whether an error's words say the input was larger than the model takes:
 /// one of [`OVERSIZE_PHRASES`], and — where the error carries the upstream's
-/// status — one of [`OVERSIZE_STATUSES`].
+/// status — one of [`OVERSIZE_STATUSES`]. For an error only its text is left
+/// of: a plain upstream error ([`is_oversize_error`]), a job's stored error.
 pub fn is_oversize(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     if upstream_status(&e).is_some_and(|s| !OVERSIZE_STATUSES.contains(&s)) {
         return false;
     }
-    OVERSIZE_PHRASES.iter().any(|needle| e.contains(needle))
+    has_oversize_phrase(&e)
+}
+
+/// Whether `text` holds one of [`OVERSIZE_PHRASES`].
+fn has_oversize_phrase(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    OVERSIZE_PHRASES.iter().any(|needle| text.contains(needle))
 }
 
 /// The fewest tokens a piece is still split below: an oversize refusal of a
@@ -217,6 +255,84 @@ mod tests {
         assert!(is_oversize(
             "upstream error (400): {\"code\":\"context_length_exceeded\"}"
         ));
+    }
+
+    /// The variant decides: every context refusal splits whatever its words
+    /// (the OpenAI platform's carry none of the phrases), a plain upstream
+    /// error by its words and status, and nothing else — not a 429 whose
+    /// message happens to hold a phrase.
+    #[test]
+    fn the_error_variant_decides_and_only_plain_upstream_errors_are_read() {
+        let platform = |status: u16, body: serde_json::Value| {
+            crate::egress::for_protocol(crate::config::Protocol::Openai)
+                .map_error(status, body.to_string().as_bytes())
+        };
+        let worded = platform(
+            400,
+            serde_json::json!({"error": {"message": "Your input exceeds the context window.",
+                "type": "invalid_request_error", "param": "input",
+                "code": "context_length_exceeded"}}),
+        );
+        assert!(matches!(
+            worded,
+            GatewayError::ContextExceededAsWorded { .. }
+        ));
+        assert!(is_oversize_error(&worded));
+        let numbered = platform(
+            400,
+            serde_json::json!({"error": {"message": "This model's maximum context length is \
+                8192 tokens. However, your messages resulted in 9000 tokens.",
+                "type": "invalid_request_error", "param": "input",
+                "code": "context_length_exceeded"}}),
+        );
+        assert!(matches!(numbered, GatewayError::ContextExceeded { .. }));
+        assert!(is_oversize_error(&numbered));
+        let limited = platform(
+            429,
+            serde_json::json!({"error": {"message": "maximum number of tokens per minute",
+                "type": "tokens", "param": null, "code": "rate_limit_exceeded"}}),
+        );
+        assert!(matches!(limited, GatewayError::UpstreamLimited { .. }));
+        assert!(!is_oversize_error(&limited));
+
+        // llama-server's typed backstop, and an older build's plain words.
+        let llama = |status: u16, body: &str| {
+            crate::egress::for_protocol(crate::config::Protocol::LlamaCpp)
+                .map_error(status, body.as_bytes())
+        };
+        assert!(is_oversize_error(&llama(
+            400,
+            r#"{"error":{"code":400,"message":"input (8010 tokens) is too large to process. increase the physical batch size","type":"exceed_context_size_error","n_prompt_tokens":8010,"n_ctx":4096}}"#
+        )));
+        let plain = llama(
+            500,
+            r#"{"error":{"code":500,"message":"input is too large to process. increase the physical batch size","type":"server_error"}}"#,
+        );
+        assert!(matches!(plain, GatewayError::Upstream { .. }));
+        assert!(is_oversize_error(&plain));
+        assert!(!is_oversize_error(&llama(
+            401,
+            r#"{"error":{"message":"input is too large to process","type":"auth"}}"#
+        )));
+        assert!(!is_oversize_error(&GatewayError::Transport(
+            "input is too large to process".into()
+        )));
+        // The platform's relayed 4xx goes by its status like a plain one: a
+        // 400 naming the context is oversize, a 404 or 409 that merely
+        // mentions it is not.
+        let relayed = |status: u16, message: &str| {
+            GatewayError::UpstreamRelayed(Box::new(crate::error::Relayed {
+                status,
+                error_type: Some("invalid_request_error".into()),
+                code: None,
+                param: None,
+                message: message.into(),
+            }))
+        };
+        let words = "This model's maximum context length is 8192 tokens";
+        assert!(is_oversize_error(&relayed(400, words)));
+        assert!(!is_oversize_error(&relayed(404, words)));
+        assert!(!is_oversize_error(&relayed(409, words)));
     }
 
     #[test]

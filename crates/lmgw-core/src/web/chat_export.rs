@@ -224,18 +224,20 @@ pub async fn export_thread(
         Ok(Err(e)) => return internal(e),
         Err(e) => return internal(e),
     };
-    (
-        [
-            (header::CONTENT_TYPE, format.mime().to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                content_disposition(&thread_file_name(&bundle.thread, format)),
-            ),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-        body,
+    super::stored::sandboxed(
+        (
+            [
+                (header::CONTENT_TYPE, format.mime().to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    content_disposition(&thread_file_name(&bundle.thread, format)),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            body,
+        )
+            .into_response(),
     )
-        .into_response()
 }
 
 /// `GET /chat/api/folders/{id}/export`. A device's zip leaves Admin Chat
@@ -353,16 +355,18 @@ async fn zip_response(
                     Err(e) => Some((Err(e), f)),
                 }
             }));
-            (
-                [
-                    (header::CONTENT_TYPE, "application/zip".to_string()),
-                    (header::CONTENT_DISPOSITION, content_disposition(&file_name)),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                    (header::CACHE_CONTROL, "no-store".to_string()),
-                ],
-                body,
+            super::stored::sandboxed(
+                (
+                    [
+                        (header::CONTENT_TYPE, "application/zip".to_string()),
+                        (header::CONTENT_DISPOSITION, content_disposition(&file_name)),
+                        (header::CONTENT_LENGTH, len.to_string()),
+                        (header::CACHE_CONTROL, "no-store".to_string()),
+                    ],
+                    body,
+                )
+                    .into_response(),
             )
-                .into_response()
         }
         Err(e) => internal(e),
     }
@@ -582,7 +586,12 @@ impl<'a> JsonExport<'a> {
                 let mut row = serde_json::to_value(m).expect("ChatMessageRow always serializes");
                 if let Some(raw) = m.ir_messages.as_deref() {
                     match serde_json::from_str::<Value>(raw) {
-                        Ok(v) => row["ir_messages"] = v,
+                        // Seals are the upstream's to read, not an export's
+                        // (openai egress design §7.3.2).
+                        Ok(mut v) => {
+                            crate::ir::strip_seals(&mut v);
+                            row["ir_messages"] = v;
+                        }
                         // `ExportMessage::ir_messages_unparsed`: the row stays a
                         // `Value` so its keys are written sorted, this one among them.
                         Err(_) => row["ir_messages_unparsed"] = Value::Bool(true),
@@ -645,18 +654,24 @@ fn fenced(lang: &str, text: &str) -> String {
     format!("{f}{lang}\n{}\n{f}\n", text.trim_end_matches('\n'))
 }
 
-fn human_size(n: i64) -> String {
-    let n = n as f64;
-    if n < 1024.0 {
-        format!("{n:.0} B")
-    } else if n < 1024.0 * 1024.0 {
-        format!("{:.1} KB", n / 1024.0)
-    } else {
-        format!("{:.1} MB", n / 1024.0 / 1024.0)
+/// Text that goes into a heading or a list line: no line breaks.
+/// Backslash-escapes the characters Markdown reads as markup, for text
+/// somebody else chose (a page title in an origin) that goes inside the
+/// export's own emphasis.
+fn md_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>' | '#' | '!' | '|'
+        ) {
+            o.push('\\');
+        }
+        o.push(c);
     }
+    o
 }
 
-/// Text that goes into a heading or a list line: no line breaks.
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -798,6 +813,11 @@ fn markdown(b: &Bundle) -> String {
         if let Some(note) = &m.images_note {
             o.push_str(&format!("*{}*\n\n", one_line(note)));
         }
+        // Where a message was written, as its client said and the model
+        // read it (chat-plane design §9.10).
+        if let Some(origin) = &m.origin {
+            o.push_str(&format!("*{}*\n\n", md_escape(&one_line(origin))));
+        }
         let atts: Vec<&ChatAttachmentFull> = b
             .attachments
             .iter()
@@ -815,7 +835,7 @@ fn markdown(b: &Bundle) -> String {
                     "- Attachment: {} ({}, {}){extracted}\n",
                     one_line(&a.name),
                     a.kind,
-                    human_size(a.data.len() as i64)
+                    lmgw_api_types::units::fmt_bytes(a.data.len() as u64)
                 ));
             }
             o.push('\n');
@@ -829,8 +849,12 @@ fn markdown(b: &Bundle) -> String {
         // A task result's record is its synthetic call: its text says it.
         let record = m.ir_messages.as_deref().filter(|_| !m.is_task_result());
         if let Some(ir) = record.filter(|s| !s.trim().is_empty()) {
+            // Without the seals, which are the upstream's to read.
             let pretty = serde_json::from_str::<Value>(ir)
-                .and_then(|v| serde_json::to_string_pretty(&v))
+                .and_then(|mut v| {
+                    crate::ir::strip_seals(&mut v);
+                    serde_json::to_string_pretty(&v)
+                })
                 .unwrap_or_else(|_| ir.to_string());
             o.push_str("<details><summary>Tool calls</summary>\n\n");
             o.push_str(&fenced("json", &pretty));
@@ -885,9 +909,23 @@ fn markdown(b: &Bundle) -> String {
                 "- {} ({}, {})\n",
                 one_line(&a.name),
                 a.kind,
-                human_size(a.data.len() as i64)
+                lmgw_api_types::units::fmt_bytes(a.data.len() as u64)
             ));
         }
     }
     o
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::md_escape;
+
+    #[test]
+    fn a_page_title_in_an_origin_cannot_make_markup() {
+        let s = md_escape("beside the tab “*a*_b_ [x](javascript:alert(1)) <b>#!|`\\”");
+        assert_eq!(
+            s,
+            "beside the tab “\\*a\\*\\_b\\_ \\[x\\]\\(javascript:alert\\(1\\)\\) \\<b\\>\\#\\!\\|\\`\\\\”"
+        );
+    }
 }

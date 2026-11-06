@@ -20,6 +20,8 @@ use crate::store;
 use crate::telemetry::TelemetryBus;
 use crate::vram::VramScheduler;
 
+pub mod fresh_install;
+
 /// Per-`init_for_tests` counter behind the unique `data_dir` each test gateway
 /// gets.
 static NEXT_TEST_DIR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -99,7 +101,15 @@ pub struct AppState {
     /// container runtime. Live `rmcp` peers, reconciled against the snapshot
     /// on every reload.
     pub mcp: McpManager,
+    /// Every upstream request and stream, and the hub's file reads. Decodes
+    /// nothing (`no_gzip`): its wire behaviour is what it was before the
+    /// build turned the `gzip` feature on (find-a-model design D141).
     pub http: reqwest::Client,
+    /// The Hugging Face hub's metadata reads (search, listings, trees,
+    /// uploads, overviews), the one client that asks for gzip and decodes it:
+    /// the hub's search pages are about 600 KB plain. Same connect timeout and
+    /// TLS as [`Self::http`].
+    pub hub_http: reqwest::Client,
     /// The client the service-mode proxy and its health probe use
     /// (container-runtime §3.3), and the **only** thing that distinguishes it
     /// from [`Self::http`]: `redirect::Policy::none()`.
@@ -115,6 +125,12 @@ pub struct AppState {
     /// A Hugging Face download takes its first hop with it too
     /// ([`crate::hf::get_with_commit`]): the hub names the commit only on its
     /// own redirect, which reqwest would follow past.
+    ///
+    /// It decodes nothing (`no_gzip`): what passes through it reaches its
+    /// reader as the far end sent it, a container's compressed answer to the
+    /// browser with its `Content-Encoding`, and a file with its length. The
+    /// other client, `hub_http`, decodes gzip for the hub's metadata reads
+    /// alone (find-a-model design D141).
     pub proxy_http: reqwest::Client,
     pub catalog: CatalogCache,
     /// What external `llama_cpp` rows said about themselves in `GET /props`
@@ -125,11 +141,19 @@ pub struct AppState {
     /// refused the protocol's own off form (model-capabilities design §5.6):
     /// learned from the refusal, kept per route for the process's life.
     pub(crate) reasoning_learned: crate::proxy::reasoning_fit::Learned,
+    /// The upstream rows remembered out of quota (openai egress design
+    /// §14.6): a hop on one with a fallback is skipped to it. In memory, for
+    /// the process's life.
+    pub upstream_quota: crate::upstream_quota::QuotaMemory,
     /// GGUF header cache (model capabilities design §3.5): one entry per
     /// absolute path, validated against the file's `(len, mtime)` on every
     /// hit. Keeps `/v1/models` cheap — the alternative is a header read per
     /// local row on every call.
     pub gguf_cache: GgufSummaryCache,
+    /// Hugging Face files' headers read over HTTP before a download
+    /// (find-a-model design §2.1, D4): by the file's content hash, for the
+    /// process's life.
+    pub hf_headers: crate::hf::RemoteHeaderCache,
     /// GPU admission control (quickdoc §9b, per-model-containers §4): the VRAM
     /// ledger, the eviction policy, and the queue requests wait in. The plane
     /// that *decides*; [`Self::runtime`] is the plane that *acts*.
@@ -148,6 +172,17 @@ pub struct AppState {
     /// [`Self::runtime`], never cloned out at startup and cached — a stale
     /// handle would drive a registry nobody else can see.
     runtime: ArcSwap<runtime::registry::Registry>,
+    /// lmgw's own CDI spec (machine-check design §3.6, ruling 4): where it
+    /// lives for this instance, whether it is true of the machine, and the
+    /// `--cdi-spec-dir` every GPU podman call carries. Production's is
+    /// managed on the real machine; a test state's is unmanaged (no spec, no
+    /// option) unless the test installs one ([`Self::set_cdi_for_tests`]).
+    cdi: ArcSwap<runtime::cdi::OwnSpec>,
+    /// The machine check (machine-check design WP4): whether this computer
+    /// can run local models, read on the machine `init_with_host` was given
+    /// (a test state's reads a blank one until the test states one,
+    /// [`crate::machine::MachineChecks::set_machine`]).
+    pub machine: crate::machine::MachineChecks,
     /// How a container agent reaches `podman` (container-runtime §6.1).
     ///
     /// A second, streaming seam beside [`Self::runtime`]'s buffered one,
@@ -194,6 +229,16 @@ pub struct AppState {
     /// already stopped every container, which is the failure that made this
     /// worth fixing (gpu-hold design §3.1).
     pub settings_write: tokio::sync::Mutex<()>,
+    /// Serializes the writes that change what a stored fallback reaches
+    /// (openai egress design §14.2): every setter whose save runs the
+    /// referrer dry run holds it from the snapshot its check reads, through
+    /// the dry run, to the real commit and the snapshot reload after it
+    /// ([`Self::routing_write`]). Two such saves racing could each pass
+    /// their dry run against the routing before the other, and commit
+    /// together what neither would have allowed; a write committed while
+    /// another one's check ran would be judged as that one's. Only these
+    /// writes wait on it — reads, requests and every other write never do.
+    routing_write: Arc<tokio::sync::Mutex<()>>,
     /// The order the snapshot's loads from the store publish in
     /// ([`Self::publish_snapshot`]).
     snapshot_loads: SnapshotLoads,
@@ -232,6 +277,13 @@ pub struct AppState {
     /// change, and the live turns, bound sessions and hold it reports. Its
     /// live half is the one [`Self::chat_live`] registers turns in.
     pub(crate) chat_feed: crate::web::chat_feed::Feed,
+    /// The Chat's running image and audio calls, by thread and call id: what
+    /// the per-call cancel route stops (chat-media-tools design §6.5).
+    pub(crate) media_calls: crate::web::MediaCalls,
+    /// Transfers between devices (device transfers design §3, §4): the
+    /// upload slots, the offers' lock, a test's free space. The rows and
+    /// files are the store's and the data dir's.
+    pub transfers: crate::transfers::Transfers,
     /// One lock per Chat folder, held by every write that reads an ongoing
     /// folder's current thread and then moves it (client-apps design L8),
     /// so two clients asking together get one thread.
@@ -420,16 +472,61 @@ pub fn is_installed_data_dir(dir: &Path, installed: &Path, home_default: Option<
 }
 
 /// A test state's data dir: removed when the state is dropped (the test's
-/// runtime shutting down drops every task holding it).
+/// runtime shutting down drops every task holding it). A state something
+/// still holds when the process exits (a thread outside the runtime, a task
+/// the runtime never got to drop) is never dropped, which left one directory
+/// per such test on the RAM-backed `/tmp`; so every test dir is also in
+/// [`TEST_DIRS`], and the process's exit sweeps what is left.
 struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new(dir: PathBuf) -> Self {
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| {
+            extern "C" fn sweep() {
+                // Never waited for: exit cannot hang on a lock a thread still
+                // holds (that thread's dirs are left, as before this sweep).
+                let dirs = match TEST_DIRS.try_lock() {
+                    Ok(dirs) => dirs,
+                    Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                };
+                for dir in dirs.iter() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+            // SAFETY: `atexit` only registers the handler, which touches a
+            // static and the filesystem.
+            unsafe { libc::atexit(sweep) };
+        });
+        if let Ok(mut dirs) = TEST_DIRS.lock() {
+            dirs.push(dir.clone());
+        }
+        Self(dir)
+    }
+}
 
 impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        // Gone: nothing for the exit sweep to do, and the list stays as long
+        // as the states alive.
+        if let Ok(mut dirs) = TEST_DIRS.lock() {
+            dirs.retain(|d| d != &self.0);
+        }
     }
 }
 
+/// The data dirs of the test states alive in this process, for the exit sweep.
+static TEST_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 impl AppState {
+    /// Take the routing-write lock ([`Self::routing_write`]'s field doc):
+    /// owned, so a save's detached commit carries it to its end.
+    pub async fn routing_write(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.routing_write).lock_owned().await
+    }
+
     /// The gateway on `data_dir`, a dev instance when `LMGW_DEV` says so
     /// ([`dev_from_env`]) — what the tray app starts.
     pub async fn init(data_dir: PathBuf) -> anyhow::Result<SharedState> {
@@ -456,6 +553,9 @@ impl AppState {
             dev,
             Arc::new(runtime::registry::TokioRunner),
             crate::vram::detect_probe(),
+            Arc::new(lmgw_machine::SystemFacts::prepared_by(
+                crate::child::system_tool,
+            )),
         )
         .await?;
         match wrap_key_store(dev) {
@@ -469,21 +569,24 @@ impl AppState {
         Ok(state)
     }
 
-    /// [`Self::init_with`], reaching podman through `runner` and the GPU
-    /// through `probe` — the two host seams [`Self::init_for_tests`] fakes —
-    /// so a test can boot the real initialisation on a real data dir and
-    /// record every podman call it makes. `pub` (unconditional) to match the
-    /// `init_for_tests` convention.
+    /// [`Self::init_with`], reaching podman through `runner`, the GPU through
+    /// `probe` and the rest of the machine (driver files, `nvidia-ctk`,
+    /// `XDG_RUNTIME_DIR`) through `machine` — the host seams
+    /// [`Self::init_for_tests`] fakes — so a test can boot the real
+    /// initialisation on a real data dir and record every podman call it
+    /// makes. `pub` (unconditional) to match the `init_for_tests` convention.
     #[doc(hidden)]
     pub async fn init_with_host(
         data_dir: PathBuf,
         dev: bool,
         runner: Arc<dyn runtime::registry::CommandRunner>,
         probe: Arc<dyn crate::vram::GpuProbe>,
+        machine: Arc<dyn lmgw_machine::Facts>,
     ) -> anyhow::Result<SharedState> {
         // Every path under the data dir may become a container mount.
         let data_dir = absolute_dir(data_dir);
-        let db = store::open(&data_dir.join("lmgw.sqlite")).await?;
+        // A new data dir also gets its models dirs (`fresh_install`).
+        let db = fresh_install::open_db(&data_dir, dev).await?;
         let corpus = quickdoc_core::store::open(&data_dir.join(crate::quickdoc::CORPUS_DB_FILE))
             .await
             .map_err(|e| anyhow::anyhow!("opening the corpus DB: {e}"))?;
@@ -535,6 +638,13 @@ impl AppState {
         // §5): the id that keeps this data dir's runs apart from another
         // instance's in the builds dir and the image store they share.
         let instance = crate::backends::run::load_instance_id(&db, &data_dir).await;
+        // Before anything seals: the key the seals' configuration
+        // fingerprints are keyed by (`ir::seal`, WP8 verify V-N2).
+        crate::ir::install_seal_key(
+            store::seal_key(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("reading the seal key: {e}"))?,
+        );
         if dev {
             tracing::info!(
                 "dev instance (LMGW_DEV): image deletion and keep_runs pruning are refused — the \
@@ -548,13 +658,25 @@ impl AppState {
         // A database restored from an older copy is found by the cursors
         // themselves: each names its record's check (review W5-4).
         let chat_feed = crate::web::chat_feed::Feed::new(&snapshot);
+        // Every client but `hub_http` opts out of gzip (find-a-model design
+        // D141): the feature is on for the build, and an upstream's request
+        // and stream stay as they were.
         let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .no_gzip()
+            .build()?;
+        let hub_http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
         let proxy_http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
+            .no_gzip()
             .build()?;
+        // lmgw's own CDI spec asks the same podman whether it takes
+        // `--cdi-spec-dir`.
+        let checks = crate::machine::MachineChecks::system(machine.clone());
+        let cdi = runtime::cdi::OwnSpec::managed(machine, data_dir.clone(), runner.clone());
         let registry = runtime::registry::Registry::new(runner, http.clone());
         let app = Arc::new(Self {
             db,
@@ -562,6 +684,8 @@ impl AppState {
             knowledge: crate::knowledge::Knowledge::new(knowledge),
             chat_live: crate::web::chat_live::LiveTurns::with_feed(chat_feed.live.clone()),
             chat_feed,
+            media_calls: Default::default(),
+            transfers: Default::default(),
             snapshot: ArcSwap::from_pointee(snapshot),
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
@@ -578,14 +702,19 @@ impl AppState {
             agent_services: Default::default(),
             mcp: McpManager::new(),
             http,
+            hub_http,
             proxy_http,
             catalog: CatalogCache::default(),
             llama_facts: Default::default(),
             reasoning_learned: Default::default(),
+            upstream_quota: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
+            hf_headers: Default::default(),
             vram: VramScheduler::with_probe(probe),
             kv_pools: Default::default(),
             runtime: ArcSwap::from_pointee(registry),
+            cdi: ArcSwap::from_pointee(cdi),
+            machine: checks,
             agent_spawner: std::sync::Mutex::new(Arc::new(crate::agents::container::TokioSpawner)),
             turn_score_hook: std::sync::Mutex::new(None),
             started_at: Instant::now(),
@@ -596,6 +725,7 @@ impl AppState {
             data_dir,
             _test_dir: None,
             settings_write: tokio::sync::Mutex::new(()),
+            routing_write: Default::default(),
             snapshot_loads: SnapshotLoads::default(),
             dev: std::sync::atomic::AtomicBool::new(dev),
             builds: Default::default(),
@@ -626,6 +756,15 @@ impl AppState {
         // the real lookup installs it against a mock.
         app.builds
             .set_forge(Arc::new(crate::backends::forge::GatewayForge::new(&app)));
+        // Pulls through Podman's API, for their byte counts (machine-check
+        // design §5): a private service on this instance's own socket,
+        // started when a pull needs it. Not in `init_for_tests`, for the
+        // reason the forge above is not: a test must not start a podman
+        // service or reach a registry.
+        app.builds
+            .set_pull_api(Arc::new(crate::backends::pull::ServicePull::for_instance(
+                app.builds.instance_id(),
+            )));
         // The two owner rows (principals §6), before anything else reads the
         // snapshot: `resync_all` below and the shell's window both want a
         // gateway that already has its door key.
@@ -753,13 +892,23 @@ impl AppState {
             std::process::id(),
             NEXT_TEST_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
+        let test_dir = TestDir::new(dir.clone());
         let instance = crate::backends::run::load_instance_id(&db, &dir).await;
+        // As a start does; the first gateway's key stays this process's
+        // (`ir::seal`'s key module).
+        crate::ir::install_seal_key(
+            store::seal_key(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
         let app = Arc::new(Self {
             db,
             corpus,
             knowledge: crate::knowledge::Knowledge::new(knowledge),
             chat_live: crate::web::chat_live::LiveTurns::with_feed(chat_feed.live.clone()),
             chat_feed,
+            media_calls: Default::default(),
+            transfers: Default::default(),
             snapshot: ArcSwap::from_pointee(snapshot),
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
@@ -775,15 +924,22 @@ impl AppState {
             agent_meters: Default::default(),
             agent_services: Default::default(),
             mcp: McpManager::new(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .no_gzip()
+                .build()
+                .expect("a default client always builds"),
+            hub_http: reqwest::Client::new(),
             proxy_http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .no_gzip()
                 .build()
                 .expect("a client with no redirect policy always builds"),
             catalog: CatalogCache::default(),
             llama_facts: Default::default(),
             reasoning_learned: Default::default(),
+            upstream_quota: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
+            hf_headers: Default::default(),
             // Deliberately never the real NVML: a test must not read the
             // machine's actual GPU (and must not behave differently on a box
             // that has one). This is the degraded path, which is also what a
@@ -808,6 +964,17 @@ impl AppState {
                 )),
                 reqwest::Client::new(),
             )),
+            // No CDI spec and no `--cdi-spec-dir`, for the reason the registry
+            // above has no podman: a test must not run `nvidia-ctk` on the
+            // machine it runs on, nor write into its `XDG_RUNTIME_DIR`. A test
+            // of the spec installs a managed one on a stated machine with
+            // `set_cdi_for_tests`.
+            cdi: ArcSwap::from_pointee(runtime::cdi::OwnSpec::unmanaged(
+                "test state: no CDI spec managed (see AppState::set_cdi_for_tests)",
+            )),
+            // A blank machine, for the same reason: a test's check reads
+            // nothing of the computer it runs on unless it states one.
+            machine: crate::machine::MachineChecks::blank(),
             // Never the real podman, for the same reason the registry above is
             // not: a test must not start containers on the machine it runs on.
             // A test that wants the runner installs its own with
@@ -823,9 +990,10 @@ impl AppState {
             background: Default::default(),
             stops: Default::default(),
             calls: Default::default(),
-            _test_dir: Some(TestDir(dir.clone())),
+            _test_dir: Some(test_dir),
             data_dir: dir,
             settings_write: tokio::sync::Mutex::new(()),
+            routing_write: Default::default(),
             snapshot_loads: SnapshotLoads::default(),
             // Never read from the environment: a developer running the suite
             // from a dev shell must not get a different gateway. A test that
@@ -952,6 +1120,8 @@ impl AppState {
     /// still there (`registry/owned.rs`).
     fn wire_runtime(&self, registry: &runtime::registry::Registry) {
         registry.set_owner(self.builds.instance_id().to_string());
+        self.wire_cdi(&self.cdi());
+        registry.set_cdi(self.cdi());
         let me = self.me.get().cloned();
         registry.set_on_started(Box::new(move || {
             if let Some(state) = me.as_ref().and_then(std::sync::Weak::upgrade) {
@@ -961,9 +1131,46 @@ impl AppState {
         }));
     }
 
-    /// How a container agent reaches `podman` (container-runtime §6.1).
+    /// lmgw's own CDI spec ([`runtime::cdi`]).
+    pub fn cdi(&self) -> Arc<runtime::cdi::OwnSpec> {
+        self.cdi.load_full()
+    }
+
+    /// What the spec learns from the state around it: the load timeout a
+    /// throwaway probe's write may take, read from the settings when it runs.
+    fn wire_cdi(&self, cdi: &runtime::cdi::OwnSpec) {
+        let me = self.me.get().cloned();
+        cdi.set_load_timeout(move || {
+            me.as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .map(|state| runtime::cdi::load_timeout(&state))
+                .unwrap_or_else(|| {
+                    std::time::Duration::from_secs(
+                        crate::config::VramSettings::default().load_timeout_seconds,
+                    )
+                })
+        });
+    }
+
+    /// Test-only: manage the CDI spec as `cdi` says (a managed one on a
+    /// stated machine), for this state and its registry. `pub`
+    /// (unconditional) to match the `set_runtime_for_tests` convention.
+    #[doc(hidden)]
+    pub fn set_cdi_for_tests(&self, cdi: Arc<runtime::cdi::OwnSpec>) {
+        self.wire_cdi(&cdi);
+        self.runtime().set_cdi(cdi.clone());
+        self.cdi.store(cdi);
+    }
+
+    /// How a container agent reaches `podman` (container-runtime §6.1): the
+    /// spawner installed, behind lmgw's CDI check
+    /// ([`crate::agents::container::CdiChecked`]), which refuses a podman
+    /// call that gives a container the graphics card without lmgw's spec dir.
     pub fn agent_spawner(&self) -> Arc<dyn crate::agents::container::Spawner> {
-        self.agent_spawner.lock().unwrap().clone()
+        Arc::new(crate::agents::container::CdiChecked {
+            inner: self.agent_spawner.lock().unwrap().clone(),
+            cdi: self.cdi(),
+        })
     }
 
     /// Test-only: swap in a spawner that replays scripted output instead of
@@ -1019,6 +1226,9 @@ impl AppState {
             next.gpu_lease = lease.clone();
             next
         });
+        // The Chat feed's `hold` says a benchmark's lease (chat-plane design
+        // D6), so a lease taken or released is a `hold` event.
+        self.chat_feed.published(|| self.snapshot());
     }
 
     /// Lay a key op's write over the published snapshot when the reload
@@ -1208,6 +1418,27 @@ impl AppState {
             }
             self.devices.reach_moves.moved();
         }
+        // The machine check's §1.4 and its verdict follow the settings and
+        // rows just published, whichever path saved them (machine-check
+        // design D135): the switch it offers is the one these give. The live
+        // feed hears of the change (D183); a turn to `ready` begins the
+        // pre-fetch, as any does.
+        let refit = self.machine.refit(&published);
+        if let Some((summary, _)) = &refit {
+            self.telemetry.machine(summary.clone());
+        }
+        if refit.is_some_and(|(_, turned_ready)| turned_ready) {
+            match self.me.get().and_then(std::sync::Weak::upgrade) {
+                Some(me) if tokio::runtime::Handle::try_current().is_ok() => {
+                    crate::machine::begin_prefetch(&me)
+                }
+                _ => tracing::info!(
+                    "the machine check turned ready with the settings just saved, and the \
+                     engine pre-fetch could not begin from here; each model's first start \
+                     downloads its engine"
+                ),
+            }
+        }
         published
     }
 
@@ -1217,6 +1448,22 @@ impl AppState {
     /// connection-config change.
     pub async fn reload_snapshot(&self) -> Result<Arc<Snapshot>, GatewayError> {
         let snap = self.publish_snapshot().await?;
+        self.mcp.reconcile(&snap).await;
+        Ok(snap)
+    }
+
+    /// [`Self::reload_snapshot`] for a routing write: `routing`
+    /// ([`Self::routing_write`]) is let go once the snapshot is published,
+    /// before the MCP reconcile — which can take a server's whole connect
+    /// timeout, and changes nothing a fallback reaches — and on a failed
+    /// load too.
+    pub(crate) async fn reload_snapshot_releasing(
+        &self,
+        routing: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Arc<Snapshot>, GatewayError> {
+        let published = self.publish_snapshot().await;
+        drop(routing);
+        let snap = published?;
         self.mcp.reconcile(&snap).await;
         Ok(snap)
     }
@@ -1236,6 +1483,7 @@ impl AppState {
     /// this does; the reconcile can follow the sweep.
     pub(crate) async fn publish_snapshot(&self) -> Result<Arc<Snapshot>, GatewayError> {
         let load = self.snapshot_loads.start();
+        let badge_before = crate::backends::updates::badge_image_names(&self.snapshot());
         let snap = self.publish_loaded(load, store::load_snapshot(&self.db).await?);
         // The server certificates carry every device's URL hosts (device
         // link design §2.2).
@@ -1249,6 +1497,12 @@ impl AppState {
         // A model's ctx-size, cache types or GGUF path may have just changed,
         // and every one of those changes what it costs on the GPU (§9b).
         self.vram.forget_plans().await;
+        // The nav's engine-update badge counts the images a model row runs
+        // (container-builds §8): a row that starts or stops running one moves
+        // it without a registry check, so the open dashboards hear it now.
+        if crate::backends::updates::badge_image_names(&snap) != badge_before {
+            crate::backends::updates::publish(self).await;
+        }
         Ok(snap)
     }
 }

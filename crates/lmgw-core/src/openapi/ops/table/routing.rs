@@ -110,6 +110,25 @@ pub(super) const OPS: &[OpDoc] = &[
         example: None,
     },
     OpDoc {
+        name: "upstream_quota_clear",
+        tag: TAG,
+        summary: "Forget that an upstream is out of quota",
+        description: Some(
+            "lmgw remembers an upstream that answered `insufficient_quota` (`quota` on \
+             `/api/upstreams`): until its next check, models and aliases on it that have a \
+             fallback answer with the fallback (openai egress design §14.6). This forgets it, \
+             so the next request goes to the upstream again: the Upstreams page's Check now.",
+        ),
+        tool: Some("lmgw__upstream_quota_clear"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::UpstreamQuotaClear>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::RowSaved>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
         name: "upstream_test",
         tag: TAG,
         summary: "Test connectivity to a configured upstream",

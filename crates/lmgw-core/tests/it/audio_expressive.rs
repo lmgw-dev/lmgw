@@ -327,7 +327,7 @@ async fn cloud_alias(w: &World, cloud: &MockServer, alias: &str, speech: Option<
         &w.state.db,
         &NewUpstream {
             name: format!("{alias}-up"),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", cloud.uri()),
             api_key: None,
@@ -355,6 +355,7 @@ async fn cloud_alias(w: &World, cloud: &MockServer, alias: &str, speech: Option<
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: Some(json!({ "capabilities": caps })),
+            fallback: None,
         },
     )
     .await
@@ -460,8 +461,7 @@ async fn capabilities_speech_says_what_takes_effect_on_a_local_row() {
     assert_eq!(
         qwen3["capabilities"]["speech"],
         json!({"instructions": "style", "instructions_required": false,
-               "inline_tags": "none", "languages": ["de", "en", "zh"],
-               "streaming": false})
+               "inline_tags": "none", "streaming": false})
     );
     assert!(
         qwen3["notes"].as_array().unwrap().iter().any(|n| n

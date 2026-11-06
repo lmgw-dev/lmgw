@@ -227,9 +227,11 @@ pub(crate) fn all_routes() -> Vec<DocRoute> {
     routes.extend(super::planes::audio_lab::routes());
     routes.extend(super::planes::image_lab::routes());
     routes.extend(super::planes::decision_lab::routes());
+    routes.extend(super::planes::voice_lab::routes());
     routes.extend(super::planes::labs_store::routes());
     routes.extend(super::planes::session::routes());
     routes.extend(super::planes::chat::routes());
     routes.extend(super::planes::devices::routes());
+    routes.extend(super::planes::transfers::routes());
     routes
 }

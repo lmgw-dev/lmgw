@@ -215,6 +215,7 @@ async fn priced_cloud_tts(state: &SharedState) -> TtsFake {
             PriceScope::Alias,
             "cloud-tts",
             unit,
+            lmgw_core::config::PriceTier::Standard,
             &sheet,
             Some(rate),
             None,

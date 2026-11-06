@@ -16,6 +16,7 @@ use lmgw_api_types::{ModelTest, RungTest};
 use serde_json::json;
 
 use crate::ops_state::{model_key, OpsState};
+use crate::widgets::machine_check::MachineInCard;
 use crate::widgets::{Modal, Toasts};
 
 /// One test's answer: when it ran (local time) and what the op said, or why
@@ -333,6 +334,7 @@ fn OutcomeView(at: String, res: Result<ModelTest, String>) -> impl IntoView {
         }
         ModelTest::Failed(f) => view! {
             <div class="problem">{f.error}</div>
+            {(f.code.as_deref() == Some(GPU_SETUP)).then(|| view! { <MachineInCard/> })}
             {(!f.hint.is_empty()).then(|| view! { <p class="mini-note">{f.hint}</p> })}
             {(!f.container_log.is_empty())
                 .then(|| {
@@ -349,6 +351,13 @@ fn OutcomeView(at: String, res: Result<ModelTest, String>) -> impl IntoView {
     }
     .into_any()
 }
+
+/// The code of a test whose model could not start on the graphics card
+/// because of the computer: the machine check's line goes under it, while
+/// the check says the card is not ready (machine-check design D179, D188).
+/// Any other failure, a model on the processor and the op's own refusal
+/// (a 401, a timeout) get none.
+const GPU_SETUP: &str = "gpu_setup";
 
 #[cfg(test)]
 mod tests {

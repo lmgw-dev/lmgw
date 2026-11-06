@@ -45,6 +45,7 @@ use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Completion, Message, Params, Role, ToolDef, ToolResultBlock};
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::proxy;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry::INGEST_PROTO;
 
@@ -476,8 +477,12 @@ async fn extract_and_store(
             tool_choice: None,
             stream: false,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         };
         let result = agent::run(
             ir,
@@ -616,9 +621,9 @@ impl ExtractionPlan {
         // Plain `resolve`, deliberately: an unattended batch job is **refused
         // under a GPU hold, never re-routed** (gpu-hold design §2). Nobody is
         // waiting on an ingest, it can be re-run after the hold, and its
-        // embedding step could not fall back anyway — aux rows never inherit
-        // the global fallback, because a corpus embedded with a different
-        // model is a silently corrupted vector index.
+        // embedding step must not fall back anyway — a corpus embedded with a
+        // different model, an embedder's own fallback included, is a silently
+        // corrupted vector index.
         let route = snap.resolve(&alias).map_err(|e| e.to_string())?;
         // Checked here rather than left to `admit_local`, and before anything
         // is measured or fetched: the very next step counts tokens through
@@ -649,7 +654,7 @@ impl ExtractionPlan {
             "{system}\n{}",
             prompt::document_turn("", SourceKind::Markdown, "", 1, 1, 1)
         );
-        let scaffold = proxy::count_tokens_inner(state, &alias, &scaffold_text, true)
+        let scaffold = proxy::count_tokens_inner(state, &alias, &scaffold_text, true, Origin::Owner)
             .await
             .map_err(|(_, e)| format!("counting the ingest prompt against '{alias}': {e}"))?
             .0 as usize;
@@ -692,6 +697,7 @@ impl ExtractionPlan {
                         .into(),
                 ),
                 parameters: extract::emit_schema(),
+                strict: None,
             },
         )
     }
@@ -838,7 +844,7 @@ impl ingest::AsyncTokenCounter for GatewayTokens {
         Box::pin(async move {
             // Pinned: windows are sized with this model's own tokenizer, so a
             // count from a fallback would be a silently wrong window (§4.7).
-            proxy::count_tokens_inner(&self.state, &self.alias, text, true)
+            proxy::count_tokens_inner(&self.state, &self.alias, text, true, Origin::Owner)
                 .await
                 .map(|(n, _)| n as usize)
                 .map_err(|(_, e)| {

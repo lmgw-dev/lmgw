@@ -1,0 +1,29 @@
+{
+  "requests": [
+    {
+      "body": "{\"max_tokens\":16,\"model\":\"chat-gguf\",\"prompt\":\"Once upon a time\"}",
+      "body_json": {
+        "max_tokens": 16,
+        "model": "chat-gguf",
+        "prompt": "Once upon a time"
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/completions"
+    }
+  ],
+  "response": {
+    "error": {
+      "code": null,
+      "message": "request (5000 tokens) exceeds the available context size",
+      "param": null,
+      "type": "exceed_context_size_error"
+    }
+  },
+  "status": 400
+}

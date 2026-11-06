@@ -31,6 +31,8 @@
 
 use std::sync::Arc;
 
+use lmgw_api_types::units::fmt_bytes;
+
 use super::super::ids::Ids;
 use super::super::protocol::{ErrorObject, ServerEvent, ServerFrame};
 use super::handle::Limit;
@@ -102,7 +104,7 @@ impl Shaper {
     /// then one `event_too_large` per field (module doc). An error that is
     /// itself over the limit is said at WARN and not sent.
     fn emptied(&self, text: &str) -> Result<Vec<String>, String> {
-        let fitted = empty::fit(text, self.max, &human(self.max))?;
+        let fitted = empty::fit(text, self.max, &fmt_bytes(self.max as u64))?;
         let mut messages = vec![fitted.text];
         for f in fitted.emptied {
             let message = format!(
@@ -110,7 +112,7 @@ impl Shaper {
                 fitted.kind,
                 fitted.event_id,
                 f.path,
-                human(f.size),
+                fmt_bytes(f.size as u64),
                 self.by.named(self.max)
             );
             tracing::warn!("WebRTC call {}: {message}", self.call);
@@ -135,18 +137,5 @@ impl Shaper {
             }
         }
         Ok(messages)
-    }
-}
-
-/// `bytes` as a person reads a size: bytes below 1 KiB, whole KiB below
-/// 1 MiB, MiB to one decimal above.
-pub(crate) fn human(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    if bytes < KIB {
-        format!("{bytes} bytes")
-    } else if bytes < KIB * KIB {
-        format!("{} KiB", (bytes + KIB / 2) / KIB)
-    } else {
-        format!("{:.1} MiB", bytes as f64 / (KIB * KIB) as f64)
     }
 }

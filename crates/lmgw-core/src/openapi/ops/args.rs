@@ -127,10 +127,12 @@ pub(crate) fn audio_catalog() -> Value {
 /// `price_set` (§4.7 table B divergence: `scope_kind` defaults to `alias`
 /// here, where the tool requires it) — `web/api.rs`'s `"price_set"` arm
 /// (`ops::price_set`). `unit` and `price` are the billable units' (design
-/// 2026-10-07 §8.2), from the same table the tool's are.
+/// 2026-10-07 §8.2), from the same table the tool's are; `service_tier`
+/// the OpenAI price tiers' (openai egress design §5.7).
 pub(crate) fn price_set() -> Value {
-    use crate::config::PriceUnit;
+    use crate::config::{PriceTier, PriceUnit};
     let units: Vec<&str> = PriceUnit::ALL.iter().map(|u| u.as_str()).collect();
+    let tiers: Vec<&str> = PriceTier::ALL.iter().map(|t| t.as_str()).collect();
     let price_scales = PriceUnit::ALL
         .iter()
         .filter(|u| !u.is_tokens())
@@ -155,6 +157,7 @@ pub(crate) fn price_set() -> Value {
                  than changing it.",
                 &units,
             ),
+            "service_tier": enum_p(PriceTier::PRICE_SET_DOC, &tiers),
             "price_in": num("per_mtok only: input price per 1M tokens."),
             "price_out": num("per_mtok only: output price per 1M tokens."),
             "price_cache_read": num(

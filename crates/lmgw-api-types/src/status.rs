@@ -115,6 +115,19 @@ pub struct GatewayStatus<R = RuntimeStatus, V = VramStatus, M = McpStatus> {
     /// listener (realtime calls design §9).
     #[serde(default)]
     pub webrtc: crate::realtime::WebRtcStatus,
+    /// The upstreams lmgw remembers out of quota (openai egress design
+    /// §14.6); empty while none is.
+    #[serde(default)]
+    pub upstreams_out_of_quota: Vec<crate::UpstreamQuotaStatus>,
+    /// The machine check's verdict (machine-check design §4.1): whether this
+    /// computer can run local models. Absent until the check at boot has
+    /// finished; `POST /api/op/machine_check` has the whole check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub machine: Option<crate::machine::MachineSummary>,
 }
 
 /// One model container's runtime state.
@@ -274,6 +287,14 @@ pub struct ImageCapabilities {
     pub output_formats: Vec<String>,
     pub loras: Vec<ImageAsset>,
     pub upscalers: Vec<ImageAsset>,
+    /// The preview modes the build offers (`none`, `proj`, `tae`, `vae`);
+    /// empty for a build without previews.
+    pub preview_modes: Vec<String>,
+    /// The build can upscale with a model under its upscalers directory.
+    pub upscale: bool,
+    /// The request defaults per mode, as the server serializes its own
+    /// request struct (`img_gen` → `{width, height, sample_params, …}`).
+    pub defaults_by_mode: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Bounds the server enforces on a request — **the server's real numbers**;
@@ -289,6 +310,8 @@ pub struct ImageLimits {
     pub max_height: Option<i64>,
     pub max_batch_count: Option<i64>,
     pub max_queue_size: Option<i64>,
+    pub max_upscale_width: Option<i64>,
+    pub max_upscale_height: Option<i64>,
 }
 
 /// Which optional inputs the loaded pipeline admits to accepting. Not an edit
@@ -308,6 +331,8 @@ pub struct ImageFeatures {
     pub cache: bool,
     pub cancel_queued: bool,
     pub cancel_generating: bool,
+    /// The job API draws previews of a running generation.
+    pub preview: bool,
 }
 
 /// A named LoRA or upscaler. Objects (`{"name": "Latent"}`) and bare strings
@@ -315,6 +340,9 @@ pub struct ImageFeatures {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ImageAsset {
     pub name: String,
+    /// An upscaler `POST /sdcpp/v1/upscale` can run (a model under the
+    /// upscalers directory); `false` for the built-in resize modes.
+    pub image_upscale: bool,
 }
 
 impl<'de> Deserialize<'de> for ImageAsset {
@@ -326,10 +354,22 @@ impl<'de> Deserialize<'de> for ImageAsset {
             Object {
                 #[serde(default)]
                 name: String,
+                #[serde(default)]
+                image_upscale: bool,
             },
         }
         Ok(match Shape::deserialize(d)? {
-            Shape::Name(name) | Shape::Object { name } => ImageAsset { name },
+            Shape::Name(name) => ImageAsset {
+                name,
+                image_upscale: false,
+            },
+            Shape::Object {
+                name,
+                image_upscale,
+            } => ImageAsset {
+                name,
+                image_upscale,
+            },
         })
     }
 }
@@ -347,7 +387,10 @@ impl schemars::JsonSchema for ImageAsset {
         schemars::json_schema!({
             "type": "object",
             "required": ["name"],
-            "properties": { "name": { "type": "string" } },
+            "properties": {
+                "name": { "type": "string" },
+                "image_upscale": { "type": "boolean" },
+            },
         })
     }
 }
@@ -385,17 +428,30 @@ pub struct VramStatus {
     /// False when `free_bytes` was derived from the estimate rather than read
     /// from the driver.
     pub free_measured: bool,
+    /// What `free_bytes` was lowered by on top of the memory in use, by
+    /// reason. With a measured free figure, `free_bytes` is the capacity's
+    /// measured free memory — the devices' free memory, or with
+    /// `vram.budget_mb` the budget less the devices' used memory — less
+    /// these (never below zero). The devices' total less their used and free
+    /// memory is in neither: memory the probe reports as not available
+    /// (NVML: the driver's own reserve; an AMD APU: GTT the host's RAM
+    /// cannot back).
+    pub kept_free: VramKeptFree,
     pub estimated_resident_bytes: u64,
     pub devices: Vec<VramDevice>,
     pub resident: Vec<VramResident>,
     pub queue: Vec<VramWaiter>,
+    /// Starts whose model's engine image is still downloading (machine-check
+    /// design §5), oldest first: each `phase` is `downloading` with the bytes
+    /// so far. They hold no place in `queue` and nothing on the card; once
+    /// its download is done a start is admitted like any other, and enters
+    /// `queue` if it has to wait for room. Absent from an older gateway's
+    /// frame.
+    pub downloading: Vec<VramWaiter>,
     pub note: String,
     /// The `hold.active` setting — hold is a switch on
     /// the resolve/start paths, orthogonal to `enabled`/`active` above.
     pub hold_active: bool,
-    /// `settings.hold.fallback_alias`, for the titlebar pill and the
-    /// settings page to show what a held chat request falls back to.
-    pub hold_fallback_alias: Option<String>,
     /// Resident model ids that are busy or still starting while hold is
     /// active — visible continuously, not only in the one-shot `hold_set`
     /// response. Empty whenever hold is not active.
@@ -418,6 +474,23 @@ pub struct VramStatus {
     pub external_trigger_reason: Option<String>,
     /// The benchmark run holding the card, if one does: no local model is admitted until it ends.
     pub benchmark: Option<VramBenchmark>,
+}
+
+/// What admission keeps free on top of the memory in use: memory the driver
+/// cannot show yet. Each part is zero when nothing of that kind is kept.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VramKeptFree {
+    /// Containers still starting, and starts admitted whose container is not
+    /// up yet: weights on their way onto the card.
+    pub starting_bytes: u64,
+    /// What resident image pipelines take above their idle residency while
+    /// they draw (the residents' `peak_extra_bytes`).
+    pub image_peak_bytes: u64,
+    /// What ready audio containers will still load on their first request
+    /// (the residents' `pending_bytes`).
+    pub pending_load_bytes: u64,
 }
 
 /// A benchmark run's GPU lease.
@@ -489,10 +562,11 @@ pub struct VramResident {
     /// model that has not generated anything yet — `note` says which.
     pub peak_extra_bytes: Option<u64>,
     /// What a `ready` audio container will still load on its first request,
-    /// kept free by admission on top of the measured use: its expected residency less what it was
-    /// read holding at rest,
-    /// or all of it where that could not be read. `None` once loaded, and for
-    /// every other class.
+    /// kept free by admission on top of the measured use: its expected
+    /// residency less what its processes hold now, else less what it was
+    /// read holding at rest, or all of it where neither could be read.
+    /// `None` once loaded (lmgw routed a request that loaded it, or its
+    /// processes hold at least that much now), and for every other class.
     pub pending_bytes: Option<u64>,
     pub note: Option<String>,
 }
@@ -501,13 +575,59 @@ pub struct VramResident {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VramWaiter {
+    /// The 1-based place in the admission queue; 0 for an entry of
+    /// `downloading`, which holds no place in it.
     pub position: usize,
     pub alias: String,
     pub model: String,
     pub container: String,
+    /// Footprint plus headroom; 0 for an entry of `downloading`, whose
+    /// footprint is read at admission, after the download.
     pub needs_bytes: u64,
     pub waiting_ms: u64,
     pub stage: String,
+    /// `stage` typed: what admission is doing for this request now. Absent
+    /// from an older gateway's frame.
+    pub phase: Option<WaitPhase>,
+}
+
+/// What admission is doing for a request that waits for room on the GPU
+/// (chat-media-tools design §5.3), told apart by `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WaitPhase {
+    /// The model's engine image is not on this machine yet and is being
+    /// downloaded (machine-check design §5), before admission: nothing is
+    /// evicted or reserved for it meanwhile, and the queue's time budget
+    /// starts after it. `done_bytes` of `total_bytes` compressed layer bytes
+    /// as Podman reports them; `total_bytes` is absent when the size is not
+    /// known (no registry manifest, or Podman's API was not reachable and
+    /// the `podman pull` command reports no byte counts — `done_bytes` then
+    /// stays 0), and `size_note` then says why.
+    Downloading {
+        image: String,
+        done_bytes: u64,
+        total_bytes: Option<u64>,
+        /// Why the size is not known, when it is not: the pull job's own
+        /// "size not known — …" (`ImagePullJobDetail::size_note`). Absent
+        /// while nothing has said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+        size_note: Option<String>,
+    },
+    /// Waiting for the admission gate: another request is being admitted.
+    Gate,
+    /// Measuring the GPU's memory.
+    Measuring,
+    /// Stopping an idle model to make room: `<class>/<model>`
+    /// (`chat/qwen3-30b`).
+    Evicting { victim: String },
+    /// Nothing idle is left to stop: waiting for a busy model to finish, or
+    /// for memory held outside lmgw.
+    WaitingForRoom { needs_bytes: u64, free_bytes: u64 },
+    /// Room is there: the container is starting.
+    Starting,
 }
 
 /// One registered MCP server's connection state: `status` is `connecting` |
@@ -626,8 +746,11 @@ pub struct RequestRow {
     /// Why a fallback answered instead of the requested local model: `hold`
     /// (the GPU hold), `external_vram` (VRAM outside lmgw's control was
     /// short), `background` (a background candidate alias), `unavailable`
-    /// (a candidate alias with no model it may use). `None` = no
-    /// fallback; the fallback itself is `upstream_name` / `upstream_model`.
+    /// (a candidate alias with no model it may use), `benchmark`, `quota`,
+    /// `unreachable`, `disabled`, `gpu_setup` (the graphics card is not
+    /// ready on this computer) or `engine_download` (a local model's engine
+    /// could not be downloaded). `None` = no fallback; the fallback itself
+    /// is `upstream_name` / `upstream_model`.
     #[serde(default)]
     pub fallback_reason: Option<String>,
     /// The rung a ladder row answered from — or, for a refusal, the rung it
@@ -651,6 +774,16 @@ pub struct RequestRow {
     pub chars_in: Option<i64>,
     #[serde(default)]
     pub images_out: Option<i64>,
+    /// The `service_tier` an OpenAI platform answer reported, verbatim
+    /// (`default`, `flex`, `priority`, …): the tier the row is priced at.
+    /// `None` on every other upstream, and when the answer named none.
+    #[serde(default)]
+    pub service_tier: Option<String>,
+    /// Why the row's cost is what it is, when that is not plain: "served at
+    /// service tier flex; no flex price on file for 'm', a standard one is",
+    /// "stream ended before the upstream reported usage". `None` otherwise.
+    #[serde(default)]
+    pub price_note: Option<String>,
     // Billable-units design §3.4, §8.4.
     /// How the row was priced: the rates it recorded when it was written,
     /// so each priced part can be shown as quantity × rate even after the
@@ -732,6 +865,8 @@ mod status_tests {
             candidate_aliases,
             devices: Default::default(),
             webrtc: Default::default(),
+            upstreams_out_of_quota: vec![],
+            machine: None,
         }
     }
 

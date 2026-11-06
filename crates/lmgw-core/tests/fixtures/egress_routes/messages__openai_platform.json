@@ -1,0 +1,89 @@
+{
+  "requests": [
+    {
+      "body": "{\"input\":[{\"content\":[{\"text\":\"Show me the weather chart.\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"content\":\"Fetching it.\",\"role\":\"assistant\"},{\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\",\"call_id\":\"toolu_1\",\"name\":\"chart\",\"type\":\"function_call\"},{\"call_id\":\"toolu_1\",\"output\":[{\"text\":\"The chart:\",\"type\":\"input_text\"},{\"detail\":\"auto\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\",\"type\":\"input_image\"}],\"type\":\"function_call_output\"},{\"content\":[{\"text\":\"What does it show?\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"instructions\":\"Be brief.\",\"max_output_tokens\":64,\"model\":\"chat-gguf\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"tools\":[{\"description\":\"A weather chart.\",\"name\":\"chart\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"},\"strict\":false,\"type\":\"function\"}]}",
+      "body_json": {
+        "input": [
+          {
+            "content": [
+              {
+                "text": "Show me the weather chart.",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "content": "Fetching it.",
+            "role": "assistant"
+          },
+          {
+            "arguments": "{\"city\":\"Berlin\"}",
+            "call_id": "toolu_1",
+            "name": "chart",
+            "type": "function_call"
+          },
+          {
+            "call_id": "toolu_1",
+            "output": [
+              {
+                "text": "The chart:",
+                "type": "input_text"
+              },
+              {
+                "detail": "auto",
+                "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                "type": "input_image"
+              }
+            ],
+            "type": "function_call_output"
+          },
+          {
+            "content": [
+              {
+                "text": "What does it show?",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "Be brief.",
+        "max_output_tokens": 64,
+        "model": "chat-gguf",
+        "reasoning": {
+          "summary": "auto"
+        },
+        "service_tier": "auto",
+        "store": false,
+        "tools": [
+          {
+            "description": "A weather chart.",
+            "name": "chart",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/responses"
+    }
+  ],
+  "status": 200
+}

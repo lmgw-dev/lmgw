@@ -15,6 +15,7 @@
 
 use crate::catalog::CANONICAL_LEVELS;
 use crate::config::Protocol;
+use crate::error::GatewayError;
 
 use super::Off;
 
@@ -98,11 +99,112 @@ pub(super) fn after_refusal(protocol: Protocol, sent: &Off, msg: &str) -> Option
     (instead != *sent).then_some(instead)
 }
 
+/// The codes of an error about one parameter's name or value: what a
+/// refusal of the control alone comes with, where it comes with a code.
+const CONTROL_CODES: [&str; 3] = [
+    "unsupported_value",
+    "unsupported_parameter",
+    "unknown_parameter",
+];
+
+/// What a request carried besides the reasoning control and its messages,
+/// that a refusal of the off could be about
+/// ([`not_about_the_control_alone`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Carried {
+    /// Features no provider refuses in combination with a reasoning control
+    /// and that nearly every chat request carries: function tools, a tool
+    /// choice, a response format. A refusal that names one of them still
+    /// is about it; a refusal that names nothing is not held against them.
+    pub ordinary: Vec<String>,
+    /// Everything else: a hosted tool's type, the client's own top-level
+    /// keys. A bare refusal on a request that carried one may be about it.
+    pub blocking: Vec<String>,
+}
+
+impl Carried {
+    /// Every word a refusal could name, ordinary or not.
+    fn words(&self) -> impl Iterator<Item = &String> {
+        self.ordinary.iter().chain(&self.blocking)
+    }
+}
+
+/// Why the refusal `refused` of an off on `protocol` teaches the route
+/// nothing, though its retry goes out for this request: `None` when it is
+/// about the reasoning control alone — its `param` (where the provider
+/// names one) is the control, its `code` (where it sends one) is about one
+/// parameter, and its words name nothing in `carried`, what this request
+/// carried besides the control and its messages (a hosted tool's type, a
+/// top-level key, function tools: [`super::OffRetry::after`]). A refusal that depends on
+/// the body ("The following tools cannot be used with reasoning.effort
+/// 'minimal': web_search") would otherwise teach every later request of
+/// the route, chat and native, a form only this one needed.
+///
+/// Words that do not name the control at all (Gemini's bare "Request
+/// contains an invalid argument." for a budget off its model refuses) are
+/// about the control alone only on a request that carried nothing
+/// [blocking](Carried::blocking): then the control is all the retry changed
+/// that a provider could refuse it with. Function tools, a tool choice and a
+/// response format ([`Carried::ordinary`]) are on nearly every chat request
+/// and no provider refuses them with a control, so they do not count. On a
+/// request that carried a hosted tool or a key of the client's, the refusal
+/// may be about that together with the control, and the lesson would be
+/// this request's only. A refusal that does name something carried,
+/// ordinary or not, is never about the control alone.
+pub(super) fn not_about_the_control_alone(
+    protocol: Protocol,
+    refused: &GatewayError,
+    carried: &Carried,
+) -> Option<String> {
+    if let GatewayError::UpstreamRelayed(r) = refused {
+        if let Some(p) = r
+            .param
+            .as_deref()
+            .filter(|p| !is_control_param(protocol, p))
+        {
+            return Some(format!("it is about the parameter '{p}'"));
+        }
+        if let Some(c) = r.code.as_deref().filter(|c| !CONTROL_CODES.contains(c)) {
+            return Some(format!("its code '{c}' is not about one parameter"));
+        }
+    }
+    let message = refused.to_string();
+    let msg = refused.upstream_message().unwrap_or(&message);
+    if !names_control(protocol, msg) {
+        let listed: Vec<String> = carried.blocking.iter().map(|c| format!("'{c}'")).collect();
+        return (!listed.is_empty()).then(|| {
+            format!(
+                "its words do not name the reasoning control, and the request carried {}",
+                listed.join(", ")
+            )
+        });
+    }
+    carried
+        .words()
+        .find(|f| names_word(msg, f))
+        .map(|f| format!("it also names '{f}', which this request carried"))
+}
+
+/// Whether an error's `param` is the reasoning control `protocol` sends.
+fn is_control_param(protocol: Protocol, param: &str) -> bool {
+    let p = param.to_ascii_lowercase();
+    match protocol {
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
+            matches!(
+                p.as_str(),
+                "reasoning_effort" | "reasoning.effort" | "reasoning"
+            )
+        }
+        Protocol::Gemini => p.contains("thinking"),
+        Protocol::Anthropic => p.starts_with("thinking") || p == "output_config.effort",
+    }
+}
+
 /// Whether `msg` is about the reasoning control `protocol` sends.
 fn names_control(protocol: Protocol, msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     match protocol {
-        Protocol::Openai | Protocol::LlamaCpp => {
+        Protocol::Openai | Protocol::OpenaiCompatible | Protocol::LlamaCpp => {
             ["reasoning_effort", "reasoning effort", "reasoning.effort"]
                 .iter()
                 .any(|n| m.contains(n))
@@ -185,27 +287,38 @@ mod tests {
     const GEMINI_NO_LEVELS: &str =
         "upstream error (400): Thinking level is not supported for this model.";
 
+    /// OpenAI's own texts: known on the platform, relayed by a compatible
+    /// provider in front of it (openai egress design §7.1). Both read them.
+    const OPENAI_SHAPED: [Protocol; 2] = [Protocol::Openai, Protocol::OpenaiCompatible];
+
     #[test]
     fn openai_without_the_control_gets_none() {
-        assert_eq!(
-            after_refusal(Protocol::Openai, &Off::Control, OPENAI_NO_PARAM),
-            Some(Off::Omitted)
-        );
+        for p in OPENAI_SHAPED {
+            assert_eq!(
+                after_refusal(p, &Off::Control, OPENAI_NO_PARAM),
+                Some(Off::Omitted),
+                "{p:?}"
+            );
+        }
     }
 
     #[test]
     fn openai_listing_its_values_gets_the_least() {
-        assert_eq!(
-            after_refusal(Protocol::Openai, &Off::Control, OPENAI_NO_NONE),
-            Some(lowest("minimal"))
-        );
         // o3: no `minimal` either.
         let o3 = "Unsupported value: 'reasoning_effort' does not support 'none' with this \
                   model. Supported values are: 'high', 'low', and 'medium'.";
-        assert_eq!(
-            after_refusal(Protocol::Openai, &Off::Control, o3),
-            Some(lowest("low"))
-        );
+        for p in OPENAI_SHAPED {
+            assert_eq!(
+                after_refusal(p, &Off::Control, OPENAI_NO_NONE),
+                Some(lowest("minimal")),
+                "{p:?}"
+            );
+            assert_eq!(
+                after_refusal(p, &Off::Control, o3),
+                Some(lowest("low")),
+                "{p:?}"
+            );
+        }
     }
 
     #[test]
@@ -249,10 +362,13 @@ mod tests {
             None
         );
         let other = "Unsupported parameter: 'max_tokens' is not supported with this model.";
-        assert_eq!(after_refusal(Protocol::Openai, &Off::Control, other), None);
+        assert_eq!(
+            after_refusal(Protocol::OpenaiCompatible, &Off::Control, other),
+            None
+        );
         // Nothing is left to drop once no control went out.
         assert_eq!(
-            after_refusal(Protocol::Openai, &Off::Omitted, OPENAI_NO_PARAM),
+            after_refusal(Protocol::OpenaiCompatible, &Off::Omitted, OPENAI_NO_PARAM),
             None
         );
     }
@@ -268,7 +384,7 @@ mod tests {
         let again = "Unsupported value: 'reasoning_effort' does not support 'minimal'. \
                      Supported values are: 'minimal'.";
         assert_eq!(
-            after_refusal(Protocol::Openai, &lowest("minimal"), again),
+            after_refusal(Protocol::OpenaiCompatible, &lowest("minimal"), again),
             None
         );
     }
@@ -278,16 +394,31 @@ mod tests {
         use Retry::{Fallback, Guided};
         // Guided first, while the one guided retry is left.
         assert_eq!(
-            next_after_refusal(Protocol::Openai, &Off::Control, OPENAI_NO_NONE, true),
+            next_after_refusal(
+                Protocol::OpenaiCompatible,
+                &Off::Control,
+                OPENAI_NO_NONE,
+                true
+            ),
             Some((lowest("minimal"), Guided))
         );
         assert_eq!(
-            next_after_refusal(Protocol::Openai, &Off::Control, OPENAI_NO_PARAM, true),
+            next_after_refusal(
+                Protocol::OpenaiCompatible,
+                &Off::Control,
+                OPENAI_NO_PARAM,
+                true
+            ),
             Some((Off::Omitted, Guided))
         );
         // The guided form refused as well: no control.
         assert_eq!(
-            next_after_refusal(Protocol::Openai, &lowest("minimal"), OPENAI_NO_NONE, false),
+            next_after_refusal(
+                Protocol::OpenaiCompatible,
+                &lowest("minimal"),
+                OPENAI_NO_NONE,
+                false
+            ),
             Some((Off::Omitted, Fallback))
         );
         // A refusal that names nothing (`gemini-flash-lite-latest` on
@@ -305,7 +436,12 @@ mod tests {
         // Nothing of the off is left once no control went out.
         for guided in [true, false] {
             assert_eq!(
-                next_after_refusal(Protocol::Openai, &Off::Omitted, OPENAI_NO_PARAM, guided),
+                next_after_refusal(
+                    Protocol::OpenaiCompatible,
+                    &Off::Omitted,
+                    OPENAI_NO_PARAM,
+                    guided
+                ),
                 None
             );
         }

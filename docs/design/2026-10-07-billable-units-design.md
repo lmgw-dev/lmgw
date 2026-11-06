@@ -561,6 +561,17 @@ design, so they surface rather than vanish (decision 5).
   (`recording.rs:336-348`), and the reseed reads `usage_hourly.cost_micro`
   (`store/usage.rs:676-690`). Audio rows that were unpriced, which "audio budgets bite on only
   through per-call counts" (realtime design §11), now count toward a budget once priced.
+  *Since 2026-10-24* three unpriced kinds count too, each with a lower bound
+  (`Cost::budget_floor_micro`, `usage_hourly.budget_floor_micro`, migration 0094) that
+  `note_spend` and the reseed add to the cost: a row unpriced only for a hosted-tool fee keeps
+  its known part (openai egress design §6.1); an OpenAI answer at a tier above Standard with no
+  price at that tier, or one that named no tier, counts at the standard price (§13.2); and a
+  stream on the OpenAI platform cut before the upstream reported usage counts a local tiktoken
+  count of its text, the prompt at the cache-read rate (§13.4, §13.6). A budgeted caller's
+  request on a cloud model that has no price for what it is billed in is refused instead
+  (`budget_unpriced`, openai egress design §13.3, decision 24), flex without a flex price among
+  them, since no other tier's price bounds flex. Each row, its totals, rollup cost and run meters stay unpriced; "one
+  unknown part makes the whole unknown" still holds for every reading but the budget's.
 - **Agent run meters.** HTTP runs sum each row's cost (`agents/mod.rs`, `RunMeters`), so unit
   costs arrive by themselves. The in-process batch meter sums its calls' row costs the same way
   (`agents/batch/meter.rs`, `metered.rs`): each row is priced on the route that answered it, so a

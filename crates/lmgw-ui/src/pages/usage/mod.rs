@@ -78,6 +78,8 @@ mod scope_editor;
 mod devices;
 use devices::*;
 
+mod price_hosted;
+mod price_tiers;
 mod price_units;
 mod prices;
 pub use prices::UsagePrices;

@@ -29,7 +29,7 @@ pub(crate) async fn gateway(
         &state.db,
         &NewUpstream {
             name: "speech-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::AudioCpp,
             base_url: format!("{}/v1", stt2.uri()),
             api_key: Some("sk-up".into()),
@@ -59,6 +59,7 @@ pub(crate) async fn gateway(
                 capabilities_override: Some(json!({ "capabilities": {
                     "task": task, "endpoints": [endpoint], "source": "owner"
                 } })),
+                fallback: None,
             },
         )
         .await

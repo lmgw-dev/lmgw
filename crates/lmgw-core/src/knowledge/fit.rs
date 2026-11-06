@@ -27,6 +27,7 @@
 //! The measurement runs inside the job that acts on it ([`super::reembed`]),
 //! never in a request handler.
 
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
 use super::limit;
@@ -104,7 +105,7 @@ pub async fn measure(state: &SharedState, kb: &Kb, alias: &str) -> Result<Measur
             ..Default::default()
         });
     }
-    let (counter, how, n) = sampled_counter(state, kb, alias, total).await?;
+    let (counter, how, n) = sampled_counter(state, kb, (alias, Origin::Owner), total).await?;
     limit::remember_ratio(state, alias, &counter);
     let ratio = counter.ratio();
     let ceiling = max as i64 - limit::SPECIAL_TOKENS as i64;
@@ -130,11 +131,12 @@ pub async fn measure(state: &SharedState, kb: &Kb, alias: &str) -> Result<Measur
 
 /// The model's tokenizer ratio, measured on [`SAMPLE_CHUNKS`] chunks spread
 /// over `kb` (of `total`). Returns the counter, the sentence naming what
-/// counted, and how many chunks were sampled.
+/// counted, and how many chunks were sampled. The counts are `origin`'s
+/// traffic ([`limit::calibrate`]).
 pub async fn sampled_counter(
     state: &SharedState,
     kb: &Kb,
-    alias: &str,
+    (alias, origin): (&str, Origin),
     total: i64,
 ) -> Result<(std::sync::Arc<limit::ScaledCounter>, String, i64), String> {
     let pool = &state.knowledge.pool;
@@ -152,15 +154,16 @@ pub async fn sampled_counter(
             sample.push_str(&super::chunk::embed_text(&heading, &payload));
         }
     }
-    let (counter, how) = limit::calibrate(state, alias, &sample).await;
+    let (counter, how) = limit::calibrate(state, alias, &sample, origin).await;
     Ok((counter, how, n))
 }
 
 /// Make sure `alias`'s tokenizer ratio is remembered, sampling `kb` once per
 /// model identity per process ([`limit::cached_counter`] then answers every
 /// later search without a tokenizer call). A base with no chunks, a model with
-/// no reachable tokenizer, or a ratio already remembered costs nothing.
-pub async fn prime_ratio(state: &SharedState, kb: &Kb, alias: &str) {
+/// no reachable tokenizer, or a ratio already remembered costs nothing. The
+/// sample's counts are `origin`'s traffic — the search's.
+pub async fn prime_ratio(state: &SharedState, kb: &Kb, alias: &str, origin: Origin) {
     if limit::ratio_known(state, alias)
         || limit::input_limit(state, alias).await.tokenizer == "tiktoken_guess"
     {
@@ -172,7 +175,7 @@ pub async fn prime_ratio(state: &SharedState, kb: &Kb, alias: &str) {
     if total == 0 {
         return;
     }
-    if let Ok((counter, _, _)) = sampled_counter(state, kb, alias, total).await {
+    if let Ok((counter, _, _)) = sampled_counter(state, kb, (alias, origin), total).await {
         limit::remember_ratio(state, alias, &counter);
     }
 }

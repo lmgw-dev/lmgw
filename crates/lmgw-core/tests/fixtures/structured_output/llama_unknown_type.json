@@ -1,0 +1,13 @@
+{
+  "captured": "llama.cpp source, official master of 2026-09-26: tools/server/server-common.cpp oaicompat_chat_params_parse throws std::invalid_argument for a response_format type other than text, json_object, json_schema",
+  "upstream": "llama_cpp",
+  "status": 400,
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "response_format type must be one of \"text\" or \"json_object\", but got: regex",
+      "type": "invalid_request_error"
+    }
+  },
+  "expect": "response_format_unsupported"
+}

@@ -29,6 +29,7 @@ pub fn ProfilesPanel(
     #[prop(optional)] on_changed: Option<Callback<ProfileList>>,
     #[prop(optional)] dirty: Option<RwSignal<bool>>,
 ) -> impl IntoView {
+    let http = crate::http::use_http();
     let list = RwSignal::new(ProfileList::default());
     let loaded = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -43,7 +44,7 @@ pub fn ProfilesPanel(
 
     let refresh = move || {
         scope.spawn(async move {
-            match api::list().await {
+            match api::list(http).await {
                 Ok(l) => {
                     list.set(l.clone());
                     loaded.set(true);
@@ -113,7 +114,7 @@ pub fn ProfilesPanel(
     };
     let add_builtin = move |_| {
         scope.spawn(async move {
-            match api::create_builtin(BUILTIN_CONCISE).await {
+            match api::create_builtin(http, BUILTIN_CONCISE).await {
                 Ok(p) => {
                     let id = p.id;
                     list.update(|l| upsert(l, p));

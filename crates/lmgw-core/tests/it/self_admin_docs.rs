@@ -2,7 +2,7 @@
 //! (`lmgw__docs_corpora`, `lmgw__docs_requests`, `lmgw__docs_corpus_set`,
 //! `lmgw__docs_ingest`, `lmgw__docs_request_set`): each tool's text is read
 //! into its type and written out again, and the two texts are equal byte for
-//! byte. The text is the answer's pretty JSON with sorted keys, so a key a
+//! byte. The text is the answer's compact JSON with sorted keys, so a key a
 //! type adds, drops, renames or turns from absent into `null` (or an integer
 //! into a float) shows up here.
 //!

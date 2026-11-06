@@ -4,6 +4,7 @@ use lmgw_api_types as dto;
 use serde::Deserialize;
 
 use crate::config::{ApiKey, ApiKeyKind, BudgetPeriod, KeyPolicy, ScopeMode};
+use crate::detached::detached;
 use crate::state::SharedState;
 use crate::store::{self};
 
@@ -609,87 +610,101 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<dto::KeySaved, 
     }
 
     let reach_moved = changed.contains(&"self_admin");
-    let rows = store::update_key_policy(
-        &state.db,
-        key.id,
-        &policy,
-        enabled,
-        &note,
-        hosts_label.as_deref(),
-        (self_admin, reach_moved.then_some(key.self_admin)),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if rows == 0 {
-        return Err(format!(
-            "key {} disappeared between reading it and writing it — nothing was changed",
-            key.id
-        ));
-    }
-    if let Some(urls) = urls.as_deref() {
-        // The publish below hands the hosts to the server certificates.
-        store::set_device_urls(&state.db, key.id, urls)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    // Raised whether or not the reload below succeeds (review W2-6): the
-    // row is written, and a revocation that waited for a snapshot would fail
-    // open. The snapshot is published first and the MCP reconcile comes
-    // last (the branch review's N-1, as `ops::hold_set` splits them): one
-    // unreachable autostart server stalls the reconcile for its connect
-    // timeout, and nothing below waits for it.
-    let published = state.publish_snapshot().await;
-    // A key switched off is cut off now, not at its next request (§1.6):
-    // its feed, voice sessions, Chat streams and tool link end with the
-    // reason — a device's, and since 2026-10-06 every kind's (Disable means
-    // disable). Raised after the publish, so a client that reconnects at
-    // once meets the gate's refusal — and raised when the reload failed
-    // too. A changed expiry re-arms every watch's timer.
-    if changed.contains(&"enabled") && !enabled {
-        if published.is_err() {
-            state.key_written(key.id, crate::state::KeyWritten::Disabled);
+    // The write and everything after it are a task of their own (*changed
+    // 2026-10-24*, see [`crate::detached::detached`]): a dropped request would
+    // leave the snapshot serving the old row, a disabled key's connections open
+    // and its device's transfers running.
+    let task_st = state.clone();
+    detached("updating the key", async move {
+        let state = &task_st;
+        let rows = store::update_key_policy(
+            &state.db,
+            key.id,
+            &policy,
+            enabled,
+            &note,
+            hosts_label.as_deref(),
+            (self_admin, reach_moved.then_some(key.self_admin)),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!(
+                "key {} disappeared between reading it and writing it — nothing was changed",
+                key.id
+            ));
         }
-        crate::devices::revoke(state, key.id, crate::devices::RevokeReason::Disabled);
-    }
-    if changed.contains(&"expires_at") {
-        state.devices.revocations.rearm();
-    }
-    // The level moved: the publish that says it plays it
-    // (`AppState::publish_over`) — the device's feed reads the record
-    // written with the row (above `off` or back, its threads and folders
-    // with the toolset come or go), its live state is sent again with the
-    // level, and turned off, its sessions bound to such a thread close now
-    // and its turns on such a thread are cancelled, as an attach of the
-    // toolset closes and cancels them (review P-8); its realtime sessions
-    // list their `lmgw` tools again, at the new level. A reload that failed
-    // lays the level over the published snapshot, which plays it the same
-    // way. A lowered level refuses the next write call of a turn still
-    // running. `/mcp` never serves the admin tools, so its lists do not
-    // move.
-    if reach_moved && published.is_err() {
-        state.key_written(key.id, crate::state::KeyWritten::SelfAdmin(self_admin));
-    }
-    // A cleared hosting grant removed the device's row, and its MCP tasks
-    // ended with it (MCP Tasks design §1.6): the results enter their
-    // threads.
-    if changed.contains(&"hosts_label") && hosts_label.is_none() {
-        crate::web::chat_tasks::servers_gone(state).await;
-    }
-    let published = published.map_err(|e| e.to_string())?;
-    state.mcp.reconcile(&published).await;
-    // A session this key holds on `/mcp` has its own copy of `tools/list`;
-    // nudge it to re-list, as a per-tool switch does.
-    if changed
-        .iter()
-        .any(|c| c.starts_with("tool_scope") || *c == "device_tools")
-    {
-        state.mcp.notify_tools_changed_now();
-    }
-    Ok(dto::KeySaved {
-        ok: true,
-        id: key.id,
-        message: format!("'{}': updated {}", key.name, changed.join(", ")),
-        name: key.name,
-        changed: changed.into_iter().map(String::from).collect(),
+        if let Some(urls) = urls.as_deref() {
+            // The publish below hands the hosts to the server certificates.
+            store::set_device_urls(&state.db, key.id, urls)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        // Raised whether or not the reload below succeeds: the
+        // row is written, and a revocation that waited for a snapshot would fail
+        // open. The snapshot is published first and the MCP reconcile comes
+        // last (as `ops::hold_set` splits them): one
+        // unreachable autostart server stalls the reconcile for its connect
+        // timeout, and nothing below waits for it.
+        let published = state.publish_snapshot().await;
+        // A key switched off is cut off now, not at its next request (§1.6):
+        // its feed, voice sessions, Chat streams and tool link end with the
+        // reason — a device's, and since 2026-10-06 every kind's (Disable means
+        // disable). Raised after the publish, so a client that reconnects at
+        // once meets the gate's refusal — and raised when the reload failed
+        // too. A changed expiry re-arms every watch's timer.
+        if changed.contains(&"enabled") && !enabled {
+            if published.is_err() {
+                state.key_written(key.id, crate::state::KeyWritten::Disabled);
+            }
+            crate::devices::revoke(state, key.id, crate::devices::RevokeReason::Disabled);
+            // A disabled device's transfers end (device transfers design §8).
+            if key.kind == ApiKeyKind::Device {
+                crate::transfers::device_ended(state, key.id, &key.name, false).await;
+            }
+        }
+        if changed.contains(&"expires_at") {
+            state.devices.revocations.rearm();
+        }
+        // The level moved: the publish that says it plays it
+        // (`AppState::publish_over`) — the device's feed reads the record
+        // written with the row (above `off` or back, its threads and folders
+        // with the toolset come or go), its live state is sent again with the
+        // level, and turned off, its sessions bound to such a thread close now
+        // and its turns on such a thread are cancelled, as an attach of the
+        // toolset closes and cancels them; its realtime sessions
+        // list their `lmgw` tools again, at the new level. A reload that failed
+        // lays the level over the published snapshot, which plays it the same
+        // way. A lowered level refuses the next write call of a turn still
+        // running. `/mcp` never serves the admin tools, so its lists do not
+        // move.
+        if reach_moved && published.is_err() {
+            state.key_written(key.id, crate::state::KeyWritten::SelfAdmin(self_admin));
+        }
+        // A cleared hosting grant removed the device's row, and its MCP tasks
+        // ended with it (MCP Tasks design §1.6): the results enter their
+        // threads.
+        if changed.contains(&"hosts_label") && hosts_label.is_none() {
+            crate::web::chat_tasks::servers_gone(state).await;
+        }
+        let published = published.map_err(|e| e.to_string())?;
+        state.mcp.reconcile(&published).await;
+        // A session this key holds on `/mcp` has its own copy of `tools/list`;
+        // nudge it to re-list, as a per-tool switch does.
+        if changed
+            .iter()
+            .any(|c| c.starts_with("tool_scope") || *c == "device_tools")
+        {
+            state.mcp.notify_tools_changed_now();
+        }
+        Ok(dto::KeySaved {
+            ok: true,
+            id: key.id,
+            message: format!("'{}': updated {}", key.name, changed.join(", ")),
+            name: key.name,
+            changed: changed.into_iter().map(String::from).collect(),
+        })
     })
+    .await
+    .map_err(|r| r.message)?
 }

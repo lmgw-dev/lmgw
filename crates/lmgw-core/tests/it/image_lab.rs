@@ -56,9 +56,10 @@ pub(crate) fn image_row(model_id: &str, edit: bool) -> NewImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 0,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -105,7 +106,7 @@ fn serve(state: &SharedState) -> Gw {
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     Gw { base, key }
 }
 
@@ -168,7 +169,7 @@ pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
         &state.db,
         &store::NewUpstream {
             name: "bfl".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri().trim_end_matches('/')),
             api_key: Some("sk-up".into()),
@@ -209,6 +210,7 @@ pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override,
+                fallback: None,
             },
         )
         .await

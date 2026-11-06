@@ -22,6 +22,7 @@ fn tool(exposed: &str, wire: &str) -> LabelTool {
             name: exposed.into(),
             description: None,
             parameters: json!({"type": "object"}),
+            strict: None,
         },
         wire: wire.into(),
     }
@@ -32,6 +33,8 @@ fn spec(label: &str, allowed: Option<&[&str]>) -> McpToolSpec {
         server_label: label.into(),
         allowed_tools: allowed.map(|a| a.iter().map(|s| s.to_string()).collect()),
         require_approval: Default::default(),
+        server_url: None,
+        connector_id: None,
     }
 }
 

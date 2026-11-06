@@ -6,7 +6,7 @@
 > Companion to [2026-06-09-llm-api-gateway-design.md](2026-06-09-llm-api-gateway-design.md).
 > Section refs like “§8” point at that document; this spec adds the **MCP plane**
 > alongside the existing **LLM plane** in the same binary, reusing its patterns.
-> **v2** folds in an Opus design review: sampling must declare the client
+> **v2** folds in a design review: sampling must declare the client
 > capability or it’s dead on arrival (§8); the “in-process logging is free” claim
 > was wrong (§8); the northbound MUST-list + no-batch (§6); stats-pollution fixes
 > (§10); 64-char tool names + result content types (§7); the lazy-list contract

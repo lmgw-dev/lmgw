@@ -4,7 +4,7 @@
 //! `next_step` unless the build was deleted), and the two writes that say what
 //! to call next, `lmgw__build_run` and `lmgw__container_image_pull`.
 //!
-//! The text is the answer's pretty JSON with sorted keys, so a key a type
+//! The text is the answer's compact JSON with sorted keys, so a key a type
 //! adds, drops, renames or turns from absent into `null` shows up as a
 //! difference between the text and what the type writes back.
 

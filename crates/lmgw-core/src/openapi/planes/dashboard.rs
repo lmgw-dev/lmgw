@@ -10,8 +10,8 @@ use lmgw_api_types as dto;
 
 use super::super::registry::{Dialect, DocRoute, Req, Resp};
 use crate::web::api::{
-    ChainQuery, FlagsQuery, HfRepoQuery, IdQuery, InspectQuery, JobsQuery, LocalModelQuery,
-    LogsQuery, ModelIdQuery, RungPlanQuery, SearchQuery,
+    ChainQuery, DownloadsQuery, FlagsQuery, HfRepoQuery, IdQuery, InspectQuery, JobsQuery,
+    LocalModelQuery, LogsQuery, ModelIdQuery, PlanQuery, RungPlanQuery, SearchQuery,
 };
 
 fn base(
@@ -85,10 +85,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "The live feed the dashboard opens once and keeps: stats, jobs, \
-                runtime, vram, mcp, updates and chat frames on connect, then request/stats/mcp/\
-                jobs/vram/runtime/updates frames as they change, a keys frame when a key's \
-                state moves without a request (a device's connection opened or closed, a key \
-                disabled, rotated or deleted), and a chat frame naming the threads, folders \
+                runtime, vram, mcp, updates and chat frames on connect (and machine, once the \
+                machine check has a result), then request/stats/mcp/jobs/vram/runtime/updates \
+                frames as they change, a machine frame with the machine check's summary \
+                whenever its last result changes (a run, the settings judged again, a local \
+                model's start on the graphics card that failed because of the computer), a \
+                keys frame when a key's state moves without a request (a device's connection \
+                opened or closed, a key disabled, rotated or deleted), and a chat frame naming \
+                the threads, folders \
                 and messages any writer changed in the Chat (a device, an owner key, this or \
                 another dashboard window, the sweep): read them again. The first change of a \
                 burst waits a fixed 200 ms for the rest, then one read names everything \
@@ -109,6 +113,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 }),
                 ("request", |g| g.root_schema_for::<dto::RequestRow>()),
                 ("keys", |g| g.root_schema_for::<dto::KeysChanged>()),
+                ("machine", |g| {
+                    g.root_schema_for::<dto::machine::MachineSummary>()
+                }),
                 ("chat", |g| g.root_schema_for::<dto::ChatChanged>()),
             ]),
             ..base("GET", "/api/events", "status", "Open the live event stream")
@@ -121,9 +128,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             ..base("GET", "/api/jobs", "status", "List background jobs")
         },
         DocRoute {
-            description: "The GPU ledger and the admission queue, freshly measured — the same \
-                object the vram SSE frame carries, so a page can fetch once and then follow \
-                the stream.",
+            description: "The GPU ledger and the admission queue, freshly measured, and the \
+                starts waiting for their engine image's download (downloading, with its \
+                bytes) — the same object the vram SSE frame carries, so a page can fetch once \
+                and then follow the stream.",
             response: Resp::Json(|g| g.root_schema_for::<dto::VramStatus>()),
             ..base("GET", "/api/vram", "status", "Get the GPU ledger")
         },
@@ -189,8 +197,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "A complete, ready-to-apply local-model parameter set derived from a \
                 GGUF file's own metadata, with a rationale for each value — the editor's \
-                wizard read, and the same one lmgw__local_model_plan answers.",
-            query: Some(|g| g.root_schema_for::<InspectQuery>()),
+                wizard read, and the same one lmgw__local_model_plan answers. A file on disk \
+                is named by path; a file on Hugging Face by repo and file, planned from its \
+                header before anything is downloaded (1 to 16 MiB read a file). A chat or aux \
+                plan carries its source and its fit on the graphics card, against the whole \
+                card and beside what runs on it now; an image plan (target=image) carries \
+                neither yet.",
+            query: Some(|g| g.root_schema_for::<PlanQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::PlanResult>()),
             ..base(
                 "GET",
@@ -290,7 +303,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- Downloads -----------------------------------------------------------
         DocRoute {
             description: "A Hugging Face repo's files, classified into weights, mmproj \
-                projector and speculative drafter candidates.",
+                projector and speculative drafter candidates. With `fit=true` each weights \
+                file of the chat or aux class also gets its fit on this computer's graphics \
+                card, and the answer names the recommended file (find-a-model design §3.3); \
+                that reads file headers from Hugging Face, 1 to 16 MiB each, and \
+                `header_bytes_read` says how much. `fit=unless_metered` reads nothing on a \
+                metered connection: every mark is then by size, and `metered` says why. The \
+                card and what holds for every file are said once, in `card` and `fit_notes`.",
             query: Some(|g| g.root_schema_for::<HfRepoQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::RepoFiles>()),
             ..base(
@@ -301,7 +320,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "The download queue and history.",
+            description: "The download queue and history. No filter returns every row \
+                ever recorded; a poller passes the ids its queueing call returned.",
+            query: Some(|g| g.root_schema_for::<DownloadsQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DownloadsView>()),
             ..base("GET", "/api/hf/downloads", "downloads", "List downloads")
         },

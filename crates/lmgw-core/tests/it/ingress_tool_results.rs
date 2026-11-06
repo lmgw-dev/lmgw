@@ -302,8 +302,9 @@ fn anthropic_tool_result(content: Value) -> Vec<ToolResultBlock> {
 }
 
 /// A `tool_result` image by URL is the resource naming it, as a Responses
-/// URL image is; a base64 one stays the image; a source this ingress does
-/// not read (a Files API `file`, a URL with no URL) stays the block's JSON.
+/// URL image is; a base64 one stays the image; a Files API `file` is the
+/// verbatim block only an Anthropic row is sent (changed 2026-11-06); a URL
+/// with no URL stays the block's JSON.
 #[test]
 fn anthropic_names_a_url_tool_image_as_a_resource() {
     let file = json!({"type": "image", "source": {"type": "file", "file_id": "file_1"}});
@@ -326,7 +327,7 @@ fn anthropic_names_a_url_tool_image_as_a_resource() {
                 mime: "image/gif".into(),
                 data: GIF_B64.into(),
             },
-            ToolResultBlock::Json { value: file },
+            ToolResultBlock::AnthropicBlock(lmgw_core::ir::AnthropicBlock::from_client(file)),
             ToolResultBlock::Json { value: no_url },
         ]
     );

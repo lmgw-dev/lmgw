@@ -23,8 +23,14 @@
 # the real dir look like a copy.
 #
 # start writes <dir>.pid, <dir>.log and <dir>.token (0600: the owner bearer for /api/op/*, from
-# the log's login line) next to dir, and waits up to 120 s for /v1/models. The copy's
-# owner:self-admin key is production's; /mcp/admin takes it as the bearer.
+# the log's login line) next to dir. It waits for the gateway to answer HTTP on addr: any status
+# counts (/v1/models says 401 to a keyless request, which is "up"), only a refused connection means
+# "not yet". It fails at once, with the log's tail, when the process dies, and prints progress
+# every 10 s. The wait is capped by LMGW_DEV_COPY_WAIT seconds (default 300; a small database boots
+# within seconds once built; 0 = no cap, wait as long as the process lives).
+# On a timeout the process is left running: look at <dir>.log, then re-run start (it reports
+# "already running") or stop. The copy's owner:self-admin key is production's; /mcp/admin takes it
+# as the bearer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -87,17 +93,38 @@ start)
     LMGW_DATA_DIR="$dir" LMGW_DEV=1 setsid nohup target/debug/examples/headless "$addr" \
         > "$dir.log" 2>&1 < /dev/null &
     echo $! > "$dir.pid"
-    for _ in $(seq 1 120); do
-        if curl -sf -o /dev/null "http://$addr/v1/models"; then
-            (umask 077; grep -m1 -o 'token=[A-Za-z0-9_-]*' "$dir.log" | cut -d= -f2 > "$dir.token")
-            echo "up: http://$addr (pid $(cat "$dir.pid"), log $dir.log, owner bearer in $dir.token)"
-            exit 0
+    wait_s="${LMGW_DEV_COPY_WAIT:-300}"
+    case "$wait_s" in '' | *[!0-9]*) echo "LMGW_DEV_COPY_WAIT must be whole seconds, got '$wait_s'" >&2; exit 2 ;; esac
+    t0=$SECONDS
+    while :; do
+        # curl prints 000 when nothing answered; every real status (401 included) means up.
+        code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://$addr/v1/models" || true)"
+        [ "$code" != "000" ] && break
+        alive || { echo "the gateway exited before it answered:" >&2; tail -20 "$dir.log" >&2; exit 1; }
+        waited=$((SECONDS - t0))
+        if [ "$wait_s" -gt 0 ] && [ "$waited" -ge "$wait_s" ]; then
+            echo "no answer from http://$addr after ${waited} s (pid $(cat "$dir.pid") still running, LMGW_DEV_COPY_WAIT=$wait_s)." >&2
+            echo "last log lines:" >&2; tail -5 "$dir.log" >&2
+            echo "a slow boot: read $dir.log, then re-run with a larger LMGW_DEV_COPY_WAIT (0 = no cap); or stop it: scripts/dev-copy.sh stop $dir" >&2
+            exit 1
         fi
-        alive || { echo "the gateway exited:" >&2; tail -20 "$dir.log" >&2; exit 1; }
+        [ "$waited" -gt 0 ] && [ $((waited % 10)) -eq 0 ] && echo "still booting after ${waited} s: $(tail -1 "$dir.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-140)" >&2
         sleep 1
     done
-    echo "no answer from http://$addr after 120 s; see $dir.log" >&2
-    exit 1
+    # The login line is logged just before the listener answers; strip colour codes, then take it.
+    token=""
+    for _ in 1 2 3 4 5; do
+        token="$(sed 's/\x1b\[[0-9;]*m//g' "$dir.log" | grep -m1 -o 'login?token=[A-Za-z0-9_-]*' | cut -d= -f2 || true)"
+        [ -n "$token" ] && break
+        sleep 1
+    done
+    if [ -z "$token" ]; then
+        echo "UP, BUT NO OWNER TOKEN: the gateway answers on http://$addr (pid $(cat "$dir.pid")) yet $dir.log has no 'login?token=' line; $dir.token not written." >&2
+        echo "the login line's format probably changed: grep -n token $dir.log, then fix this script." >&2
+        exit 1
+    fi
+    (umask 077; printf '%s\n' "$token" > "$dir.token")
+    echo "up after $((SECONDS - t0)) s (/v1/models: HTTP $code): http://$addr (pid $(cat "$dir.pid"), log $dir.log, owner bearer in $dir.token)"
     ;;
 stop)
     if ! alive; then

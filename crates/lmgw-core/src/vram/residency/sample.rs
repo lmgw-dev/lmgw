@@ -1,7 +1,7 @@
 //! Sampling an audio container while a request runs on it (WP7 live gate).
 //!
 //! **Why.** The reading after an answer misses what audio.cpp frees once it
-//! has answered: on the 4090, pocket-tts read 0.921 GB after its answer and
+//! has answered: on a test card, pocket-tts read 0.921 GB after its answer and
 //! 0.981 GB at most while it worked — the compute buffers, released per
 //! request the way sd.cpp releases its own ([`crate::vram::peak`]). A figure
 //! learned after the answer alone leaves that transient charged nowhere.

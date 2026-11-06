@@ -275,7 +275,7 @@ async fn a_plan_past_the_card_names_the_largest_context_that_fits() {
     );
     let warnings = p["warnings"].to_string();
     assert!(
-        warnings.contains("ctx_size 262144") && warnings.contains("vram.budget_mb (2.0 GiB)"),
+        warnings.contains("ctx_size 262144") && warnings.contains("GPU memory budget, 2.0 GiB"),
         "{warnings}"
     );
     assert!(warnings.contains("KV cache 4.0 GiB"), "{warnings}");

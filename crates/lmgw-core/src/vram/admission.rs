@@ -29,6 +29,16 @@ pub enum Fit {
     /// hold". Reporting a hold as "not enough GPU memory" would send them
     /// hunting for a model to evict on an empty card.
     Held(String),
+    /// The model's engine image is not on this machine and its download
+    /// failed (machine-check design §5): no start can happen, and this says
+    /// why, naming the image and where it is set.
+    Failed(String),
+    /// The model's engine image was downloaded just now (machine-check
+    /// design §5). That can take minutes, so the snapshot this check was
+    /// given — and the row the caller read from it — are from before:
+    /// nothing was decided, and the caller reads its row again and asks
+    /// again. The image is here now, so that check does not wait for it.
+    Downloaded,
 }
 
 /// A background start admission has measured and claimed memory for.

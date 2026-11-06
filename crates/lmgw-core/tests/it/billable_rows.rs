@@ -29,6 +29,7 @@ async fn price(state: &SharedState, unit: PriceUnit, p: Prices, price: Option<f6
         PriceScope::Alias,
         "my-model",
         unit,
+        lmgw_core::config::PriceTier::Standard,
         &p,
         price,
         None,
@@ -85,7 +86,12 @@ async fn a_chat_row_pays_tokens_and_its_request_fee() {
         .respond_with(ResponseTemplate::new(200).set_body_json(chat_answer()))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     tokens_3_15(&state).await;
     fee(&state, 0.005).await;
 
@@ -119,7 +125,12 @@ async fn a_row_without_tokens_is_priced_by_a_request_only_sheet() {
         ))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     fee(&state, 0.005).await;
     let legacy = json!({"model": "my-model", "prompt": "hi", "stream": true});
 
@@ -159,7 +170,12 @@ async fn an_upstream_refusal_pays_no_fee() {
         })))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     fee(&state, 0.005).await;
 
     let resp = post(
@@ -190,7 +206,12 @@ async fn a_chat_tab_stream_that_failed_mid_way_pays_its_fee() {
         ))
         .mount(&mock)
         .await;
-    let (state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    let (state, base) = setup_kind(
+        &mock.uri(),
+        Protocol::OpenaiCompatible,
+        UpstreamKind::Generic,
+    )
+    .await;
     fee(&state, 0.005).await;
     let client = base.client();
     let thread: Value = client

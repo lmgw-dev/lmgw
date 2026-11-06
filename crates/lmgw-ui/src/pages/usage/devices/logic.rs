@@ -407,13 +407,35 @@ pub(super) fn contested_words(name: &str, from: &str) -> String {
     format!("the token for '{name}' was used, then {again}: if your device did not pair, delete it")
 }
 
-/// The row's pairing in one line (§9.3). `at` prints an RFC 3339 time in
-/// the reader's own zone.
-pub(super) fn pairing_words(p: &DevicePairingView, at: &dyn Fn(&str) -> String) -> String {
+/// One stretch of the pairing line (§9.3): lmgw's own words, or what a
+/// device said of itself. A device's claim is free text it chose (a stranger's
+/// waiting key sends one too), so it never joins lmgw's sentence: it is a part
+/// of its own, drawn apart, after the words that carry the state and the code
+/// (*changed 2026-10-23*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Part {
+    Own(String),
+    Claim(String),
+}
+
+/// What a device says of itself, as one claim: its name, then its client text
+/// in brackets, whichever it sent.
+fn claim(name: &Option<String>, client: &Option<String>) -> Option<String> {
+    match (name, client) {
+        (Some(n), Some(c)) => Some(format!("{n} ({c})")),
+        (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+        (None, None) => None,
+    }
+}
+
+/// The row's pairing in one line (§9.3), as parts. `at` prints an RFC 3339
+/// time in the reader's own zone.
+pub(super) fn pairing_words(p: &DevicePairingView, at: &dyn Fn(&str) -> String) -> Vec<Part> {
     let from = |f: &Option<String>| f.as_ref().map(|f| format!(" from {f}")).unwrap_or_default();
+    let own = |s: String| vec![Part::Own(s)];
     match p.state {
-        DevicePairingState::V1 => "paired before TLS; its old key opens nothing".into(),
-        DevicePairingState::Waiting => match &p.token {
+        DevicePairingState::V1 => own("paired before TLS; its old key opens nothing".into()),
+        DevicePairingState::Waiting => own(match &p.token {
             Some(t) if t.alive => {
                 format!(
                     "waiting for its device, token valid until {}",
@@ -423,7 +445,7 @@ pub(super) fn pairing_words(p: &DevicePairingView, at: &dyn Fn(&str) -> String) 
             Some(t) if t.ended_at.is_some() => "token ended unused".into(),
             Some(t) => format!("token expired unused ({})", at(&t.expires_at)),
             None => "no pairing token".into(),
-        },
+        }),
         DevicePairingState::Enrolled => {
             let code = p.confirm_code.clone().unwrap_or_default();
             let lead = if p.kept_code.is_some() {
@@ -431,16 +453,33 @@ pub(super) fn pairing_words(p: &DevicePairingView, at: &dyn Fn(&str) -> String) 
             } else {
                 "enrolled"
             };
-            format!("{lead}{}, code {code}", from(&p.enrolled_from))
+            // lmgw's words (state, address, code) come first and whole; the
+            // device's claim follows as a part of its own, and a key waiting
+            // beside a kept one adds where the working key came from.
+            let mut parts = own(format!("{lead}{}, code {code}", from(&p.enrolled_from)));
+            if let Some(c) = claim(&p.device_name, &p.client) {
+                parts.push(Part::Own(", the device says: ".into()));
+                parts.push(Part::Claim(c));
+            }
+            if let Some(k) = claim(&p.kept_device_name, &p.kept_client) {
+                parts.push(Part::Own("; the working key came from ".into()));
+                parts.push(Part::Claim(k));
+            }
+            parts
         }
         DevicePairingState::Confirmed => {
             let when = p.enrolled_at.as_deref().map(date_of).unwrap_or("");
-            let client = p
-                .client
-                .as_ref()
-                .map(|c| format!(": {c}"))
-                .unwrap_or_default();
-            format!("paired {when}{}{client}, confirmed", from(&p.enrolled_from))
+            // The card's title stays the owner's name; the device's own
+            // claim (*added 2026-10-23*) follows lmgw's words.
+            let mut parts = own(format!(
+                "paired {when}{}, confirmed",
+                from(&p.enrolled_from)
+            ));
+            if let Some(c) = claim(&p.device_name, &p.client) {
+                parts.push(Part::Own(", the device says: ".into()));
+                parts.push(Part::Claim(c));
+            }
+            parts
         }
     }
 }
@@ -956,6 +995,40 @@ mod tests {
         assert_eq!(card_phase(Some(&ended), EXP), Phase::Ended);
     }
 
+    /// The parts as text, a device's claim between `<<` and `>>`.
+    fn shown(p: &DevicePairingView, at: &dyn Fn(&str) -> String) -> String {
+        pairing_words(p, at)
+            .into_iter()
+            .map(|part| match part {
+                Part::Own(s) => s,
+                Part::Claim(s) => format!("<<{s}>>"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_device_s_claim_never_joins_lmgw_s_words() {
+        let at = |t: &str| t.to_string();
+        let spoof = DevicePairingView {
+            state: DevicePairingState::Enrolled,
+            confirm_code: Some("7F3A-91C2".into()),
+            kept_code: Some("0000-0001".into()),
+            device_name: Some("x\"), code 1111-2222; the working key is (\"Anna's phone".into()),
+            ..Default::default()
+        };
+        let parts = pairing_words(&spoof, &at);
+        // lmgw's code is in the first part, whole, before anything the
+        // device chose; the claim is a part of its own.
+        assert_eq!(
+            parts[0],
+            Part::Own("a new key enrolled, code 7F3A-91C2".into())
+        );
+        assert!(matches!(&parts[2], Part::Claim(c) if c.contains("1111-2222")));
+        assert!(parts
+            .iter()
+            .all(|p| !matches!(p, Part::Own(s) if s.contains("1111-2222"))));
+    }
+
     #[test]
     fn a_row_s_pairing_reads_in_one_line() {
         let at = |t: &str| t.get(11..16).unwrap_or(t).to_string();
@@ -964,7 +1037,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            pairing_words(&waiting, &at),
+            shown(&waiting, &at),
             "waiting for its device, token valid until 14:32"
         );
         let ended = DevicePairingView {
@@ -974,14 +1047,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(pairing_words(&ended, &at), "token ended unused");
+        assert_eq!(shown(&ended, &at), "token ended unused");
         let lapsed = DevicePairingView {
             token: Some(token(false)),
             ..Default::default()
         };
-        assert!(pairing_words(&lapsed, &at).starts_with("token expired unused"));
+        assert!(shown(&lapsed, &at).starts_with("token expired unused"));
         assert_eq!(
-            pairing_words(&DevicePairingView::default(), &at),
+            shown(&DevicePairingView::default(), &at),
             "no pairing token"
         );
         let enrolled = DevicePairingView {
@@ -991,8 +1064,69 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            pairing_words(&enrolled, &at),
+            shown(&enrolled, &at),
             "enrolled from 192.0.2.2, code 7F3A-91C2"
+        );
+        // What the device says of itself stands beside its address, in every
+        // combination; the code still ends the line.
+        let said = |name: Option<&str>, client: Option<&str>| {
+            shown(
+                &DevicePairingView {
+                    device_name: name.map(Into::into),
+                    client: client.map(Into::into),
+                    enrolled_from: Some("192.0.2.7".into()),
+                    ..enrolled.clone()
+                },
+                &at,
+            )
+        };
+        assert_eq!(
+            said(Some("Anna's phone"), Some("Kai mobile 0.1.0")),
+            "enrolled from 192.0.2.7, code 7F3A-91C2, the device says: <<Anna's phone (Kai mobile 0.1.0)>>"
+        );
+        assert_eq!(
+            said(Some("Anna's phone"), None),
+            "enrolled from 192.0.2.7, code 7F3A-91C2, the device says: <<Anna's phone>>"
+        );
+        assert_eq!(
+            said(None, Some("Kai mobile 0.1.0")),
+            "enrolled from 192.0.2.7, code 7F3A-91C2, the device says: <<Kai mobile 0.1.0>>"
+        );
+        assert_eq!(said(None, None), "enrolled from 192.0.2.7, code 7F3A-91C2");
+        // Beside a kept key: the kept one is named too, as far as it said
+        // anything.
+        let beside = |kept_name: Option<&str>, kept_client: Option<&str>| {
+            shown(
+                &DevicePairingView {
+                    kept_code: Some("0000-0001".into()),
+                    kept_device_name: kept_name.map(Into::into),
+                    kept_client: kept_client.map(Into::into),
+                    device_name: Some("Mallory".into()),
+                    client: Some("Evil 1.0".into()),
+                    enrolled_from: Some("192.0.2.7".into()),
+                    ..enrolled.clone()
+                },
+                &at,
+            )
+        };
+        assert_eq!(
+            beside(Some("Anna's phone"), Some("Kai mobile 0.1.0")),
+            "a new key enrolled from 192.0.2.7, code 7F3A-91C2, the device says: \
+             <<Mallory (Evil 1.0)>>; the working key came from <<Anna's phone (Kai mobile 0.1.0)>>"
+        );
+        assert_eq!(
+            beside(Some("Anna's phone"), None),
+            "a new key enrolled from 192.0.2.7, code 7F3A-91C2, the device says: \
+             <<Mallory (Evil 1.0)>>; the working key came from <<Anna's phone>>"
+        );
+        assert_eq!(
+            beside(None, Some("Kai mobile 0.1.0")),
+            "a new key enrolled from 192.0.2.7, code 7F3A-91C2, the device says: \
+             <<Mallory (Evil 1.0)>>; the working key came from <<Kai mobile 0.1.0>>"
+        );
+        assert_eq!(
+            beside(None, None),
+            "a new key enrolled from 192.0.2.7, code 7F3A-91C2, the device says: <<Mallory (Evil 1.0)>>"
         );
         let confirmed = DevicePairingView {
             state: DevicePairingState::Confirmed,
@@ -1002,14 +1136,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            pairing_words(&confirmed, &at),
-            "paired 2026-10-14 from 192.0.2.2: Kai mobile 0.1.0 (Android 16), confirmed"
+            shown(&confirmed, &at),
+            "paired 2026-10-14 from 192.0.2.2, confirmed, the device says: <<Kai mobile 0.1.0 (Android 16)>>"
+        );
+        // The device's name leads its claim, its client text follows in brackets.
+        let named = DevicePairingView {
+            device_name: Some("Anna's phone".into()),
+            ..confirmed.clone()
+        };
+        assert_eq!(
+            shown(&named, &at),
+            "paired 2026-10-14 from 192.0.2.2, confirmed, the device says: \
+             <<Anna's phone (Kai mobile 0.1.0 (Android 16))>>"
+        );
+        let name_only = DevicePairingView {
+            client: None,
+            ..named
+        };
+        assert_eq!(
+            shown(&name_only, &at),
+            "paired 2026-10-14 from 192.0.2.2, confirmed, the device says: <<Anna's phone>>"
         );
         let v1 = DevicePairingView {
             state: DevicePairingState::V1,
             ..Default::default()
         };
-        assert!(pairing_words(&v1, &at).contains("before TLS"));
+        assert!(shown(&v1, &at).contains("before TLS"));
         assert_eq!(
             v1_count(&[row(v1), row(confirmed.clone()), KeyRow::default()]),
             1

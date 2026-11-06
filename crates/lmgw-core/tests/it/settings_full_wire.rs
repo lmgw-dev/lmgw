@@ -83,7 +83,6 @@ async fn every_block_set_away_from_its_default_reads_back_as_set() {
     s.vram.fallback_on_external = false;
     s.vram.budget_mb = 8192;
     s.hold.active = true;
-    s.hold.fallback_alias = Some("openai/gpt-y".into());
     s.chat_archive_days = 0;
     s.chat_purge_days = 90;
     s.chat_system_prompt = Some("Be terse.".into());
@@ -111,7 +110,6 @@ async fn every_block_set_away_from_its_default_reads_back_as_set() {
     assert!(!full.vram.enabled && !full.vram.fallback_on_external);
     assert_eq!(full.vram.budget_mb, 8192);
     assert!(full.hold.active);
-    assert_eq!(full.hold.fallback_alias.as_deref(), Some("openai/gpt-y"));
     assert_eq!((full.chat_archive_days, full.chat_purge_days), (0, 90));
     assert_eq!(full.chat_system_prompt, "Be terse.");
     assert_eq!(

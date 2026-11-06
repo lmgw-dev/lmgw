@@ -889,3 +889,99 @@ async fn a_valid_three_rung_ladder_passes_every_rule() {
             .is_ok()
     );
 }
+
+// -----------------------------------------------------------------
+// A dflash row's spec_draft_n_max against its drafter's block size
+// -----------------------------------------------------------------
+
+fn dflash_row(spec: &str, n_max: Option<i64>) -> crate::store::NewLocalModel {
+    crate::store::NewLocalModel {
+        model_id: "m".into(),
+        gguf_path: "base.gguf".into(),
+        params: crate::config::LlamaParams {
+            spec_type: Some(spec.into()),
+            spec_draft_n_max: n_max,
+            draft_gguf_path: Some("draft.gguf".into()),
+            ..Default::default()
+        },
+        args: vec![],
+        idle_seconds: 0,
+        enabled: true,
+        public: false,
+        image: None,
+        extra_run_args: None,
+        warm_start: false,
+        fallback: None,
+        capabilities_override: None,
+        ladder: vec![],
+    }
+}
+
+/// A models dir with a weights file and a dflash drafter of `block` (`None`
+/// writes a header without `dflash.block_size`).
+fn dflash_dir(block: Option<u32>) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    crate::gguf::synth::chat("qwen3", 4096).write_to(&dir.path().join("base.gguf"));
+    let mut d = crate::gguf::synth::Header::default();
+    d.str("general.architecture", "dflash");
+    if let Some(b) = block {
+        d.u32("dflash.block_size", b);
+    }
+    d.write_to(&dir.path().join("draft.gguf"));
+    dir
+}
+
+async fn window_advisories(
+    dir: &tempfile::TempDir,
+    row: &crate::store::NewLocalModel,
+) -> Vec<String> {
+    let checks = model_warnings(&dir.path().display().to_string(), row).await;
+    checks
+        .advisories
+        .into_iter()
+        .filter(|a| a.contains("spec_draft_n_max"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_window_past_the_drafters_block_is_an_advisory() {
+    let dir = dflash_dir(Some(8));
+    let found = window_advisories(&dir, &dflash_row("draft-dflash", Some(16))).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("spec_draft_n_max is 16"), "{found:?}");
+    assert!(
+        found[0].contains("block size is 8 (dflash.block_size)"),
+        "{found:?}"
+    );
+    assert!(
+        found[0].contains("at most 7 per step; set it to 7"),
+        "{found:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_window_at_the_cap_is_quiet() {
+    let dir = dflash_dir(Some(8));
+    for n in [Some(7), Some(4), None] {
+        let row = dflash_row("draft-dflash", n);
+        assert!(window_advisories(&dir, &row).await.is_empty(), "{n:?}");
+    }
+}
+
+#[tokio::test]
+async fn another_spec_type_or_a_header_without_a_block_is_quiet() {
+    let dir = dflash_dir(Some(8));
+    let row = dflash_row("draft-eagle3", Some(16));
+    assert!(window_advisories(&dir, &row).await.is_empty());
+    let dir = dflash_dir(None);
+    let row = dflash_row("draft-dflash", Some(16));
+    assert!(window_advisories(&dir, &row).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_drafter_adds_no_window_advisory() {
+    let dir = dflash_dir(Some(8));
+    std::fs::remove_file(dir.path().join("draft.gguf")).unwrap();
+    let row = dflash_row("draft-dflash", Some(16));
+    assert!(window_advisories(&dir, &row).await.is_empty());
+}

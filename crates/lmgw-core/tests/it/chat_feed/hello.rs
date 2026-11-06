@@ -147,6 +147,14 @@ async fn a_device_feed_sets_tcp_user_timeout_from_its_keepalive() {
         sockets_with_user_timeout(37) >= 1,
         "the device's socket carries it"
     );
+    // Its TCP keep-alive moves to the stream's interval too (2026-10-24).
+    assert!(
+        crate::support::sockopts::keepalives()
+            .iter()
+            .any(|k| k.on && k.idle_s == 37 && k.interval_s == 37 && k.user_timeout_ms == 37_000),
+        "{:?}",
+        crate::support::sockopts::keepalives()
+    );
 
     let details = w.state.devices.links.details(d.id);
     let [link] = details.as_slice() else {
@@ -160,10 +168,16 @@ async fn a_device_feed_sets_tcp_user_timeout_from_its_keepalive() {
         "{link:?}"
     );
 
-    // Closed: the link and the socket go.
+    // Closed: the link goes, and the socket's timers are the accept-time
+    // ones again, if the socket is still open at all.
     drop(f);
+    let stream_timers_gone = || {
+        crate::support::sockopts::keepalives()
+            .iter()
+            .all(|k| k.idle_s != 37 && k.user_timeout_ms != 37_000)
+    };
     for _ in 0..50 {
-        if w.state.devices.links.details(d.id).is_empty() && sockets_with_user_timeout(37) == 0 {
+        if w.state.devices.links.details(d.id).is_empty() && stream_timers_gone() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

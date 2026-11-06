@@ -328,6 +328,9 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
             </div>
 
             {move || refresh_err.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
+            // What the packages run in, when a download fetches it too
+            // (machine-check design §5, D16).
+            <crate::gpu_download::GpuPulls/>
             {move || {
                 let lines = warnings.get();
                 let n = lines.len();

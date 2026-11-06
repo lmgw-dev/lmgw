@@ -49,8 +49,7 @@ pub(super) async fn ladder_fixture(total_vram: u64, idle_seconds: i64) -> Fixtur
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![
                 lmgw_core::ladder::Rung {
@@ -77,6 +76,7 @@ pub(super) async fn ladder_hold(f: &Fixture) -> lmgw_core::vram::LocalHold {
         &f.state,
         LADDER,
         lmgw_core::gate::RouteCheck::Text("/v1/chat/completions"),
+        lmgw_core::runtime::registry::Origin::Owner,
     )
     .await
     .unwrap()
@@ -283,6 +283,7 @@ async fn an_outside_shortfall_answers_a_climb_with_the_fallback_and_stops_nothin
             alias,
             route,
             reason,
+            ..
         } => {
             assert_eq!(alias, "cloud-chat");
             assert_eq!(route.upstream.name, "cloud");
@@ -449,6 +450,7 @@ async fn a_rung_that_will_not_start_fails_the_trigger_and_waiters_start_the_base
                 &state,
                 LADDER,
                 lmgw_core::gate::RouteCheck::Text("/v1/chat/completions"),
+                lmgw_core::runtime::registry::Origin::Owner,
             )
             .await
             .map(|o| o.hold.map(|h| h.rung()))

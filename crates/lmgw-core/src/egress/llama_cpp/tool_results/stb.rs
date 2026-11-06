@@ -45,6 +45,13 @@ pub(super) fn check(format: ImageFormat, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// How many images a GIF holds, walked block by block to its trailer;
+/// `None` for one that cannot be walked so far. More than one is an
+/// animation.
+pub(super) fn gif_images(bytes: &[u8]) -> Option<u32> {
+    gif::images(bytes)
+}
+
 /// stb_image's `STBI_MAX_DIMENSIONS`: no side may be larger.
 const MAX_DIMENSION: u64 = 1 << 24;
 

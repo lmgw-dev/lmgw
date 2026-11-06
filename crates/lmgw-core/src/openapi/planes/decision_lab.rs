@@ -55,8 +55,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  their source (llama.cpp lowers the ubatch to the batch, embedding mode the \
                  batch to the ubatch), CPU or GPU and the thread count; from its running \
                  container's /props n_ctx_slot. `state` is its container's (null: not \
-                 running), `held` whether the GPU hold pauses it now and `hold_fallback` the \
-                 alias that answers for it then. `reads_images` is the running server's \
+                 running), `held` whether the GPU hold pauses it now and `fallback` the \
+                 model or alias that answers for it then. `reads_images` is the running server's \
                  vision, else an image among its input modalities. `limits` says what a \
                  request must fit in how many tokens: the ubatch for a non-causal type, the \
                  option span and the context for a causal type with a head, the context for a \

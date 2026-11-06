@@ -453,7 +453,7 @@ async fn a_broken_rebuild_keeps_the_immutable_tag_on_the_verified_image() {
 
     // Fixed and rebuilt: the verified image takes the immutable tag, and the
     // good image it replaced goes once unused (nothing tags it any more).
-    h.podman.world().devices_out = "  CUDA0: NVIDIA GeForce RTX 4090\n".into();
+    h.podman.world().devices_out = "  CUDA0: NVIDIA GeForce RTX 3090\n".into();
     let third = run::start_run(&h.state, build_id, BuildTrigger::Manual, true)
         .await
         .unwrap();
@@ -649,7 +649,7 @@ async fn a_failed_verify_is_broken_and_not_promoted() {
         .execute(&h.state.db)
         .await
         .unwrap();
-    h.podman.world().devices_out = "  CUDA0: NVIDIA GeForce RTX 4090\n".into();
+    h.podman.world().devices_out = "  CUDA0: NVIDIA GeForce RTX 3090\n".into();
     let report = run::verify_run(&h.state, r.id).await.unwrap();
     assert!(report.gpu_verified, "{report:?}");
     let r = store::get_build_run(&h.state.db, r.id)
@@ -747,8 +747,7 @@ fn local_model(model_id: &str, image: Option<String>) -> store::NewLocalModel {
         image,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }

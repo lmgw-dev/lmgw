@@ -1,6 +1,6 @@
 //! `lmgw__builds` and `lmgw__build_set`.
 //!
-//! The tools drive the Backends page's own ops (`builds`, `build_get`,
+//! The tools drive the Engines page's own ops (`builds`, `build_get`,
 //! `build_set`), so most of what they answer is those ops' types
 //! ([`BuildsResponse`], [`BuildGetResponse`], [`BuildSetResponse`]). What the
 //! tools add is on top of them: the repository presets `lmgw__build_set

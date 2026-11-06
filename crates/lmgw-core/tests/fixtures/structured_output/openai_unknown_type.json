@@ -1,0 +1,14 @@
+{
+  "captured": "live probe 2026-10-22 (fix round) through a dev copy of the gateway: POST /v1/chat/completions, openai/gpt-4.1-nano, response_format {\"type\": \"regex\", \"pattern\": \"ok\"}; the raw body as OpenAI answered",
+  "upstream": "openai",
+  "status": 400,
+  "body": {
+    "error": {
+      "message": "Invalid value: 'regex'. Supported values are: 'json_object', 'json_schema', and 'text'.",
+      "type": "invalid_request_error",
+      "param": "response_format.type",
+      "code": "invalid_value"
+    }
+  },
+  "expect": "response_format_unsupported"
+}

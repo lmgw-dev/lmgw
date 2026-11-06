@@ -20,9 +20,10 @@
 //!
 //! **The regain is the hold's own rule**, on the same model — never another
 //! route, so a loop's later calls do not move to a fallback for having
-//! waited. (A GPU block that refuses it is no such move: the tool loop then
-//! sends that call where the gate sends any request under the block, its
-//! configured fallback — `web::agentchat::claim::under_block`, review V12.)
+//! waited. (A GPU block that refuses it, or a candidate lost meanwhile, is
+//! no such move: the tool loop then sends that call where the gate sends
+//! any request — the block's configured fallback, the candidate alias's
+//! next pick — `agent::claim::reroute`, review V12.)
 //! - [`Restart::Admit`]: admission as for any start — a model still up is
 //!   joined at once; one evicted meanwhile queues, evicts and starts like any
 //!   request, and the GPU hold or a benchmark refuses it;
@@ -60,6 +61,7 @@ impl LocalHold {
             policy,
             origin,
             restart,
+            turns: _,
         } = self;
         drop(guard);
         LetGo {
@@ -74,6 +76,27 @@ impl LocalHold {
 }
 
 impl LetGo {
+    /// The alias the claim was taken for.
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    /// Whose claim it was ([`Origin`]): a call the gate sends elsewhere when
+    /// the regain is refused goes as the same traffic (`agent::claim`'s
+    /// `reroute`, per-request background design §7).
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// Whether the model still answers on a ready container: a regain then
+    /// joins it at once, with nothing to load.
+    pub fn is_up(&self) -> bool {
+        self.state
+            .runtime()
+            .ready_port(self.target.class, &self.target.model_id)
+            .is_some()
+    }
+
     /// Take the claim again by the hold's own rule (module doc). An error is
     /// the next model call's: the GPU hold, a benchmark, admission's
     /// refusal or its queue timeout, a candidate lost, a row deleted.

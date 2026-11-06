@@ -1,11 +1,14 @@
 //! A run from start to end (benchmark design §3.2, §3.3): the
 //! `JobKind::Benchmark` executor around the engine's [`run_suite`].
 //!
-//! **Start** (§3.2): take the GPU lease — from here on no local model of any
-//! class is admitted — refuse if the hold came on meanwhile, empty the card
+//! **Start** (§3.2): download the engine image when it is not on this
+//! machine ([`fetch_engine`], machine-check design §5) — before the lease,
+//! so the download neither holds the card nor is timed as the load — then
+//! take the GPU lease — from here on no local model of any class is admitted
+//! — refuse if the hold came on meanwhile, empty the card
 //! ([`super::drain`]), measure the idle baseline, start the bench container
-//! ([`super::launcher`]) and time it to healthy (the load phase), then hand
-//! the running server to the engine.
+//! ([`super::launcher`], with `--pull=never`) and time it to healthy (the
+//! load phase), then hand the running server to the engine.
 //!
 //! **End** (§3.3), on every path — done, failed, canceled, aborted, and a
 //! panic in the run, which is caught: the bench container is removed, *then*
@@ -38,8 +41,10 @@ use super::run::{BenchSink, Progress, Record};
 use super::state::{CurrentRun, OnCard, Stranded};
 use super::{run_suite, Bench, BenchTarget, Sampler, SuiteEnd};
 use crate::agent::Cancel;
+use crate::backends::pull;
 use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress};
+use crate::runtime::argv::never_pull;
 use crate::runtime::registry::PortRetry;
 use crate::state::SharedState;
 use crate::store::{self, NewBenchRun};
@@ -180,11 +185,6 @@ async fn run(ctx: &JobCtx, input: &JobInput) -> Ended {
         model_id: model_id.clone(),
         ..Default::default()
     });
-    // §3.2 step 2, before anything else: from here on nothing local is
-    // admitted, so the card the drain empties stays empty.
-    let lease = LeaseGuard::take(st, run_id, &model_id);
-    crate::vram::broadcast(st);
-
     let sink = Sink {
         ctx,
         detail: serde_json::to_value(BenchJobDetail {
@@ -194,8 +194,24 @@ async fn run(ctx: &JobCtx, input: &JobInput) -> Ended {
         .unwrap_or_default(),
         run_id,
     };
-    let launcher = st.bench.launcher(st);
     let cancel = Cancel::flag(ctx.cancel_signal());
+    // The engine image first, while the card is still the owner's
+    // (machine-check design §5). A panic is caught as in the run below.
+    let fetched = AssertUnwindSafe(fetch_engine(ctx, input, &cancel, &sink))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| Err(panicked(run_id, panic)));
+    // §3.2 step 2, before anything else on the card: from here on nothing
+    // local is admitted, so the card the drain empties stays empty. Not
+    // taken for a run that ends at its download.
+    let lease = fetched
+        .is_ok()
+        .then(|| LeaseGuard::take(st, run_id, &model_id));
+    if lease.is_some() {
+        crate::vram::broadcast(st);
+    }
+
+    let launcher = st.bench.launcher(st);
     let mut record = Record::default();
     let mut container: Option<String> = None;
     // A panic in the run is caught here, so the end below still runs: the
@@ -203,28 +219,21 @@ async fn run(ctx: &JobCtx, input: &JobInput) -> Ended {
     // through the job's task instead would leave the container on the card
     // and the row and the job `running` — refusing every later run until
     // the next restart (review finding 4).
-    let outcome = AssertUnwindSafe(drive(
-        ctx,
-        input,
-        launcher.as_ref(),
-        &cancel,
-        &sink,
-        &mut record,
-        &mut container,
-    ))
-    .catch_unwind()
-    .await
-    .unwrap_or_else(|panic| {
-        let why = panic
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "no message".into());
-        tracing::error!("benchmark run {run_id} panicked: {why}");
-        Ended::failed(format!(
-            "the run stopped on an internal error (a panic: {why})"
+    let outcome = match fetched {
+        Err(ended) => ended,
+        Ok(()) => AssertUnwindSafe(drive(
+            ctx,
+            input,
+            launcher.as_ref(),
+            &cancel,
+            &sink,
+            &mut record,
+            &mut container,
         ))
-    });
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| panicked(run_id, panic)),
+    };
 
     // The end (§3.3). From here the run is ending: a hold switched on now
     // finds nothing to abort — the run measured all it was going to, and
@@ -257,9 +266,11 @@ async fn run(ctx: &JobCtx, input: &JobInput) -> Ended {
             }
         }
     }
-    lease.release();
-    drop(lease);
-    crate::vram::broadcast(st);
+    if let Some(lease) = lease {
+        lease.release();
+        drop(lease);
+        crate::vram::broadcast(st);
+    }
 
     let mut ended = settle(outcome, abort, ctx.canceled());
     if let Some(note) = left_behind {
@@ -290,6 +301,78 @@ async fn run(ctx: &JobCtx, input: &JobInput) -> Ended {
             .unwrap_or_default()
     );
     ended
+}
+
+/// How a run that panicked ends: failed, with the panic's message.
+fn panicked(run_id: i64, panic: Box<dyn std::any::Any + Send>) -> Ended {
+    let why = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".into());
+    tracing::error!("benchmark run {run_id} panicked: {why}");
+    Ended::failed(format!(
+        "the run stopped on an internal error (a panic: {why})"
+    ))
+}
+
+/// The run's engine image, downloaded when it is not on this machine
+/// (machine-check design §5): before the GPU lease, so the download neither
+/// holds the card — the lease refuses every local model — nor is timed as
+/// the load. The bench container then starts with `--pull=never`. `Err` is
+/// how the run ends: canceled (the hold's abort cancels the job too), or a
+/// download that failed. An image podman cannot say anything about goes on
+/// as it is; the image check after the drain says what is wrong with it.
+async fn fetch_engine(
+    ctx: &JobCtx,
+    input: &JobInput,
+    cancel: &Cancel,
+    sink: &Sink<'_>,
+) -> Result<(), Ended> {
+    let st = &ctx.state;
+    let Some(image) = plan::engine_image(&st.snapshot(), &input.args) else {
+        // A request the run cannot prepare: `drive` says why.
+        return Ok(());
+    };
+    if pull::presence(st, &image).await != pull::Presence::Missing {
+        return Ok(());
+    }
+    let words = format!("downloading the engine image {image} before the run takes the GPU");
+    stage(sink, words.clone()).await;
+    let (moved, mut bytes) = tokio::sync::watch::channel(pull::Bytes::default());
+    let download = async {
+        let pulled = pull::pull_and_wait(st, &image, move |b| {
+            let _ = moved.send(b);
+        });
+        tokio::pin!(pulled);
+        let mut open = true;
+        loop {
+            tokio::select! {
+                ended = &mut pulled => return ended,
+                changed = bytes.changed(), if open => match changed {
+                    Ok(()) => {
+                        let b = bytes.borrow_and_update().clone();
+                        sink.progress(Progress {
+                            stage: words.clone(),
+                            done: b.done,
+                            total: b.total.unwrap_or(0),
+                        })
+                        .await;
+                    }
+                    Err(_) => open = false,
+                },
+            }
+        }
+    };
+    // Dropping the wait stops the waiting, not the download: a run started
+    // again joins it.
+    match cancel.guard(download).await {
+        None => Err(Ended::canceled()),
+        Some(Ok(())) => Ok(()),
+        Some(Err(failed)) => Err(Ended::failed(format!(
+            "the image '{image}' is not on this machine, and {failed}"
+        ))),
+    }
 }
 
 /// How a run ended, from how its measuring ended (`outcome`), what aborted
@@ -426,10 +509,24 @@ async fn load_and_measure(
     record.results.energy.baseline_vram_bytes = baseline.vram_used_bytes;
     record.results.energy.idle_power_w = baseline.idle_power_w;
 
-    // §3.4: the container, as the row (plus overrides) renders it.
+    // §3.4: the container, as the row (plus overrides) renders it — with
+    // lmgw's own CDI spec made fresh first, as a model start does
+    // (machine-check design §3.6.4).
     let snap = st.snapshot();
     let prefix = snap.settings.container_prefix.clone();
-    let (mut port, mut argv) = match port_and_argv(launcher, prep, &prefix, &st.data_dir, run_id) {
+    let globals = match cancel
+        .guard(crate::runtime::cdi::ready_globals(
+            st,
+            &prep.runtime.extra_run_args,
+        ))
+        .await
+    {
+        None => return Ended::canceled(),
+        Some(Ok(g)) => g,
+        Some(Err(e)) => return Ended::failed(e.to_string()),
+    };
+    let render_at = || port_and_argv(launcher, prep, &prefix, &globals, &st.data_dir, run_id);
+    let (mut port, mut argv) = match render_at() {
         Ok(r) => r,
         Err(e) => return Ended::failed(e),
     };
@@ -441,11 +538,7 @@ async fn load_and_measure(
     let build = match cancel.guard(launcher::image_facts(launcher, &image)).await {
         None => return Ended::canceled(),
         Some(Ok((id, labels))) => build_identity(&image, Some(id), labels),
-        Some(Err(e)) => {
-            return Ended::failed(format!(
-                "the image '{image}' is not on this machine ({e}) — pull or build it first"
-            ))
-        }
+        Some(Err(e)) => return Ended::failed(plan::image_missing(&image, &e)),
     };
     record_identity(st, run_id, prep, &build, &argv).await;
 
@@ -475,7 +568,11 @@ async fn load_and_measure(
     // model's start retries the same way (per-model containers §10.4).
     let mut retry = PortRetry::default();
     loop {
-        match cancel.guard(bc.launch(&argv)).await {
+        // Never a pull here: the image was downloaded before the lease
+        // (`fetch_engine`), and one gone since fails plainly. The stored
+        // command line (`record_identity`) keeps podman's default, so a
+        // copy of it pulls what it needs.
+        match cancel.guard(bc.launch(&never_pull(argv.clone()))).await {
             Some(Ok(())) => break,
             Some(Err(e)) if retry.again(&e) => {
                 stage(
@@ -492,7 +589,7 @@ async fn load_and_measure(
                 if cancel.guard(bc.remove()).await.is_none() {
                     return Ended::canceled();
                 }
-                (port, argv) = match port_and_argv(launcher, prep, &prefix, &st.data_dir, run_id) {
+                (port, argv) = match render_at() {
                     Ok(r) => r,
                     Err(e) => return Ended::failed(e),
                 };
@@ -585,13 +682,14 @@ fn port_and_argv(
     launcher: &dyn BenchLauncher,
     prep: &Prepared,
     prefix: &str,
+    globals: &[String],
     data_dir: &std::path::Path,
     run_id: i64,
 ) -> Result<(u16, Vec<String>), String> {
     let port = launcher
         .free_port()
         .map_err(|e| format!("no free host port could be allocated: {e}"))?;
-    let (_spec, argv) = plan::render(prep, prefix, port, data_dir, run_id)?;
+    let (_spec, argv) = plan::render(prep, prefix, globals, port, data_dir, run_id)?;
     Ok((port, argv))
 }
 
@@ -657,19 +755,30 @@ async fn remove_retrying(
 /// The GPU hold switched on (§3.3): end the run in flight, if there is one —
 /// mark it aborted (reason `hold`), cancel its job, and remove its container
 /// now rather than when the run notices, because `hold_sweep` does not see
-/// it and the owner asked for the card back. Returns the run's id.
-pub async fn abort_for_hold(state: &SharedState) -> Option<i64> {
+/// it and the owner asked for the card back. Returns the run's id and how the
+/// removal went.
+pub async fn abort_for_hold(state: &SharedState) -> Option<Aborted> {
     abort(state, "hold").await
+}
+
+/// The run [`abort_for_hold`] ended, and whether its container is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aborted {
+    pub run_id: i64,
+    /// Why the bounded `podman rm -f` failed or timed out; `None` when the
+    /// container was removed. A container that is still there is still on the
+    /// card.
+    pub removal_error: Option<String>,
 }
 
 /// lmgw is quitting (`lifecycle::shutdown`): the same as for the hold, with
 /// reason `shutdown` — the bench container is not a registry entry, so the
 /// shutdown's `stop_all` would leave it on the card until the next boot.
-pub async fn abort_for_shutdown(state: &SharedState) -> Option<i64> {
+pub async fn abort_for_shutdown(state: &SharedState) -> Option<Aborted> {
     abort(state, "shutdown").await
 }
 
-async fn abort(state: &SharedState, reason: &'static str) -> Option<i64> {
+async fn abort(state: &SharedState, reason: &'static str) -> Option<Aborted> {
     let run = state.bench.abort(reason)?;
     state.jobs.request_cancel(run.job_id);
     let prefix = state.snapshot().settings.container_prefix.clone();
@@ -678,17 +787,43 @@ async fn abort(state: &SharedState, reason: &'static str) -> Option<i64> {
         .clone()
         .unwrap_or_else(|| launcher::container_name(&prefix, run.run_id));
     let launcher = state.bench.launcher(state);
-    match launcher::remove(launcher.as_ref(), &name).await {
+    // Bounded (2026-10-24): the hold's abort runs under the settings lock,
+    // and a podman that hangs must not hold it, and every settings write
+    // behind it, for good. The registry's stop grace (podman's own default
+    // for a container started without `--stop-timeout`, as a bench one is),
+    // then `vram.unload_timeout_seconds`, as the registry bounds its
+    // removals.
+    let bound = std::time::Duration::from_secs(
+        crate::runtime::registry::STOP_GRACE_SECONDS
+            .saturating_add(state.snapshot().settings.vram.unload_timeout_seconds),
+    );
+    let removed = tokio::time::timeout(bound, launcher::remove(launcher.as_ref(), &name))
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "podman rm -f {name} did not return within {bound:?} (the stop grace plus the \
+                 unload timeout, {})",
+                crate::config::UNLOAD_TIMEOUT_LABEL
+            ))
+        });
+    let removal_error = match removed {
         Ok(()) => {
             state.bench.set_on_card(run.run_id, OnCard::Off);
             tracing::info!(
                 "{reason}: benchmark run {} aborted, its container {name} removed",
                 run.run_id
-            )
+            );
+            None
         }
-        Err(e) => tracing::warn!("{reason}: removing benchmark container {name}: {e}"),
-    }
-    Some(run.run_id)
+        Err(e) => {
+            tracing::warn!("{reason}: removing benchmark container {name}: {e}");
+            Some(e)
+        }
+    };
+    Some(Aborted {
+        run_id: run.run_id,
+        removal_error,
+    })
 }
 
 /// Boot (§3.3): every bench container of this instance that podman created

@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewAudioModel};
 use serde_json::{json, Value};
@@ -85,12 +84,7 @@ async fn local_row(state: &SharedState, fallback: Option<&str>) {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: if fallback.is_some() {
-                HoldFallbackMode::Alias
-            } else {
-                HoldFallbackMode::None
-            },
-            hold_fallback: fallback.map(str::to_string),
+            fallback: fallback.map(str::to_string),
         },
     )
     .await

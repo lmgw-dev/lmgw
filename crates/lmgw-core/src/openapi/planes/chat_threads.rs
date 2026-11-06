@@ -7,6 +7,7 @@
 
 use lmgw_api_types::chat;
 use lmgw_api_types::chat_folders;
+use lmgw_api_types::chat_media;
 use lmgw_api_types::chat_threads as threads;
 
 use super::super::registry::{DocRoute, Req, Resp};
@@ -123,6 +124,22 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             path_ints: &["id"],
+            request: Req::Json(|g| g.root_schema_for::<threads::TitleRequest>()),
+            response: Resp::Json(thread),
+            ..chat_route(
+                "POST",
+                "/chat/api/threads/{id}/title",
+                "Rename a thread",
+                "Sets the thread's title, trimmed, and answers the thread as the list \
+                 carries it. The change reaches every client as a thread.updated event. A \
+                 thread named this way keeps its title: the first send names only a thread \
+                 still called \"New chat\". An empty title is a 400 bad_request. A temporary \
+                 thread has no stored title to set until it is kept: 409 temporary_thread. A \
+                 thread the caller cannot reach is a 404 not_found.",
+            )
+        },
+        DocRoute {
+            path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<threads::MoveRequest>()),
             response: Resp::Json(thread),
             ..chat_route(
@@ -146,15 +163,16 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 "The rows of the threads named in `ids` (comma-separated, as 3,7), each \
                  exactly as GET /chat/api/threads lists it, active or archived, in the active \
                  list's order. For a client that follows the change feed and wants only the \
-                 rows a `chat` frame named, instead of the whole list: a frame that names \
-                 only messages moved those threads' updated_at and last_message_at and \
-                 nothing else the list shows, so read these rows and sort the list again. \
+                 rows its message.* events named, instead of the whole list: a message \
+                 written moved its thread's updated_at and last_message_at and nothing else \
+                 the list shows, so read these rows and sort the list again. \
                  Only stored threads are answered: a temporary id, one that is not there \
                  and one out of the caller's reach are left out, so a missing row is never \
                  an error. There is no cap on `ids` beyond the 64 KiB a request line may be \
                  (about 9,000 ids; more is a 414, and the whole list is then the read to \
                  fall back to). A part of `ids` that is not a number is a 400 bad_request. \
-                 Owner only: a paired device's own change feed already carries whole rows.",
+                 A device key's answer leaves out the threads it may not see, as its list \
+                 does.",
             )
         },
         DocRoute {
@@ -281,6 +299,62 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  edits no message of a thread with lmgw's admin tools (403 \
                  chat_toolset_needs_full); its kb_refs pass its tool scope. A thread or \
                  message that is not there is a 404 not_found.",
+            )
+        },
+        DocRoute {
+            path_ints: &["id"],
+            response: Resp::Json(|g| g.root_schema_for::<chat_media::MediaCancelled>()),
+            ..chat_route(
+                "POST",
+                chat_media::MEDIA_CANCEL_PATH,
+                "Cancel a running picture or recording",
+                "Stops the image or audio tool call {call_id} (the call_id of its tool \
+                 frames) of the turn that runs in the thread, as the turn's Stop stops it, \
+                 without stopping the turn: the call's result tells the model the picture was \
+                 not made, and the turn goes on. It also stops a card action of the thread \
+                 (POST /chat/api/attachments/{id}/media), named by the act-<boot>-<n> id of its \
+                 stream's action frame; the action's stream then ends with an error frame and \
+                 nothing is stored. A running image job is cancelled by what its \
+                 image server can do, which the call's last `progress` frame named as `cancel` \
+                 and the answer repeats: native, the server's own cancel (the model stays \
+                 loaded); restart, the server cannot stop a running picture and this call is \
+                 the model's only request, so lmgw stops its container and the next picture \
+                 loads it again; abandon, another request uses the model, so the call stops \
+                 waiting and the picture finishes in the background and is thrown away. An \
+                 upscale has no job: restart or abandon by the same rule, an abandoned one \
+                 holding its claim until the image server is done. No \
+                 `cancel` in the answer: no job ran yet (the call was loading its model or \
+                 waiting for room, and stops waiting), or an audio call. The body is ignored. \
+                 A thread the caller does not reach is 404 not_found; a call that is not \
+                 running, 404 not_running.",
+            )
+        },
+        DocRoute {
+            query: Some(|g| {
+                g.root_schema_for::<crate::web::MediaDefaultsQuery>()
+            }),
+            response: Resp::Json(|g| g.root_schema_for::<chat_media::MediaDefaultsView>()),
+            ..chat_route(
+                "GET",
+                "/chat/api/media/defaults",
+                "The image and audio tools' default models",
+                "Which model image__generate, image__edit, audio__speak and audio__transcribe \
+                 use when a call leaves out `model`, and the voice audio__speak uses when it \
+                 leaves out `voice`. Three levels, the narrowest that says something winning: \
+                 a thread's own (its settings' media_defaults), its folder's (the folder \
+                 defaults' media_defaults, read at each turn rather than copied), Settings → \
+                 Chat's (chat_media_defaults). In a thread or a folder an absent field \
+                 inherits and an empty one is no default. The answer has Settings' always, \
+                 ?folder=<id> adds a folder's and ?thread=<id> a thread's and its folder's; \
+                 `inherited` is what the narrowest level asked takes from above it, \
+                 `resolved` what a call uses now, and `choices` every model each tool's \
+                 `model` enum offers this caller (a device key's alias scope narrows it), \
+                 with a label and each speech row's voices. A stored default that no longer \
+                 resolves — its model switched off or deleted, an alias that lost the route, \
+                 a model outside the caller's key scope, a voice its model does not have — is \
+                 listed under `unavailable` with the reason and is no default: the tool \
+                 requires `model` again, and no other model is put in its place. A folder or \
+                 thread the caller does not reach is 404 not_found.",
             )
         },
     ]

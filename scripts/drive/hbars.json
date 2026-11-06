@@ -1,0 +1,1244 @@
+[
+ {
+  "js": "'No sideways scrollbars in the app window, in both engines with html.tauri set (its classic scrollbars show a bar for any overflow): an agent\\'s Definition manifest editor wraps its long description lines and is as tall as its wrapped text (nothing clipped, also after a 3000-character line is typed into it and taken out again, never saved; each check waits until the editor has read the same for 5 animation frames, as it is fitted on frames and Broadway WebKit draws an idle page seldom), the Devices card on /usage/keys and every Settings category fit their pane (the keys table gives up its Spend vs budget column where its card is under 800px, and then fits its card too: 720 and 819 px, with the column hidden, and 2560 px with it shown), and a status chip that carries a sentence (the device listener\\'s or a WebRTC group\\'s error) wraps inside its row. The agents are folder-chat, mail-labeler and docs-librarian (an instance without one fails its expects). Read-only. Run: scripts/ui-drive.py scripts/drive/hbars.json --block-writes --dsf 1.25 --token-file <dir>.token --base http://<addr>, or scripts/webkit-check.py --backend broadway --zoom 1.25 --timeout 1500 --drive scripts/drive/hbars.json --token-file <dir>.token --base http://<addr>.'"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/agents/folder-chat/definition"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 60,
+  "label": "/agents/folder-chat/definition 900x1200: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/folder-chat/definition 900x1200"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/folder-chat/definition 900x1200: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/folder-chat/definition 900x1200: nothing scrolls sideways"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/folder-chat/definition 1024x700: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/folder-chat/definition 1024x700"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/folder-chat/definition 1024x700: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/folder-chat/definition 1024x700: nothing scrolls sideways"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/folder-chat/definition 1440x900: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/folder-chat/definition 1440x900"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/folder-chat/definition 1440x900: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/folder-chat/definition 1440x900: nothing scrolls sideways"
+ },
+ {
+  "size": "2560x1400"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/folder-chat/definition 2560x1400: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/folder-chat/definition 2560x1400"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/folder-chat/definition 2560x1400: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/folder-chat/definition 2560x1400: nothing scrolls sideways"
+ },
+ {
+  "shot": "agents_folder-chat_definition"
+ },
+ {
+  "js": "(() => { window.__orig = document.querySelector('.def-pane > textarea.manifest-editor').value; return __type(__orig + '\\n' + 'word '.repeat(600)); })()"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/folder-chat/definition, a 3000-character line typed in: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "__m('.def-pane > textarea.manifest-editor')"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor') && __hbars().length === 0",
+  "label": "/agents/folder-chat/definition: a 3000-character line typed in wraps, the box grows with it"
+ },
+ {
+  "js": "__type(__orig)"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/folder-chat/definition, the line taken out again: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor') && document.querySelector('.def-pane > textarea.manifest-editor').value === __orig",
+  "label": "/agents/folder-chat/definition: taken out again, the box fits its text"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/agents/mail-labeler/definition"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 60,
+  "label": "/agents/mail-labeler/definition 900x1200: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/mail-labeler/definition 900x1200"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/mail-labeler/definition 900x1200: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/mail-labeler/definition 900x1200: nothing scrolls sideways"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/mail-labeler/definition 1024x700: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/mail-labeler/definition 1024x700"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/mail-labeler/definition 1024x700: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/mail-labeler/definition 1024x700: nothing scrolls sideways"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/mail-labeler/definition 1440x900: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/mail-labeler/definition 1440x900"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/mail-labeler/definition 1440x900: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/mail-labeler/definition 1440x900: nothing scrolls sideways"
+ },
+ {
+  "size": "2560x1400"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/mail-labeler/definition 2560x1400: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/mail-labeler/definition 2560x1400"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/mail-labeler/definition 2560x1400: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/mail-labeler/definition 2560x1400: nothing scrolls sideways"
+ },
+ {
+  "shot": "agents_mail-labeler_definition"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/agents/docs-librarian/definition"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 60,
+  "label": "/agents/docs-librarian/definition 900x1200: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/docs-librarian/definition 900x1200"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/docs-librarian/definition 900x1200: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/docs-librarian/definition 900x1200: nothing scrolls sideways"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/docs-librarian/definition 1024x700: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/docs-librarian/definition 1024x700"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/docs-librarian/definition 1024x700: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/docs-librarian/definition 1024x700: nothing scrolls sideways"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/docs-librarian/definition 1440x900: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/docs-librarian/definition 1440x900"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/docs-librarian/definition 1440x900: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/docs-librarian/definition 1440x900: nothing scrolls sideways"
+ },
+ {
+  "size": "2560x1400"
+ },
+ {
+  "until": "__settled('.def-pane > textarea.manifest-editor', 5)",
+  "timeout": 30,
+  "label": "/agents/docs-librarian/definition 2560x1400: the manifest editor has settled (5 frames unchanged)"
+ },
+ {
+  "js": "[__m('.def-pane > textarea.manifest-editor'), __hbars()]",
+  "label": "/agents/docs-librarian/definition 2560x1400"
+ },
+ {
+  "expect": "__whole('.def-pane > textarea.manifest-editor')",
+  "label": "/agents/docs-librarian/definition 2560x1400: the manifest wraps and is as tall as its text"
+ },
+ {
+  "expect": "__hbars().length === 0",
+  "label": "/agents/docs-librarian/definition 2560x1400: nothing scrolls sideways"
+ },
+ {
+  "shot": "agents_docs-librarian_definition"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.devices-card'), __hbars()]",
+  "label": "/usage/keys 900x1200"
+ },
+ {
+  "expect": "__fits('.devices-card') && __chips()",
+  "label": "/usage/keys 900x1200: the Devices card fits, its status chip wraps inside it"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.devices-card'), __hbars()]",
+  "label": "/usage/keys 1024x700"
+ },
+ {
+  "expect": "__fits('.devices-card') && __chips()",
+  "label": "/usage/keys 1024x700: the Devices card fits, its status chip wraps inside it"
+ },
+ {
+  "size": "1440x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.devices-card'), __hbars()]",
+  "label": "/usage/keys 1440x900"
+ },
+ {
+  "expect": "__fits('.devices-card') && __chips()",
+  "label": "/usage/keys 1440x900: the Devices card fits, its status chip wraps inside it"
+ },
+ {
+  "shot": "usage_keys"
+ },
+ {
+  "js": "(() => {\n  const card = () => document.querySelector('.card:has(> table.keys-table)');\n  window.__keys = () => { const c = card(); const cells = [...c.querySelectorAll('.col-spend')];\n    return { card: c.clientWidth, sw: c.scrollWidth, cells: cells.length,\n      shown: cells.filter(e => getComputedStyle(e).display !== 'none').length }; };\n  window.__keysFit = () => { const k = __keys(); return k.sw <= k.card + 1; };\n  window.__keysFitOrNarrow = () => { const k = __keys(); return k.card < 573 || k.sw <= k.card + 1; };\n  window.__spendRule = () => { const k = __keys(); return k.cells > 0 && k.shown === (k.card < 800 ? 0 : k.cells); };\n  window.__spendHidden = () => { const k = __keys(); return k.cells > 0 && k.shown === 0; };\n  window.__spendShown = () => { const k = __keys(); return k.cells > 0 && k.shown === k.cells; };\n  return 'keys helpers';\n})()"
+ },
+ {
+  "size": "720x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__keys(), __hbars()]",
+  "label": "/usage/keys 720x900"
+ },
+ {
+  "shot": "usage_keys_720"
+ },
+ {
+  "expect": "__keysFitOrNarrow()",
+  "label": "/usage/keys 720x900: the keys table fits its card without a sideways scroll (not asserted for a card under 573px, the hidden table's own width: WebKit's 720 and 819 px windows are 576 and 655 CSS px)"
+ },
+ {
+  "expect": "__spendHidden()",
+  "label": "/usage/keys 720x900: the Spend vs budget column is hidden"
+ },
+ {
+  "size": "819x900"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__keys(), __hbars()]",
+  "label": "/usage/keys 819x900"
+ },
+ {
+  "shot": "usage_keys_819"
+ },
+ {
+  "expect": "__keysFitOrNarrow()",
+  "label": "/usage/keys 819x900: the keys table fits its card without a sideways scroll (not asserted for a card under 573px, the hidden table's own width: WebKit's 720 and 819 px windows are 576 and 655 CSS px)"
+ },
+ {
+  "expect": "__spendHidden()",
+  "label": "/usage/keys 819x900: the Spend vs budget column is hidden"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__keys(), __hbars()]",
+  "label": "/usage/keys 900x1200"
+ },
+ {
+  "shot": "usage_keys_900"
+ },
+ {
+  "expect": "__keysFit()",
+  "label": "/usage/keys 900x1200: the keys table fits its card without a sideways scroll"
+ },
+ {
+  "expect": "__spendRule()",
+  "label": "/usage/keys 900x1200: the Spend vs budget column is hidden under a card of 800px and shown from it"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__keys(), __hbars()]",
+  "label": "/usage/keys 1024x700"
+ },
+ {
+  "shot": "usage_keys_1024"
+ },
+ {
+  "expect": "__keysFit()",
+  "label": "/usage/keys 1024x700: the keys table fits its card without a sideways scroll"
+ },
+ {
+  "expect": "__spendRule()",
+  "label": "/usage/keys 1024x700: the Spend vs budget column is hidden under a card of 800px and shown from it"
+ },
+ {
+  "size": "2560x1400"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__keys(), __hbars()]",
+  "label": "/usage/keys 2560x1400"
+ },
+ {
+  "shot": "usage_keys_2560"
+ },
+ {
+  "expect": "__keysFit()",
+  "label": "/usage/keys 2560x1400: the keys table fits its card without a sideways scroll"
+ },
+ {
+  "expect": "__spendShown()",
+  "label": "/usage/keys 2560x1400: the Spend vs budget column is shown"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "shot": "settings"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/network"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/network 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/network 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/network 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/network 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/network 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/network 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/network 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/network 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/network 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/retention"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/retention 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/retention 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/retention 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/retention 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/retention 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/retention 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/retention 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/retention 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/retention 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/usage-cost"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/usage-cost 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/usage-cost 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/usage-cost 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/usage-cost 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/usage-cost 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/usage-cost 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/usage-cost 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/usage-cost 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/usage-cost 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/gpu"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/gpu 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/gpu 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/gpu 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/gpu 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/gpu 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/gpu 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/gpu 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/gpu 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/gpu 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/runtimes"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/runtimes 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/runtimes 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/runtimes 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/runtimes 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/runtimes 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/runtimes 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/runtimes 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/runtimes 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/runtimes 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/backends"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/backends 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/backends 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/backends 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/backends 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/backends 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/backends 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/backends 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/backends 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/backends 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/chat"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/chat 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/chat 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/chat 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/chat 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/chat 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/chat 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/chat 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/chat 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/chat 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/realtime"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/realtime 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/realtime 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/realtime 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/realtime 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/realtime 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/realtime 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/realtime 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/realtime 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/realtime 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "shot": "settings_realtime"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/agents"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/agents 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/agents 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/agents 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/agents 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/agents 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/agents 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/agents 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/agents 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/agents 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/docs"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/docs 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/docs 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/docs 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/docs 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/docs 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/docs 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/docs 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/docs 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/docs 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/tokens"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/tokens 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/tokens 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/tokens 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/tokens 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/tokens 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/tokens 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/tokens 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/tokens 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/tokens 1440x600: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "900x1200"
+ },
+ {
+  "nav": "/settings/appearance"
+ },
+ {
+  "js": "(() => {\n  const h = document.documentElement;\n  h.classList.add('tauri');\n  // A scroller built before the class keeps the bar it was built with.\n  h.style.display = 'none'; void h.offsetHeight; h.style.display = ''; void h.offsetHeight;\n  const name = el => { let s = el.tagName.toLowerCase();\n    if (typeof el.className === 'string' && el.className.trim())\n      s += '.' + el.className.trim().split(/\\s+/).slice(0, 4).join('.');\n    return s; };\n  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };\n  // + 1: a fractional box reads scrollWidth rounded up and clientWidth down.\n  window.__hbars = () => [...document.querySelectorAll('body *')].filter(el => {\n    const s = getComputedStyle(el);\n    return (s.overflowX === 'auto' || s.overflowX === 'scroll') && el.scrollWidth > el.clientWidth + 1\n      && shown(el); }).map(el => name(el) + ' +' + (el.scrollWidth - el.clientWidth));\n  window.__m = sel => [...document.querySelectorAll(sel)].filter(shown).map(e => ({ el: name(e),\n    sw: e.scrollWidth, cw: e.clientWidth, sh: e.scrollHeight, ch: e.clientHeight }));\n  window.__fits = sel => { const m = __m(sel); return m.length > 0 && m.every(x => x.sw <= x.cw + 1); };\n  window.__whole = sel => { const m = __m(sel);\n    return m.length > 0 && m.every(x => x.sw <= x.cw + 1 && x.sh <= x.ch + 1); };\n  window.__chips = () => [...document.querySelectorAll('.chip.chip-line')].filter(shown).every(c =>\n    c.getBoundingClientRect().right <= c.parentElement.getBoundingClientRect().right + 1);\n  // The manifest editor is fitted on animation frames (its pane's ResizeObserver, the size that\n  // writes a frame later, the fit a frame after that), so it has settled once its box reads the\n  // same for n frames in a row. Frames, not time: under Broadway WebKit can leave an idle page\n  // undrawn (a box still at its rows height well over a second after the page had gone quiet,\n  // until something on it changed), so a fixed wait measured the box before its fit. A call that finds no\n  // run of frames starts one; the first call after it ends reads true and clears it, so the next\n  // check counts afresh.\n  window.__settled = (sel, n) => { const s = window.__settle;\n    if (s && s.done) { window.__settle = null; return true; }\n    if (!s) { const st = window.__settle = { last: null, same: 0, done: false };\n      const frame = () => { const t = document.querySelector(sel);\n        const k = t && [t.style.height, t.clientWidth, t.clientHeight, t.scrollHeight].join();\n        st.same = k && k === st.last ? st.same + 1 : 0; st.last = k;\n        if (st.same >= n) st.done = true; else requestAnimationFrame(frame); };\n      requestAnimationFrame(frame); }\n    return false; };\n  window.__type = s => { const t = document.querySelector('.def-pane > textarea.manifest-editor');\n    t.value = s; t.dispatchEvent(new Event('input', { bubbles: true })); return s.length; };\n  return 'helpers';\n})()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/appearance 900x1200"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/appearance 900x1200: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/appearance 900x1200: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/appearance 1024x700"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/appearance 1024x700: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/appearance 1024x700: nothing scrolls sideways, status chips wrap"
+ },
+ {
+  "size": "1440x600"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "label": "/settings/appearance 1440x600"
+ },
+ {
+  "expect": "__fits('.fill-pane.set-scroll')",
+  "label": "/settings/appearance 1440x600: the settings pane does not scroll sideways"
+ },
+ {
+  "expect": "__hbars().length === 0 && __chips()",
+  "label": "/settings/appearance 1440x600: nothing scrolls sideways, status chips wrap"
+ }
+]

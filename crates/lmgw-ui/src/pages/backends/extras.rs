@@ -704,7 +704,7 @@ fn PrBrowser(
                             "It resets at {reset}. Adding a PR by number still works meanwhile; a forge token for this host lifts the limit: "
                         )}
                         <a href=crate::pages::settings_href("forge_tokens")>
-                            "Settings → Backends → Forge tokens"
+                            "Settings → Engines → Forge tokens"
                         </a>
                     </div>
                 }
@@ -762,7 +762,7 @@ fn PrBrowser(
                                                 view! {
                                                     " A forge token lifts the limit: "
                                                     <a href=crate::pages::settings_href("forge_tokens")>
-                                                        "Settings → Backends"
+                                                        "Settings → Engines"
                                                     </a>
                                                 }
                                             })}

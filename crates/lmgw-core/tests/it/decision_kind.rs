@@ -420,8 +420,7 @@ async fn the_footprint_charges_the_projector_and_a_cpu_row_nothing() {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     };
     let plans = PlanCache::default();
 

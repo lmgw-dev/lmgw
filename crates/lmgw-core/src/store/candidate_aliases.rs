@@ -2,7 +2,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::config::{CandidateAlias, HoldFallbackMode};
+use crate::config::CandidateAlias;
 
 use super::*;
 
@@ -10,7 +10,7 @@ pub struct NewCandidateAlias {
     pub alias: String,
     pub candidates: Vec<String>,
     pub background: bool,
-    pub fallback_mode: HoldFallbackMode,
+    /// The alias's one fallback (openai egress design §14.2); `None` = none.
     pub fallback: Option<String>,
     pub capabilities_disabled: Vec<String>,
     pub capabilities_enabled: Vec<String>,
@@ -26,24 +26,32 @@ pub async fn list_candidate_aliases(pool: &SqlitePool) -> DbResult<Vec<Candidate
 }
 
 pub async fn insert_candidate_alias(pool: &SqlitePool, a: &NewCandidateAlias) -> DbResult<i64> {
+    insert_candidate_alias_in(&mut *pool.acquire().await?, a).await
+}
+
+/// [`insert_candidate_alias`] inside a caller's transaction: the fallback save checks
+/// write it in a dry run first (`ops::fallback::referrers`).
+pub async fn insert_candidate_alias_in(
+    conn: &mut sqlx::SqliteConnection,
+    a: &NewCandidateAlias,
+) -> DbResult<i64> {
     let candidates = to_json(&a.candidates)?;
     let capabilities_disabled = to_json(&a.capabilities_disabled)?;
     let capabilities_enabled = to_json(&a.capabilities_enabled)?;
     let res = sqlx::query(
-        "INSERT INTO candidate_aliases (alias, candidates, background, fallback_mode, fallback,
+        "INSERT INTO candidate_aliases (alias, candidates, background, fallback,
                                          capabilities_disabled, capabilities_enabled, enabled, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(&a.alias)
     .bind(candidates)
     .bind(a.background as i64)
-    .bind(a.fallback_mode.as_str())
     .bind(&a.fallback)
     .bind(capabilities_disabled)
     .bind(capabilities_enabled)
     .bind(a.enabled as i64)
     .bind(&a.notes)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(res.last_insert_rowid())
 }
@@ -53,25 +61,35 @@ pub async fn update_candidate_alias(
     id: i64,
     a: &NewCandidateAlias,
 ) -> DbResult<()> {
+    update_candidate_alias_in(&mut *pool.acquire().await?, id, a).await
+}
+
+/// [`update_candidate_alias`] inside a caller's transaction: a rename
+/// rewrites the fallbacks that name the alias in the same one
+/// ([`rewrite_fallbacks_in`]).
+pub async fn update_candidate_alias_in(
+    conn: &mut sqlx::SqliteConnection,
+    id: i64,
+    a: &NewCandidateAlias,
+) -> DbResult<()> {
     let candidates = to_json(&a.candidates)?;
     let capabilities_disabled = to_json(&a.capabilities_disabled)?;
     let capabilities_enabled = to_json(&a.capabilities_enabled)?;
     sqlx::query(
-        "UPDATE candidate_aliases SET alias=?2, candidates=?3, background=?4, fallback_mode=?5,
-         fallback=?6, capabilities_disabled=?7, capabilities_enabled=?8, enabled=?9, notes=?10,
+        "UPDATE candidate_aliases SET alias=?2, candidates=?3, background=?4,
+         fallback=?5, capabilities_disabled=?6, capabilities_enabled=?7, enabled=?8, notes=?9,
          updated_at=datetime('now') WHERE id=?1",
     )
     .bind(id)
     .bind(&a.alias)
     .bind(candidates)
     .bind(a.background as i64)
-    .bind(a.fallback_mode.as_str())
     .bind(&a.fallback)
     .bind(capabilities_disabled)
     .bind(capabilities_enabled)
     .bind(a.enabled as i64)
     .bind(&a.notes)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

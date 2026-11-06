@@ -93,6 +93,16 @@ pub fn moss_voicegen(root: &Path) {
         .write_to(&root.join("moss-voicegen-q8_0.gguf"));
 }
 
+/// A package of `family` whose spec runs `tasks` and lists `languages` as
+/// written (codes, or a count such as `80+ languages`), with no options.
+pub fn with_languages(root: &Path, family: &str, tasks: &[&str], languages: &[&str]) {
+    let spec = json!({
+        "family": family, "tasks": tasks, "modes": ["offline"], "languages": languages,
+    });
+    synth::audiocpp(family, &spec.to_string(), &[])
+        .write_to(&root.join(format!("{family}-q8_0.gguf")));
+}
+
 /// A package of `family` whose embedded spec declares the request options
 /// `options` (by name) and the modes `modes` — for families whose behaviour
 /// the spec decides (an `instruction` or `instruct` option, streaming).

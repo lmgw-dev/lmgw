@@ -11,7 +11,8 @@
 #
 # Models, overridable: README_CHAT_MODEL (gemma4-26b-a4b), README_TRAFFIC_MODEL (qwen3.5-9b),
 # README_EMBED_MODEL (embed/Qwen3-Embedding-0.6B-Q8_0), README_HIDE_MODELS (a SQL LIKE pattern,
-# %uncensored%).
+# %uncensored%), README_HIDE_MCP (a SQL LIKE pattern for MCP servers to drop, none by default; device rows and
+# their MCP servers always go). Gateway auth is switched off so the keyless traffic below is served.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,19 +22,34 @@ chat_model="${README_CHAT_MODEL:-gemma4-26b-a4b}"
 traffic_model="${README_TRAFFIC_MODEL:-qwen3.5-9b}"
 embed_model="${README_EMBED_MODEL:-embed/Qwen3-Embedding-0.6B-Q8_0}"
 hide="${README_HIDE_MODELS:-%uncensored%}"
+hide_mcp="${README_HIDE_MCP:-}"
 
 [ -e "$dir/lmgw.sqlite" ] || { echo "no copy at $dir (scripts/dev-copy.sh copy first)" >&2; exit 1; }
 
 scripts/dev-copy.sh stop "$dir"
 sqlite3 "$dir/lmgw.sqlite" "PRAGMA foreign_keys=ON;
     DELETE FROM chat_threads; DELETE FROM chat_folders;
-    DELETE FROM local_models WHERE model_id LIKE '$hide';"
+    -- No history of the machine the copy came from: request logs, the usage and latency rollups
+    -- (spend, tokens, audio seconds, image and spoken-character counters), stored /v1/responses,
+    -- the chat feed's records (its meta row, the epoch, stays), the labs' runs, files and batches,
+    -- benchmark runs and device transfers. Models, prices, settings, upstreams and presets stay.
+    DELETE FROM request_logs; DELETE FROM usage_hourly; DELETE FROM usage_latency_hourly;
+    DELETE FROM native_responses; DELETE FROM responses; DELETE FROM chat_feed;
+    DELETE FROM lab_artifacts; DELETE FROM lab_runs; DELETE FROM lab_batches; DELETE FROM lab_groups;
+    DELETE FROM bench_runs; DELETE FROM transfers; DELETE FROM mcp_tasks;
+    DELETE FROM local_models WHERE model_id LIKE '$hide';
+    DELETE FROM mcp_servers WHERE name LIKE 'device:%' OR name LIKE '$hide_mcp';
+    DELETE FROM api_keys WHERE kind = 'device';"
 scripts/dev-copy.sh start "$dir" "$addr"
 
 # Chat threads go through the UI, so they look like any other thread.
 sed "s/gemma4-26b-a4b/$chat_model/g" scripts/drive/readme-chat.json \
     | python3 scripts/ui-drive.py - --base "http://$addr" --token-file "$dir.token" \
         --size 1536x864 --dsf 1.25 --podman-guard ''
+
+# The copy inherits the source database's "Require API key"; the keyless traffic below would log 401s.
+curl -fsS -X POST "http://$addr/api/op/settings_set" -H "authorization: Bearer $(cat "$dir.token")" \
+    -H 'content-type: application/json' -d '{"auth_enabled":false}' > /dev/null
 
 base="http://$addr/v1"
 chat() {  # chat <dialect> <prompt> <stream>
@@ -59,5 +75,14 @@ chat anthropic "Rewrite this commit message to be concise: fixed the thing where
 embed "vector search basics"
 chat openai "List five uses for a Raspberry Pi." true
 chat anthropic "What is the capital of Australia? One word." false
+
+# The start-up probe (dev-copy.sh asks /v1/models before auth is off) logs one keyless 401 that is
+# not demo traffic: drop it. The Usage page's window ends at the current UTC hour, exclusive, so
+# traffic from this hour would not show on it: file the rollups under the previous hour.
+sqlite3 "$dir/lmgw.sqlite" "DELETE FROM request_logs WHERE status = 401;
+    DELETE FROM usage_hourly WHERE outcome = 'client_error';
+    DELETE FROM usage_latency_hourly WHERE alias = '?';
+    UPDATE usage_hourly SET bucket_utc = strftime('%Y-%m-%dT%H', bucket_utc || ':00:00', '-1 hour');
+    UPDATE usage_latency_hourly SET bucket_utc = strftime('%Y-%m-%dT%H', bucket_utc || ':00:00', '-1 hour');"
 
 echo "ready: scripts/readme-shots.sh $dir $addr (while the models are still resident)"

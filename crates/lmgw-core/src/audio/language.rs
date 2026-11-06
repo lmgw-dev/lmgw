@@ -40,6 +40,8 @@ use super::profile::{LanguageVocab, SpeechProfile, VocabSource};
 
 mod configured;
 pub use configured::{asr_fit, tts_fit, Field, Fit, SpeechLanguage};
+mod multilingual;
+pub use multilingual::multilingual;
 
 /// ISO 639-1 (and the few three-letter primary subtags in use) → the
 /// English language name, lowercase — Qwen3's spelling.
@@ -203,8 +205,8 @@ pub fn hint_language(hint: &str, profile: &SpeechProfile) -> Option<String> {
     }
 }
 
-/// The ISO 639-1 codes (or the primary subtags in use) a row speaks, for
-/// `capabilities.speech.languages`: its vocabulary's entries — a name by
+/// The ISO 639-1 codes (or the primary subtags in use) a row works in, for
+/// `capabilities.languages` (any audio task): its vocabulary's entries — a name by
 /// its code, a code or BCP-47 tag by its primary subtag — else the spec's
 /// `languages` when they are codes. `auto` and names lmgw has no code for
 /// are left out. Sorted, without duplicates.

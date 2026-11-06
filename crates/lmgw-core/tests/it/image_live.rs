@@ -156,9 +156,10 @@ async fn a_real_sd_server_container_renders_a_png() {
             extra_run_args: None,
             warm_start: false,
             idle_seconds: 0,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
+            prompt_style: None,
+            preview_mode: None,
         },
     )
     .await
@@ -168,7 +169,7 @@ async fn a_real_sd_server_container_renders_a_png() {
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
 
     // This box's real driver. `AppState::init_for_tests` installs a probe that
     // answers "no telemetry" precisely so the rest of the suite can never

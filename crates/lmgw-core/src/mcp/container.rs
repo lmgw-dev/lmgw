@@ -13,7 +13,7 @@ use rmcp::RoleClient;
 
 use crate::agents::container::LABEL_INSTANCE;
 use crate::config::McpServer;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 
 use super::handler::GatewayClientHandler;
 
@@ -22,6 +22,19 @@ use super::handler::GatewayClientHandler;
 /// tells this gateway's containers from those of a dev or production
 /// instance on the same podman.
 pub const LABEL_MCP: &str = "lmgw.mcp";
+
+/// The Podman global options an isolated `server`'s `podman create` and
+/// `podman start` carry, before the subcommand: lmgw's own CDI spec dir, made
+/// fresh within the load timeout, when anything in its create argv gives the
+/// container the graphics card (machine-check design §3.6.4); none otherwise.
+/// Read over the whole create argv, as the CDI check reads it, so a device
+/// named anywhere in it gets the option.
+pub async fn podman_globals(state: &AppState, server: &McpServer) -> Result<Vec<String>, String> {
+    let argv = server.container_create_argv(&[], &[]).unwrap_or_default();
+    crate::runtime::cdi::ready_globals(state, &argv)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 /// A container [`create`](Self::create) made, removed when this is dropped
 /// unless it was [`stop`](Self::stop)ped or [`discard`](Self::discard)ed
@@ -37,16 +50,27 @@ pub(super) struct Container {
 
 impl Container {
     /// `podman create` `server`'s container, labelled for `instance` (the
-    /// `container_prefix`): the image pull, when its run flags ask for one,
-    /// and the container. Podman's own words when it fails.
-    pub(super) async fn create(server: &McpServer, instance: &str) -> Result<Self, String> {
+    /// `container_prefix`), with `globals` (lmgw's CDI spec dir when it gets
+    /// the graphics card) before `create`: the image pull, when its run flags
+    /// ask for one, and the container. Podman's own words when it fails, and
+    /// lmgw's CDI check's when the argv gives the container the card without
+    /// lmgw's spec dir.
+    pub(super) async fn create(
+        server: &McpServer,
+        instance: &str,
+        globals: &[String],
+        cdi: Option<&crate::runtime::cdi::OwnSpec>,
+    ) -> Result<Self, String> {
         let labels = [
             (LABEL_INSTANCE.to_string(), instance.to_string()),
             (LABEL_MCP.to_string(), server.id.to_string()),
         ];
         let argv = server
-            .container_create_argv(&labels)
+            .container_create_argv(globals, &labels)
             .ok_or("stdio server has no container image")?;
+        if let Some(cdi) = cdi {
+            cdi.refuse_unpointed(&argv)?;
+        }
         let out = crate::child::system_tool_tokio(&mut tokio::process::Command::new("podman"))
             .args(&argv)
             .stdin(Stdio::null())

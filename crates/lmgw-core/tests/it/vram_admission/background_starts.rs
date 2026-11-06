@@ -96,8 +96,7 @@ async fn boot_skips_a_warm_start_that_does_not_fit() {
             image: aux.image.clone(),
             extra_run_args: aux.extra_run_args.clone(),
             warm_start: true,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await

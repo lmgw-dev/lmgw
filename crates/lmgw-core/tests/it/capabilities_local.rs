@@ -53,8 +53,7 @@ fn row(model_id: &str, params: LlamaParams, args: &[&str]) -> LocalModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         ladder: vec![],
     }
@@ -872,6 +871,7 @@ fn alias_reasoning_overrides_replace_the_rows_defaults() {
             enabled: Some(true),
             effort: Some("high".into()),
             budget_tokens: None,
+            ..Default::default()
         }),
         ..Default::default()
     });

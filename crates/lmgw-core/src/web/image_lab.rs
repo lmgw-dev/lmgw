@@ -38,6 +38,7 @@ use crate::state::SharedState;
 /// form kept as a group, then turned into the request, dispatched and kept
 /// as its run.
 mod dispatch;
+pub(crate) use dispatch::model_stem;
 /// Recording a dispatch's answer as the group's run, and the answer.
 mod kept;
 /// The multipart body an edit is relayed as.

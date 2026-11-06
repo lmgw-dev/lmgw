@@ -527,7 +527,7 @@ the UI changed, and is committed with explicit paths.
 9. **WP9 Knowledge bases backend** (§9.1–9.4).
 10. **WP10 Knowledge UI + Chat integration** (§9.3 UI, §9.5).
 11. **WP11 Key scope editor** (§10).
-12. Review (Opus, split by area), fixes, UI verification (`scripts/ui-matrix.py`, new
+12. Review (split by area), fixes, UI verification (`scripts/ui-matrix.py`, new
     `scripts/drive/*.json` checks, `scripts/webkit-check.py`), and a review page.
 
 ## 13. Defaults chosen during implementation (open to revision)

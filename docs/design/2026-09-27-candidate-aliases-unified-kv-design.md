@@ -1,5 +1,20 @@
 # Candidate aliases, background traffic and unified KV — design (2026-09-27)
 
+*Change note, 2026-10-24 (owner rulings, built in WP10 on 2026-10-25):* one fallback setting per model and per
+alias, used for every reason it cannot answer (the hold, a benchmark, VRAM outside lmgw, a
+deferred background request, an unavailable candidate, an exhausted upstream quota, an unreachable
+upstream, a disabled model, alias or upstream); the reason is recorded, never configured. The
+global `settings.hold.fallback_alias` and the `inherit` mode are removed, and a fallback may be a
+local model, with each hop of a chain checked on its own. A fallback is a model of the same type
+(decision 29): a save that would give any row's fallback another type, a candidate alias or a
+loop is refused, naming the row. So a candidate
+alias's `fallback_mode` (`inherit` reading the global hold fallback) goes, and its `fallback` is
+the one field; a candidate alias still cannot be a fallback target, and its candidates' own row
+fallbacks are still never used through the alias. `background` and `unavailable` stay the reasons
+this design defined, now recorded per hop. See
+[2026-10-24-openai-egress-design.md](2026-10-24-openai-egress-design.md) §14 (decisions 25 and
+26).
+
 **Status:** Implemented (2026-09-27/28): §3 and the gate core (phase 1), §4.7 (phase 2), §4.1–4.6 candidate aliases (phase 4). Choices made during implementation are in §12, for review.
 
 Sibling of [2026-09-27-ladder-models-design.md](2026-09-27-ladder-models-design.md).
@@ -299,6 +314,11 @@ version can allow both together (§10).
 **The alias fallback**, used by both modes:
 - **a fallback alias:** it serves the request, with `x-lmgw-fallback`;
 - **none:** `503`, code `gpu_hold`, which is what the clients already handle.
+  *Changed 2026-10-21* (the owner's decision A,
+  [per-request background design](2026-10-21-per-request-background-design.md)
+  §8): under the hold it is still `gpu_hold`; a background deferral answers
+  its own code, `gpu_deferred`, because clients must not retry the hold and a
+  deferral is "retry later".
 
 **"Loaded"** means ready in the registry, or already starting (joining a start
 in flight), and able to take this request: it fits the model's current
@@ -343,7 +363,10 @@ Otherwise, the first step that applies wins:
 4. **The alias fallback.** With none, the `503 gpu_hold` message reads
    "deferred: GPU in use by <model>". It is logged with its own error kind,
    `gpu_deferred`, so the request log and dashboard can tell a deferral from a
-   real hold.
+   real hold. *Changed 2026-10-21* (decision A, per-request background design
+   §8): the wire code is `gpu_deferred` too, not `gpu_hold`. The same walk
+   now also runs for a request sent with `x-lmgw-background: on`, on any
+   alias (that design's §5).
 
 **Waiting on a chosen model is fair:** llama-server's own FIFO for split KV,
 the pool ledger for unified KV.
@@ -575,6 +598,8 @@ when overfilled. A cloud wiremock upstream stands in for fallback cases.
 7. **Background, nothing usable.** P can't start and no alternate is loaded:
    - fallback alias → served by the cloud mock, with `x-lmgw-fallback`;
    - fallback `none` → `503 gpu_hold`, logged `gpu_deferred`, no eviction.
+     (*Changed 2026-10-21:* `503 gpu_deferred` on the wire too, per-request
+     background design §8.)
 8. **Background evicts background.** An idle `Background` model is evicted to
    start P; an idle `Owner` model never is.
 9. **Owner waits for a busy background model.** The model is marked draining;
@@ -650,7 +675,7 @@ when overfilled. A cloud wiremock upstream stands in for fallback cases.
    - the widened fallback trigger, with `vram.fallback_on_external = false` as
      the way back to hold-only.
 
-## 9. Spec choices (veto if wrong)
+## 9. Spec choices
 
 - **Candidates are local chat models only.** Cloud is reached through the
   alias fallback.
@@ -666,7 +691,10 @@ when overfilled. A cloud wiremock upstream stands in for fallback cases.
 - Unified KV on ladder models (the ledger makes "wait vs climb" decidable).
 - A background flag on API keys, for an app that needs both modes.
 - Background for aux models (embedding jobs), where eviction hurts just as
-  much.
+  much. *Since 2026-10-21* a single request of any class, aux, image and
+  audio included, can ask for it with `x-lmgw-background: on`
+  ([per-request background design](2026-10-21-per-request-background-design.md));
+  candidates are still chat models only.
 - Upstream: llama.cpp aborting only the largest slot on overflow (its own
   TODO, fact 3) would soften the unguarded case.
 
@@ -1245,7 +1273,10 @@ Phase 4, W1 (`feat/candidate-aliases`, 2026-09-27): the data layer — migration
     plain row's usual "unread" absence. `reasoning` has no negative shape
     (`fixed`+`enabled:false` is a model fact, not a refusal to reason), so a
     disabled reasoning facet is left absent instead.
-    (`capabilities::exposed::candidate_alias_entry`.)
+    (`capabilities::exposed::candidate_alias_entry`.) *2026-10-22:* an
+    enabled `structured_output` publishes `json_object` as every routable
+    candidate says it, absent when none is routable (structured-output
+    design §11.20).
 52. **Deleting or disabling a candidate row, or the alias named as the
     fallback, is not refused** — exactly as instructed, and consistent with
     a row's own hold fallback already being re-validated at use rather than
@@ -1334,7 +1365,9 @@ climb (`runtime/registry/ownership.rs`, `vram/background.rs`).
     before any eviction, so guests stop turning its eviction victims busy.
     An owner climb's make-room loop takes it too; a guest's climb never gets
     there. It is armed only when `Snapshot::any_background_alias()`, so the
-    frame of an install without guests never shows it. Accepted (H4): a
+    frame of an install without guests never shows it. *Changed
+    2026-10-21* (per-request background design §10): any request may be a
+    guest, so every owner wait arms it, on every install. Accepted (H4): a
     guest's in-process run (agent run, `/v1/responses` loop) holds one claim
     for the whole run, and an owner waiting for its model waits for the run.
 64. **A guest yields to any queued admission, and a guest never measures
@@ -1381,6 +1414,9 @@ climb (`runtime/registry/ownership.rs`, `vram/background.rs`).
     clients and `gpu_deferred` in `request_logs.error_kind`, so
     `GatewayError::code()` exists and differs from `kind()` for
     `GpuDeferred` alone. `gpu_deferred` joins `telemetry::REFUSAL_KINDS`.
+    *Changed 2026-10-21* (the owner's decision A, per-request background
+    design §8): a deferral answers `gpu_deferred` on the wire as well, so
+    `code()` is gone and `kind()` is the wire code for every variant again.
 68. **An interim answer for `Climbed::Denied`.** Superseded by entry 73.
 
 Phase 4, C2 (`feat/candidate-aliases`, 2026-09-27): the gate half —
@@ -1411,14 +1447,17 @@ Phase 4, C2 (`feat/candidate-aliases`, 2026-09-27): the gate half —
     since the primary cannot be loaded.
 71. **The facet 400 is `Routed::using(FacetSet)`**, called between `resolve`
     and admission. It refuses at once with `unsupported` (400) naming the
-    facet, under the hold too. `/v1/responses` calls it before its native
+    facet, under the hold too — `response_format_unsupported` when
+    structured output is the only facet missing (*2026-10-22*,
+    structured-output design §11.20). `/v1/responses` calls it before its native
     branch, which never reaches admission. What counts as a use:
     - image and audio parts;
     - tool definitions the model is given, which the sites add: the client's
       and MCP tools on `/v1/responses`, always on agent chat, and on agent
       runs whose manifest attaches tools;
     - a `json_schema`/`json_object` `response_format`, or llama.cpp's
-      top-level `json_schema` (not `grammar`);
+      top-level `json_schema` (not `grammar`) — beside a `text` one too
+      (*2026-10-22*, structured-output design §11.18);
     - reasoning only when the request asks to think (H3).
 
     Under the hold with no fallback, `resolve`'s 503 comes before the 400

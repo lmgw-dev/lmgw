@@ -1,0 +1,17 @@
+-- The content hash of a tracked download's file (find-a-model design D122).
+--
+-- A download the tray app's nightly quit cuts used to start again from byte 0
+-- the next morning. Now its `.part` is kept and the next transfer continues
+-- it with a Range request from the byte it reached, but only while the hub
+-- still names the same file: the sha256 the hub's resolver sends as
+-- `x-linked-etag` (the tree listing's `lfs.oid`), recorded here when a
+-- transfer starts from byte 0. A transfer that finds the hub naming another
+-- hash starts again from byte 0 and records the new one.
+--
+-- NULL on every row from before this column, and on a row whose hub sent no
+-- hash (a file kept in git, a mirror): such a `.part` is never continued, its
+-- next transfer starts from byte 0. A cancel clears it with the `.part`.
+--
+-- `etag` stays what it was: the last finished download's ETag as the update
+-- check compares it.
+ALTER TABLE hf_models ADD COLUMN oid TEXT;

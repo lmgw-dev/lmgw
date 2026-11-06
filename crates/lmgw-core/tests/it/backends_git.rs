@@ -1216,3 +1216,519 @@ async fn pools_on_one_directory_share_their_lock_and_fetch_concurrently() {
     assert_eq!(ra.unwrap().sha, a);
     assert_eq!(rb.unwrap().sha, b);
 }
+
+/// audio.cpp's case: `.gitmodules` carries a relative URL (`../../other/x.git`)
+/// that resolves against the superproject's remote. The pool has none, so git
+/// would resolve it against the worktree's path; the build's repository URL
+/// has to stand in, for nested relative URLs too (they resolve against their
+/// parent submodule's own origin).
+#[tokio::test]
+async fn relative_submodule_urls_resolve_against_the_builds_repository_url() {
+    let env = Env::new().await;
+    let bare = |p: &str| Repo::bare(env.root.join(p));
+    let (nested_remote, sub_remote, super_remote) = (
+        bare("other/nested.git"),
+        bare("other/sub.git"),
+        bare("owner/super.git"),
+    );
+    let relative = |repo: &Repo, name: &str, url: &str| {
+        repo.git(&[
+            "config",
+            "-f",
+            ".gitmodules",
+            &format!("submodule.{name}.url"),
+            url,
+        ]);
+    };
+
+    let nested = env.repo("nested-src");
+    nested.write("n.txt", "nested\n");
+    nested.commit("n");
+    nested.push_all(&nested_remote);
+
+    let sub = env.repo("sub-src");
+    sub.write("s.txt", "sub\n");
+    sub.git(&["submodule", "add", "--quiet", &nested_remote.url(), "deep"]);
+    relative(&sub, "deep", "../nested.git");
+    sub.commit("s");
+    sub.push_all(&sub_remote);
+
+    let sup = env.repo("super-src");
+    sup.write("main.c", "main\n");
+    sup.git(&["submodule", "add", "--quiet", &sub_remote.url(), "sub"]);
+    relative(&sup, "sub", "../../other/sub.git");
+    sup.commit("super");
+    sup.push_all(&super_remote);
+
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    let wt = env.pool.work_dir().join("run-rel");
+    env.pool.worktree_add(&base, &wt, None).await.unwrap();
+    let opts = AssembleOpts {
+        repo_url: Some(url),
+        ..AssembleOpts::default()
+    };
+    let (cap, lines) = capture();
+    let report = env
+        .pool
+        .assemble(&wt, &base, &[], opts, Some(&*cap))
+        .await
+        .unwrap_or_else(|e| panic!("assemble: {e}\n{:#?}", lines.lock().unwrap()));
+    assert!(report.is_clean());
+    assert_eq!(read(&wt, "sub/s.txt"), "sub\n");
+    assert_eq!(read(&wt, "sub/deep/n.txt"), "nested\n");
+
+    // The shared pool gained no remote from it.
+    let remotes = fixture_git(env.pool.dir(), &["remote"], "@0 +0000");
+    assert_eq!(remotes, "", "the pool stays remote-less");
+}
+
+/// An extra from another repository (a fork) changes the submodules: it bumps
+/// one and adds a second, relative one. The final submodule sync/update of the
+/// merged tree resolves relative URLs against the BUILD's repository URL, not
+/// against the fork the extra came from (whose own sibling paths do not hold
+/// those repositories).
+#[tokio::test]
+async fn relative_submodules_of_a_forks_extra_resolve_against_the_build_url() {
+    let env = Env::new().await;
+    let bare = |p: &str| Repo::bare(env.root.join(p));
+    let (sub_remote, two_remote, super_remote, fork_remote) = (
+        bare("other/sub.git"),
+        bare("owner/other/two.git"),
+        bare("owner/super.git"),
+        bare("forker/super.git"),
+    );
+    let relative = |repo: &Repo, name: &str, url: &str| {
+        repo.git(&[
+            "config",
+            "-f",
+            ".gitmodules",
+            &format!("submodule.{name}.url"),
+            url,
+        ]);
+    };
+
+    let sub = env.repo("sub-src");
+    sub.write("s.txt", "sub\n");
+    sub.commit("s");
+    sub.push_all(&sub_remote);
+
+    let two = env.repo("two-src");
+    two.write("t.txt", "two\n");
+    two.commit("t");
+    two.push_all(&two_remote);
+
+    let sup = env.repo("super-src");
+    sup.write("main.c", "main\n");
+    sup.git(&["submodule", "add", "--quiet", &sub_remote.url(), "sub"]);
+    relative(&sup, "sub", "../../other/sub.git");
+    sup.commit("super");
+    sup.push_all(&super_remote);
+
+    // The fork's branch: `sub` moves to a newer commit and `two` is added,
+    // with a URL relative to `owner/super.git` (it would resolve to
+    // `forker/other/two.git` against the fork, which does not exist).
+    sub.write("s.txt", "sub, newer\n");
+    let sub_new = sub.commit("s2");
+    sub.push_all(&sub_remote);
+    sup.git(&["checkout", "--quiet", "-b", "feat"]);
+    sup.git(&["-C", "sub", "fetch", "--quiet", "origin"]);
+    sup.git(&["-C", "sub", "checkout", "--quiet", &sub_new]);
+    sup.git(&["submodule", "add", "--quiet", &two_remote.url(), "two"]);
+    relative(&sup, "two", "../other/two.git");
+    let feat = sup.commit("feat");
+    sup.push_all(&fork_remote);
+
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    assert_eq!(env.fetch(&fork_remote.url(), "feat").await, feat);
+    let wt = env.pool.work_dir().join("run-fork-rel");
+    env.pool.worktree_add(&base, &wt, None).await.unwrap();
+    let opts = AssembleOpts {
+        repo_url: Some(url),
+        ..AssembleOpts::default()
+    };
+    let (cap, lines) = capture();
+    let report = env
+        .pool
+        .assemble(&wt, &base, &[extra("fork feat", &feat)], opts, Some(&*cap))
+        .await
+        .unwrap_or_else(|e| panic!("assemble: {e}\n{:#?}", lines.lock().unwrap()));
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(read(&wt, "sub/s.txt"), "sub, newer\n");
+    assert_eq!(in_wt(&wt.join("sub"), &["rev-parse", "HEAD"]), sub_new);
+    assert_eq!(read(&wt, "two/t.txt"), "two\n");
+    assert_eq!(pool_submodule_config(env.pool.dir()), "");
+}
+
+/// Every `submodule.*` key in the pool's (shared) config.
+fn pool_submodule_config(pool: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(pool)
+        .args(["config", "--local", "--get-regexp", r"^submodule\."])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A run's assemble against the build's repository URL.
+async fn assemble_at(env: &Env, name: &str, url: &str, base: &str) -> PathBuf {
+    let wt = env.pool.work_dir().join(name);
+    env.pool.worktree_add(base, &wt, None).await.unwrap();
+    let opts = AssembleOpts {
+        repo_url: Some(url.to_string()),
+        ..AssembleOpts::default()
+    };
+    let (cap, lines) = capture();
+    let report = env
+        .pool
+        .assemble(&wt, base, &[], opts, Some(&*cap))
+        .await
+        .unwrap_or_else(|e| panic!("assemble {name}: {e}\n{:#?}", lines.lock().unwrap()));
+    assert!(report.is_clean(), "{report:?}");
+    wt
+}
+
+/// `sup` gets submodule `name` (at path `name`) from `remote`, its
+/// `.gitmodules` URL replaced by `url`.
+fn add_submodule(sup: &Repo, remote: &Repo, name: &str, url: &str) {
+    sup.git(&[
+        "submodule",
+        "add",
+        "--quiet",
+        "--name",
+        name,
+        &remote.url(),
+        name,
+    ]);
+    sup.git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        &format!("submodule.{name}.url"),
+        url,
+    ]);
+}
+
+/// The audio.cpp incident: an older build's `submodule init` left a wrong
+/// `submodule.<name>.url` in the pool's shared config (init never overwrites
+/// one), and every later run cloned from it. A run's URLs now come from its
+/// own `.gitmodules`, whatever the pool's config says, and reopening the pool
+/// removes the leftovers.
+#[tokio::test]
+async fn a_stale_submodule_url_in_the_pool_config_is_never_used_and_is_removed() {
+    let env = Env::new().await;
+    let bare = |p: &str| Repo::bare(env.root.join(p));
+    let (right_remote, wrong_remote, super_remote) = (
+        bare("other/sub.git"),
+        bare("wrong/sub.git"),
+        bare("owner/super.git"),
+    );
+    let right = env.repo("right-src");
+    right.write("f.txt", "right\n");
+    right.commit("r");
+    right.push_all(&right_remote);
+    let wrong = env.repo("wrong-src");
+    wrong.write("f.txt", "wrong\n");
+    wrong.commit("w");
+    wrong.push_all(&wrong_remote);
+
+    let sup = env.repo("super-src");
+    sup.write("main.c", "main\n");
+    add_submodule(&sup, &right_remote, "sub", "../../other/sub.git");
+    sup.commit("super");
+    sup.push_all(&super_remote);
+
+    // What a build before the fix left behind, plus sd.cpp's entries.
+    let pool = env.pool.dir().to_path_buf();
+    for (k, v) in [
+        ("submodule.sub.url", wrong_remote.url()),
+        ("submodule.sub.active", "true".into()),
+        (
+            "submodule.examples/server/frontend.url",
+            "https://example.test/f.git".into(),
+        ),
+        (
+            "submodule.thirdparty/libwebp.url",
+            "https://example.test/w.git".into(),
+        ),
+    ] {
+        fixture_git(&pool, &["config", k, &v], "@0 +0000");
+    }
+
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    let wt = assemble_at(&env, "run-stale", &url, &base).await;
+    assert_eq!(read(&wt, "sub/f.txt"), "right\n", "cloned from .gitmodules");
+    assert_eq!(
+        in_wt(&wt.join("sub"), &["config", "--get", "remote.origin.url"]),
+        right_remote.url()
+    );
+    // Check merge, a second worktree on the same pool, too.
+    let opts = AssembleOpts {
+        repo_url: Some(url.clone()),
+        ..AssembleOpts::default()
+    };
+    let report = env.pool.check_merge(&base, &[], opts, None).await.unwrap();
+    assert!(report.is_clean());
+
+    // The runs left the stale entries alone; opening the pool heals it.
+    assert!(pool_submodule_config(&pool).contains("wrong/sub.git"));
+    Pool::open(Git::new().allow_file_protocol(), &env.root.join("builds"))
+        .await
+        .unwrap();
+    assert_eq!(pool_submodule_config(&pool), "", "no submodule.* left");
+    let config = std::fs::read_to_string(pool.join("config")).unwrap();
+    assert!(!config.contains("[submodule"), "{config}");
+}
+
+/// Two repositories in the one pool with a submodule of the same name at
+/// different URLs: each run clones its own (the first to initialise used to
+/// win for both). The first also nests a submodule of that name, whose
+/// relative URL resolves against its parent submodule, never the top level's
+/// `-c submodule.lib.url`. No run writes `submodule.*` into the pool's config.
+#[tokio::test]
+async fn repositories_sharing_a_submodule_name_each_get_their_own_url() {
+    let env = Env::new().await;
+    let bare = |p: &str| Repo::bare(env.root.join(p));
+    let (a_inner, a_lib, a_super, b_lib, b_super) = (
+        bare("a/inner.git"),
+        bare("a/lib.git"),
+        bare("a/super.git"),
+        bare("b/lib.git"),
+        bare("b/super.git"),
+    );
+    let inner = env.repo("a-inner-src");
+    inner.write("f.txt", "a inner\n");
+    inner.commit("i");
+    inner.push_all(&a_inner);
+
+    let lib = env.repo("a-lib-src");
+    lib.write("f.txt", "a lib\n");
+    add_submodule(&lib, &a_inner, "lib", "../inner.git");
+    lib.commit("l");
+    lib.push_all(&a_lib);
+
+    let sup = env.repo("a-super-src");
+    sup.write("main.c", "a\n");
+    add_submodule(&sup, &a_lib, "lib", "../lib.git");
+    sup.commit("a");
+    sup.push_all(&a_super);
+
+    let lib_b = env.repo("b-lib-src");
+    lib_b.write("f.txt", "b lib\n");
+    lib_b.commit("lb");
+    lib_b.push_all(&b_lib);
+
+    let sup_b = env.repo("b-super-src");
+    sup_b.write("main.c", "b\n");
+    add_submodule(&sup_b, &b_lib, "lib", "../../b/lib.git");
+    sup_b.commit("b");
+    sup_b.push_all(&b_super);
+
+    let pool = env.pool.dir().to_path_buf();
+    let (url_a, url_b) = (a_super.url(), b_super.url());
+    let base_a = env.fetch(&url_a, "master").await;
+    let base_b = env.fetch(&url_b, "master").await;
+
+    let wt_a = assemble_at(&env, "run-a", &url_a, &base_a).await;
+    assert_eq!(read(&wt_a, "lib/f.txt"), "a lib\n");
+    assert_eq!(read(&wt_a, "lib/lib/f.txt"), "a inner\n");
+    assert_eq!(pool_submodule_config(&pool), "");
+
+    let wt_b = assemble_at(&env, "run-b", &url_b, &base_b).await;
+    assert_eq!(read(&wt_b, "lib/f.txt"), "b lib\n");
+    assert_eq!(pool_submodule_config(&pool), "");
+
+    // And back: the second repository's run changed nothing for the first.
+    env.pool.worktree_remove(&wt_a, None).await.unwrap();
+    let wt_a = assemble_at(&env, "run-a2", &url_a, &base_a).await;
+    assert_eq!(read(&wt_a, "lib/f.txt"), "a lib\n");
+    assert_eq!(read(&wt_a, "lib/lib/f.txt"), "a inner\n");
+    assert_eq!(pool_submodule_config(&pool), "");
+    let config = std::fs::read_to_string(pool.join("config")).unwrap();
+    assert!(!config.contains("[submodule"), "{config}");
+}
+
+/// An extra bumps submodule `s` to a commit whose own `.gitmodules` moved its
+/// nested submodule `deep` to another URL (the new nested commit exists only
+/// there). `init` never overwrites the URL it wrote for the base's `s`, so the
+/// nested URLs have to be synced after the top-level update moved `s`.
+#[tokio::test]
+async fn a_nested_url_moved_by_an_extra_is_followed() {
+    let env = Env::new().await;
+    let bare = |p: &str| Repo::bare(env.root.join(p));
+    let (url_a, url_b, s_remote, super_remote, fork_remote) = (
+        bare("a/deep.git"),
+        bare("b/deep.git"),
+        bare("o/s.git"),
+        bare("o/super.git"),
+        bare("fork/super.git"),
+    );
+    let deep = env.repo("deep-src");
+    deep.write("n.txt", "n1\n");
+    deep.commit("n1");
+    deep.push_all(&url_a);
+    deep.push_all(&url_b);
+    deep.write("n.txt", "n2\n");
+    let n2 = deep.commit("n2");
+    deep.push_all(&url_b);
+
+    let s = env.repo("s-src");
+    s.write("s.txt", "s1\n");
+    add_submodule(&s, &url_a, "deep", &url_a.url());
+    s.commit("s1");
+    s.push_all(&s_remote);
+
+    let sup = env.repo("super-src");
+    sup.write("main.c", "main\n");
+    add_submodule(&sup, &s_remote, "s", &s_remote.url());
+    sup.commit("super");
+    sup.push_all(&super_remote);
+
+    // s2: `deep` now lives at B, at the commit only B has.
+    s.write("s.txt", "s2\n");
+    s.git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "submodule.deep.url",
+        &url_b.url(),
+    ]);
+    s.git(&["submodule", "sync", "--quiet"]);
+    s.git(&["-C", "deep", "fetch", "--quiet", "origin"]);
+    s.git(&["-C", "deep", "checkout", "--quiet", &n2]);
+    let s2 = s.commit("s2");
+    s.push_all(&s_remote);
+    sup.git(&["checkout", "--quiet", "-b", "feat"]);
+    sup.git(&["-C", "s", "fetch", "--quiet", "origin"]);
+    sup.git(&["-C", "s", "checkout", "--quiet", &s2]);
+    let feat = sup.commit("feat");
+    sup.push_all(&fork_remote);
+
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    assert_eq!(env.fetch(&fork_remote.url(), "feat").await, feat);
+    let wt = env.pool.work_dir().join("run-nested-moved");
+    env.pool.worktree_add(&base, &wt, None).await.unwrap();
+    let opts = AssembleOpts {
+        repo_url: Some(url),
+        ..AssembleOpts::default()
+    };
+    let (cap, lines) = capture();
+    let report = env
+        .pool
+        .assemble(&wt, &base, &[extra("fork feat", &feat)], opts, Some(&*cap))
+        .await
+        .unwrap_or_else(|e| panic!("assemble: {e}\n{:#?}", lines.lock().unwrap()));
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(read(&wt, "s/s.txt"), "s2\n");
+    assert_eq!(read(&wt, "s/deep/n.txt"), "n2\n");
+    assert_eq!(pool_submodule_config(env.pool.dir()), "");
+}
+
+/// A `.gitmodules` entry no gitlink points at is ignored (git ignores it), even
+/// when its name or URL would not pass validation; one a gitlink does point at
+/// still fails, with the reason.
+#[tokio::test]
+async fn gitmodules_entries_without_a_gitlink_are_ignored_but_a_gitlinked_bad_one_fails() {
+    let env = Env::new().await;
+    let lib_remote = Repo::bare(env.root.join("o/lib.git"));
+    let lib = env.repo("lib-src");
+    lib.write("f.txt", "lib\n");
+    lib.commit("l");
+    lib.push_all(&lib_remote);
+
+    let odd = |repo: &Repo, name: &str, path: &str, url: &str| {
+        for (k, v) in [("path", path), ("url", url)] {
+            repo.git(&[
+                "config",
+                "-f",
+                ".gitmodules",
+                &format!("submodule.{name}.{k}"),
+                v,
+            ]);
+        }
+    };
+    let sup = env.repo("dead-src");
+    sup.write("main.c", "main\n");
+    add_submodule(&sup, &lib_remote, "lib", &lib_remote.url());
+    odd(&sup, "a=b", "ghost", "https://example.invalid/x.git");
+    odd(&sup, "far", "ghost2", "../../../../escape.git");
+    odd(&sup, "nopath-only-url", "", "x");
+    sup.git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "--unset",
+        "submodule.nopath-only-url.path",
+    ]);
+    let super_remote = Repo::bare(env.root.join("o/dead.git"));
+    sup.commit("dead entries");
+    sup.push_all(&super_remote);
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    let wt = assemble_at(&env, "run-dead", &url, &base).await;
+    assert_eq!(read(&wt, "lib/f.txt"), "lib\n");
+
+    // The same odd name, now with a gitlink at its path.
+    let bad = env.repo("bad-src");
+    bad.write("main.c", "main\n");
+    bad.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{},thing", lib.git(&["rev-parse", "HEAD"])),
+    ]);
+    odd(&bad, "a=b", "thing", &lib_remote.url());
+    let bad_remote = Repo::bare(env.root.join("o/bad.git"));
+    // Not `commit`: its `add -A` would drop the gitlink, which has no checkout.
+    bad.git(&["add", ".gitmodules", "main.c"]);
+    bad.git(&["commit", "--quiet", "-m", "bad"]);
+    bad.push_all(&bad_remote);
+    let burl = bad_remote.url();
+    let bbase = env.fetch(&burl, "master").await;
+    let wt = env.pool.work_dir().join("run-bad");
+    env.pool.worktree_add(&bbase, &wt, None).await.unwrap();
+    let opts = AssembleOpts {
+        repo_url: Some(burl),
+        ..AssembleOpts::default()
+    };
+    let err = env
+        .pool
+        .assemble(&wt, &bbase, &[], opts, None)
+        .await
+        .expect_err("a gitlinked entry with a bad name fails");
+    assert!(err.contains("a=b"), "{err}");
+}
+
+/// `update = none` in `.gitmodules` still keeps a submodule from being cloned.
+#[tokio::test]
+async fn a_submodule_with_update_none_is_not_cloned() {
+    let env = Env::new().await;
+    let lib_remote = Repo::bare(env.root.join("o/lib.git"));
+    let lib = env.repo("lib-src");
+    lib.write("f.txt", "lib\n");
+    lib.commit("l");
+    lib.push_all(&lib_remote);
+    let sup = env.repo("none-src");
+    sup.write("main.c", "main\n");
+    add_submodule(&sup, &lib_remote, "lib", &lib_remote.url());
+    sup.git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "submodule.lib.update",
+        "none",
+    ]);
+    let super_remote = Repo::bare(env.root.join("o/none.git"));
+    sup.commit("none");
+    sup.push_all(&super_remote);
+    let url = super_remote.url();
+    let base = env.fetch(&url, "master").await;
+    let wt = assemble_at(&env, "run-none", &url, &base).await;
+    assert!(!wt.join("lib/f.txt").exists());
+}

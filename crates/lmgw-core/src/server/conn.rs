@@ -12,7 +12,8 @@
 //! - **`device`**: the client certificate the device listener's handshake
 //!   verified, read once per connection ([`DevicePeer`]);
 //! - **`socket`**: a handle to the connection's socket options, so the Chat
-//!   feed can set `TCP_USER_TIMEOUT` from a device's keep-alive (§7.1). The
+//!   feed and a streamed chat answer can set their keep-alive and
+//!   `TCP_USER_TIMEOUT` for as long as they run (§4.3, §7.1). The
 //!   device listener's authenticated connections (a certificate that opens
 //!   a working device) carry one; the plain listener's do not (no device
 //!   connects there, D12), nor any other: a handle costs a descriptor.
@@ -234,53 +235,179 @@ impl DevicePeer {
 /// the lock a setter holds: so a setter never reaches a descriptor number
 /// the process has since given to another file, and the duplicate never
 /// keeps a closed connection's socket open.
+///
+/// Its timers are set for as long as a stream runs, never for good
+/// ([`Self::override_timers`]): a stream's own values hold while its
+/// [`TimersOverride`] lives, and the connection's accept-time values are
+/// back once the last one on it is gone (2026-10-24).
 #[derive(Clone)]
-pub struct SocketHandle(Arc<Mutex<Option<OwnedFd>>>);
+pub struct SocketHandle(Arc<Mutex<Shared>>);
+
+/// What a [`SocketHandle`] shares with its stream: the descriptor, and the
+/// timer overrides in force on it.
+#[derive(Default)]
+struct Shared {
+    fd: Option<OwnedFd>,
+    /// The connection's timers before the first override, read then: what
+    /// the last one gone restores.
+    base: Option<Applied>,
+    /// The overrides in force, oldest first, each by its id.
+    overrides: Vec<(u64, Override)>,
+    next: u64,
+}
+
+/// The timers a socket carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Applied {
+    idle: Duration,
+    interval: Duration,
+    user_timeout: Option<Duration>,
+}
+
+/// One stream's timers: each `None` leaves what the connection has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Override {
+    keepalive: Option<Duration>,
+    user_timeout: Option<Duration>,
+}
+
+impl Shared {
+    /// The base with every override in force laid over it, oldest first, so
+    /// the newest one's fields win.
+    fn wanted(&self) -> Option<Applied> {
+        let mut t = self.base?;
+        for (_, o) in &self.overrides {
+            if let Some(every) = o.keepalive {
+                t.idle = every;
+                t.interval = every;
+            }
+            if let Some(u) = o.user_timeout {
+                t.user_timeout = Some(u);
+            }
+        }
+        Some(t)
+    }
+
+    /// Put [`Self::wanted`] on the socket; nothing once it has closed.
+    fn apply(&self) -> std::io::Result<()> {
+        let (Some(fd), Some(t)) = (self.fd.as_ref(), self.wanted()) else {
+            return Ok(());
+        };
+        let s = socket2::SockRef::from(fd);
+        s.set_tcp_keepalive(
+            &socket2::TcpKeepalive::new()
+                .with_time(t.idle)
+                .with_interval(t.interval),
+        )?;
+        s.set_tcp_user_timeout(t.user_timeout)
+    }
+}
 
 impl std::fmt::Debug for SocketHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let open = self.0.lock().map(|g| g.is_some()).unwrap_or(false);
+        let open = self.0.lock().map(|g| g.fd.is_some()).unwrap_or(false);
         f.debug_struct("SocketHandle").field("open", &open).finish()
     }
 }
 
+fn closed() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotConnected,
+        "the connection has closed",
+    )
+}
+
 impl SocketHandle {
-    fn with<R>(
-        &self,
-        f: impl FnOnce(socket2::SockRef<'_>) -> std::io::Result<R>,
-    ) -> std::io::Result<R> {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let fd = guard.as_ref().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "the connection has closed",
-            )
-        })?;
-        f(socket2::SockRef::from(fd))
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Set the connection's `TCP_USER_TIMEOUT` (`None` clears it): how long
-    /// sent data may stay unacknowledged before the kernel ends the
-    /// connection. An error once the connection has closed.
-    pub fn set_tcp_user_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
-        self.with(|s| s.set_tcp_user_timeout(timeout))
+    /// Set the connection's TCP keep-alive (the first probe after
+    /// `keepalive` idle, then one each `keepalive`) and its
+    /// `TCP_USER_TIMEOUT` (how long sent data or probes may stay
+    /// unacknowledged before the kernel ends the connection) for as long as
+    /// the returned guard lives; `None` leaves the one the connection has.
+    /// Dropped, the guard puts back what the connection had before it —
+    /// the other overrides still in force laid over its accept-time values.
+    /// An error once the connection has closed, or when the kernel refuses
+    /// an option (nothing is left changed then).
+    pub fn override_timers(
+        &self,
+        keepalive: Option<Duration>,
+        user_timeout: Option<Duration>,
+    ) -> std::io::Result<TimersOverride> {
+        let mut g = self.lock();
+        let fd = g.fd.as_ref().ok_or_else(closed)?;
+        if g.base.is_none() {
+            let s = socket2::SockRef::from(fd);
+            g.base = Some(Applied {
+                idle: s.tcp_keepalive_time()?,
+                interval: s.tcp_keepalive_interval()?,
+                user_timeout: s.tcp_user_timeout()?,
+            });
+        }
+        let id = g.next;
+        g.next += 1;
+        g.overrides.push((
+            id,
+            Override {
+                keepalive,
+                user_timeout,
+            },
+        ));
+        if let Err(e) = g.apply() {
+            g.overrides.pop();
+            let _ = g.apply();
+            return Err(e);
+        }
+        Ok(TimersOverride {
+            shared: self.0.clone(),
+            id,
+        })
     }
 
     /// The connection's `TCP_USER_TIMEOUT` now.
     pub fn tcp_user_timeout(&self) -> std::io::Result<Option<Duration>> {
-        self.with(|s| s.tcp_user_timeout())
+        let g = self.lock();
+        let fd = g.fd.as_ref().ok_or_else(closed)?;
+        socket2::SockRef::from(fd).tcp_user_timeout()
     }
 
     /// Whether the connection is still open.
     pub fn is_open(&self) -> bool {
-        self.0.lock().map(|g| g.is_some()).unwrap_or(false)
+        self.0.lock().map(|g| g.fd.is_some()).unwrap_or(false)
+    }
+}
+
+/// One stream's timers on its connection ([`SocketHandle::override_timers`]),
+/// in force until it is dropped.
+pub struct TimersOverride {
+    shared: Arc<Mutex<Shared>>,
+    id: u64,
+}
+
+impl std::fmt::Debug for TimersOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimersOverride")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl Drop for TimersOverride {
+    fn drop(&mut self) {
+        let mut g = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        g.overrides.retain(|(id, _)| *id != self.id);
+        if let Err(e) = g.apply() {
+            tracing::warn!("a stream's TCP timers were not put back on its connection: {e}");
+        }
     }
 }
 
 /// A TCP stream that hands out a [`SocketHandle`] and closes it as it goes.
 pub(crate) struct TrackedStream {
     inner: TcpStream,
-    handle: Arc<Mutex<Option<OwnedFd>>>,
+    handle: Arc<Mutex<Shared>>,
 }
 
 impl TrackedStream {
@@ -290,7 +417,7 @@ impl TrackedStream {
     pub(crate) fn new(inner: TcpStream) -> Self {
         Self {
             inner,
-            handle: Arc::new(Mutex::new(None)),
+            handle: Arc::new(Mutex::new(Shared::default())),
         }
     }
 
@@ -298,9 +425,9 @@ impl TrackedStream {
     /// descriptor that cannot be duplicated (the process is at its limit)
     /// leaves the handle closed, and the connection serves on without one.
     pub(crate) fn handle(&self) -> SocketHandle {
-        let mut fd = self.handle.lock().unwrap_or_else(|e| e.into_inner());
-        if fd.is_none() {
-            *fd = self.inner.as_fd().try_clone_to_owned().ok();
+        let mut shared = self.handle.lock().unwrap_or_else(|e| e.into_inner());
+        if shared.fd.is_none() {
+            shared.fd = self.inner.as_fd().try_clone_to_owned().ok();
         }
         SocketHandle(self.handle.clone())
     }
@@ -310,7 +437,11 @@ impl Drop for TrackedStream {
     fn drop(&mut self) {
         // Before `inner` closes: under the lock, so a setter in progress
         // finishes first and none starts after.
-        self.handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fd
+            .take();
     }
 }
 
@@ -371,8 +502,8 @@ mod tests {
         // Asked again: the same descriptor, no second one.
         let again = tracked.handle();
         assert!(Arc::ptr_eq(&handle.0, &again.0));
-        handle
-            .set_tcp_user_timeout(Some(Duration::from_secs(7)))
+        let over = handle
+            .override_timers(None, Some(Duration::from_secs(7)))
             .unwrap();
         assert_eq!(
             handle.tcp_user_timeout().unwrap(),
@@ -381,8 +512,56 @@ mod tests {
         assert!(handle.is_open());
         drop(tracked);
         assert!(!handle.is_open());
-        let e = handle.set_tcp_user_timeout(None).unwrap_err();
+        // Dropped after its connection: nothing to put back, no panic.
+        drop(over);
+        let e = handle
+            .override_timers(None, Some(Duration::from_secs(7)))
+            .unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
+    }
+
+    /// Two streams on one connection: each one's timers hold while it
+    /// runs, the newest's fields winning, and once both are gone the
+    /// connection has its accept-time values again, whichever ended first.
+    #[tokio::test]
+    async fn overrides_stack_and_the_last_gone_restores_the_accept_time_timers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = listener.accept().await.unwrap();
+        let _client = client.await.unwrap();
+        let s = Duration::from_secs;
+        socket2::SockRef::from(&server)
+            .set_tcp_keepalive(
+                &socket2::TcpKeepalive::new()
+                    .with_time(s(23))
+                    .with_interval(s(23)),
+            )
+            .unwrap();
+        let tracked = TrackedStream::new(server);
+        let handle = tracked.handle();
+        let now = || {
+            let s = socket2::SockRef::from(&tracked.inner);
+            (
+                s.tcp_keepalive_time().unwrap(),
+                s.tcp_keepalive_interval().unwrap(),
+                s.tcp_user_timeout().unwrap(),
+            )
+        };
+        assert_eq!(now(), (s(23), s(23), None));
+
+        let feed = handle.override_timers(Some(s(37)), Some(s(37))).unwrap();
+        assert_eq!(now(), (s(37), s(37), Some(s(37))));
+        let chat = handle.override_timers(None, Some(s(46))).unwrap();
+        assert_eq!(now(), (s(37), s(37), Some(s(46))), "the newest wins");
+        drop(feed);
+        assert_eq!(
+            now(),
+            (s(23), s(23), Some(s(46))),
+            "the chat stream's alone"
+        );
+        drop(chat);
+        assert_eq!(now(), (s(23), s(23), None), "the accept-time timers");
     }
 
     #[test]

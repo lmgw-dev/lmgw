@@ -10,7 +10,7 @@ use lmgw_api_types::LocalModel;
 use serde_json::Value;
 
 use super::{fmt_ms, phase_label};
-use crate::fmt::{grouped, human_bytes};
+use crate::fmt::{fmt_bytes, grouped};
 use crate::pages::backends::{local_ts, sha7, short_repo};
 use crate::widgets::CopyBtn;
 
@@ -65,7 +65,7 @@ pub fn IdentityCards(run: BenchRun, row: Option<LocalModel>) -> impl IntoView {
     let model = kv(vec![
         ("row", mono(m.model_id.clone())),
         ("weights", path(&m.gguf_path)),
-        ("size", text(human_bytes(m.gguf_size))),
+        ("size", text(fmt_bytes(m.gguf_size))),
         (
             "modified",
             opt(m.gguf_mtime.clone(), |t| text(local_ts(&t))),
@@ -131,7 +131,7 @@ pub fn IdentityCards(run: BenchRun, row: Option<LocalModel>) -> impl IntoView {
     let gpu = kv(vec![
         ("card", opt(g.name.clone(), text)),
         ("driver", opt(g.driver.clone(), mono)),
-        ("VRAM", opt(g.vram_total_bytes, |v| text(human_bytes(v)))),
+        ("VRAM", opt(g.vram_total_bytes, |v| text(fmt_bytes(v)))),
         (
             "power limit",
             opt(g.power_limit_w, |w| text(format!("{w:.0} W"))),
@@ -217,7 +217,7 @@ pub fn IdentityCards(run: BenchRun, row: Option<LocalModel>) -> impl IntoView {
                     "{w:.0} W, baseline VRAM {}",
                     energy
                         .baseline_vram_bytes
-                        .map(human_bytes)
+                        .map(fmt_bytes)
                         .unwrap_or_else(|| "—".into())
                 ))
             }),
@@ -225,7 +225,7 @@ pub fn IdentityCards(run: BenchRun, row: Option<LocalModel>) -> impl IntoView {
         (
             "peak",
             match (energy.peak_power_w, energy.peak_vram_bytes) {
-                (Some(w), Some(v)) => text(format!("{w:.0} W · {}", human_bytes(v))),
+                (Some(w), Some(v)) => text(format!("{w:.0} W · {}", fmt_bytes(v))),
                 (Some(w), None) => text(format!("{w:.0} W")),
                 _ => None,
             },

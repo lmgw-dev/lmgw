@@ -21,7 +21,7 @@ use lmgw_api_types::decision_lab::{
     QuestionDraft, QuestionKind, StateMode, Variant, PERTURB_WITH_OVERRIDE,
 };
 use lmgw_api_types::lab_store::{LabCellResult, LabGroupView};
-use lmgw_core::config::{AuxBackend, AuxKind, HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{AuxBackend, AuxKind, Protocol, UpstreamKind};
 use lmgw_core::egress::openai_wire::SystemOneBody;
 use lmgw_core::gguf::synth;
 use lmgw_core::store::{self, NewAlias, NewAuxModel, NewUpstream};
@@ -124,8 +124,7 @@ pub async fn lab_on(state: lmgw_core::state::SharedState) -> Lab {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
         },
     )
     .await
@@ -318,7 +317,7 @@ async fn the_model_list_carries_a_non_causal_rows_facts_and_limits() {
     );
     assert_eq!(serde_json::to_value(f.batch_source).unwrap(), "ubatch");
     assert_eq!(serde_json::to_value(f.backend).unwrap(), "gpu");
-    assert!(gpu.held && gpu.hold_fallback.is_none(), "{gpu:?}");
+    assert!(gpu.held && gpu.fallback.is_none(), "{gpu:?}");
     assert_eq!(gpu.limits[0].tokens, Some(512));
 }
 
@@ -521,7 +520,7 @@ async fn with_jev(l: &Lab) -> MockServer {
         &l.w.state.db,
         &NewUpstream {
             name: "typesafe".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: up.uri(),
             api_key: Some("sk-up".into()),
@@ -545,6 +544,7 @@ async fn with_jev(l: &Lab) -> MockServer {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -568,8 +568,7 @@ async fn with_jev(l: &Lab) -> MockServer {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::Alias,
-            hold_fallback: Some("jev".into()),
+            fallback: Some("jev".into()),
         },
     )
     .await

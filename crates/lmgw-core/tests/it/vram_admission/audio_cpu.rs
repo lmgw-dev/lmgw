@@ -147,8 +147,7 @@ async fn under_the_hold_a_cpu_row_keeps_serving_and_the_gpu_row_does_not() {
     op(
         &f,
         "audio_model_set",
-        json!({"action": "update", "id": asr, "hold_fallback_mode": "alias",
-               "hold_fallback": "cloud-speech"}),
+        json!({"action": "update", "id": asr, "fallback": "cloud-speech"}),
     )
     .await;
     assert_eq!(speak(&f, "tts").await, 200);
@@ -264,8 +263,7 @@ async fn a_row_switched_while_its_gpu_container_runs_falls_back_like_a_held_row(
     op(
         &f,
         "audio_model_set",
-        json!({"action": "update", "id": id, "hold_fallback_mode": "alias",
-               "hold_fallback": "cloud-speech"}),
+        json!({"action": "update", "id": id, "fallback": "cloud-speech"}),
     )
     .await;
     let snap = f.state.snapshot();

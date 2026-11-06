@@ -24,9 +24,18 @@ async fn price(
         source,
         ..Default::default()
     };
-    store::upsert_price(&l.w.state.db, scope, key, unit, &p, rate, None)
-        .await
-        .unwrap();
+    store::upsert_price(
+        &l.w.state.db,
+        scope,
+        key,
+        unit,
+        lmgw_core::config::PriceTier::Standard,
+        &p,
+        rate,
+        None,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -150,7 +159,12 @@ async fn each_model_names_the_rows_its_requests_are_priced_by() {
 
     // The price the list names is the price a request is recorded at.
     let snap = l.w.state.snapshot();
-    let sheet = snap.sheet_for("jev", Some(up), Some("jev"));
+    let sheet = snap.sheet_for(
+        "jev",
+        Some(up),
+        Some("jev"),
+        Some(lmgw_core::config::PriceTier::Standard),
+    );
     assert_eq!(sheet.tokens.unwrap().price_in, Some(0.8));
     assert_eq!(sheet.request.map(|r| r.price), Some(0.001));
 }

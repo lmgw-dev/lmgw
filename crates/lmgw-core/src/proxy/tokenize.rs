@@ -68,6 +68,12 @@ async fn tokenize(
     // The log row's `ingress_proto` has no llama.cpp spelling; `/tokenize` is
     // an OpenAI-family route like the rest of lmgw's own counters.
     let mut row = counter_row(&state, ClientProto::OpenaiChat, &ctx, &Value::Null);
+    // A malformed `x-lmgw-background` is this route's 400 in its own shape
+    // (per-request background design §3).
+    if let Some(e) = ctx.background_refusal() {
+        row.failed(&e).await;
+        return llama_error_of(&e);
+    }
     let body = match read_body(&state, body) {
         Ok(b) => b,
         Err(e) => {
@@ -98,6 +104,7 @@ async fn tokenize(
         &alias,
         RouteCheck::Count("/tokenize"),
         false,
+        ctx.origin(),
         Some(&mut row),
     )
     .await
@@ -172,7 +179,7 @@ async fn tokenize(
     if !status.is_success() {
         let e =
             crate::egress::for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes);
-        row.answered(status.as_u16(), Some((e.kind(), e.to_string())))
+        row.answered(status.as_u16(), Some((e.kind(), e.log_text())))
             .await;
     } else {
         row.answered(status.as_u16(), None).await;
@@ -211,14 +218,14 @@ pub(super) fn read_bytes(
 
 /// A [`GatewayError`] in llama.cpp's error shape ([`llama_error`]).
 pub(super) fn llama_error_of(e: &GatewayError) -> Response {
-    llama_error(e.http_status(), &e.to_string(), e.code())
+    llama_error(e.http_status(), &e.to_string(), e.kind())
 }
 
 /// llama.cpp's error shape (api-docs design §5.3):
 /// `{"error": {"code": <status>, "message", "type", "lmgw_code"}}`.
 ///
 /// `type` is llama.cpp's word for the status. `lmgw_code` is lmgw's own
-/// [`GatewayError::code`], so a client that checks for `gpu_hold` still can.
+/// [`GatewayError::kind`], so a client that checks for `gpu_hold` still can.
 ///
 /// Three refusals are answered before this route's handler runs, by layers
 /// every `/v1` route shares, and so in the `/v1` OpenAI dialect instead

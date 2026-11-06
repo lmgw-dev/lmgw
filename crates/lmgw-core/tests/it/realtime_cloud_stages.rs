@@ -51,7 +51,7 @@ async fn openai_upstream(state: &SharedState) -> MockServer {
         &state.db,
         &NewUpstream {
             name: "openai".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -79,6 +79,7 @@ async fn openai_upstream(state: &SharedState) -> MockServer {
                 param_overrides: Default::default(),
                 enabled: true,
                 capabilities_override: Some(json!({ "capabilities": { "task": task } })),
+                fallback: None,
             },
         )
         .await

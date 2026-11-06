@@ -27,6 +27,13 @@ pub struct McpToolSpec {
     /// `require_approval` — which of this server's tools need a round trip
     /// before they run.
     pub require_approval: ApprovalRule,
+    /// `server_url`, as written: a server for the upstream to dial (OpenAI's
+    /// hosted MCP tool). lmgw serves the label itself only when this is unset
+    /// or names lmgw's own `/mcp` (openai egress design §6); it never dials
+    /// it.
+    pub server_url: Option<String>,
+    /// `connector_id`: one of OpenAI's connectors, never a server of lmgw's.
+    pub connector_id: Option<String>,
 }
 
 impl McpToolSpec {
@@ -169,8 +176,24 @@ pub fn parse_mcp_tool(t: &Value) -> Result<McpToolSpec, String> {
     Ok(McpToolSpec {
         allowed_tools: parse_allowed_tools(t.get("allowed_tools"), &label)?,
         require_approval: parse_require_approval(t.get("require_approval"), &label)?,
+        server_url: optional_string(t, "server_url", &label)?,
+        connector_id: optional_string(t, "connector_id", &label)?,
         server_label: label,
     })
+}
+
+/// A string field of an `mcp` entry that may be left out. Any other value is
+/// refused rather than read as absent: an unreadable `server_url` taken for
+/// none would hand the block to lmgw's same-label server.
+fn optional_string(t: &Value, key: &str, label: &str) -> Result<Option<String>, String> {
+    match t.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(v)) => Ok(Some(v.clone())),
+        Some(other) => Err(format!(
+            "{key} on mcp server '{label}' must be a string, got {}",
+            kind_of(other)
+        )),
+    }
 }
 
 /// `allowed_tools` in either spelling: a list of names, or the filter object

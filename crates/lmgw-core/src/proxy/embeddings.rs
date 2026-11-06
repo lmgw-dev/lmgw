@@ -13,6 +13,7 @@ use crate::error::GatewayError;
 use crate::gate::{FallbackReason, GateHeaders};
 use crate::ingress::ClientProto;
 use crate::ir::{EmbeddingsRequest, EmbeddingsResponse, RerankRequest, RerankResponse, Usage};
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
@@ -32,14 +33,14 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
     // go away before the row is written (`unanswered.rs`).
     let mut unanswered = Unanswered::open(&state, proto, &ctx, &alias, started, RequestClass::Aux);
 
-    if let Some(e) = policy_refusal(&state, &ctx, &alias).await {
+    if let Some(e) = policy_refusal_priced(&state, &ctx, proto, &alias, RequestClass::Aux).await {
         unanswered.logging();
         record_refusal(&state, proto, &ctx, &alias, started, RequestClass::Aux, &e).await;
         return error_response(proto, &e);
     }
 
     unanswered.stage("waiting for admission, or for the model's answer");
-    let result = embeddings_inner(&state, &body).await;
+    let result = embeddings_inner(&state, &body, ctx.origin()).await;
     // Every way on writes the row.
     unanswered.logging();
     match result {
@@ -60,6 +61,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 200,
                 None,
@@ -87,11 +89,12 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
             )
             .await;
             resp
@@ -99,7 +102,11 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
     }
 }
 
-async fn embeddings_inner(state: &SharedState, body: &Value) -> Result<Served<Value>, Failed> {
+async fn embeddings_inner(
+    state: &SharedState,
+    body: &Value,
+    origin: Origin,
+) -> Result<Served<Value>, Failed> {
     let alias = body.get("model").and_then(Value::as_str).ok_or((
         None,
         GateHeaders::default(),
@@ -109,7 +116,7 @@ async fn embeddings_inner(state: &SharedState, body: &Value) -> Result<Served<Va
         embeddings_fields(body).map_err(|e| (None, GateHeaders::default(), e))?;
 
     let (route, headers, parsed) =
-        embed_in_process(state, alias, inputs, dimensions, false).await?;
+        embed_in_process(state, alias, inputs, dimensions, false, origin, None).await?;
     let data: Vec<Value> = parsed
         .embeddings
         .iter()
@@ -215,6 +222,9 @@ fn base64_f32(v: &[f32]) -> String {
 /// (candidate-aliases design §4.7, [`crate::gate::Routed::admit_pinned`]).
 /// The hold's swap still happens; the caller refuses that one itself.
 ///
+/// `origin`: whose traffic the call is (per-request background design §3):
+/// `/v1/embeddings` with `x-lmgw-background: on` is a guest.
+///
 /// `dimensions`: [`EmbeddingsRequest::dimensions`]. Every vector that comes
 /// back has to have that length, or the call is refused as unsupported by
 /// the route — a backend that ignores the field would otherwise hand the
@@ -225,6 +235,8 @@ pub(crate) async fn embed_in_process(
     inputs: Vec<String>,
     dimensions: Option<u32>,
     pinned: bool,
+    origin: Origin,
+    priced: Option<(&KeyRef, &str)>,
 ) -> Result<(Route, GateHeaders, EmbeddingsResponse), Failed> {
     let req = EmbeddingsRequest {
         model_alias: alias.to_string(),
@@ -241,15 +253,32 @@ pub(crate) async fn embed_in_process(
     // answers on (§5).
     let check = crate::gate::RouteCheck::Embeddings;
     let opened = if pinned {
-        crate::gate::open_pinned(state, alias, check).await
+        crate::gate::open_pinned(state, alias, check, origin).await
     } else {
-        crate::gate::open(state, alias, check).await
+        crate::gate::open(state, alias, check, origin).await
     };
     let crate::gate::Opened {
         route,
         hold,
         headers,
     } = opened.map_err(|f| (f.route, f.headers, f.error))?;
+
+    // The gateway's own embedding work (ingest, re-embed, probes) is checked
+    // here, where the route is final: the public handler checked its caller
+    // before the gate and passes no `priced`. A budgeted gateway refuses an
+    // unpriced cloud encoder like it refuses any other unpriced send.
+    if let Some((key, ingress_proto)) = priced {
+        priced_refusal(
+            state,
+            key,
+            ingress_proto,
+            alias,
+            &route,
+            RequestClass::Aux,
+            None,
+        )
+        .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
+    }
 
     let egress = for_protocol(route.upstream.protocol);
 
@@ -263,6 +292,7 @@ pub(crate) async fn embed_in_process(
     .await
     .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     let status = resp.status();
+    state.upstream_quota.answered(&route, status);
     let bytes = resp.bytes().await.map_err(|e| {
         (
             Some(Box::new(route.clone())),
@@ -330,6 +360,11 @@ pub(crate) async fn embed_in_process(
 /// device's, when a turn of one embeds its query (client-apps design L4), or
 /// nobody's — the label's internal identity.
 ///
+/// `origin` is whose traffic the call is (per-request background design
+/// §7): a `docs__query` or `kb__search` made by a `/v1/responses` run's
+/// tool carries the run's — a guest's embed then defers rather than
+/// disturb the owner, and never takes a fallback's vectors (it is pinned).
+///
 /// Erased ([`crate::erased`]): the embedders, probes and ingest jobs of
 /// quickdoc and the knowledge bases await it.
 pub(crate) fn embed_once<'a>(
@@ -337,12 +372,21 @@ pub(crate) fn embed_once<'a>(
     alias: &'a str,
     inputs: Vec<String>,
     ingress_proto: &'a str,
-    key: KeyRef,
+    (key, origin): (KeyRef, Origin),
 ) -> crate::erased::Erased<'a, Result<(Route, GateHeaders, EmbeddingsResponse), Failed>> {
     futures::FutureExt::boxed(async move {
         let started = Instant::now();
         state.telemetry.request_started();
-        let result = embed_in_process(state, alias, inputs, None, true).await;
+        let result = embed_in_process(
+            state,
+            alias,
+            inputs,
+            None,
+            true,
+            origin,
+            Some((&key, ingress_proto)),
+        )
+        .await;
         log_in_process_aux(
             state,
             key,
@@ -376,14 +420,14 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
     // go away before the row is written (`unanswered.rs`).
     let mut unanswered = Unanswered::open(&state, proto, &ctx, &alias, started, RequestClass::Aux);
 
-    if let Some(e) = policy_refusal(&state, &ctx, &alias).await {
+    if let Some(e) = policy_refusal_priced(&state, &ctx, proto, &alias, RequestClass::Aux).await {
         unanswered.logging();
         record_refusal(&state, proto, &ctx, &alias, started, RequestClass::Aux, &e).await;
         return error_response(proto, &e);
     }
 
     unanswered.stage("waiting for admission, or for the model's answer");
-    let result = rerank_inner(&state, &body).await;
+    let result = rerank_inner(&state, &body, ctx.origin()).await;
     // Every way on writes the row.
     unanswered.logging();
     match result {
@@ -404,6 +448,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 200,
                 None,
@@ -431,11 +476,12 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     rung: None,
                     degraded: None,
                     quantities: Default::default(),
+                    service_tier: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
                 Usage::default(),
-                Some((e.kind(), e.to_string())),
+                Some((e.kind(), e.log_text())),
             )
             .await;
             resp
@@ -443,7 +489,11 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
     }
 }
 
-async fn rerank_inner(state: &SharedState, body: &Value) -> Result<Served<Value>, Failed> {
+async fn rerank_inner(
+    state: &SharedState,
+    body: &Value,
+    origin: Origin,
+) -> Result<Served<Value>, Failed> {
     let alias = body.get("model").and_then(Value::as_str).ok_or((
         None,
         GateHeaders::default(),
@@ -481,7 +531,7 @@ async fn rerank_inner(state: &SharedState, body: &Value) -> Result<Served<Value>
         .map(|n| n as usize);
 
     let (route, headers, parsed) =
-        rerank_in_process(state, alias, query, documents, top_n, false).await?;
+        rerank_in_process(state, alias, query, documents, top_n, false, origin).await?;
     let results: Vec<Value> = parsed
         .results
         .iter()
@@ -517,15 +567,16 @@ pub(crate) async fn rerank_in_process(
     documents: Vec<String>,
     top_n: Option<usize>,
     pinned: bool,
+    origin: Origin,
 ) -> Result<(Route, GateHeaders, RerankResponse), Failed> {
     // The gate's per-request half, as in `embed_in_process`: the hold swap,
     // the media check and the embedding-section guard
     // ([`crate::gate::RouteCheck::Rerank`]), then admission.
     let check = crate::gate::RouteCheck::Rerank;
     let opened = if pinned {
-        crate::gate::open_pinned(state, alias, check).await
+        crate::gate::open_pinned(state, alias, check, origin).await
     } else {
-        crate::gate::open(state, alias, check).await
+        crate::gate::open(state, alias, check, origin).await
     };
     let crate::gate::Opened {
         route,
@@ -551,6 +602,7 @@ pub(crate) async fn rerank_in_process(
     .await
     .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     let status = resp.status();
+    state.upstream_quota.answered(&route, status);
     let bytes = resp.bytes().await.map_err(|e| {
         (
             Some(Box::new(route.clone())),
@@ -590,7 +642,7 @@ pub(crate) async fn rerank_in_process(
 /// rerank stage, and logged for the same reason: a query whose time went to the
 /// reranker should say so in Logs rather than look like a slow search. Pinned,
 /// like [`embed_once`]: every caller is quickdoc's retrieval. The row is
-/// `key`'s, as [`embed_once`]'s.
+/// `key`'s and the traffic `origin`'s, as [`embed_once`]'s.
 pub(crate) async fn rerank_once(
     state: &SharedState,
     alias: &str,
@@ -598,11 +650,11 @@ pub(crate) async fn rerank_once(
     documents: Vec<String>,
     top_n: Option<usize>,
     ingress_proto: &str,
-    key: KeyRef,
+    (key, origin): (KeyRef, Origin),
 ) -> Result<(Route, GateHeaders, RerankResponse), Failed> {
     let started = Instant::now();
     state.telemetry.request_started();
-    let result = rerank_in_process(state, alias, query, documents, top_n, true).await;
+    let result = rerank_in_process(state, alias, query, documents, top_n, true, origin).await;
     log_in_process_aux(
         state,
         key,
@@ -639,7 +691,7 @@ async fn log_in_process_aux(
             route,
             e.http_status().as_u16(),
             Usage::default(),
-            Some((e.kind(), e.to_string())),
+            Some((e.kind(), e.log_text())),
         ),
     };
     let Some(route) = route else {
@@ -663,6 +715,7 @@ async fn log_in_process_aux(
             rung: None,
             degraded: None,
             quantities: Default::default(),
+            service_tier: Default::default(),
         },
         status,
         Some(started.elapsed().as_millis() as i64),

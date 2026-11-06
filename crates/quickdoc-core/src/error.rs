@@ -36,6 +36,12 @@ pub enum QuickdocError {
     RerankCount { want: usize, got: usize },
     #[error("embedder failed: {0}")]
     Embedder(String),
+    /// The embedder refused an input as larger than it takes — decided by
+    /// the embedder's adapter on its own error type, not on these words — so
+    /// a caller can split the input and try again. Worded as
+    /// [`Embedder`](Self::Embedder).
+    #[error("embedder failed: {0}")]
+    EmbedderOversize(String),
     #[error("reranker failed: {0}")]
     Reranker(String),
     #[error("malformed corpus id {0:?} — expected `library@version`")]

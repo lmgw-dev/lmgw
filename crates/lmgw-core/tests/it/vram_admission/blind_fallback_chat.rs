@@ -196,8 +196,7 @@ async fn chat_model_sees(f: &Fixture, vision: bool) {
             image: row.image,
             extra_run_args: row.extra_run_args,
             warm_start: row.warm_start,
-            hold_fallback_mode: row.hold_fallback_mode,
-            hold_fallback: row.hold_fallback,
+            fallback: row.fallback,
             capabilities_override: Some(json!({"capabilities": {
                 "task": "chat", "endpoints": ["/v1/chat/completions"],
                 "vision": vision, "source": "owner",

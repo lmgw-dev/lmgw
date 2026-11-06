@@ -11,19 +11,27 @@
 //!
 //! Skipped when admission has nothing to measure against (no GPU telemetry
 //! and no `vram.budget_mb`) and for a row planned on the CPU.
+//!
+//! The footprint at any context comes from [`Sizer`], over the plan's one
+//! input ([`PlanFiles`], find-a-model design WP2), which read every file
+//! before: nothing here touches the disk. A fit on the card
+//! ([`super::fit`]) searches the same footprints with [`largest_fitting`].
 
 use serde_json::{Map, Value};
 
 use crate::config::Snapshot;
-use crate::gguf::ModelSummary;
 use crate::hf::fmt_bytes;
 use crate::state::SharedState;
+use crate::vram::plan::chat::{ChatFiles, Second, Shape};
+use crate::vram::plan::GgufFiles;
 use crate::vram::Footprint;
+
+use super::plan_files::PlanFiles;
 
 /// What a plan is checked against: the capacity admission refuses beyond
 /// (`vram.budget_mb`, else the devices' total) and the headroom it adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Card {
+pub struct Card {
     pub capacity: u64,
     pub headroom: u64,
     /// The capacity is `vram.budget_mb`, not the devices' total.
@@ -47,87 +55,209 @@ impl Card {
         })
     }
 
-    fn fits(&self, fp: &Footprint) -> bool {
+    pub fn fits(&self, fp: &Footprint) -> bool {
         fp.total_bytes.saturating_add(self.headroom) <= self.capacity
     }
 }
 
-/// Finding 3 for a chat plan: the planned row's weights, projector, drafter,
-/// KV cache and compute buffers at the planned slots, batch sizes, cache
-/// types and speculative decoding, as admission charges a chat row
-/// ([`crate::vram::plan::chat`]), against the card. `None` without a card,
-/// without a context, and when it fits.
-pub(super) async fn chat(
-    state: &SharedState,
-    snap: &Snapshot,
-    dir: &str,
-    rel: &str,
-    s: &ModelSummary,
-    params: &Map<String, Value>,
-) -> Option<String> {
-    use crate::config::LlamaParams;
-    use crate::vram::plan::chat::{footprint, ChatFiles, Second, Shape};
-    use crate::vram::plan::GgufFiles;
+/// The footprint a planned row is charged at any context, from the plan's
+/// input and the plan's own parameters (find-a-model design §3.1): what the
+/// plan's warning and a fit both search over, so they never disagree about
+/// a number. Pure: every file was read into the [`PlanFiles`] before.
+pub struct Sizer {
+    kind: SizerKind,
+    rel: String,
+    /// The context the plan sets (`ctx_size`, else the trained one); `None`
+    /// when neither is known.
+    pub ctx: Option<u64>,
+    /// What else can be done, besides a smaller context.
+    pub instead: &'static str,
+    /// The row is planned on the CPU: nothing on the card.
+    pub on_cpu: bool,
+}
 
-    let text = |k: &str| params.get(k).and_then(Value::as_str);
-    if params.get("n_gpu_layers").and_then(Value::as_i64) == Some(0) {
+enum SizerKind {
+    Chat {
+        files: Box<ChatFiles>,
+        shape: Shape,
+    },
+    Aux {
+        files: Box<GgufFiles>,
+        ubatch: Option<i64>,
+        batch: Option<i64>,
+        tied: bool,
+    },
+}
+
+impl Sizer {
+    /// A chat plan's sizer: the planned row's weights, projector, drafter,
+    /// KV cache and compute buffers at the planned slots, batch sizes, cache
+    /// types and speculative decoding, as admission charges a chat row
+    /// ([`crate::vram::plan::chat`]).
+    pub fn chat(files: &PlanFiles, params: &Map<String, Value>) -> Self {
+        use crate::config::LlamaParams;
+
+        let text = |k: &str| params.get(k).and_then(Value::as_str);
+        let on_cpu = params.get("n_gpu_layers").and_then(Value::as_i64) == Some(0);
+        let ctx = params
+            .get("ctx_size")
+            .and_then(Value::as_u64)
+            .or(files.summary.context_length);
+        let companions: Vec<&str> = ["mmproj_path", "draft_gguf_path"]
+            .into_iter()
+            .filter_map(text)
+            .collect();
+        // The plan's parameters are a row's typed fields by name.
+        let planned: LlamaParams =
+            serde_json::from_value(Value::Object(params.clone())).unwrap_or_default();
+        let shape = Shape::of(&planned, &[]);
+        let draft = match &shape.second {
+            Second::Draft { path, .. } => Some(
+                files
+                    .companion(path)
+                    .map(|c| c.summary.clone())
+                    .ok_or_else(|| format!("{path} is not a drafter beside the weights")),
+            ),
+            _ => None,
+        };
+        Self {
+            kind: SizerKind::Chat {
+                files: Box::new(ChatFiles {
+                    files: files.gguf_files(&companions),
+                    draft,
+                }),
+                shape,
+            },
+            rel: files.rel.clone(),
+            ctx,
+            instead: "run it on the CPU (n_gpu_layers 0)",
+            on_cpu,
+        }
+    }
+
+    /// An aux plan's sizer: the planned row's footprint on the GPU as
+    /// admission charges it ([`crate::vram::plan::aux`]). A plan that ties
+    /// the ubatch to the context (a whole input in one ubatch) keeps the tie
+    /// at every context.
+    pub fn aux(files: &PlanFiles, params: &Map<String, Value>) -> Self {
+        let int = |k: &str| params.get(k).and_then(Value::as_i64);
+        let on_cpu = params.get("backend").and_then(Value::as_str) == Some("cpu");
+        let ctx = int("ctx_size")
+            .and_then(|c| u64::try_from(c).ok())
+            .or(files.summary.context_length);
+        let companions: Vec<&str> = params
+            .get("mmproj_path")
+            .and_then(Value::as_str)
+            .into_iter()
+            .collect();
+        let (ubatch, batch) = (int("ubatch_size"), int("batch_size"));
+        Self {
+            kind: SizerKind::Aux {
+                files: Box::new(files.gguf_files(&companions)),
+                ubatch,
+                batch,
+                tied: ubatch.is_some() && ubatch == int("ctx_size"),
+            },
+            rel: files.rel.clone(),
+            ctx,
+            instead: "run it on the CPU (backend=cpu), where it takes no VRAM",
+            on_cpu,
+        }
+    }
+
+    /// The footprint at `c` tokens of context.
+    pub fn at(&self, c: u64) -> Footprint {
+        self.sized(Some(c))
+    }
+
+    /// The footprint at the planned context, none included.
+    pub fn at_planned(&self) -> Footprint {
+        self.sized(self.ctx)
+    }
+
+    fn sized(&self, c: Option<u64>) -> Footprint {
+        match &self.kind {
+            SizerKind::Chat { files, shape } => {
+                let at = Shape {
+                    ctx: c,
+                    ..shape.clone()
+                };
+                crate::vram::plan::chat::footprint(files, &self.rel, &at)
+            }
+            SizerKind::Aux {
+                files,
+                ubatch,
+                batch,
+                tied,
+            } => {
+                use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+                use crate::vram::plan::aux::{footprint, Batches, Placement};
+                let count = |n: Option<i64>, default: i64| n.unwrap_or(default).unsigned_abs();
+                let tied_to = c.filter(|_| *tied);
+                let batches = Batches {
+                    ubatch: tied_to.unwrap_or_else(|| count(*ubatch, LLAMA_DEFAULT_UBATCH)),
+                    batch: tied_to.unwrap_or_else(|| count(*batch, LLAMA_DEFAULT_BATCH)),
+                    flash_attn_off: false,
+                };
+                // The plan renders no cache type, so the KV cache is f16.
+                let ctx = c.map(|c| i64::try_from(c).unwrap_or(i64::MAX));
+                footprint(files, &self.rel, ctx, (16, 16), Placement::Gpu, batches)
+            }
+        }
+    }
+}
+
+/// Finding 3 for a plan: the warning when the planned row doesn't fit the
+/// card, with the largest context that does. `None` for a row planned on
+/// the CPU, without a card, without a context, and when it fits.
+pub(super) async fn warning(state: &SharedState, snap: &Snapshot, sizer: &Sizer) -> Option<String> {
+    if sizer.on_cpu {
         return None;
     }
     let card = Card::of(state, snap).await?;
-    let ctx = params
-        .get("ctx_size")
-        .and_then(Value::as_u64)
-        .or(s.context_length)?;
-    let mut companion_bytes = 0u64;
-    for p in ["mmproj_path", "draft_gguf_path"]
-        .into_iter()
-        .filter_map(text)
-    {
-        let len = tokio::fs::metadata(std::path::Path::new(dir).join(p))
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        companion_bytes = companion_bytes.saturating_add(len);
+    let ctx = sizer.ctx?;
+    over_card(&card, ctx, sizer.instead, |c| sizer.at(c))
+}
+
+/// What the search over the contexts `1..=ctx` found ([`largest_fitting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Search {
+    /// The whole `ctx` fits.
+    All,
+    /// It doesn't, and this is the largest that does.
+    Upto(u64),
+    /// Not even one token fits.
+    None,
+}
+
+/// The largest context in `1..=ctx` whose footprint `at` fits `card` (a
+/// context of 0 is read as 1). `at` grows with the context (KV cache,
+/// attention mask) and never shrinks, so a bisection finds it.
+pub fn largest_fitting(card: &Card, ctx: u64, at: impl Fn(u64) -> Footprint) -> Search {
+    let ctx = ctx.max(1);
+    if card.fits(&at(ctx)) {
+        return Search::All;
     }
-    // The plan's parameters are a row's typed fields by name.
-    let planned: LlamaParams =
-        serde_json::from_value(Value::Object(params.clone())).unwrap_or_default();
-    let shape = Shape::of(&planned, &[]);
-    let draft = match &shape.second {
-        Second::Draft { path, .. } => {
-            let path = std::path::Path::new(dir).join(path);
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    crate::gguf::summarize(&path).map_err(|e| e.to_string())
-                })
-                .await
-                .unwrap_or_else(|e| Err(e.to_string())),
-            )
+    if !card.fits(&at(1)) {
+        return Search::None;
+    }
+    // The largest n in 1..ctx with at(n) fitting: at(1) fits, at(ctx) does not.
+    let (mut lo, mut hi) = (1u64, ctx);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if card.fits(&at(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
         }
-        _ => None,
-    };
-    let files = ChatFiles {
-        files: GgufFiles {
-            main_bytes: s.file_size,
-            companion_bytes,
-            summary: Ok(s.clone()),
-        },
-        draft,
-    };
-    over_card(&card, ctx, "run it on the CPU (n_gpu_layers 0)", |c| {
-        let at = Shape {
-            ctx: Some(c),
-            ..shape.clone()
-        };
-        footprint(&files, rel, &at)
-    })
+    }
+    Search::Upto(lo)
 }
 
 /// The warning for a GPU row planned at `ctx` whose footprint `at(ctx)` plus
 /// the headroom exceeds `card`; `None` when it fits. The largest context
-/// that fits is searched over `1..ctx` through `at`, which grows with the
-/// context (KV cache, attention mask) and never shrinks. `instead` names
-/// what else can be done, besides a smaller context.
+/// that fits is searched over `1..ctx` through `at` ([`largest_fitting`]).
+/// `instead` names what else can be done, besides a smaller context.
 pub(super) fn over_card(
     card: &Card,
     ctx: u64,
@@ -135,10 +265,12 @@ pub(super) fn over_card(
     at: impl Fn(u64) -> Footprint,
 ) -> Option<String> {
     let ctx = ctx.max(1);
+    let lo = match largest_fitting(card, ctx, &at) {
+        Search::All => return None,
+        Search::None => None,
+        Search::Upto(n) => Some(n),
+    };
     let planned = at(ctx);
-    if card.fits(&planned) {
-        return None;
-    }
     let terms = |fp: &Footprint| {
         let mut t = format!(
             "weights {}, KV cache {}",
@@ -151,43 +283,39 @@ pub(super) fn over_card(
         t
     };
     let of = if card.budget {
-        "vram.budget_mb"
+        format!(
+            "the declared GPU memory budget, {} ({})",
+            fmt_bytes(card.capacity),
+            crate::config::BUDGET_LABEL
+        )
     } else {
-        "the GPU's total memory"
+        format!("the GPU's total memory ({})", fmt_bytes(card.capacity))
     };
     let outcome = if card.admission {
-        "admission will refuse to load it (\"no eviction can make it fit\")"
+        "admission will refuse to load it (\"no eviction can make it fit\")".to_string()
     } else {
-        "admission is off (vram.enabled), so nothing refuses the start, and llama-server tries \
-         to load it into memory the card does not have"
+        format!(
+            "admission is off ({}), so nothing refuses the start, and llama-server tries to \
+             load it into memory the card does not have",
+            crate::config::ADMISSION_LABEL
+        )
     };
     let head = format!(
         "on the GPU at ctx_size {ctx}, this row's estimated footprint is {} ({}) plus the {} \
-         headroom, more than {of} ({}): {outcome}",
+         headroom, more than {of}: {outcome}",
         fmt_bytes(planned.total_bytes),
         terms(&planned),
         fmt_bytes(card.headroom),
-        fmt_bytes(card.capacity)
     );
-    let smallest = at(1);
-    if !card.fits(&smallest) {
+    let Some(lo) = lo else {
+        let smallest = at(1);
         return Some(format!(
             "{head}. No ctx_size fits: at 1 token it is still {} ({}). The plan keeps the \
              trained context; {instead}",
             fmt_bytes(smallest.total_bytes),
             terms(&smallest)
         ));
-    }
-    // The largest n in 1..ctx with at(n) fitting: at(1) fits, at(ctx) does not.
-    let (mut lo, mut hi) = (1u64, ctx);
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if card.fits(&at(mid)) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
+    };
     Some(format!(
         "{head}. The largest ctx_size that fits is {lo} ({} there). The plan keeps the trained \
          context, so the overrun stays visible: lower ctx_size to at most {lo} yourself, or \
@@ -260,7 +388,7 @@ mod tests {
         let w = over_card(&card(), 262_144, "set backend=cpu", vl8b).unwrap();
         assert!(w.contains("ctx_size 262144"), "{w}");
         assert!(w.contains("41.5 GiB"), "the estimate: {w}");
-        assert!(w.contains("compute buffer 512.0 MiB"), "{w}");
+        assert!(w.contains("compute buffer 512 MiB"), "{w}");
         assert!(
             w.contains("24.0 GiB") && w.contains("1.0 GiB headroom"),
             "{w}"
@@ -286,7 +414,7 @@ mod tests {
         };
         let w = over_card(&budget, 8192, "offload fewer layers", huge).unwrap();
         assert!(
-            w.contains("No ctx_size fits") && w.contains("vram.budget_mb"),
+            w.contains("No ctx_size fits") && w.contains("GPU memory budget"),
             "{w}"
         );
         assert!(

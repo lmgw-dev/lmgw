@@ -106,7 +106,7 @@ impl BenchState {
         if let Some(l) = self.launcher.read().unwrap().clone() {
             return l;
         }
-        Arc::new(PodmanLauncher::new(state.runtime().runner()))
+        Arc::new(PodmanLauncher::new(state.runtime().runner(), state.cdi()))
     }
 
     /// Test-only: the launcher runs use from now on.

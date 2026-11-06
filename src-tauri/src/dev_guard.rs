@@ -144,14 +144,23 @@ pub(crate) fn tray_label(debug_build: bool) -> &'static str {
 }
 
 /// The tray's tooltip: a debug build names itself and its data dir, and the
-/// GPU hold is said when it is on (gpu-hold design §6).
-pub(crate) fn tray_tooltip(data_dir: &Path, debug_build: bool, hold: bool) -> String {
+/// GPU hold is said when it is on (gpu-hold design §6), and the machine
+/// check's plain sentence while the graphics card needs attention.
+pub(crate) fn tray_tooltip(
+    data_dir: &Path,
+    debug_build: bool,
+    hold: bool,
+    attention: Option<&str>,
+) -> String {
     let mut tip = tray_label(debug_build).to_string();
     if debug_build {
         tip.push_str(&format!(" — {}", data_dir.display()));
     }
     if hold {
         tip.push_str(" — GPU hold: local models paused, new loads refused or re-routed");
+    }
+    if let Some(sentence) = attention {
+        tip.push_str(&format!(" — {sentence}"));
     }
     tip
 }
@@ -241,10 +250,18 @@ mod tests {
             Some(PathBuf::from("/srv/dev-copy/tray-icon"))
         );
         assert_eq!(tray_icon_dir(dir, false), None, "tray-icon's default");
-        assert_eq!(tray_tooltip(dir, false, false), "lmgw");
-        assert_eq!(tray_tooltip(dir, true, false), "lmgw (dev) — /srv/dev-copy");
-        assert!(tray_tooltip(dir, true, true).starts_with("lmgw (dev) — /srv/dev-copy — GPU hold"));
-        assert!(tray_tooltip(dir, false, true).starts_with("lmgw — GPU hold"));
+        assert_eq!(tray_tooltip(dir, false, false, None), "lmgw");
+        assert_eq!(
+            tray_tooltip(dir, true, false, None),
+            "lmgw (dev) — /srv/dev-copy"
+        );
+        assert!(tray_tooltip(dir, true, true, None)
+            .starts_with("lmgw (dev) — /srv/dev-copy — GPU hold"));
+        assert!(tray_tooltip(dir, false, true, None).starts_with("lmgw — GPU hold"));
+        assert_eq!(
+            tray_tooltip(dir, false, false, Some("Restart the computer.")),
+            "lmgw — Restart the computer."
+        );
     }
 
     #[test]

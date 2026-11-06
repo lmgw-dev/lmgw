@@ -334,6 +334,22 @@ async fn catalog_refresh_install_and_serve_round_trip() {
     assert_eq!(body["files_queued"], json!(1));
     let dl_id = body["downloads"][0]["id"].as_i64().unwrap();
     assert_eq!(body["downloads"][0]["file"], json!("english/model.gguf"));
+    // The audio class's image (machine-check design §5, D37): a test state
+    // has no podman to ask, so whether it is here is not known — said, with
+    // the image and why, and nothing fetched.
+    assert_eq!(body["engine"]["state"], "not_known", "{body}");
+    assert_eq!(
+        body["engine"]["image"].as_str(),
+        Some(state.snapshot().settings.audio.image.trim()),
+        "{body}"
+    );
+    assert_eq!(body["engine"]["job_id"], Value::Null, "{body}");
+    assert!(
+        body["engine"]["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("no container runtime")),
+        "{body}"
+    );
 
     let mut status = String::new();
     for _ in 0..200 {

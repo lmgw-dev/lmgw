@@ -32,7 +32,10 @@
 //! - `GET /chat/api/threads/{id}/tasks`, `POST /chat/api/threads/{id}/answer` and
 //!   `POST /chat/api/threads/{id}/tasks/{task}/cancel`: answering a
 //!   thread's MCP task results, and cancelling a task
-//!   ([`tasks`](mod@tasks)).
+//!   ([`tasks`](mod@tasks));
+//! - `/transfers/api/*`: a file offered to another device of the same app,
+//!   uploaded in ranges, downloaded with ranges, received, declined and
+//!   canceled ([`transfer`](mod@transfer)).
 //!
 //! A refusal reads with [`read_refusal`] as an [`ApiError`]: the Chat
 //! routes answer the flat `{code, message}`, the realtime handshake
@@ -60,6 +63,8 @@ pub use lmgw_api_types::ApiError;
 pub enum Method {
     Get,
     Post,
+    /// A transfer's upload ([`transfer::upload`]).
+    Put,
 }
 
 impl Method {
@@ -67,6 +72,7 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Put => "PUT",
         }
     }
 }
@@ -601,6 +607,15 @@ reader!(
 pub mod approvals;
 pub use approvals::{approvals, read_transcription, transcribe};
 
+/// A thread browser: the archived list, the search, create, pin, archive,
+/// move and delete.
+pub mod threads;
+pub use threads::{
+    archive, archived_threads, create_thread, delete, move_to_folder, pin, read_changed,
+    read_created, read_deleted, read_search, search, SearchHit, SearchPage, SearchScope,
+    SearchThread, ThreadCreate,
+};
+
 /// A chat turn's send.
 pub mod send;
 pub use send::{send, ErrorFrame, LabelCode, SendRequest, TurnEvent};
@@ -611,7 +626,12 @@ pub use tasks::{answer, cancel_task, read_task_cancelled, read_thread_tasks, thr
 
 /// Enrolment over the device link (device link design §3.4, §6.3).
 pub mod enrol;
-pub use enrol::{confirm_code, enrol, read_enrolment, CertDates, CredentialState, Credentials};
+pub use enrol::{
+    confirm_code, enrol, read_enrolment, CertDates, CredentialState, Credentials, DeviceSelf,
+};
+
+/// Transfers between devices (device transfers design §9, §11.3).
+pub mod transfer;
 
 /// A voice session over WebRTC, and its hangup (realtime calls design §2).
 pub mod calls;
@@ -876,7 +896,10 @@ mod tests {
         let r = enrol(
             &crate::pairing::PairingToken::parse(token).unwrap(),
             &[0x30, 0x59],
-            Some("Kai mobile"),
+            DeviceSelf {
+                client: Some("Kai mobile"),
+                ..DeviceSelf::default()
+            },
         )
         .bearer("lmgw-device-secret");
         let shown = format!("{r:?}");

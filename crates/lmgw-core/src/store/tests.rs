@@ -22,6 +22,7 @@ async fn seed(pool: &SqlitePool, id: &str, chain: &str, prev: Option<&str>, hour
             input_tokens: Some(1),
             output_tokens: Some(2),
             created_at: String::new(),
+            key_id: None,
         },
     )
     .await
@@ -48,9 +49,18 @@ async fn gc_keeps_a_chain_alive_while_its_head_is_recent() {
 
     let removed = gc_responses(&pool, 24, 0).await.unwrap();
     assert_eq!(removed, 1, "only the abandoned chain goes");
-    assert!(get_response(&pool, "r1").await.unwrap().is_some());
-    assert!(get_response(&pool, "r2").await.unwrap().is_some());
-    assert!(get_response(&pool, "old").await.unwrap().is_none());
+    assert!(get_response(&pool, "r1", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(get_response(&pool, "r2", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(get_response(&pool, "old", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -63,10 +73,22 @@ async fn gc_by_chain_count_evicts_whole_conversations_least_recent_first() {
 
     gc_responses(&pool, 0, 2).await.unwrap();
     // "a" is the least recently active, and both of its rows go together.
-    assert!(get_response(&pool, "a1").await.unwrap().is_none());
-    assert!(get_response(&pool, "a2").await.unwrap().is_none());
-    assert!(get_response(&pool, "b1").await.unwrap().is_some());
-    assert!(get_response(&pool, "c1").await.unwrap().is_some());
+    assert!(get_response(&pool, "a1", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(get_response(&pool, "a2", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(get_response(&pool, "b1", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(get_response(&pool, "c1", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 /// Both rules off means keep everything — a visible choice, not a hidden
@@ -76,7 +98,10 @@ async fn gc_with_both_rules_off_keeps_everything() {
     let pool = pool().await;
     seed(&pool, "ancient", "ancient", None, 10_000).await;
     assert_eq!(gc_responses(&pool, 0, 0).await.unwrap(), 0);
-    assert!(get_response(&pool, "ancient").await.unwrap().is_some());
+    assert!(get_response(&pool, "ancient", ResponseReader::Owner)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

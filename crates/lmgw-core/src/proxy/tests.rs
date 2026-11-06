@@ -180,7 +180,7 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
             supports_responses: false,
             catalog_all_modalities: true,
             name: "sampling-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -202,6 +202,7 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -217,8 +218,12 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
 
     let completion = sample_once(
@@ -239,7 +244,7 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
         .content
         .iter()
         .filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -299,7 +304,7 @@ async fn sample_once_logs_failures() {
             supports_responses: false,
             catalog_all_modalities: true,
             name: "down-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -321,6 +326,7 @@ async fn sample_once_logs_failures() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -336,8 +342,12 @@ async fn sample_once_logs_failures() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
 
     let err = sample_once(
@@ -387,7 +397,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             supports_responses: false,
             catalog_all_modalities: true,
             name: "inproc-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: "http://127.0.0.1:1".into(), // never dialed; we log directly
             api_key: None,
@@ -409,6 +419,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -432,6 +443,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             rung: None,
             degraded: None,
             quantities: Default::default(),
+            service_tier: Default::default(),
         },
         200,
         Some(12),
@@ -461,6 +473,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             rung: None,
             degraded: None,
             quantities: Default::default(),
+            service_tier: Default::default(),
         },
         500,
         None,
@@ -489,7 +502,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
     assert_eq!(chat.requested_alias, "inproc");
     assert_eq!(chat.upstream_name.as_deref(), Some("inproc-up"));
     assert_eq!(chat.upstream_model.as_deref(), Some("the-model"));
-    assert_eq!(chat.egress_proto.as_deref(), Some("openai"));
+    assert_eq!(chat.egress_proto.as_deref(), Some("openai_compatible"));
     assert_eq!(chat.prompt_tokens, Some(31));
     assert_eq!(chat.completion_tokens, Some(9));
     assert!(chat.error_kind.is_none());
@@ -538,7 +551,7 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
             supports_responses: false,
             catalog_all_modalities: true,
             name: "blind-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -563,12 +576,13 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
                 "task": "chat", "endpoints": ["/v1/chat/completions"],
                 "vision": false, "source": "owner",
             }})),
+            fallback: None,
         },
     )
     .await
     .unwrap();
     state.reload_snapshot().await.unwrap();
-    let route = state.snapshot().usable_fallback("blind").unwrap();
+    let (_, route) = state.snapshot().hop("blind").unwrap();
     assert_eq!(route.fallback.as_deref(), Some("blind"));
     let ir = ChatRequest {
         model_alias: "local".into(),
@@ -589,8 +603,12 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
         tool_choice: None,
         stream: false,
         passthrough: Default::default(),
+        response_format: None,
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
+        context_management: None,
+        compaction: None,
+        thinking_display: None,
     };
     sample_once(
         &state,

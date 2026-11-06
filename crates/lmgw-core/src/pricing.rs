@@ -32,9 +32,19 @@
 
 use serde::{Deserialize, Serialize};
 
+mod floor;
+mod hosted;
+mod tier;
 mod total;
 mod units;
 
+pub use floor::{
+    count_floor_tiers, floor_clause, tier_floor, LocalCount, ANSWER_NO_USAGE,
+    CLIENT_LEFT_ANSWER_NO_USAGE, CLIENT_LEFT_NO_USAGE, CLIENT_LEFT_UNANSWERED, STOPPED_NO_USAGE,
+    STREAM_NO_USAGE,
+};
+pub use hosted::{HostedCalls, HOSTED_FEES_NOTE};
+pub use tier::{gap_note, on_file_words, ServedTier, TierGap, TierSet, NO_TIER_NOTE};
 pub use total::{CostTotal, RowCost};
 pub use units::{price_request, Quantities, Sheet, UnitRate, UnitRates};
 
@@ -167,6 +177,14 @@ pub struct Cost {
     /// `None` where the sheet has no rate in that unit
     /// (`request_logs.price_per_*`).
     pub used_units: UnitRates,
+    /// What budgets count for a call whose total is unknown, as a lower
+    /// bound (`request_logs.budget_floor_micro`, migration 0094): the known
+    /// part of one unpriced only for a fee priced nowhere
+    /// ([`Self::unpriced`]), or the price of a sheet that bounds the real
+    /// one from below ([`Self::with_floor`], openai egress design §13).
+    /// Never a cost: the row, its totals and its rollups stay unpriced.
+    /// `None` otherwise.
+    pub budget_floor_micro: Option<i64>,
 }
 
 impl Cost {
@@ -176,6 +194,43 @@ impl Cost {
             source: PriceSource::Unknown,
             ..Default::default()
         }
+    }
+
+    /// `self` made unknown by a part priced nowhere ([`HostedCalls`]): no
+    /// total and no parts, the rates that would have applied still
+    /// snapshotted, as [`price_request`] leaves any unknown request. What
+    /// `self` did price stays as the budgets' lower bound
+    /// ([`Self::budget_floor_micro`]): a fee nobody can price must not make
+    /// the tokens beside it free to a budget. A floor `self` already had
+    /// ([`Self::with_floor`]) stays when `self` priced nothing.
+    pub fn unpriced(self) -> Self {
+        Self {
+            source: PriceSource::Unknown,
+            used: self.used,
+            used_units: self.used_units,
+            budget_floor_micro: self.total_micro.or(self.budget_floor_micro),
+            ..Default::default()
+        }
+    }
+
+    /// `self`, unknown, with `micro` as the budgets' lower bound: what a
+    /// sheet known to cost no more than the real answer prices it at
+    /// ([`tier_floor`], [`LocalCount`]). A known total is left alone: it is
+    /// what budgets count already.
+    pub fn with_floor(self, micro: i64) -> Self {
+        if self.total_micro.is_some() {
+            return self;
+        }
+        Self {
+            budget_floor_micro: Some(micro),
+            ..self
+        }
+    }
+
+    /// What budgets count for this call: its total, or for an unknown total
+    /// its lower bound, when it has one.
+    pub fn budget_micro(&self) -> Option<i64> {
+        self.total_micro.or(self.budget_floor_micro)
     }
 }
 
@@ -232,6 +287,7 @@ pub fn price_tokens(usage: &TokenUsage, prices: Option<&Prices>) -> Cost {
         },
         units_micro: None,
         used_units: UnitRates::default(),
+        budget_floor_micro: None,
     }
 }
 

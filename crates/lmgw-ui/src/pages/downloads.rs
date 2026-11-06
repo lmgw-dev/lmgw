@@ -25,7 +25,7 @@ mod revision;
 
 use super::wizard::{self, file_role, Planned};
 use crate::catalog::use_model_catalog;
-use crate::fmt::grouped;
+use crate::fmt::{fmt_bytes, grouped};
 use crate::widgets::{
     filter_words, use_toasts, Facet, FacetSet, FilterBar, GroupRow, MenuItem, Modal, ModalFooter,
     PageFrame, PageMode, RowMenu, Toasts,
@@ -58,22 +58,6 @@ fn parse_size(s: &str) -> Option<u64> {
         _ => return None,
     };
     Some((n * mult) as u64)
-}
-
-/// Bytes in the units the server reports file sizes in ("15.9 GiB").
-fn human_bin(b: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = b as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{b} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
 }
 
 /// The server's filename guess, for a file its listing does not have (it is
@@ -140,6 +124,9 @@ struct FileItem {
     /// text beside the name, the sentence for its title
     /// ([`revision::revision_note`]).
     revision: (String, String),
+    /// What a transfer that isn't running left in its `.part` for the next
+    /// one (find-a-model design D135).
+    kept_bytes: Option<u64>,
 }
 
 impl FileItem {
@@ -378,6 +365,7 @@ pub fn Downloads() -> impl IntoView {
                     let revision = revision::revision_note(&d);
                     FileItem {
                         revision,
+                        kept_bytes: d.kept_bytes,
                         id: d.id,
                         size_bytes: listed
                             .map(|f| f.size_bytes)
@@ -503,8 +491,15 @@ pub fn Downloads() -> impl IntoView {
         })
     });
 
+    // The downloads for the graphics card (machine-check design §5, D41):
+    // the header counts them with the files, as the sidebar does.
+    let pulling = Memo::new(move |_| {
+        live.jobs
+            .with(|j| crate::gpu_download::pull_count(j.as_deref().unwrap_or_default()))
+    });
     let summary = move || {
         let run = running.get();
+        let pulling = pulling.get();
         items.with(|all| {
             if data.rows.with(Option::is_none) {
                 return "tracked Hugging Face files".to_string();
@@ -528,8 +523,8 @@ pub fn Downloads() -> impl IntoView {
                 "{} files from {} repos · {} on disk · {} downloading · {} failed · {} updates",
                 grouped(all.len() as u64),
                 grouped(repos as u64),
-                human_bin(bytes),
-                n("downloading"),
+                fmt_bytes(bytes),
+                n("downloading") + pulling,
                 n("failed"),
                 n("updates"),
             )
@@ -595,7 +590,7 @@ pub fn Downloads() -> impl IntoView {
         let meta = if g.singles {
             format!(
                 "{} · one file each, its repo named on the row",
-                human_bin(g.bytes)
+                fmt_bytes(g.bytes)
             )
         } else {
             let users = if g.users.is_empty() {
@@ -603,7 +598,7 @@ pub fn Downloads() -> impl IntoView {
             } else {
                 format!("used by {}", g.users.join(", "))
             };
-            format!("{} · {users}", human_bin(g.bytes))
+            format!("{} · {users}", fmt_bytes(g.bytes))
         };
         let label = if g.singles {
             "Single-file repos".to_string()
@@ -687,6 +682,10 @@ pub fn Downloads() -> impl IntoView {
                     })
                     .collect_view()
             }}
+            // What the models run in, downloading for the graphics card
+            // (machine-check design §5, D16): a model download fetches it
+            // too, and so does a first start.
+            <crate::gpu_download::GpuPulls/>
             <div class="fill-pane card pad0">
                 <table class="data dl-table">
                     <thead>
@@ -754,20 +753,45 @@ impl RowCtx {
 /// transferring with no job behind it is one the last shutdown cut off.
 fn status_chip(f: &FileItem, job: Option<&JobRow>) -> AnyView {
     if let Some(j) = job {
-        let label = j.percent.map(|p| format!("{p}%")).unwrap_or_else(|| {
-            // No Content-Length: show what it is doing rather than a fake bar.
-            if j.stage.is_empty() {
-                "downloading".into()
-            } else {
-                j.stage.clone()
-            }
-        });
+        // A resumed transfer reads what it kept before it asks for the rest
+        // (find-a-model design D130): its share is of the kept bytes.
+        let checking = if j.stage == "checking" {
+            "checking "
+        } else {
+            ""
+        };
+        let label = j
+            .percent
+            .map(|p| format!("{checking}{p}%"))
+            .unwrap_or_else(|| {
+                // No Content-Length: show what it is doing rather than a fake bar.
+                if j.stage.is_empty() {
+                    "downloading".into()
+                } else {
+                    j.stage.clone()
+                }
+            });
         return view! {
             <span class="chip live"><span class="dot"></span>{label}</span>
         }
         .into_any();
     }
     if f.in_flight() {
+        // A row the boot left waiting says why (find-a-model design D122):
+        // the connection is metered, and Resume goes on from its `.part`.
+        if let Some(why) = f.error.clone().filter(|e| !e.is_empty()) {
+            let label = match why.starts_with("Paused: metered connection") {
+                true => "paused: metered connection",
+                false => "paused",
+            };
+            return view! {
+                <span class="chip off" title=why>
+                    <span class="dot"></span>
+                    {label}
+                </span>
+            }
+            .into_any();
+        }
         return view! {
             <span class="chip err" title="No transfer is running for it: the last shutdown cut it off">
                 <span class="dot"></span>
@@ -803,6 +827,27 @@ fn status_chip(f: &FileItem, job: Option<&JobRow>) -> AnyView {
             view! { <span class="chip off"><span class="dot"></span>{other.to_string()}</span> }
                 .into_any()
         }
+    }
+}
+
+/// The size column: the file's size, or what a transfer that isn't running
+/// kept for the next one, in words (D135): "9.2 GiB kept for Retry".
+fn size_cell(f: &FileItem) -> AnyView {
+    match f.kept_bytes.filter(|_| f.size.is_empty()) {
+        Some(kept) => {
+            let next = match f.status.as_str() {
+                "failed" => "Retry",
+                _ => "Resume",
+            };
+            let title = format!(
+                "{} of this file are on the disk already; {next} goes on from there instead of \
+                 downloading them again",
+                fmt_bytes(kept)
+            );
+            view! { <span class="dim" title=title>{format!("{} kept for {next}", fmt_bytes(kept))}</span> }
+                .into_any()
+        }
+        None => f.size.clone().into_any(),
     }
 }
 
@@ -946,6 +991,17 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
                 .title("Fetch the file again from Hugging Face"),
             );
         }
+        // A row that waits with nothing transferring it (paused on a
+        // metered connection, or cut off): Cancel ends it as it ends a
+        // running one, its kept bytes deleted.
+        if !busy && item.with_value(FileItem::in_flight) {
+            v.push(
+                MenuItem::new("Cancel download", move || {
+                    item.with_value(|f| ctx.hf_set("cancel", f, "download canceled"))
+                })
+                .title("Don't go on with it; the bytes kept for Resume are deleted"),
+            );
+        }
         v.push(
             MenuItem::new("Copy path", move || {
                 let rel = item.with_value(|f| f.rel.clone());
@@ -1018,7 +1074,7 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
                 {users.unwrap_or_else(|| "unused".to_string())}
             </td>
             <td>{chip}</td>
-            <td class="num">{f.size.clone()}</td>
+            <td class="num">{size_cell(&f)}</td>
             <td class="actions">{primary} <RowMenu items=menu/></td>
         </tr>
     }
@@ -1086,17 +1142,17 @@ fn DeleteModal(confirm: RwSignal<Option<FileItem>>, ctx: RowCtx) -> impl IntoVie
 
 #[cfg(test)]
 mod tests {
-    use super::{human_bin, name_guess, parse_size, planable_target};
+    use super::{fmt_bytes, name_guess, parse_size, planable_target};
 
     #[test]
     fn sizes_round_trip_through_their_label() {
         assert_eq!(parse_size("644.2 MiB"), Some(675_492_659));
         assert_eq!(
-            parse_size("15.9 GiB").map(human_bin).as_deref(),
+            parse_size("15.9 GiB").map(fmt_bytes).as_deref(),
             Some("15.9 GiB")
         );
         assert_eq!(parse_size(""), None);
-        assert_eq!(human_bin(512), "512 B");
+        assert_eq!(fmt_bytes(512), "512 B");
     }
 
     /// "Plan & create" finishes what the wizard would have: chat and aux.

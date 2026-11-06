@@ -752,6 +752,120 @@ async fn registry_refusals_are_sentences() {
 
 const AUDIO: &str = "ghcr.io/0xshug0/audio.cpp:full-cuda12";
 
+/// An audio row that follows its class's image, so the class default is in
+/// use.
+async fn audio_row(h: &Harness, id: &str) -> i64 {
+    audio_row_running(h, id, None).await
+}
+
+/// An audio row running `image` (`None`: its class's).
+async fn audio_row_running(h: &Harness, id: &str, image: Option<&str>) -> i64 {
+    let row = store::insert_audio_model(
+        &h.state.db,
+        &store::NewAudioModel {
+            model_id: id.into(),
+            family: "kokoro".into(),
+            path: format!("{id}/"),
+            task: "tts".into(),
+            mode: "offline".into(),
+            lazy: None,
+            busy_timeout_ms: None,
+            backend: None,
+            threads: None,
+            load_options: Default::default(),
+            session_options: Default::default(),
+            default_request_options: Default::default(),
+            model_spec_override: None,
+            config_id: None,
+            weight_id: None,
+            voice_presets: Default::default(),
+            default_voice_preset: None,
+            enabled: true,
+            image: image.map(Into::into),
+            extra_run_args: None,
+            warm_start: false,
+            fallback: None,
+        },
+    )
+    .await
+    .unwrap();
+    h.state.reload_snapshot().await.unwrap();
+    row
+}
+
+/// The next `updates` frame on `events`.
+async fn next_updates(events: &mut tokio::sync::broadcast::Receiver<Event>) -> UpdatesSummary {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("an updates frame")
+        {
+            Ok(Event::Updates(s)) => break s,
+            _ => continue,
+        }
+    }
+}
+
+/// A first launch on a machine whose podman store already holds an outdated
+/// copy of a class default (another install's, a dev instance's shared
+/// store): the check asks about it, so the Engines page shows its update and
+/// offers its pull, but no model row runs it, so the nav badge does not
+/// count it. A row with an image of its own does not put the default in
+/// use; one that follows the class does, and the badge counts it at once —
+/// no new check, and an open dashboard hears it. Deleting that row takes it
+/// off the badge the same way.
+#[tokio::test]
+async fn a_class_default_no_model_runs_is_on_the_page_but_not_on_the_badge() {
+    let h = Harness::new().await;
+    let reg = MockServer::start().await;
+    challenge(&reg, "0xshug0/audio.cpp", "/token", "ghcr.io").await;
+    serve_index(&reg, "0xshug0/audio.cpp", "full-cuda12", 'n', &['p']).await;
+    h.state.builds.set_registry_client(
+        RegistryClient::new()
+            .unwrap()
+            .with_endpoint("ghcr.io", reg.uri()),
+    );
+    let id = "1".repeat(64);
+    let repo_digest = format!("ghcr.io/0xshug0/audio.cpp@{}", digest('o'));
+    h.podman.add_pulled(&id, &[AUDIO], &[repo_digest.as_str()]);
+    h.settings(|s| s.audio.image = AUDIO.into()).await;
+
+    updates::check_all(&h.state).await.unwrap();
+    let asked = reg.received_requests().await.unwrap().len();
+    assert!(asked > 0, "a configured image is asked about");
+    assert_eq!(updates::summary(&h.state).await.images_with_updates, 0);
+    let gw = common::serve(h.state.clone()).await;
+    let images = op(&gw, "container_images", json!({})).await;
+    let ru = images["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id.as_str())
+        .unwrap()["registry_update"]
+        .clone();
+    assert_eq!(ru["update_available"], true, "the page has it: {ru}");
+
+    // A row with its own image runs that one, not the class default.
+    audio_row_running(&h, "own", Some("localhost/audio-mine:1")).await;
+    assert_eq!(updates::summary(&h.state).await.images_with_updates, 0);
+
+    let mut events = h.state.telemetry.subscribe();
+    let speaker = audio_row(&h, "speaker").await;
+    assert_eq!(next_updates(&mut events).await.images_with_updates, 1);
+    assert_eq!(updates::summary(&h.state).await.images_with_updates, 1);
+
+    store::delete_audio_model(&h.state.db, speaker)
+        .await
+        .unwrap();
+    h.state.reload_snapshot().await.unwrap();
+    assert_eq!(next_updates(&mut events).await.images_with_updates, 0);
+    assert_eq!(
+        reg.received_requests().await.unwrap().len(),
+        asked,
+        "the badge moved without a new check"
+    );
+}
+
 #[tokio::test]
 async fn a_registry_image_in_use_is_badged_and_pull_update_clears_it() {
     let h = Harness::new().await;
@@ -779,6 +893,8 @@ async fn a_registry_image_in_use_is_badged_and_pull_update_clears_it() {
         s.router.image = "localhost/llama-server-cuda:official-latest".into();
     })
     .await;
+    // In use: a row follows the audio class's image.
+    audio_row(&h, "speaker").await;
     let mut events = h.state.telemetry.subscribe();
 
     let gw = common::serve(h.state.clone()).await;
@@ -855,6 +971,13 @@ async fn a_registry_image_in_use_is_badged_and_pull_update_clears_it() {
     assert_eq!(st["image"], AUDIO);
     assert_eq!(st["result"], result);
     assert!(st["error"].is_null());
+    // Without Podman's API (a test state has none) the pull ran the podman
+    // command, which reports no byte counts, and says so rather than
+    // showing a made-up size (machine-check design §5).
+    let note = st["detail"]["size_note"].as_str().unwrap_or_default();
+    assert!(note.starts_with("size not known — "), "{st}");
+    assert!(st["detail"]["total_bytes"].is_null(), "{st}");
+    assert_eq!(st["detail"]["done_bytes"], 0);
     assert_eq!(result["old_id"], old.as_str());
     assert_eq!(result["new_id"], new.as_str());
     assert_eq!(result["new_digests"], json!([repo_digest('n')]));

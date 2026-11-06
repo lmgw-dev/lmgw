@@ -66,7 +66,7 @@ def setup(base, work, mock, owner_file):
             sys.exit(f"setup: {name} answered {status}: {v}")
         return v
 
-    op("upstream_set", {"action": "create", "name": "interop-mock", "protocol": "openai",
+    op("upstream_set", {"action": "create", "name": "interop-mock", "protocol": "openai_compatible",
                         "kind": "generic", "base_url": f"{mock}/v1"})
     for alias, task, endpoint in [("interop-chat", None, None),
                                   ("interop-asr", "asr", "/v1/audio/transcriptions"),

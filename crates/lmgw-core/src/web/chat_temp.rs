@@ -23,6 +23,7 @@
 mod approvals;
 mod voice;
 
+use lmgw_api_types::chat_media::SOURCE_UPLOAD;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 
@@ -110,6 +111,11 @@ pub(crate) struct TempAttachment {
     pub extracted: Option<String>,
     pub meta: serde_json::Value,
     pub mode: Option<String>,
+    /// `upload`, `tool` or `action` (chat-media-tools design §6.3).
+    pub source: String,
+    /// The tool call that made a `tool` file, the card action (`act-<boot>-<n>`)
+    /// that made an `action` file.
+    pub call_id: Option<String>,
     /// Rendered PDF pages, by 1-based page number.
     pub pages: HashMap<u32, Vec<u8>>,
 }
@@ -129,7 +135,20 @@ impl TempAttachment {
             meta: self.meta.clone(),
             blockers: None,
             hints: None,
+            source: self.source.clone(),
+            call_id: self.call_id.clone(),
         }
+    }
+
+    /// An upload (not a tool's file).
+    fn is_upload(&self) -> bool {
+        self.source == SOURCE_UPLOAD
+    }
+
+    /// A draft: an upload no message carries yet. A tool's file waiting for
+    /// its reply is not one (chat-media-tools design §6.3).
+    fn is_draft(&self) -> bool {
+        self.message_id.is_none() && self.is_upload()
     }
 
     fn full(&self, thread_id: i64, with_data: bool) -> ChatAttachmentFull {
@@ -148,12 +167,22 @@ impl TempAttachment {
             extracted: self.extracted.clone(),
             meta: self.meta.clone(),
             mode: self.mode.clone(),
+            source: self.source.clone(),
+            call_id: self.call_id.clone(),
         }
     }
 
-    /// For Keep: the row as the DB insert takes it.
-    pub fn kept(&self) -> KeptAttachment {
-        KeptAttachment {
+    /// For Keep: the row as the DB insert takes it. `None` for a tool's or
+    /// an action's file no message took yet: it belongs to a turn or an
+    /// action that Keep stopped (its picture is not kept, as the turn's
+    /// reply is not), and a stored thread never holds such a row
+    /// (chat-media-tools design §6.3).
+    pub fn kept(&self) -> Option<KeptAttachment> {
+        if self.message_id.is_none() && !self.is_upload() {
+            return None;
+        }
+        Some(KeptAttachment {
+            id: self.id,
             message_id: self.message_id,
             kind: self.kind.clone(),
             name: self.name.clone(),
@@ -165,8 +194,10 @@ impl TempAttachment {
             extracted: self.extracted.clone(),
             meta: self.meta.clone(),
             mode: self.mode.clone(),
+            source: self.source.clone(),
+            call_id: self.call_id.clone(),
             pages: self.pages.iter().map(|(p, b)| (*p, b.clone())).collect(),
-        }
+        })
     }
 }
 
@@ -395,6 +426,7 @@ impl TempChats {
             role: "assistant".to_string(),
             content: r.content.clone(),
             reasoning: r.reasoning.clone(),
+            reasoning_seals: r.reasoning_seals.clone(),
             prompt_tokens: r.prompt_tokens,
             completion_tokens: r.completion_tokens,
             ir_messages: r.ir_messages.clone(),
@@ -432,6 +464,7 @@ impl TempChats {
             }
             row.content = r.content.clone();
             row.reasoning = r.reasoning.clone();
+            row.reasoning_seals = r.reasoning_seals.clone();
             row.prompt_tokens = r.prompt_tokens;
             row.completion_tokens = r.completion_tokens;
             row.ir_messages = r.ir_messages.clone();
@@ -447,7 +480,8 @@ impl TempChats {
 
     /// Rewrite user message `id` for a resend, all at once —
     /// `store::rewrite_chat_user_message`'s rule, a changed text dropping
-    /// how it was spoken. `false` when it is not a user message of this
+    /// how it was spoken, and `origin`, when there is one, replacing where
+    /// it was written. `false` when it is not a user message of this
     /// thread.
     pub fn rewrite_user_message(
         &self,
@@ -455,6 +489,7 @@ impl TempChats {
         id: i64,
         content: &str,
         kb_refs: &[i64],
+        origin: Option<&str>,
     ) -> bool {
         self.with_thread(thread_id, |t| {
             let Some(pos) = t
@@ -469,6 +504,10 @@ impl TempChats {
             // spoken: it is a typed turn from now on (chat-voice §3).
             if row.content != content {
                 row.voice = None;
+            }
+            // Kept unless the edit says where it was written.
+            if let Some(o) = origin {
+                row.origin = Some(o.to_string());
             }
             row.content = content.to_string();
             row.kb_refs = kb_refs.to_vec();
@@ -495,7 +534,13 @@ impl TempChats {
     ) -> Option<SendMessageOutcome> {
         self.append_user_by(
             thread_id,
-            (content, attachment_ids, kb_refs, voice),
+            crate::store::UserMessage {
+                content,
+                attachment_ids,
+                kb_refs,
+                voice,
+                origin: None,
+            },
             &crate::store::Decider::gateway(),
         )
     }
@@ -505,7 +550,13 @@ impl TempChats {
     pub fn append_user_by(
         &self,
         thread_id: i64,
-        (content, attachment_ids, kb_refs, voice): (&str, &[i64], &[i64], Option<&MessageVoice>),
+        crate::store::UserMessage {
+            content,
+            attachment_ids,
+            kb_refs,
+            voice,
+            origin,
+        }: crate::store::UserMessage<'_>,
         by: &crate::store::Decider,
     ) -> Option<SendMessageOutcome> {
         let mut inner = self.lock();
@@ -516,10 +567,7 @@ impl TempChats {
         // still refused, as the DB refuses it.
         let mut seen = Vec::with_capacity(attachment_ids.len());
         for aid in attachment_ids {
-            let draft = t
-                .attachments
-                .iter()
-                .any(|a| a.id == *aid && a.message_id.is_none());
+            let draft = t.attachments.iter().any(|a| a.id == *aid && a.is_draft());
             if !draft || seen.contains(aid) {
                 return Some(SendMessageOutcome::AttachmentNotDraft);
             }
@@ -539,6 +587,7 @@ impl TempChats {
             content: content.to_string(),
             kb_refs: kb_refs.to_vec(),
             voice: voice.cloned(),
+            origin: origin.map(str::to_string),
             created_at: now(),
             ..Default::default()
         });
@@ -553,6 +602,7 @@ impl TempChats {
             };
             row.content = m.content.clone();
             row.reasoning = m.reasoning.clone();
+            row.reasoning_seals = m.reasoning_seals.clone();
             row.prompt_tokens = m.prompt_tokens;
             row.completion_tokens = m.completion_tokens;
             row.ir_messages = m.ir_messages.clone();
@@ -632,9 +682,67 @@ impl TempChats {
             extracted: a.extracted.clone(),
             meta: a.meta.clone(),
             mode: a.mode.clone(),
+            source: a.source.clone(),
+            call_id: a.call_id.clone(),
             pages: HashMap::new(),
         });
         Some(id)
+    }
+
+    /// Bind the turn's tool files `ids` to its reply `message_id`, as the
+    /// DB binds them in the reply's own transaction
+    /// (`store::bind_tool_files`).
+    pub fn bind_tool_files(&self, thread_id: i64, message_id: i64, ids: &[i64]) {
+        self.with_thread(thread_id, |t| {
+            for a in t.attachments.iter_mut() {
+                if ids.contains(&a.id) && a.message_id.is_none() && !a.is_upload() {
+                    a.message_id = Some(message_id);
+                }
+            }
+        });
+    }
+
+    /// Bind card action file `id` to message `message_id`, as the DB binds
+    /// it (`store::bind_action_file`): `false` when the message is gone.
+    pub fn bind_action_file(&self, thread_id: i64, message_id: i64, id: i64) -> bool {
+        self.with_thread(thread_id, |t| {
+            if !t.messages.iter().any(|m| m.id == message_id) {
+                return false;
+            }
+            match t
+                .attachments
+                .iter_mut()
+                .find(|a| a.id == id && a.message_id.is_none() && !a.is_upload())
+            {
+                Some(a) => {
+                    a.message_id = Some(message_id);
+                    true
+                }
+                None => false,
+            }
+        })
+        .unwrap_or(false)
+    }
+
+    /// Drop the tool files `ids` no reply took (`store::drop_tool_files`).
+    pub fn drop_tool_files(&self, thread_id: i64, ids: &[i64]) {
+        self.with_thread(thread_id, |t| {
+            t.attachments
+                .retain(|a| !(ids.contains(&a.id) && a.message_id.is_none() && !a.is_upload()))
+        });
+    }
+
+    /// Attachments `ids` of thread `thread_id` with their bytes, whatever
+    /// their source (`store::chat_attachments_by_ids`).
+    pub fn attachments_by_ids(&self, thread_id: i64, ids: &[i64]) -> Vec<ChatAttachmentFull> {
+        self.with_thread(thread_id, |t| {
+            t.attachments
+                .iter()
+                .filter(|a| ids.contains(&a.id))
+                .map(|a| a.full(thread_id, true))
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn with_attachment<R>(&self, id: i64, f: impl FnOnce(&mut TempAttachment) -> R) -> Option<R> {
@@ -657,7 +765,7 @@ impl TempChats {
     /// A text-class PDF's mode, under the same rules as the DB's.
     pub fn set_mode(&self, id: i64, mode: &str) -> SetModeOutcome {
         self.with_attachment(id, |a| {
-            if a.message_id.is_some() {
+            if a.message_id.is_some() || !a.is_upload() {
                 SetModeOutcome::Sent
             } else if !store::is_text_pdf(&a.kind, &a.meta) {
                 SetModeOutcome::NotTextPdf
@@ -683,7 +791,11 @@ impl TempChats {
     /// Every attachment's metadata, each message's in the order it sent them.
     pub fn attachments_meta(&self, thread_id: i64) -> Vec<ChatAttachmentMeta> {
         self.with_thread(thread_id, |t| {
-            let mut v: Vec<&TempAttachment> = t.attachments.iter().collect();
+            let mut v: Vec<&TempAttachment> = t
+                .attachments
+                .iter()
+                .filter(|a| a.message_id.is_some() || a.is_upload())
+                .collect();
             v.sort_by_key(|a| a.ord);
             v.into_iter().map(|a| a.meta(thread_id)).collect()
         })
@@ -714,7 +826,7 @@ impl TempChats {
             let mut v: Vec<&TempAttachment> = t
                 .attachments
                 .iter()
-                .filter(|a| a.message_id.is_some())
+                .filter(|a| a.message_id.is_some() && a.is_upload())
                 .collect();
             v.sort_by_key(|a| a.ord);
             v.into_iter()
@@ -729,7 +841,7 @@ impl TempChats {
         self.with_thread(thread_id, |t| {
             t.attachments
                 .iter()
-                .filter(|a| a.message_id.is_none() && ids.contains(&a.id))
+                .filter(|a| a.is_draft() && ids.contains(&a.id))
                 .map(|a| a.meta(thread_id))
                 .collect()
         })
@@ -761,7 +873,11 @@ impl TempChats {
     pub fn delete_draft(&self, id: i64) -> DeleteAttachmentOutcome {
         let mut inner = self.lock();
         for t in inner.threads.values_mut() {
-            if let Some(pos) = t.attachments.iter().position(|a| a.id == id) {
+            if let Some(pos) = t
+                .attachments
+                .iter()
+                .position(|a| a.id == id && (a.message_id.is_some() || a.is_upload()))
+            {
                 if t.attachments[pos].message_id.is_some() {
                     return DeleteAttachmentOutcome::AlreadySent;
                 }
@@ -859,6 +975,40 @@ mod tests {
     }
 
     #[test]
+    fn keep_takes_uploads_and_bound_files_but_no_unbound_tool_or_action_file() {
+        let c = TempChats::default();
+        let t = c.create("m", "chat", "").id;
+        let upload = c
+            .insert_attachment(
+                t,
+                &NewAttachment::plain("image", "p.png", "image/png", b"p"),
+            )
+            .unwrap();
+        let file = |source: &str| {
+            let mut a = NewAttachment::plain("image", "x.png", "image/png", b"x");
+            a.source = source.into();
+            c.insert_attachment(t, &a).unwrap()
+        };
+        let (tool, action, bound) = (file("tool"), file("action"), file("action"));
+        let Some(SendMessageOutcome::Sent(m)) = c.append_user_message(t, "x", &[upload], &[], None)
+        else {
+            panic!("sent");
+        };
+        assert!(c.bind_action_file(t, m, bound));
+        let TakeForKeep::Taken(taken) = c.take_for_keep(t) else {
+            panic!("taken");
+        };
+        let kept: Vec<i64> = taken
+            .attachments
+            .iter()
+            .filter_map(TempAttachment::kept)
+            .map(|k| k.id)
+            .collect();
+        assert_eq!(kept, vec![upload, bound]);
+        assert!(!kept.contains(&tool) && !kept.contains(&action));
+    }
+
+    #[test]
     fn a_temporary_thread_draws_its_seed_once() {
         // WP4 review m8: the temporary store's draw, under its lock.
         let c = TempChats::default();
@@ -950,9 +1100,9 @@ mod tests {
         else {
             panic!("sent")
         };
-        assert!(c.rewrite_user_message(t, u, "spoken", &[]));
+        assert!(c.rewrite_user_message(t, u, "spoken", &[], None));
         assert!(c.message(t, u).unwrap().voice.is_some(), "unchanged text");
-        assert!(c.rewrite_user_message(t, u, "typed", &[]));
+        assert!(c.rewrite_user_message(t, u, "typed", &[], None));
         assert_eq!(c.message(t, u).unwrap().voice, None);
     }
 

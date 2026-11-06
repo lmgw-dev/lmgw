@@ -153,6 +153,9 @@ async fn a_fresh_dev_data_dir_never_lists_or_removes_another_prefixs_containers(
         true,
         podman.clone(),
         Arc::new(NoTelemetry("test: no GPU".into())),
+        // A machine with nothing on it: no driver, no `nvidia-ctk`, and no
+        // `XDG_RUNTIME_DIR`, so nothing here writes outside the data dir.
+        Arc::new(lmgw_machine::fake::FakeFacts::new()),
     )
     .await
     .unwrap();
@@ -272,6 +275,9 @@ async fn a_dev_instance_refuses_the_production_prefix_as_a_settings_edit() {
         true,
         podman.clone(),
         Arc::new(NoTelemetry("test: no GPU".into())),
+        // A machine with nothing on it: no driver, no `nvidia-ctk`, and no
+        // `XDG_RUNTIME_DIR`, so nothing here writes outside the data dir.
+        Arc::new(lmgw_machine::fake::FakeFacts::new()),
     )
     .await
     .unwrap();
@@ -344,6 +350,9 @@ async fn dev_state_on_own_prefix(
         true,
         podman.clone(),
         Arc::new(NoTelemetry("test: no GPU".into())),
+        // A machine with nothing on it: no driver, no `nvidia-ctk`, and no
+        // `XDG_RUNTIME_DIR`, so nothing here writes outside the data dir.
+        Arc::new(lmgw_machine::fake::FakeFacts::new()),
     )
     .await
     .unwrap();

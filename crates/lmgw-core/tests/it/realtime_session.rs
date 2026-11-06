@@ -44,7 +44,7 @@ async fn gateway(
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('nowhere', 'openai', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 0, '',
+         VALUES ('nowhere', 'openai_compatible', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 0, '',
                  datetime('now'), datetime('now'), 0)",
     )
     .execute(&state.db)
@@ -83,7 +83,7 @@ async fn gateway(
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     (state, addr.to_string())
 }
 
@@ -373,7 +373,7 @@ async fn model_map_and_openai_names_come_before_any_alias() {
     sqlx::query(
         "INSERT INTO upstreams (name, protocol, kind, base_url, extra_headers, timeout_ms,
              enabled, expose_all, expose_prefix, created_at, updated_at, supports_responses)
-         VALUES ('everything', 'openai', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 1, '',
+         VALUES ('everything', 'openai_compatible', 'generic', 'http://127.0.0.1:9', '[]', 1000, 1, 1, '',
                  datetime('now'), datetime('now'), 0)",
     )
     .execute(&state.db)

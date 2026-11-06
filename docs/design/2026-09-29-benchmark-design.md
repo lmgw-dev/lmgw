@@ -1009,7 +1009,7 @@ Taken without owner input. Each can be reverted on its own.
 56. **A window shorter than two sampler ticks has no energy figure**
     (review finding 3). The counter is interpolated between the 100 ms
     ticks at both ends of a window. A prefill TTFT window at 512–2048
-    tokens (15–60 ms on the 4090) lies inside one tick, and NVML's counter
+    tokens (15–60 ms on a 24 GiB test GPU) lies inside one tick, and NVML's counter
     itself moves only every ~50 ms. Its "tok/J" was the neighbouring ticks'
     average power times the window's length, not a measurement. The bound
     comes from the sampler's own tick (`MIN_WINDOW_TICKS` = 2, so 200 ms):

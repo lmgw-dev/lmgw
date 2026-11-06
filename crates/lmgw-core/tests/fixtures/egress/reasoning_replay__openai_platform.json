@@ -1,0 +1,46 @@
+{
+  "request": {
+    "body": "{\"input\":[{\"content\":[{\"text\":\"2+2?\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"},{\"content\":\"4\",\"role\":\"assistant\"},{\"content\":[{\"text\":\"And 3+3?\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"model\":\"the-model\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false}",
+    "body_json": {
+      "input": [
+        {
+          "content": [
+            {
+              "text": "2+2?",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        },
+        {
+          "content": "4",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "text": "And 3+3?",
+              "type": "input_text"
+            }
+          ],
+          "role": "user",
+          "type": "message"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "summary": "auto"
+      },
+      "service_tier": "auto",
+      "store": false
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://platform.test/v1/responses"
+  }
+}

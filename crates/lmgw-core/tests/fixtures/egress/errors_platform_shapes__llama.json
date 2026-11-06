@@ -1,0 +1,70 @@
+{
+  "errors": [
+    {
+      "body": "{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens. However, your messages resulted in 130021 tokens. Please reduce the length of the messages.\",\"type\":\"invalid_request_error\",\"param\":\"messages\",\"code\":\"context_length_exceeded\"}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"This model's maximum context length is 128000 tokens. However, your messages resulted in 130021 tokens. Please reduce the length of the messages.\" }",
+      "status": 400,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.\",\"type\":\"invalid_request_error\",\"param\":\"max_tokens\",\"code\":\"unsupported_parameter\"}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.\" }",
+      "status": 400,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Unrecognized request argument supplied: top_k\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Unrecognized request argument supplied: top_k\" }",
+      "status": 400,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low', 'medium', and 'high'.\",\"type\":\"invalid_request_error\",\"param\":\"reasoning_effort\",\"code\":\"unsupported_value\"}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'low', 'medium', and 'high'.\" }",
+      "status": 400,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"You exceeded your current quota, please check your plan and billing details.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"insufficient_quota\"}}",
+      "map_error": "Upstream { status: 429, provider_type: Some(\"insufficient_quota\"), message: \"You exceeded your current quota, please check your plan and billing details.\" }",
+      "status": 429,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Rate limit reached for the-model on tokens per min (TPM): Limit 200000, Used 199000, Requested 2000. Please try again in 300ms.\",\"type\":\"tokens\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}",
+      "map_error": "Upstream { status: 429, provider_type: Some(\"tokens\"), message: \"Rate limit reached for the-model on tokens per min (TPM): Limit 200000, Used 199000, Requested 2000. Please try again in 300ms.\" }",
+      "status": 429,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Resource Unavailable\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"resource_unavailable\"}}",
+      "map_error": "Upstream { status: 429, provider_type: Some(\"invalid_request_error\"), message: \"Resource Unavailable\" }",
+      "status": 429,
+      "structured_refusal": null
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\",\"type\":\"invalid_request_error\",\"param\":\"response_format\",\"code\":null}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\" }",
+      "status": 400,
+      "structured_refusal": "InvalidJsonSchema { message: \"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\" }"
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.\" }",
+      "status": 400,
+      "structured_refusal": "ResponseFormatUnsupported { message: \"Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.\" }"
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Invalid value: 'regex'. Supported values are: 'json_object', 'json_schema', and 'text'.\",\"type\":\"invalid_request_error\",\"param\":\"response_format.type\",\"code\":\"invalid_value\"}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Invalid value: 'regex'. Supported values are: 'json_object', 'json_schema', and 'text'.\" }",
+      "status": 400,
+      "structured_refusal": "ResponseFormatUnsupported { message: \"Invalid value: 'regex'. Supported values are: 'json_object', 'json_schema', and 'text'.\" }"
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\",\"type\":\"invalid_request_error\",\"param\":\"text.format.schema\",\"code\":\"invalid_json_schema\"}}",
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\" }",
+      "status": 400,
+      "structured_refusal": "InvalidJsonSchema { message: \"Invalid schema for response_format 'answer': In context=(), 'additionalProperties' is required to be supplied and to be false.\" }"
+    }
+  ]
+}

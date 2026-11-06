@@ -436,6 +436,7 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         PriceScope::Alias,
         "gpt-x",
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &Prices {
             price_in: Some(1.0),
             price_out: Some(2.0),
@@ -452,6 +453,7 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         PriceScope::Alias,
         "gpt-x",
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &Prices {
             price_in: Some(9.0),
             price_out: Some(9.0),
@@ -479,6 +481,7 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         PriceScope::Alias,
         "gpt-x",
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &Prices {
             price_in: Some(1.5),
             price_out: Some(2.5),
@@ -642,6 +645,7 @@ async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
         alias,
         "gpt-x",
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &tokens,
         None,
         None,
@@ -654,9 +658,18 @@ async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
         // Keyed on the unit: this updates the fee rather than adding a row.
         (PriceUnit::PerRequest, 0.004),
     ] {
-        upsert_price(&pool, alias, "gpt-x", unit, &manual, Some(price), None)
-            .await
-            .unwrap();
+        upsert_price(
+            &pool,
+            alias,
+            "gpt-x",
+            unit,
+            crate::config::PriceTier::Standard,
+            &manual,
+            Some(price),
+            None,
+        )
+        .await
+        .unwrap();
     }
     let rows = list_prices(&pool).await.unwrap();
     let shapes: Vec<_> = rows
@@ -677,6 +690,7 @@ async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
         alias,
         "other",
         PriceUnit::PerMtok,
+        crate::config::PriceTier::Standard,
         &tokens,
         Some(1.0),
         None,
@@ -688,6 +702,7 @@ async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
         alias,
         "other",
         PriceUnit::PerImage,
+        crate::config::PriceTier::Standard,
         &Prices {
             price_out: Some(0.04),
             ..manual
@@ -710,6 +725,7 @@ async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
         alias,
         "tts-1",
         PriceUnit::PerMchar,
+        crate::config::PriceTier::Standard,
         &manual,
         Some(15.0),
         None,

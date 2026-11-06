@@ -7,6 +7,9 @@ use crate::image_recipes;
 use crate::state::SharedState;
 use crate::store::{self};
 
+/// `image_upscaler_add` (chat-media-tools design §9).
+pub use crate::image_upscalers::image_upscaler_add;
+
 /// The shipped recipe list, joined against this box: which components are on
 /// disk, which are downloading, which rows already serve one
 /// (image-generation design §7.2).
@@ -32,7 +35,7 @@ pub async fn image_recipes(state: &SharedState) -> Result<dto::ImageRecipes, Str
                     let dest = c.dest_rel_path();
                     let row = tracked
                         .iter()
-                        .find(|t| t.repo == c.repo && t.file == c.file);
+                        .find(|t| t.repo == c.repo && t.file == c.file && t.dest_path == dest);
                     let present = component_on_disk(&models_dir, &dest);
                     dto::ImageRecipeComponent {
                         role: c.role.to_string(),
@@ -102,12 +105,15 @@ pub async fn image_recipes(state: &SharedState) -> Result<dto::ImageRecipes, Str
     Ok(dto::ImageRecipes {
         recipes,
         models_dir_missing: models_dir.trim().is_empty(),
+        upscalers: crate::image_upscalers::listing(&models_dir, &tracked),
         models_dir,
         hf_token_set: !snap.settings.hf_token.trim().is_empty(),
         next_step: "image_recipe_add key=<key> queues every component that is not already on \
-                    disk and returns a prefilled row; poll hf_downloads until each queued id \
-                    says 'done', then post that row at image_model_set action=create and \
-                    finish with local_model_test target=image."
+                    disk and returns a prefilled row; poll hf_downloads with ids = the ids it returned until \
+                    each says 'done', then post that row at image_model_set action=create and \
+                    finish with local_model_test target=image. An upscaler is \
+                    image_upscaler_add key=<upscalers.shipped key>: it lands in upscalers/, \
+                    where every image row's server finds it."
             .into(),
     })
 }
@@ -160,6 +166,7 @@ pub async fn image_recipe_add(
     let mut queued_rows: Vec<dto::QueuedDownload> = Vec::new();
     let mut already: Vec<String> = Vec::new();
     let mut in_flight: Vec<String> = Vec::new();
+    let mut in_flight_ids: Vec<String> = Vec::new();
     let tracked_before = store::list_hf_models(&state.db).await.unwrap_or_default();
     for (c, file) in &chosen {
         let dest = hf::dest_rel_path(c.repo, file)?;
@@ -175,9 +182,14 @@ pub async fn image_recipe_add(
             t.repo == c.repo
                 && t.file == **file
                 && t.target == "image"
+                && t.dest_path == dest
                 && matches!(t.status.as_str(), "queued" | "downloading")
         }) {
-            in_flight.push(format!("{} ({dest}, {})", c.role, row.status));
+            in_flight.push(format!(
+                "{} ({dest}, {}, id {})",
+                c.role, row.status, row.id
+            ));
+            in_flight_ids.push(row.id.to_string());
             continue;
         }
         // One job per component through the path `hf_add` uses, so progress
@@ -201,6 +213,36 @@ pub async fn image_recipe_add(
     };
     let queued = queued_rows.len() as u32;
     let ids: Vec<String> = queued_rows.iter().map(|r| r.id.to_string()).collect();
+    // What the pipeline runs in, when it is not here: fetched too, and
+    // nothing started (machine-check design §5, D16).
+    let engine = crate::web::hf::engine::fetch(state, "image").await;
+    let message = if queued == 0 && !in_flight.is_empty() {
+        format!(
+            "nothing new was queued for {}: {} already downloading or queued — poll \
+                 lmgw__hf_downloads with ids [{}] until every one says 'done', then post \
+                 'row' at image_model_set action=create",
+            recipe.display_name,
+            in_flight.join(", "),
+            in_flight_ids.join(", ")
+        )
+    } else if queued == 0 {
+        format!(
+            "every component of {} is already in the image models dir — post 'row' at \
+                 image_model_set action=create, {finish}",
+            recipe.display_name
+        )
+    } else {
+        format!(
+                "queued {queued} download(s) for {} (ids {}); poll lmgw__hf_downloads with ids [{}] until \
+                 every one says 'done', then post 'row' at image_model_set action=create \
+                 {finish}. The row is not created here — image_model_set refuses files that \
+                 are not on disk yet, and that check is what keeps a broken row out of the \
+                 table.",
+                recipe.display_name,
+                ids.join(", "),
+                ids.iter().chain(&in_flight_ids).cloned().collect::<Vec<_>>().join(", ")
+            )
+    };
     Ok(dto::ImageRecipeAddResult {
         ok: true,
         key: recipe.key.to_string(),
@@ -217,30 +259,7 @@ pub async fn image_recipe_add(
             modes: recipe.modes.iter().map(|m| (*m).to_string()).collect(),
             edit: recipe.edit,
         },
-        message: if queued == 0 && !in_flight.is_empty() {
-            format!(
-                "nothing new was queued for {}: {} already downloading or queued — poll \
-                 lmgw__hf_downloads until every one says 'done', then post 'row' at \
-                 image_model_set action=create",
-                recipe.display_name,
-                in_flight.join(", ")
-            )
-        } else if queued == 0 {
-            format!(
-                "every component of {} is already in the image models dir — post 'row' at \
-                 image_model_set action=create, {finish}",
-                recipe.display_name
-            )
-        } else {
-            format!(
-                "queued {queued} download(s) for {} (ids {}); poll lmgw__hf_downloads until \
-                 every one says 'done', then post 'row' at image_model_set action=create \
-                 {finish}. The row is not created here — image_model_set refuses files that \
-                 are not on disk yet, and that check is what keeps a broken row out of the \
-                 table.",
-                recipe.display_name,
-                ids.join(", ")
-            )
-        },
+        message,
+        engine,
     })
 }

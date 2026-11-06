@@ -116,9 +116,128 @@ impl fmt::Display for PriceUnit {
     }
 }
 
+/// The OpenAI service tier a price row is for (openai egress design §5.3,
+/// decision 11): OpenAI's own pricing tiers. Every other provider's rows are
+/// [`Standard`](Self::Standard), the one tier it has.
+///
+/// A request is priced at the tier its **response** says served it
+/// ([`from_reported`](Self::from_reported)), never at the one it asked for
+/// (decision 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PriceTier {
+    /// Standard processing; OpenAI's response says `default`.
+    #[default]
+    Standard,
+    /// Flex processing, at Batch API rates.
+    Flex,
+    /// Fast mode, formerly Priority processing; the response says `priority`
+    /// (GPT-5.6 and earlier) or `fast`.
+    Fast,
+    /// Ultrafast mode.
+    Ultrafast,
+    /// Scale Tier: in OpenAI's enums, with no public price, so only a manual
+    /// row prices it.
+    Scale,
+}
+
+impl PriceTier {
+    /// What `price_set`'s `service_tier` argument says, on the tool and the
+    /// HTTP plane alike.
+    pub const PRICE_SET_DOC: &'static str =
+        "The OpenAI service tier the price is for. Default standard, the one tier every \
+         other provider has. An OpenAI platform answer is priced with the rows of the tier \
+         it reported (default is standard, priority is fast); a tier with no row leaves it \
+         unpriced, never priced at standard. Part of the row's key: a flex row stands beside \
+         the standard one.";
+
+    /// Every tier, standard first.
+    pub const ALL: [Self; 5] = [
+        Self::Standard,
+        Self::Flex,
+        Self::Fast,
+        Self::Ultrafast,
+        Self::Scale,
+    ];
+
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Flex => "flex",
+            Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
+            Self::Scale => "scale",
+        }
+    }
+
+    /// `None` for anything that is not one of [`ALL`](Self::ALL)'s
+    /// spellings, so a caller refuses an unknown tier by name.
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == s)
+    }
+
+    /// The tier a response's `service_tier` names (openai egress design
+    /// §5.4): `default` is standard, `priority` and `fast` are Fast, the rest
+    /// by name. `auto` and anything else name no tier: `None`, which prices
+    /// nothing (§5.6).
+    pub fn from_reported(value: &str) -> Option<Self> {
+        match value {
+            "default" => Some(Self::Standard),
+            "flex" => Some(Self::Flex),
+            "priority" | "fast" => Some(Self::Fast),
+            "ultrafast" => Some(Self::Ultrafast),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    /// A short name, as the Prices page shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Flex => "Flex",
+            Self::Fast => "Fast",
+            Self::Ultrafast => "Ultrafast",
+            Self::Scale => "Scale",
+        }
+    }
+}
+
+impl fmt::Display for PriceTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tier_round_trips_and_the_reported_values_map_as_documented() {
+        for t in PriceTier::ALL {
+            assert_eq!(PriceTier::parse(t.as_str()), Some(t));
+            assert_eq!(
+                serde_json::to_value(t).unwrap(),
+                serde_json::json!(t.as_str())
+            );
+        }
+        for (reported, tier) in [
+            ("default", Some(PriceTier::Standard)),
+            ("flex", Some(PriceTier::Flex)),
+            ("priority", Some(PriceTier::Fast)),
+            ("fast", Some(PriceTier::Fast)),
+            ("ultrafast", Some(PriceTier::Ultrafast)),
+            ("scale", Some(PriceTier::Scale)),
+            ("auto", None),
+            ("standard", None),
+            ("", None),
+        ] {
+            assert_eq!(PriceTier::from_reported(reported), tier, "{reported}");
+        }
+    }
 
     #[test]
     fn every_unit_round_trips_through_its_spelling_and_serde() {

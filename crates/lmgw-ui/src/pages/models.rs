@@ -16,10 +16,13 @@ use lmgw_api_types::{
 use serde_json::{json, Value};
 
 mod aux_row;
+/// `/models/find`: Find a model by its name (find-a-model design §8.1).
+mod find;
 mod licence;
+pub use find::ModelFindPage;
 
 use crate::catalog::use_model_catalog;
-use crate::fmt::{age, grouped, hue_for, human_bytes, of};
+use crate::fmt::{age, fmt_bytes, grouped, hue_for, of};
 use crate::model_ops::{container_action, LogsModal, StopRefusedModal};
 use crate::ops_state::{model_key, use_ops, OpsState};
 use crate::widgets::{
@@ -54,6 +57,10 @@ pub struct Editors {
     /// from `ImageRecipeAddResult.row` here, which is the whole handover
     /// between the two surfaces — the same path the audio catalog uses.
     pub image: RwSignal<Option<ImageModel>>,
+    /// The prompt style the matching recipe gives the row the image editor
+    /// opened on (`ImageModelView::derived_prompt_style`); none for a blank
+    /// or a recipe's prefilled row, whose match the save makes.
+    pub image_derived: RwSignal<Option<lmgw_api_types::chat_media::PromptStyle>>,
     pub candidate: RwSignal<Option<CandidateAliasView>>,
 }
 
@@ -87,8 +94,7 @@ pub(super) fn blank_audio_model() -> AudioModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: "inherit".into(),
-        hold_fallback: None,
+        fallback: None,
         // Learned by the gateway, never by the form.
         residency: None,
     }
@@ -96,8 +102,8 @@ pub(super) fn blank_audio_model() -> AudioModel {
 
 /// A blank image model (id 0) opens `ImageEditor` in "create" mode. The
 /// defaults are the row defaults `ops::image_model_set` applies when the patch
-/// leaves them out (`idle_seconds` 300, `enabled`, `hold_fallback_mode`
-/// inherit), so an untouched form saves as the same row the ops plane would
+/// leaves them out (`idle_seconds` 300, `enabled`, no fallback), so an
+/// untouched form saves as the same row the ops plane would
 /// have written — the form states them rather than hiding them.
 pub(super) fn blank_image_model() -> ImageModel {
     ImageModel {
@@ -112,13 +118,16 @@ pub(super) fn blank_image_model() -> ImageModel {
         extra_run_args: None,
         warm_start: false,
         idle_seconds: 300,
-        hold_fallback_mode: "inherit".into(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: None,
         // Learned by the gateway, never by the form: a row that has never run
         // has nothing to say about what a generation costs.
         peak_extra_bytes: None,
         peak_learned_at: None,
+        // The editor has no fields for these yet: unset derives the prompt
+        // style from the recipe and keeps the default preview.
+        prompt_style: None,
+        preview_mode: None,
     }
 }
 
@@ -145,8 +154,7 @@ fn blank_aux_model() -> AuxModel {
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: "inherit".into(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -248,7 +256,7 @@ enum Class {
 
 /// Index of the passthrough group in the open-state array, after the classes.
 const CATALOGS: usize = 6;
-const COLS: u32 = 6;
+const COLS: u32 = 7;
 
 impl Class {
     const ALL: [Self; 6] = [
@@ -381,13 +389,20 @@ struct Row {
     /// A candidate alias's own problem count (§4.6) — `CandidateStateCell`'s
     /// State-cell chip; always 0 for every other class.
     problems: usize,
-    /// A candidate alias's `gpu_deferred` count over the last 24 h (§6);
-    /// always `None` for every other class.
+    /// The `gpu_deferred` count over the last 24 h of requests for this
+    /// row's name: a candidate alias's (§6), a local model's background
+    /// requests (per-request background design §10); `None` for a plain
+    /// alias, which always routes to a stored upstream — a provider, or a
+    /// server lmgw does not start — so lmgw has nothing of its own to defer.
     deferrals_24h: Option<u64>,
     /// The licence the row's GGUF states, for the chip beside the kind;
     /// `None` for a row whose header says nothing (and for every class
     /// without a GGUF header to read).
     licence: Option<Box<licence::Chip>>,
+    /// Its one fallback (openai egress design §14.12): what answers when it
+    /// cannot, so "which local models would refuse under the hold" is one
+    /// look down the column.
+    fallback: Option<String>,
 }
 
 impl Row {
@@ -460,8 +475,9 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             ctx: l.params.ctx_size,
             enabled: l.enabled,
             problems: 0,
-            deferrals_24h: None,
+            deferrals_24h: Some(v.deferrals_24h),
             licence: v.licence.as_ref().and_then(licence::Chip::of).map(Box::new),
+            fallback: l.fallback.clone(),
         });
     }
     for v in &m.aux {
@@ -485,8 +501,9 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             ctx: a.ctx_size,
             enabled: a.enabled,
             problems: 0,
-            deferrals_24h: None,
+            deferrals_24h: Some(v.deferrals_24h),
             licence: v.licence.as_ref().and_then(licence::Chip::of).map(Box::new),
+            fallback: a.fallback.clone(),
         });
     }
     for v in &m.audio {
@@ -498,10 +515,10 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
         let mut file = short_dir(&a.path);
         match (v.runs_on.as_str(), v.residency_charged_bytes, &a.residency) {
             ("cpu", _, _) => file.push_str(&format!(" · CPU · {} threads", v.threads_in_effect)),
-            (_, Some(b), _) => file.push_str(&format!(" · resident {}", human_bytes(b))),
+            (_, Some(b), _) => file.push_str(&format!(" · resident {}", fmt_bytes(b))),
             (_, None, Some(r)) => file.push_str(&format!(
                 " · resident {}, previous config",
-                human_bytes(r.bytes)
+                fmt_bytes(r.bytes)
             )),
             (_, None, None) => {}
         }
@@ -524,8 +541,9 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             ctx: None,
             enabled: a.enabled,
             problems: 0,
-            deferrals_24h: None,
+            deferrals_24h: Some(v.deferrals_24h),
             licence: None,
+            fallback: a.fallback.clone(),
         });
     }
     for v in &m.image {
@@ -557,11 +575,11 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
         // What one generation was measured to need on top of the idle
         // residency, learned by the gateway (image-generation §9).
         if let Some(p) = i.peak_extra_bytes {
-            file.push_str(&format!(" · peak +{}", human_bytes(p)));
+            file.push_str(&format!(" · peak +{}", fmt_bytes(p)));
             title.push(format!(
                 "peak +{} while generating: admission keeps this much free on top of the \
                  idle residency; a files or args change resets it",
-                human_bytes(p)
+                fmt_bytes(p)
             ));
         }
         out.push(Row {
@@ -586,8 +604,9 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             ctx: None,
             enabled: i.enabled,
             problems: 0,
-            deferrals_24h: None,
+            deferrals_24h: Some(v.deferrals_24h),
             licence: None,
+            fallback: i.fallback.clone(),
         });
     }
     for a in &m.aliases {
@@ -626,6 +645,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             problems: 0,
             deferrals_24h: None,
             licence: None,
+            fallback: a.fallback.clone(),
         });
     }
     for c in &m.candidate_aliases {
@@ -674,6 +694,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             problems: c.problems.len(),
             deferrals_24h: c.deferrals_24h,
             licence: None,
+            fallback: c.fallback.clone(),
         });
     }
     out
@@ -704,7 +725,7 @@ struct CatalogLine {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Item {
     Group(Class),
-    Row(Row),
+    Row(Box<Row>),
     CatalogGroup,
     Catalog(CatalogLine),
 }
@@ -753,6 +774,11 @@ impl PageCtx {
                     // Every class's save answers `message`; they share nothing
                     // else (`AuxModelSaved`, `CandidateAliasSaved`, ...).
                     self.toasts.ok(v.message.unwrap_or_else(|| "done".into()));
+                    // A delete names the rows it left without a working
+                    // fallback ("confirm, then do"): each as a warning.
+                    for note in v.fallback_notes {
+                        self.toasts.warn(note);
+                    }
                     bump(self.reload);
                 }
                 Err(e) => self.toasts.err(e.to_string()),
@@ -771,6 +797,7 @@ impl PageCtx {
                     self.editors.audio.set(Some(v.model.clone()));
                 }),
                 Class::Image => f.image.iter().find(|v| v.model.id == id).map(|v| {
+                    self.editors.image_derived.set(v.derived_prompt_style);
                     self.editors.image.set(Some(v.model.clone()));
                 }),
                 Class::Alias => f.aliases.iter().find(|a| a.id == id).map(|a| {
@@ -841,7 +868,7 @@ fn run_test(toasts: Toasts, class: Class, model_id: String, testing: RwSignal<bo
                 "{model_id}: drew {}{} — {}",
                 drew.size,
                 ms(drew.latency_ms),
-                human_bytes(drew.bytes as u64)
+                fmt_bytes(drew.bytes as u64)
             )),
             ModelTest::ChatPassed(passed) => toasts.ok(format!(
                 "{model_id}: loads and generates{}",
@@ -860,6 +887,7 @@ pub fn Models() -> impl IntoView {
         aux: RwSignal::new(None),
         audio: RwSignal::new(None),
         image: RwSignal::new(None),
+        image_derived: RwSignal::new(None),
         candidate: RwSignal::new(None),
     };
     provide_context(editors);
@@ -987,7 +1015,8 @@ pub fn Models() -> impl IntoView {
                 // A filter holds every group open: a folded group would hide
                 // the very matches its count reports.
                 if narrowed || open[c.idx()].get() {
-                    s.items.extend(mine.into_iter().cloned().map(Item::Row));
+                    s.items
+                        .extend(mine.into_iter().cloned().map(|r| Item::Row(Box::new(r))));
                 }
             }
         });
@@ -1081,7 +1110,7 @@ pub fn Models() -> impl IntoView {
                 />
             }
             .into_any(),
-            Item::Row(r) => view! { <ModelRow r=r page=page/> }.into_any(),
+            Item::Row(r) => view! { <ModelRow r=*r page=page/> }.into_any(),
             Item::CatalogGroup => view! {
                 <GroupRow
                     colspan=COLS
@@ -1127,7 +1156,16 @@ pub fn Models() -> impl IntoView {
                     >
                         "New alias"
                     </button>
-                    <button class="btn primary" on:click=move |_| wizard_open.set(true)>
+                    // Find a model (find-a-model design §8.1): by its name,
+                    // sized to the card; the file list stays beside it.
+                    <a
+                        class="btn primary"
+                        href="/models/find"
+                        title="Find a model by the name someone told you: lmgw picks the file that fits your graphics card"
+                    >
+                        "Find a model"
+                    </a>
+                    <button class="btn" on:click=move |_| wizard_open.set(true)>
                         "Add from Hugging Face"
                     </button>
                 }
@@ -1176,6 +1214,9 @@ pub fn Models() -> impl IntoView {
                             <th class="col-p2">"Type"</th>
                             <th>"File"</th>
                             <th class="col-p3 num-h">"Ctx"</th>
+                            <th class="col-p2" title="What answers when it cannot: under the GPU hold, when VRAM outside lmgw is short, for background requests, when its upstream is out of quota or unreachable, while it is disabled">
+                                "Fallback"
+                            </th>
                             <th title="Where its container is; a disabled model is not served at all">
                                 "State"
                             </th>
@@ -1311,7 +1352,10 @@ fn group_actions(
         }
         .into_any(),
         Class::Image => view! {
-            <button class="btn ghost sm" on:click=move |_| editors.image.set(Some(blank_image_model()))>
+            <button class="btn ghost sm" on:click=move |_| {
+                editors.image_derived.set(None);
+                editors.image.set(Some(blank_image_model()));
+            }>
                 "New"
             </button>
             <button
@@ -1416,8 +1460,22 @@ fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
                 .and_then(|rows| mid.with_value(|m| runtime_of(rows, class, m).cloned()))
         })
     };
+    // Its start waits for the download for the graphics card (machine-check
+    // design §5): no container yet, so that is its state. The flag alone
+    // redraws the cell; the bytes move inside the chip.
+    let dl = crate::gpu_download::live_for(
+        class.runtime().unwrap_or_default().to_string(),
+        mid.get_value(),
+    );
+    let downloading = Memo::new(move |_| dl.with(Option::is_some));
     move || {
         let r = rt();
+        if r.is_none() && downloading.get() {
+            return view! {
+                <crate::gpu_download::DlChip dl=Signal::derive(move || dl.get().unwrap_or_default())/>
+            }
+            .into_any();
+        }
         let (cls, label) = match r.as_ref().map(|r| r.state.as_str()) {
             Some("ready") => (
                 "chip ok",
@@ -1467,7 +1525,7 @@ fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
                         <span
                             class="type-badge"
                             style="margin-left:4px"
-                            title="Started by a background candidate alias request; the owner has not claimed it since"
+                            title="Started by background traffic (a background candidate alias, or a request sent with x-lmgw-background: on); no ordinary request has claimed it since"
                         >
                             "background"
                         </span>
@@ -1479,9 +1537,9 @@ fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
                         <span
                             class="chip warn"
                             style="margin-left:4px"
-                            title="An owner request is waiting for room on this GPU; background traffic skips this model until it is idle"
+                            title="An ordinary request is waiting for GPU room, so no model takes new background work until it is served"
                         >
-                            "draining for owner"
+                            "owner waiting for room"
                         </span>
                     }
                 })}
@@ -1494,6 +1552,7 @@ fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
                     }
                 })}
         }
+        .into_any()
     }
 }
 
@@ -1658,6 +1717,18 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
                 {r.file.clone()}
             </td>
             <td class="num col-p3">{r.ctx.map(|c| grouped(c as u64)).unwrap_or_else(|| "—".into())}</td>
+            <td class="col-p2 clip mono-sm">
+                // The tooltip names the whole fallback: the cell clips a long
+                // one.
+                {match r.fallback.clone() {
+                    Some(f) => view! {
+                        <span title=format!("Fallback {f}: answers when {} can't", r.name)>{f.clone()}</span>
+                    }
+                        .into_any(),
+                    None => view! { <span class="dim" title="No fallback: when it cannot answer, the request gets the error it gives">"—"</span> }
+                        .into_any(),
+                }}
+            </td>
             <td>
                 {if !enabled {
                     view! {
@@ -1668,7 +1739,11 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
                     }
                         .into_any()
                 } else if class.runtime().is_some() {
-                    view! { <RuntimeCell class=class model_id=r.model_id.clone()/> }.into_any()
+                    view! {
+                        <RuntimeCell class=class model_id=r.model_id.clone()/>
+                        <super::candidate_alias_editor::DeferredBadge deferrals_24h=r.deferrals_24h/>
+                    }
+                        .into_any()
                 } else if class == Class::Candidate {
                     view! {
                         <super::candidate_alias_editor::CandidateStateCell
@@ -1726,6 +1801,7 @@ fn CatalogRow(l: CatalogLine, total: Signal<usize>, loading: RwSignal<bool>) -> 
             </td>
             <td class="clip dim" title=line>{line}</td>
             <td class="num col-p3">"—"</td>
+            <td class="col-p2 dim" title="A passthrough model has no fallback; an alias of it can have one">"—"</td>
             <td>
                 <span class="dim" title="Served by the upstream on each request">"—"</span>
             </td>

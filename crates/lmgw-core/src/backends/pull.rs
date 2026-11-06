@@ -22,6 +22,18 @@
 //! Allowed on a dev instance: a pull adds an image to the shared store and
 //! moves a registry tag to it; it deletes nothing production uses.
 //!
+//! **Bytes** (machine-check design §5). The job pulls through Podman's own
+//! API when it can ([`service`]): its compat-mode answer reports each
+//! blob's bytes ([`compat`]), the registry's manifest gives the total up
+//! front ([`crate::backends::oci::RegistryClient::platform_blobs`]), and the
+//! job's `done`/`total` are those bytes ([`via_api`]). Without the API it
+//! runs `podman pull` as it always did, which reports no byte counts, and
+//! its detail says "size not known" and why.
+//!
+//! **A model's first start** pulls its missing image through this same job
+//! ([`ensure`]), before admission — so a start, a second start of the same
+//! image and an Engines-page pull share one download.
+//!
 //! [`Registry::forget_help`]: crate::runtime::registry::Registry::forget_help
 
 use std::time::{Duration, Instant};
@@ -41,6 +53,16 @@ use crate::erased::Erased;
 use crate::jobs::{self, JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress};
 use crate::state::SharedState;
 use crate::store;
+
+pub mod compat;
+pub mod ensure;
+pub mod service;
+mod via_api;
+
+pub use ensure::{
+    begin, job_bytes, presence, pull_and_wait, start_reference, Bytes, Presence, PullFailed,
+};
+pub use service::{ApiPull, NoPullApi, PullApi, ServicePull};
 
 /// How often a running pull checks the cancel flag.
 const CANCEL_POLL: Duration = Duration::from_millis(250);
@@ -81,6 +103,56 @@ const OTHER_TRANSPORTS: [&str; 8] = [
 /// before a job exists for it: another transport, a `localhost/` build, a
 /// digest pin.
 pub fn canonical_reference(image: &str) -> Result<String, String> {
+    let bare = registry_spelling(image)?;
+    check_reference(bare)?;
+    if let Some(r) = on_local_registry(bare) {
+        return r;
+    }
+    ImageRef::parse(bare)
+        .map(|r| r.reference())
+        .ok_or_else(|| format!("'{}' is not an image reference", image.trim()))
+}
+
+/// A `localhost/` image: a build on this machine made it, and no registry
+/// has it. A registry at `localhost:<port>` is not one ([`on_local_registry`]).
+fn is_local_build(bare: &str) -> bool {
+    bare.starts_with("localhost/")
+}
+
+/// A reference on a registry at `localhost:<port>`, which podman pulls from
+/// like from any other (unlike a `localhost/` build). [`ImageRef::parse`]
+/// leaves such a registry out, so it is qualified here: `:latest` when it
+/// names neither a tag nor a digest, as podman does. `None` when `bare`
+/// names another registry; `Some(Err)` when it is no reference.
+fn on_local_registry(bare: &str) -> Option<Result<String, String>> {
+    let (host, path) = bare.split_once('/')?;
+    let port = host.strip_prefix("localhost:")?;
+    let bad = || Err(format!("'{bare}' is not an image reference"));
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(bad());
+    }
+    let (name, digest) = match path.split_once('@') {
+        Some((n, d)) => (n, Some(d)),
+        None => (path, None),
+    };
+    let last = name.rsplit('/').next().unwrap_or(name);
+    let (repo, tag) = match last.rsplit_once(':') {
+        Some((_, t)) => (&name[..name.len() - t.len() - 1], Some(t)),
+        None => (name, None),
+    };
+    if repo.is_empty() || repo.split('/').any(str::is_empty) || tag == Some("") {
+        return Some(bad());
+    }
+    Some(match digest {
+        Some(d) if super::oci::is_digest(d) => Ok(format!("{host}/{repo}@{d}")),
+        Some(_) => bad(),
+        None => Ok(format!("{host}/{repo}:{}", tag.unwrap_or("latest"))),
+    })
+}
+
+/// `image` as a registry spelling, `docker://` taken off; refuses what is
+/// no reference at all and podman's other transports.
+fn registry_spelling(image: &str) -> Result<&str, String> {
     let image = image.trim();
     if image.is_empty()
         || image.starts_with('-')
@@ -106,15 +178,12 @@ pub fn canonical_reference(image: &str) -> Result<String, String> {
              pulling from a registry; {only}"
         ));
     }
-    check_reference(bare)?;
-    ImageRef::parse(bare)
-        .map(|r| r.reference())
-        .ok_or_else(|| format!("'{image}' is not an image reference"))
+    Ok(bare)
 }
 
 /// The registry-side refusals: a `localhost/` build, a digest pin.
 fn check_reference(image: &str) -> Result<(), String> {
-    if image.starts_with("localhost/") || image.starts_with("localhost:") {
+    if is_local_build(image) {
         return Err(format!(
             "'{image}' is a localhost/ image — it was built on this machine, not pulled; run its \
              build instead"
@@ -215,7 +284,9 @@ fn describe(exit: &std::io::Result<Exit>) -> String {
 
 pub struct ImagePullExecutor;
 
-/// A pull in flight: its log and the job detail it keeps current.
+/// A `podman pull` command in flight: its log and the job detail it keeps
+/// current. The command reports no byte counts, so the detail carries the
+/// reason the size is not known instead.
 struct Pulling<'a> {
     ctx: &'a JobCtx,
     detail: ImagePullJobDetail,
@@ -236,7 +307,7 @@ impl Pulling<'_> {
     async fn publish(&self) {
         self.ctx
             .progress(JobProgress {
-                done: self.log.len() as u64,
+                done: 0,
                 total: None,
                 stage: self.detail.last_line.clone(),
                 detail: serde_json::to_value(&self.detail).unwrap_or(Value::Null),
@@ -270,6 +341,100 @@ impl Pulling<'_> {
     }
 }
 
+/// How a pull's download ended, either way it ran.
+enum Pulled {
+    /// The image is stored: the log of how.
+    Log(Vec<String>),
+    Canceled,
+}
+
+/// The `podman pull` command (the path without Podman's API): its output
+/// as the progress, `why` — the API's absence — as the size note.
+async fn via_command(
+    ctx: &JobCtx,
+    image: &str,
+    old_id: Option<String>,
+    why: String,
+) -> Result<Pulled, String> {
+    let state = ctx.state.clone();
+    let mut pulling = Pulling {
+        ctx,
+        detail: ImagePullJobDetail {
+            image: image.to_string(),
+            old_id,
+            last_line: format!("podman pull {image}"),
+            size_note: Some(format!("size not known — {why}")),
+            ..Default::default()
+        },
+        log: Vec::new(),
+    };
+    pulling.publish().await;
+
+    let argv = ["pull", "--", image].map(String::from).to_vec();
+    let Spawned {
+        mut stdout,
+        mut stderr,
+        mut status,
+        kill,
+    } = state
+        .agent_spawner()
+        .spawn("podman", &argv)
+        .await
+        .map_err(|e| format!("podman pull {image} could not be started: {e}"))?;
+    let (mut out_open, mut err_open) = (true, true);
+    let mut exit: Option<std::io::Result<Exit>> = None;
+    let mut exited_at: Option<Instant> = None;
+    let mut tick = tokio::time::interval(CANCEL_POLL);
+    while exit.is_none() || out_open || err_open {
+        tokio::select! {
+            l = stdout.recv(), if out_open => match l {
+                Some(l) => pulling.line(&l).await,
+                None => out_open = false,
+            },
+            l = stderr.recv(), if err_open => match l {
+                Some(l) => pulling.line(&l).await,
+                None => err_open = false,
+            },
+            ended = &mut status, if exit.is_none() => {
+                exit = Some(ended);
+                exited_at = Some(Instant::now());
+            }
+            _ = tick.tick() => {
+                if exit.is_none() && ctx.canceled() {
+                    let ended = terminate(&kill, &mut status, CANCEL_GRACE).await;
+                    pulling.drain(&mut stdout, &mut stderr).await;
+                    tracing::info!("pull of {image} canceled: podman {}", describe(&ended));
+                    return Ok(Pulled::Canceled);
+                }
+                if exited_at.is_some_and(|t| t.elapsed() > PIPE_DRAIN_GRACE) {
+                    break;
+                }
+            }
+        }
+    }
+    let ended = exit.expect("the loop ends only once podman has exited");
+    if !matches!(ended, Ok(Exit::Code(0))) {
+        let tail: Vec<&str> = pulling
+            .log
+            .iter()
+            .rev()
+            .take(5)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "podman pull {image} {}: {}",
+            describe(&ended),
+            if tail.is_empty() {
+                "it printed nothing".to_string()
+            } else {
+                tail.join(" / ")
+            }
+        ));
+    }
+    Ok(Pulled::Log(pulling.log))
+}
+
 impl JobExecutor for ImagePullExecutor {
     fn kind(&self) -> JobKind {
         JobKind::ImagePull
@@ -286,79 +451,31 @@ impl JobExecutor for ImagePullExecutor {
                 Some(_) => podman.repo_digests(&image).await.unwrap_or_default(),
                 None => Vec::new(),
             };
-            let mut pulling = Pulling {
-                ctx: &ctx,
-                detail: ImagePullJobDetail {
-                    image: image.clone(),
-                    old_id: old_id.clone(),
-                    last_line: format!("podman pull {image}"),
-                },
-                log: Vec::new(),
-            };
-            pulling.publish().await;
 
-            let argv = ["pull", "--", image.as_str()].map(String::from).to_vec();
-            let Spawned {
-                mut stdout,
-                mut stderr,
-                mut status,
-                kill,
-            } = state
-                .agent_spawner()
-                .spawn("podman", &argv)
-                .await
-                .map_err(|e| format!("podman pull {image} could not be started: {e}"))?;
-            let (mut out_open, mut err_open) = (true, true);
-            let mut exit: Option<std::io::Result<Exit>> = None;
-            let mut exited_at: Option<Instant> = None;
-            let mut tick = tokio::time::interval(CANCEL_POLL);
-            while exit.is_none() || out_open || err_open {
-                tokio::select! {
-                    l = stdout.recv(), if out_open => match l {
-                        Some(l) => pulling.line(&l).await,
-                        None => out_open = false,
-                    },
-                    l = stderr.recv(), if err_open => match l {
-                        Some(l) => pulling.line(&l).await,
-                        None => err_open = false,
-                    },
-                    ended = &mut status, if exit.is_none() => {
-                        exit = Some(ended);
-                        exited_at = Some(Instant::now());
-                    }
-                    _ = tick.tick() => {
-                        if exit.is_none() && ctx.canceled() {
-                            let ended = terminate(&kill, &mut status, CANCEL_GRACE).await;
-                            pulling.drain(&mut stdout, &mut stderr).await;
-                            tracing::info!("pull of {image} canceled: podman {}", describe(&ended));
-                            return Ok(JobOutcome::Canceled);
+            let api = state.builds.pull_api();
+            let pulled = match api.pull(&image).await {
+                ApiPull::Streaming(lines) => {
+                    match via_api::run(&ctx, &image, old_id.clone(), lines, CANCEL_POLL).await {
+                        via_api::Ended::Pulled(log) => Pulled::Log(log),
+                        via_api::Ended::Canceled => {
+                            tracing::info!("pull of {image} canceled");
+                            Pulled::Canceled
                         }
-                        if exited_at.is_some_and(|t| t.elapsed() > PIPE_DRAIN_GRACE) {
-                            break;
+                        via_api::Ended::Failed(e) => {
+                            return Err(format!("podman pull {image} failed: {e}"))
                         }
                     }
                 }
-            }
-            let ended = exit.expect("the loop ends only once podman has exited");
-            if !matches!(ended, Ok(Exit::Code(0))) {
-                let tail: Vec<&str> = pulling
-                    .log
-                    .iter()
-                    .rev()
-                    .take(5)
-                    .rev()
-                    .map(String::as_str)
-                    .collect();
-                return Err(format!(
-                    "podman pull {image} {}: {}",
-                    describe(&ended),
-                    if tail.is_empty() {
-                        "it printed nothing".to_string()
-                    } else {
-                        tail.join(" / ")
-                    }
-                ));
-            }
+                ApiPull::Refused(e) => return Err(format!("podman pull {image} failed: {e}")),
+                ApiPull::Unavailable(why) => {
+                    tracing::info!("pulling {image} with the podman command: {why}");
+                    via_command(&ctx, &image, old_id.clone(), why).await?
+                }
+            };
+            let log = match pulled {
+                Pulled::Log(log) => log,
+                Pulled::Canceled => return Ok(JobOutcome::Canceled),
+            };
 
             let new_id = podman.image_id(&image).await?.ok_or_else(|| {
                 format!(
@@ -409,7 +526,7 @@ impl JobExecutor for ImagePullExecutor {
                 new_digests,
                 updated,
                 used_by,
-                log: pulling.log,
+                log,
             };
             Ok(JobOutcome::Done(
                 serde_json::to_value(&result).map_err(|e| e.to_string())?,
@@ -465,6 +582,40 @@ mod tests {
             canonical_reference("registry.example:5000/o/r:t").as_deref(),
             Ok("registry.example:5000/o/r:t")
         );
+    }
+
+    /// `localhost/` is a build on this machine; `localhost:<port>/` is a
+    /// registry podman pulls from like any other.
+    #[test]
+    fn a_registry_on_localhost_is_pulled_a_localhost_build_is_not() {
+        assert_eq!(
+            canonical_reference("localhost:5000/o/r:t").as_deref(),
+            Ok("localhost:5000/o/r:t")
+        );
+        assert_eq!(
+            canonical_reference("docker://localhost:5000/r").as_deref(),
+            Ok("localhost:5000/r:latest")
+        );
+        assert!(canonical_reference("localhost/r:t")
+            .unwrap_err()
+            .contains("built on this machine"));
+        for bad in [
+            "localhost:/r",
+            "localhost:50x0/r",
+            "localhost:5000/",
+            "localhost:5000//r",
+            "localhost:5000/r:",
+        ] {
+            assert!(
+                canonical_reference(bad)
+                    .unwrap_err()
+                    .contains("not an image reference"),
+                "{bad}"
+            );
+        }
+        assert!(canonical_reference("localhost:5000/r@sha256:abc")
+            .unwrap_err()
+            .contains("pinned by digest"));
     }
 
     /// Two spellings of one image are one pull: the job key is the qualified

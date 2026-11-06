@@ -339,8 +339,12 @@ impl VisionReader {
             tool_choice: None,
             stream: false,
             passthrough: Default::default(),
+            response_format: None,
             llama_kwargs_enabled: None,
             anthropic_beta: Vec::new(),
+            context_management: None,
+            compaction: None,
+            thinking_display: None,
         };
         let deadline =
             Duration::from_secs(state.snapshot().settings.responses_timeout_seconds.max(1));
@@ -359,10 +363,7 @@ impl VisionReader {
         Ok(done
             .content
             .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
+            .filter_map(ContentPart::answer_text)
             .collect::<Vec<_>>()
             .join(""))
     }

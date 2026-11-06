@@ -3,7 +3,7 @@
 //! gate, what a count starts, and what the running server is asked — the
 //! review R1 fixes and the gaps it named.
 
-use lmgw_core::config::{hash_api_key, HoldFallbackMode, LlamaParams};
+use lmgw_core::config::{hash_api_key, LlamaParams};
 use lmgw_core::store::{NewCandidateAlias, NewLocalModel};
 use serde_json::{json, Value};
 
@@ -63,7 +63,6 @@ async fn a_candidate_alias_names_its_candidate_and_refuses_a_facet() {
         alias: "writer".into(),
         candidates: vec!["chat-model".into()],
         background: false,
-        fallback_mode: HoldFallbackMode::None,
         fallback: None,
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],
@@ -139,8 +138,7 @@ async fn an_image_on_a_projector_row_is_counted_at_its_bound() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },

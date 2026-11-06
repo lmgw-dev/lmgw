@@ -106,6 +106,8 @@ pub struct ExportThread {
     pub kb_mode: KbMode,
     pub kb_budget_tokens: Option<i64>,
     pub voice: ThreadVoice,
+    /// The image and audio tools' default models of its own.
+    pub media_defaults: crate::chat_media::MediaDefaults,
     pub created_at: String,
     pub updated_at: String,
     /// The thread was held in memory only (a temporary chat).
@@ -149,6 +151,8 @@ pub struct ExportMessage {
     )]
     pub images_note: Option<String>,
     pub voice: Option<MessageVoice>,
+    /// A user message's origin: where its client said the user wrote it.
+    pub origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "schema",

@@ -120,7 +120,7 @@ async fn a_non_causal_decision_model_plans_its_context_as_one_ubatch_on_the_cpu(
         "{ubatch}"
     );
     assert!(
-        ubatch.contains("RAM") && ubatch.contains("2.22 GB"),
+        ubatch.contains("RAM") && ubatch.contains("2.07 GiB"),
         "the compute buffer on a CPU row: {ubatch}"
     );
     let cpu = why(&p, "backend");

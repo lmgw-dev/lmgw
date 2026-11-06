@@ -25,7 +25,7 @@ async fn hello_says_who_the_feed_is_for_and_the_limits_it_runs_under() {
     assert_eq!(hello["retention_days"], 3);
     assert_eq!(
         hello["hold"],
-        json!({ "active": false, "fallback_alias": null })
+        json!({ "active": false, "benchmark": false })
     );
     assert_eq!(
         (hello["voice"].clone(), hello["turns"].clone()),
@@ -92,33 +92,48 @@ async fn a_turn_is_live_with_who_started_it_and_how_it_ended() {
 }
 
 #[tokio::test]
-async fn the_hold_is_live_and_a_fallback_changed_through_the_settings_patch_counts() {
+async fn the_hold_is_live() {
     let w = world(|_| {}).await;
     let mut feed = Feed::open(&w, &w.gw.client(), "", None).await;
-    let (s, v) = op(
-        &w,
-        "settings_set_full",
-        json!({ "hold": { "fallback_alias": "other" } }),
-    )
-    .await;
+    let (s, v) = op(&w, "hold_set", json!({ "active": true })).await;
     assert_eq!(s, 200, "{v}");
     feed.until(10, |f| f.iter().any(|f| f.event == "hold"))
         .await;
     assert_eq!(
         feed.named("hold")[0].data,
-        json!({ "active": false, "fallback_alias": "other" })
-    );
-    let (s, v) = op(&w, "hold_set", json!({ "active": true })).await;
-    assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| f.iter().filter(|f| f.event == "hold").count() >= 2)
-        .await;
-    assert_eq!(
-        feed.named("hold")[1].data,
-        json!({ "active": true, "fallback_alias": "other" })
+        json!({ "active": true, "benchmark": false })
     );
     // A new feed's hello carries it.
     let again = Feed::open(&w, &w.gw.client(), "", None).await;
     assert_eq!(again.hello()["hold"]["active"], true);
+}
+
+/// Chat-plane design D6: a benchmark run's lease is part of the hold, for
+/// the owner and a device alike — taken and given back as `hold` events,
+/// and in a new feed's `hello`.
+#[tokio::test]
+async fn a_benchmark_s_lease_is_part_of_the_hold() {
+    let w = world(|_| {}).await;
+    let d = pair(&w, "phone", json!({})).await;
+    let mut owner = Feed::open(&w, &w.gw.client(), "", None).await;
+    let mut device = Feed::open(&w, &d.client, "", None).await;
+    let guard = lmgw_core::bench::lease::LeaseGuard::take(&w.state, 7, "chatty");
+    let held = json!({ "active": false, "benchmark": true });
+    for feed in [&mut owner, &mut device] {
+        feed.until(10, |f| f.iter().any(|f| f.event == "hold"))
+            .await;
+        assert_eq!(feed.named("hold")[0].data, held);
+    }
+    let again = Feed::open(&w, &d.client, "", None).await;
+    assert_eq!(again.hello()["hold"], held);
+    drop(guard);
+    device
+        .until(10, |f| f.iter().filter(|f| f.event == "hold").count() >= 2)
+        .await;
+    assert_eq!(
+        device.named("hold")[1].data,
+        json!({ "active": false, "benchmark": false })
+    );
 }
 
 #[tokio::test]
@@ -127,14 +142,14 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
     let mut feed = Feed::open(&w, &w.gw.client(), "", None).await;
     // Six hold changes without a yield: the stream, on this test's one
     // thread, cannot read between them, and the buffer holds two.
-    let publish = |fallback: Option<&str>, buffer: u32| {
+    let publish = |held: bool, buffer: u32| {
         let mut snap = (*w.state.snapshot()).clone();
-        snap.settings.hold.fallback_alias = fallback.map(str::to_string);
+        snap.settings.hold.active = held;
         snap.settings.chat_feed_live_buffer = buffer;
         w.state.set_snapshot_for_tests(snap);
     };
     for i in 0..6 {
-        publish((i % 2 == 0).then_some("other"), 2);
+        publish(i % 2 == 0, 2);
     }
     feed.until(10, |f| f.iter().any(|f| f.event == "state"))
         .await;
@@ -146,13 +161,13 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
     );
     assert_eq!(
         state["hold"],
-        json!({ "active": false, "fallback_alias": null }),
+        json!({ "active": false, "benchmark": false }),
         "the state as it is after the last change"
     );
 
     // A resized buffer moves the open feeds over, with a state saying so,
     // and live events flow on the new one.
-    publish(Some("other"), 8);
+    publish(true, 8);
     feed.until(10, |f| f.iter().filter(|f| f.event == "state").count() >= 2)
         .await;
     let resized = &feed.named("state")[1].data;
@@ -160,12 +175,12 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
         resized["reason"].as_str().unwrap().contains("resized"),
         "{resized}"
     );
-    assert_eq!(resized["hold"]["fallback_alias"], "other");
-    publish(None, 8);
+    assert_eq!(resized["hold"]["active"], true);
+    publish(false, 8);
     feed.until(10, |f| {
         f.iter()
             .rev()
-            .any(|f| f.event == "hold" && f.data["fallback_alias"].is_null())
+            .any(|f| f.event == "hold" && f.data["active"] == false)
     })
     .await;
 }

@@ -95,7 +95,7 @@ fn a_spoken_row_with_no_words_and_a_failed_transcript_goes_as_the_placeholder() 
     let texts: Vec<_> = out
         .iter()
         .map(|m| match &m.content[..] {
-            [ContentPart::Text { text }] => text.as_str(),
+            [ContentPart::Text { text, .. }] => text.as_str(),
             other => panic!("{other:?}"),
         })
         .collect();
@@ -156,7 +156,7 @@ async fn audio_goes_only_to_a_model_that_takes_it_wherever_it_runs() {
         llama: None,
     };
     snap.upstreams = HashMap::from([
-        (7, upstream(7, Protocol::Openai)),
+        (7, upstream(7, Protocol::OpenaiCompatible)),
         (8, upstream(8, Protocol::Anthropic)),
     ]);
     let alias = |name: &str, up: i64, modalities: Option<&[&str]>| {
@@ -172,6 +172,7 @@ async fn audio_goes_only_to_a_model_that_takes_it_wherever_it_runs() {
                 capabilities_override: modalities.map(|m| {
                     serde_json::json!({ "capabilities": { "task": "chat", "input_modalities": m } })
                 }),
+                fallback: None,
             },
         )
     };
@@ -197,7 +198,7 @@ async fn audio_goes_only_to_a_model_that_takes_it_wherever_it_runs() {
         .await
         .is_ok());
     let e = refused("texty").await;
-    assert_eq!(e.code(), AUDIO_NOT_HEARD);
+    assert_eq!(e.kind(), AUDIO_NOT_HEARD);
     assert_eq!(e.http_status().as_u16(), 400);
     assert_eq!(
         e.to_string(),

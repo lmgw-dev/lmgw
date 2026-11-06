@@ -189,6 +189,8 @@ fn a_chat_attachment_meta_with_no_blockers_or_hints_writes_neither_key() {
         extracted_tokens: None,
         blockers: None,
         hints: None,
+        source: "upload".into(),
+        call_id: None,
     })
     .unwrap();
     assert!(

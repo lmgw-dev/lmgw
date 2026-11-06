@@ -1,0 +1,54 @@
+{
+  "parsed": [
+    {
+      "body": "{\"object\":\"list\",\"model\":\"gguf\",\"data\":[{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.5,-0.25,0.125]},{\"object\":\"embedding\",\"index\":1,\"embedding\":[1,0,-1]}],\"usage\":{\"prompt_tokens\":4,\"total_tokens\":4}}",
+      "parsed": {
+        "embeddings": [
+          [
+            0.5,
+            -0.25,
+            0.125
+          ],
+          [
+            1.0,
+            0.0,
+            -1.0
+          ]
+        ],
+        "model": "gguf",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": 4
+        }
+      }
+    },
+    {
+      "body": "{\"data\":[]}",
+      "parsed": {
+        "embeddings": [],
+        "model": "",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": null
+        }
+      }
+    },
+    {
+      "body": "{\"model\":\"m\"}",
+      "parsed": {
+        "embeddings": [],
+        "model": "m",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": null
+        }
+      }
+    },
+    {
+      "body": "not json",
+      "parsed": {
+        "error": "Transport(\"invalid upstream JSON: expected ident at line 1 column 2\")"
+      }
+    }
+  ]
+}

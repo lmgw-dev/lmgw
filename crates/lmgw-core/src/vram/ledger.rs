@@ -12,7 +12,7 @@ use super::nvml::{GpuMemory, ProcessMemory};
 use super::on_cpu::on_gpu;
 use super::residency;
 use super::scheduler::{Reservation, CONTROL_TIMEOUT, MIB};
-use super::view::{peak_note, ResidentView};
+use super::view::{peak_note, KeptFree, ResidentView};
 use super::{broadcast, VramScheduler};
 use crate::bench::OnCard;
 
@@ -21,6 +21,9 @@ pub(super) struct Capacity {
     pub(super) free: u64,
     /// True when `free` came from the driver rather than from the estimate.
     pub(super) measured: bool,
+    /// What `free` was lowered by on top of the memory in use: the parts
+    /// the driver cannot show yet.
+    pub(super) kept_free: KeptFree,
 }
 
 pub(super) struct Ledger {
@@ -40,10 +43,6 @@ impl VramScheduler {
     /// Assemble the ledger: measure, then account, then reconcile.
     pub(super) async fn ledger(&self, state: &SharedState, snap: &Snapshot) -> Ledger {
         let s = &snap.settings;
-        let (devices, telemetry_error) = match self.devices().await {
-            Ok(d) => (d, None),
-            Err(e) => (vec![], Some(e)),
-        };
 
         // Residency is the registry, not a question asked over HTTP: an entry
         // exists exactly while lmgw believes a container for that model is up,
@@ -98,6 +97,39 @@ impl VramScheduler {
             .any(|e| e.class == Class::Audio)
             .then(|| self.probe().process_support().err())
             .flatten();
+        // What every ready audio container lmgw does not know to hold its
+        // model holds now, read around the device read itself
+        // ([`residency::now`]): a load lmgw did not route is on the card and
+        // in `used` already. Only where per-process figures exist at all —
+        // otherwise nothing is asked, and the notes say why as before.
+        let asked: Vec<residency::Ask> = match cannot_learn {
+            Some(_) => Vec::new(),
+            None => {
+                let pids = self.pids.lock().unwrap();
+                entries
+                    .iter()
+                    .filter(|e| e.class == Class::Audio && e.state == RuntimeState::Ready)
+                    .filter(|e| {
+                        let held = gens.get(&e.generation).and_then(|g| g.last_answered);
+                        !residency::holds(held, now, &s.audio)
+                    })
+                    .map(|e| residency::Ask {
+                        generation: e.generation,
+                        root: pids.root(e.generation),
+                    })
+                    .collect()
+            }
+        };
+        let read = self.devices_and_held(asked).await;
+        let held_now = read.held;
+        let (devices, telemetry_error) = match read.devices {
+            Ok(d) => (d, None),
+            Err(e) => (vec![], Some(e)),
+        };
+        if !devices.is_empty() {
+            self.device_total
+                .store(pooled(0, &devices).0, std::sync::atomic::Ordering::Relaxed);
+        }
         for e in &entries {
             // The rung the container runs, `starting` included: a climb's new
             // rung is charged from its claim on (ladder design §5).
@@ -132,6 +164,7 @@ impl VramScheduler {
                 _ => None,
             };
             let gen = gens.get(&e.generation).cloned().unwrap_or_default();
+            let held = held_now.get(&e.generation);
             let pending = match audio {
                 Some((row, fp)) => {
                     // Only an eager row nothing was read of needs its
@@ -148,6 +181,7 @@ impl VramScheduler {
                         weights,
                         &gen,
                         now,
+                        held.and_then(|h| h.as_ref().ok().copied()),
                     ))
                 }
                 None => None,
@@ -171,6 +205,7 @@ impl VramScheduler {
                             k != residency::resident_key(row, &s.audio)
                                 && row.residency.as_ref().is_some_and(|r| r.key == k)
                         }),
+                        unmeasured: held.and_then(|h| h.as_ref().err()).map(String::as_str),
                     },
                 )),
                 _ => fp.as_ref().and_then(|f| f.note.clone()),
@@ -220,13 +255,20 @@ impl VramScheduler {
         // Capacity, in the order of decreasing authority: a declared budget is
         // an explicit instruction, the driver's total is a measurement, and
         // absent both there is nothing to admit against.
+        let measured_kept = KeptFree {
+            starting_bytes: unmeasured,
+            image_peak_bytes: reserved_peaks,
+            pending_load_bytes: pending_loads,
+        };
         let (capacity, inactive_reason) = match (budget, devices.is_empty()) {
             (0, true) => (
                 None,
                 Some(format!(
-                    "no GPU telemetry ({}) and no vram.budget_mb declared — admission control \
-                     has nothing to measure against and is forwarding every request unchanged",
-                    telemetry_error.as_deref().unwrap_or("no devices")
+                    "no GPU telemetry ({}) and no GPU memory budget declared ({}) — admission \
+                     control has nothing to measure against and is forwarding every request \
+                     unchanged",
+                    telemetry_error.as_deref().unwrap_or("no devices"),
+                    crate::config::BUDGET_LABEL
                 )),
             ),
             (0, false) => {
@@ -239,6 +281,7 @@ impl VramScheduler {
                             .saturating_sub(reserved_peaks)
                             .saturating_sub(pending_loads),
                         measured: true,
+                        kept_free: measured_kept,
                     }),
                     None,
                 )
@@ -257,6 +300,10 @@ impl VramScheduler {
                         .saturating_sub(estimated_resident)
                         .saturating_sub(reserved_peaks),
                     measured: false,
+                    kept_free: KeptFree {
+                        image_peak_bytes: reserved_peaks,
+                        ..KeptFree::default()
+                    },
                 }),
                 None,
             ),
@@ -270,6 +317,7 @@ impl VramScheduler {
                             .saturating_sub(reserved_peaks)
                             .saturating_sub(pending_loads),
                         measured: true,
+                        kept_free: measured_kept,
                     }),
                     None,
                 )
@@ -284,6 +332,21 @@ impl VramScheduler {
             estimated_resident,
             capacity,
             inactive_reason,
+        }
+    }
+
+    /// The card's total as last known — a declared `vram.budget_mb`, else the
+    /// devices' total the last ledger read measured — with no device read of
+    /// its own; `None` while neither is known (no budget, nothing measured
+    /// yet). The same total [`Self::ledger`]'s capacity carries. The measured
+    /// one is as old as the last ledger read that saw a device (a failed read
+    /// keeps the previous figure); `start_background_at` says why that bound
+    /// is enough where it is read.
+    pub(super) fn known_total(&self, snap: &Snapshot) -> Option<u64> {
+        match snap.settings.vram.budget_mb.saturating_mul(MIB) {
+            0 => Some(self.device_total.load(std::sync::atomic::Ordering::Relaxed))
+                .filter(|t| *t > 0),
+            budget => Some(budget),
         }
     }
 
@@ -735,18 +798,18 @@ impl Roster {
 pub(super) fn trigger_off(snap: &Snapshot) -> Option<String> {
     let s = &snap.settings;
     if !s.vram.fallback_on_external {
-        return Some(
-            "vram.fallback_on_external is off — only the GPU hold sends a local request to \
-             its fallback"
-                .into(),
-        );
+        return Some(format!(
+            "falling back when VRAM outside lmgw's control is short is off ({}) — only the GPU \
+             hold sends a local request to its fallback",
+            crate::config::FALLBACK_ON_EXTERNAL_LABEL
+        ));
     }
     if !s.vram.enabled {
-        return Some(
-            "vram.enabled is off — admission does not arbitrate, so there is no shortfall to \
-             measure"
-                .into(),
-        );
+        return Some(format!(
+            "GPU memory arbitration is off ({}) — admission does not arbitrate, so there is no \
+             shortfall to measure",
+            crate::config::ADMISSION_LABEL
+        ));
     }
     if s.hold.active {
         return Some(

@@ -15,7 +15,7 @@ use wasm_bindgen::JsCast;
 use crate::charts::{
     line_path, line_runs, nice_ticks, use_element_size, use_tips, Plot, Tip, TipRow,
 };
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 
 use super::super::usage::{chart_or_table, ChartHead};
 use super::phase_label;
@@ -39,7 +39,7 @@ const LANES: [Lane; 3] = [
         name: "VRAM",
         color: "var(--c1)",
         read: |s| s.vram_used_bytes.map(|b| b as f64),
-        fmt: |v| human_bytes(v.max(0.0) as u64),
+        fmt: |v| fmt_bytes(v.max(0.0) as u64),
     },
     Lane {
         name: "Temperature",
@@ -305,7 +305,7 @@ fn per_phase(t: &Timeline) -> (Vec<String>, Vec<Vec<String>>) {
                 secs(end.saturating_sub(ph.start_ms) as f64),
                 mean.map_or("—".into(), |v| format!("{v:.0} W")),
                 peak.map_or("—".into(), |v| format!("{v:.0} W")),
-                vram.map_or("—".into(), human_bytes),
+                vram.map_or("—".into(), fmt_bytes),
                 temp.map_or("—".into(), |v| format!("{v} °C")),
                 if why.is_empty() {
                     "no".into()

@@ -94,9 +94,9 @@ pub enum OfficeError {
     #[error("{0} could not be read as XML: {1}")]
     Xml(String, String),
     #[error(
-        "the archive expands to more than MAX_UNCOMPRESSED_BYTES ({} MiB) of unpacked bytes and \
+        "the archive expands to more than MAX_UNCOMPRESSED_BYTES ({}) of unpacked bytes and \
          extracted text, so it was refused instead of unpacked ({what})",
-        MAX_UNCOMPRESSED_BYTES >> 20
+        crate::hf::fmt_bytes(MAX_UNCOMPRESSED_BYTES)
     )]
     TooLarge { what: String },
 }
@@ -1442,7 +1442,7 @@ mod tests {
         let e = extract(OfficeFormat::Docx, &big).unwrap_err();
         assert!(matches!(e, OfficeError::TooLarge { .. }), "{e:?}");
         assert!(e.to_string().contains("MAX_UNCOMPRESSED_BYTES"), "{e}");
-        assert!(e.to_string().contains("1024 MiB"), "{e}");
+        assert!(e.to_string().contains("1.0 GiB"), "{e}");
         let big = tf::zip_with_declared_size("xl/workbook.xml", MAX_UNCOMPRESSED_BYTES + 1);
         assert!(matches!(
             extract(OfficeFormat::Xlsx, &big),

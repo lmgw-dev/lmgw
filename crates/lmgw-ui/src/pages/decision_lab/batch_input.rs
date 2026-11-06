@@ -10,7 +10,7 @@ use lmgw_api_types::decision_lab::BatchFormat;
 use wasm_bindgen_futures::JsFuture;
 
 use super::page::Lab;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 
 /// A picked file's text, read whole.
 async fn read_text(file: web_sys::File) -> Result<String, String> {
@@ -70,7 +70,7 @@ pub(super) fn InputPart(lab: Lab) -> impl IntoView {
                 Some((name, size)) => view! {
                     <div class="dl-file-chip">
                         <b class="n" title=name.clone()>{name.clone()}</b>
-                        <span class="mini-note dim">{human_bytes(size)}</span>
+                        <span class="mini-note dim">{fmt_bytes(size)}</span>
                         <span class="spacer"></span>
                         <button
                             type="button"

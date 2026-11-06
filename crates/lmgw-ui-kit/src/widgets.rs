@@ -7,6 +7,8 @@
 use leptos::html;
 use leptos::prelude::*;
 
+/// A tool source's `require_approval` as the tool picker edits it.
+pub mod approval_rule;
 /// Running text folded to its first lines, with "more".
 pub mod clamp;
 /// A destructive action that takes two clicks.
@@ -21,10 +23,16 @@ pub mod modal;
 pub mod model_picker;
 /// A panel in the top layer, anchored to a button: never clipped.
 pub mod popover;
+/// The "⋯" row menu: a row's secondary actions in a popover.
+pub mod row_menu;
 /// A collapsible page section with its count and folded summary.
 pub mod section;
+/// `/` focuses the page's first visible search box.
+pub mod slash;
 /// A side panel beside a main pane, folding to a labelled rail.
 pub mod split;
+/// The tool picker shared by the Chat's thread settings and the key editor.
+pub mod tool_picker;
 /// A voice of a text-to-speech model, offered the model's voice list.
 pub mod voice_picker;
 
@@ -36,8 +44,10 @@ pub use form::{flatten, use_touched, Explain, Field, FormState, Kind, SaveBar};
 pub use modal::{use_modal, Modal, ModalFooter, ModalSize};
 pub use model_picker::ModelPicker;
 pub use popover::Popover;
+pub use row_menu::{MenuItem, RowMenu};
 pub use section::Section;
-pub use split::{Side, SplitPane};
+pub use slash::use_slash_focus;
+pub use split::{Drawer, Side, SplitPane};
 
 // ---------------------------------------------------------------------------
 // Toasts
@@ -205,30 +215,16 @@ pub fn use_toasts() -> Toasts {
 /// Put a secret the owner is about to paste on the clipboard, and say so only
 /// once the clipboard took it: the write is a promise that can be refused (no
 /// focus, no permission), and "key copied" over an empty clipboard sends the
-/// owner off to paste nothing.
+/// owner off to paste nothing. A page without a clipboard (not a secure
+/// context) says so too, rather than failing on a missing object.
 pub fn copy_secret(text: &str, toasts: Toasts, ok: String) {
-    use wasm_bindgen::{closure::Closure, JsCast, JsValue};
-    let done = Closure::once_into_js(move |_: JsValue| toasts.ok(ok));
-    let failed = Closure::once_into_js(move |e: JsValue| {
-        let why = e
-            .as_string()
-            .or_else(|| {
-                js_sys::Reflect::get(&e, &"message".into())
-                    .ok()
-                    .and_then(|m| m.as_string())
-            })
-            .unwrap_or_else(|| "the clipboard refused it".to_string());
-        toasts.err(format!("not copied: {why}"));
+    let text = text.to_string();
+    leptos::task::spawn_local(async move {
+        match crate::clipboard::write_text(&text).await {
+            Ok(()) => toasts.ok(ok),
+            Err(why) => toasts.err(format!("Not copied: {why}.")),
+        }
     });
-    // `then` through Reflect: the two callbacks are one-shot JS functions,
-    // and the one that never runs is a few bytes, not a kept `Closure`.
-    let promise = window().navigator().clipboard().write_text(text);
-    if let Some(then) = js_sys::Reflect::get(&promise, &"then".into())
-        .ok()
-        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-    {
-        let _ = then.call2(&promise, &done, &failed);
-    }
 }
 
 /// Clipboard button that flips to a checkmark for two seconds. Shared by

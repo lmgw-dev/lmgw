@@ -67,14 +67,23 @@ impl VoicesProbe {
     }
 }
 
-/// `GET /v1/audio/voices` (module doc).
-pub async fn handle_audio_voices(state: SharedState, alias: &str, probe: VoicesProbe) -> Response {
+/// `GET /v1/audio/voices` (module doc). `origin` is whose traffic the read
+/// is (per-request background design §3): `?probe=engine` admits a local
+/// model, as a guest for `x-lmgw-background: on`.
+pub async fn handle_audio_voices(
+    state: SharedState,
+    alias: &str,
+    probe: VoicesProbe,
+    origin: crate::runtime::registry::Origin,
+) -> Response {
     const PROTO: ClientProto = ClientProto::OpenaiChat;
     // Resolved like the inference routes it describes — the same gate and
     // checks ([`crate::gate::RouteCheck::AudioVoices`]), so "which model does
     // `audio/x` mean" has one answer here and on the speech route.
     let routed =
-        match crate::gate::resolve(&state, alias, crate::gate::RouteCheck::AudioVoices).await {
+        match crate::gate::resolve(&state, alias, crate::gate::RouteCheck::AudioVoices, origin)
+            .await
+        {
             Ok(r) => r,
             Err(f) => {
                 // The GPU hold (or a benchmark's lease) with no fallback:

@@ -29,7 +29,7 @@ mod tools;
 mod transcripts;
 mod turns;
 
-use lmgw_core::config::{HoldFallbackMode, LlamaParams};
+use lmgw_core::config::LlamaParams;
 use lmgw_core::ops::settings_set;
 use lmgw_core::state::SharedState;
 use lmgw_core::store::{self, NewLocalModel};
@@ -54,8 +54,7 @@ async fn hearing_row(state: &SharedState, model_id: &str) {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: HoldFallbackMode::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: Some(json!({ "capabilities": {
                 "task": "chat", "input_modalities": ["text", "image", "audio"]
             } })),
@@ -373,7 +372,7 @@ async fn the_verdict_never_waits_on_a_catalog_it_has_not_read() {
         &state.db,
         &store::NewUpstream {
             name: "slow-up".into(),
-            protocol: lmgw_core::config::Protocol::Openai,
+            protocol: lmgw_core::config::Protocol::OpenaiCompatible,
             kind: lmgw_core::config::UpstreamKind::Generic,
             base_url: format!("{}/v1", slow.uri()),
             api_key: None,
@@ -397,6 +396,7 @@ async fn the_verdict_never_waits_on_a_catalog_it_has_not_read() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

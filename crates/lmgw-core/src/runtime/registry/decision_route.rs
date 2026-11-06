@@ -96,7 +96,7 @@ fn route_of(image: &str, build_info: Option<&str>, read: Result<bool, String>) -
             "the image '{image}' ({build}) lists no decisions among its model's output \
              modalities in GET /v1/models, so its llama-server has no POST /v1/systemone (it \
              came with llama.cpp b11361) and every decision request answers 501 — pick a newer \
-             image for the row or the aux class on the Backends page"
+             image for the row or the aux class on the Engines page"
         )),
         Err(why) => DecisionRoute::Unread(format!(
             "GET /v1/models could not be read ({why}), so whether the image '{image}' \
@@ -162,11 +162,10 @@ impl Registry {
             return route_of(
                 image,
                 build_info,
-                Err(
-                    "not asked: vram.load_timeout_seconds was spent by the time the server \
-                     was up"
-                        .into(),
-                ),
+                Err(format!(
+                    "not asked: the load timeout ({}) was spent by the time the server was up",
+                    crate::config::LOAD_TIMEOUT_LABEL
+                )),
             );
         }
         self.read_decision_route(port, left, image, build_info)

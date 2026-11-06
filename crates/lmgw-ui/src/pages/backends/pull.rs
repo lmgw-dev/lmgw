@@ -190,7 +190,7 @@ fn PullBody(reference: String, job: Option<i64>, open: RwSignal<bool>) -> impl I
         <Show when=move || job.with(Option::is_none)>
             <div class="notice warn">
                 <b>"The download size is not known before the pull starts"</b>
-                "A CUDA image is often several GB. It lands in podman's image store next to the one it replaces."
+                "A CUDA image is often several GiB. It lands in podman's image store next to the one it replaces."
             </div>
             <p class="dim">
                 "Nothing is restarted: running containers keep the old image until they are recreated, "
@@ -215,6 +215,27 @@ fn PullBody(reference: String, job: Option<i64>, open: RwSignal<bool>) -> impl I
                         .map(|o| view! { <span class="dim">"replacing " <code class="mono-sm">{sha7(&o)}</code></span> })
                 }}
             </div>
+            // The bytes so far, where Podman's API counts them (machine-check
+            // design §5): the bar is indeterminate while the size is not
+            // known, and its tooltip says why.
+            {
+                let r = reference.clone();
+                let dl = Signal::derive(move || {
+                    live.with(|l| {
+                        l.as_ref()
+                            .map(|l| crate::gpu_download::Dl::of_detail(&r, &l.detail))
+                            .unwrap_or_default()
+                    })
+                });
+                view! {
+                    <div class="bk-facts" title=move || dl.with(crate::gpu_download::Dl::title)>
+                        <span class="dim">
+                            {move || dl.with(|d| d.amount()).unwrap_or_else(|| "size not known yet".to_string())}
+                        </span>
+                    </div>
+                    <crate::gpu_download::DlBar dl=dl/>
+                }
+            }
             <pre class="preset bk-pull-line">
                 {move || live.with(|l| l.as_ref().map(|l| l.detail.last_line.clone()).unwrap_or_default())}
             </pre>

@@ -357,8 +357,9 @@ async fn a_cancel_with_nothing_active_is_an_error_echoing_its_event_id() {
     assert_eq!(done.last().unwrap()["response"]["status"], "completed");
 }
 
-#[tokio::test]
-async fn a_stream_that_fails_after_its_finish_completes_the_response_and_logs_the_failure() {
+/// A stream whose call came whole with its finish, then `after`; the
+/// session, its state and the finished `response.done`.
+async fn finished_then(after: Step) -> (SharedState, Vec<Value>) {
     let fake = chat_fake().await;
     let go = Arc::new(Notify::new());
     fake.push(Turn::Stream(vec![
@@ -373,7 +374,7 @@ async fn a_stream_that_fails_after_its_finish_completes_the_response_and_logs_th
         },
         Step::Finish("tool_calls"),
         Step::Wait(go.clone()),
-        Step::Fail,
+        after,
     ]));
     let (state, addr) = gateway(&fake, false, None, |_| {}).await;
     let mut ws = text_session(&addr).await;
@@ -390,10 +391,26 @@ async fn a_stream_that_fails_after_its_finish_completes_the_response_and_logs_th
     let r = &ev[0]["response"];
     assert_eq!(r["status"], "completed");
     assert_eq!(r["output"][0]["status"], "completed");
-    // The failure is the row's (and the log's).
+    (state, ev)
+}
+
+#[tokio::test]
+async fn a_stream_that_fails_after_its_finish_completes_the_response_and_logs_the_failure() {
+    let (state, _) = finished_then(Step::Error("overloaded")).await;
+    // The failure the upstream reported is the row's (and the log's).
     let rows = rows(&state, 1).await;
     assert_eq!(rows[0].0, 502);
-    assert_eq!(rows[0].1.as_deref(), Some("transport"));
+    assert_eq!(rows[0].1.as_deref(), Some("upstream"));
+}
+
+/// A body that breaks after the finish undoes nothing: the answer was whole,
+/// and so is its row (openai egress design §6, 2026-11-05).
+#[tokio::test]
+async fn a_stream_that_breaks_after_its_finish_is_whole() {
+    let (state, _) = finished_then(Step::Fail).await;
+    let rows = rows(&state, 1).await;
+    assert_eq!(rows[0].0, 200);
+    assert_eq!(rows[0].1, None);
 }
 
 #[tokio::test]
@@ -442,7 +459,7 @@ async fn a_cancel_before_the_request_went_out_bills_no_prompt() {
     // was set up, so a stop while it still waited — here for the candidate
     // a re-pick moved it to, still starting — billed an estimated prompt
     // the upstream never got.
-    use lmgw_core::config::{HoldFallbackMode, LlamaParams};
+    use lmgw_core::config::LlamaParams;
     use lmgw_core::runtime::registry::RuntimeState;
     use lmgw_core::store::{NewCandidateAlias, NewLocalModel};
     let g = Gpu::new(24 * GIB, 3, 5).await;
@@ -465,8 +482,7 @@ async fn a_cancel_before_the_request_went_out_bills_no_prompt() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -478,7 +494,6 @@ async fn a_cancel_before_the_request_went_out_bills_no_prompt() {
         alias: "jobs".into(),
         candidates: vec!["p".into(), "a".into()],
         background: true,
-        fallback_mode: HoldFallbackMode::None,
         fallback: None,
         capabilities_disabled: vec![],
         capabilities_enabled: vec![],

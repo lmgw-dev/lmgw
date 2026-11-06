@@ -27,6 +27,7 @@ fn chat_spec(model_id: &str, gguf: &str, params: LlamaParams, args: &[&str]) -> 
         models_dir: "/srv/models".into(),
         config_mount: None,
         extra_run_args: vec![],
+        globals: vec![],
         init: false,
         entrypoint: None,
         engine: EngineArgs::Llama(LlamaArgs::Chat {
@@ -56,6 +57,7 @@ fn aux_spec(
         models_dir: "/srv/aux-models".into(),
         config_mount: None,
         extra_run_args: vec![],
+        globals: vec![],
         init: false,
         entrypoint: None,
         engine: EngineArgs::Llama(LlamaArgs::Aux {
@@ -741,6 +743,7 @@ fn podman_run_argv_for_an_audio_model_matches_the_expected_shape() {
         models_dir: "/srv/audio-models/".into(),
         config_mount: Some("/home/u/.local/share/lmgw/audiocpp/qwen3-tts".into()),
         extra_run_args: vec!["--device".into(), "nvidia.com/gpu=all".into()],
+        globals: vec![],
         init: false,
         entrypoint: None,
         engine: EngineArgs::Audio,
@@ -799,6 +802,7 @@ fn render_llama_args_is_empty_for_an_audio_spec() {
         models_dir: "/m".into(),
         config_mount: None,
         extra_run_args: vec![],
+        globals: vec![],
         init: false,
         entrypoint: None,
         engine: EngineArgs::Audio,
@@ -882,6 +886,7 @@ fn image_spec(files: Value, args: Value) -> RenderSpec {
         models_dir: "/srv/image-models/".into(),
         config_mount: None,
         extra_run_args: vec!["--device".into(), "nvidia.com/gpu=all".into()],
+        globals: vec![],
         init: true,
         entrypoint: Some("/sd-server".into()),
         engine: EngineArgs::Image(ImageArgs {

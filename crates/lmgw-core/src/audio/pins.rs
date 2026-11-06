@@ -71,9 +71,9 @@ pub fn pin_is_missing(status: u16, error_code: Option<&str>) -> bool {
 pub fn no_fallback(repo: &str, revision: &str) -> String {
     format!(
         "the audio.cpp spec pins {repo} to {} and lmgw does not fall back to main on its own — \
-         set Settings → Runtimes → Audio → Catalog downloads to 'latest' \
-         (audio.catalog_revision) to download the latest instead",
-        short(revision)
+         set {} to 'latest' to download the latest instead",
+        short(revision),
+        lmgw_api_types::settings_labels::CATALOG_DOWNLOADS_AT
     )
 }
 
@@ -273,6 +273,7 @@ mod tests {
             downloaded_at: None,
             requested_revision: asked.map(String::from),
             resolved_commit: commit.map(String::from),
+            oid: None,
         }
     }
 

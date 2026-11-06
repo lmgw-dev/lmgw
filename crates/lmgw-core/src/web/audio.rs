@@ -99,7 +99,9 @@ pub(crate) fn check_voice_refs(state: &SharedState, m: &NewAudioModel) -> Result
         };
         if root.is_empty() {
             return Err(format!(
-                "voice_ref `{r}`: the audio models dir is not configured, so nothing is mounted at /models"
+                "voice_ref `{r}`: the audio models directory is not set ({}), so nothing is \
+                 mounted at /models",
+                crate::hf::models_dir_location("audio")
             ));
         }
         let host = std::path::Path::new(root.trim_end_matches('/')).join(rel);
@@ -154,7 +156,7 @@ pub(crate) async fn catalog_refresh(state: &SharedState) -> Result<CatalogSnapsh
     let previous = previous.map(|s| s.listings).unwrap_or_default();
     let token = state.snapshot().settings.hf_token.clone();
     let (listings, warnings) =
-        audio::published::list_repos(&state.http, &token, &snapshot.specs, &previous).await;
+        audio::published::list_repos(&state.hub_http, &token, &snapshot.specs, &previous).await;
     snapshot.listings = listings;
     snapshot.warnings.extend(warnings);
     *state.audio_catalog.lock().unwrap() = Some(snapshot.clone());
@@ -177,18 +179,32 @@ fn suggest_model_id(package_id: &str) -> String {
 }
 
 /// Model-root path suggestion in *this gateway's* download layout (HF
-/// `owner/repo/file`, not the spec's `target_directory`): the parent dir of
-/// the package's first file, e.g.
-/// `audio-cpp/audio.cpp-gguf/PocketTTS-GGUF/english`.
+/// `owner/repo/file`, not the spec's `target_directory`): the deepest directory
+/// all of the package's files share, compared by whole path components, e.g.
+/// `audio-cpp/audio.cpp-gguf/PocketTTS-GGUF/english`. audio.cpp resolves a
+/// package's files relative to the model root, so a package with `sidecars/…`
+/// beside a root GGUF was rooted in `sidecars` when the first file's parent
+/// was taken.
 fn suggest_path(repo: &str, pkg: &SpecPackage) -> String {
-    let Some(first) = pkg.files.first() else {
-        return String::new();
-    };
-    let dest = crate::hf::dest_rel_path(repo, first).unwrap_or_else(|_| first.to_string());
-    match dest.rsplit_once('/') {
-        Some((dir, _)) => dir.to_string(),
-        None => dest,
+    let mut common: Option<Vec<String>> = None;
+    for file in &pkg.files {
+        let dest = crate::hf::dest_rel_path(repo, file).unwrap_or_else(|_| file.to_string());
+        let dir = match dest.rsplit_once('/') {
+            Some((dir, _)) => dir.to_string(),
+            None => dest,
+        };
+        let parts: Vec<String> = dir.split('/').map(str::to_string).collect();
+        common = Some(match common {
+            None => parts,
+            Some(prev) => prev
+                .into_iter()
+                .zip(parts)
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect(),
+        });
     }
+    common.map(|parts| parts.join("/")).unwrap_or_default()
 }
 
 /// Compose the browser view: catalog snapshot × tracked downloads × configured
@@ -522,7 +538,15 @@ pub(crate) async fn catalog_download(
         .chain(stale.iter().filter(|f| !missing.contains(f)))
         .cloned()
         .collect();
+    // What the package's models run in, when it is not here: fetched too,
+    // and nothing started (machine-check design §5, D16) — also when every
+    // file is here already, since getting the package is what was asked.
     if wanted.is_empty() {
+        let engine = super::hf::engine::fetch(state, "audio").await;
+        let message = format!(
+            "every file of {} is already installed — nothing to download{unchanged}",
+            pkg.display_name
+        );
         return Ok(dto::AudioCatalogInstall {
             ok: true,
             family: family.to_string(),
@@ -531,10 +555,8 @@ pub(crate) async fn catalog_download(
             revision,
             files_queued: 0,
             downloads: Vec::new(),
-            message: format!(
-                "every file of {} is already installed — nothing to download{unchanged}",
-                pkg.display_name
-            ),
+            message,
+            engine,
         });
     }
     let completing = !rows.is_empty();
@@ -559,6 +581,31 @@ pub(crate) async fn catalog_download(
     // follow its own download (same as `ops::hf_add`).
     let downloads = queued;
     let n = downloads.len();
+    let engine = super::hf::engine::fetch(state, "audio").await;
+    let message = if completing {
+        let lacks = match missing.is_empty() {
+            true => String::new(),
+            false => format!("the file(s) it lacks: {}", missing.join(", ")),
+        };
+        let moved = match stale.is_empty() {
+            true => String::new(),
+            false => format!(
+                "{}the installed file(s) from another commit than the pin, so the package \
+                     is one commit again: {}",
+                if lacks.is_empty() { "" } else { "; " },
+                stale.join(", ")
+            ),
+        };
+        format!(
+            "completing {} — downloading {n} file(s){at}: {lacks}{moved}{unchanged}",
+            pkg.display_name
+        )
+    } else {
+        format!(
+            "downloading {} — {n} file(s){at}; the package is servable once they finish",
+            pkg.display_name
+        )
+    };
     Ok(dto::AudioCatalogInstall {
         ok: true,
         family: family.to_string(),
@@ -567,30 +614,8 @@ pub(crate) async fn catalog_download(
         revision,
         files_queued: n as u32,
         downloads,
-        message: if completing {
-            let lacks = match missing.is_empty() {
-                true => String::new(),
-                false => format!("the file(s) it lacks: {}", missing.join(", ")),
-            };
-            let moved = match stale.is_empty() {
-                true => String::new(),
-                false => format!(
-                    "{}the installed file(s) from another commit than the pin, so the package \
-                     is one commit again: {}",
-                    if lacks.is_empty() { "" } else { "; " },
-                    stale.join(", ")
-                ),
-            };
-            format!(
-                "completing {} — downloading {n} file(s){at}: {lacks}{moved}{unchanged}",
-                pkg.display_name
-            )
-        } else {
-            format!(
-                "downloading {} — {n} file(s){at}; the package is servable once they finish",
-                pkg.display_name
-            )
-        },
+        message,
+        engine,
     })
 }
 
@@ -642,8 +667,7 @@ mod tests {
                 image: None,
                 extra_run_args: None,
                 warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
+                fallback: None,
             },
         )
         .await
@@ -769,7 +793,41 @@ mod tests {
             downloaded_at: None,
             requested_revision: Some("main".into()),
             resolved_commit: None,
+            oid: None,
         }
+    }
+
+    /// The suggested model root is the deepest directory every file of the
+    /// package shares, by whole components.
+    #[test]
+    fn suggest_path_is_the_deepest_shared_directory() {
+        fn pkg(files: &[&str]) -> SpecPackage {
+            let mut spec = spec_snapshot().specs.remove(0);
+            let mut p = spec.packages.remove(0);
+            p.files = files.iter().map(|f| f.to_string()).collect();
+            p
+        }
+        let repo = "audio-cpp/Yue2-3B-GGUF";
+        assert_eq!(
+            suggest_path(
+                repo,
+                &pkg(&[
+                    "sidecars/yue2-model-config.json",
+                    "sidecars/yue2-qwen.tiktoken",
+                    "yue2-3b-q8_0.gguf",
+                ])
+            ),
+            repo
+        );
+        assert_eq!(
+            suggest_path(repo, &pkg(&["turbo/x.gguf"])),
+            format!("{repo}/turbo")
+        );
+        assert_eq!(
+            suggest_path(repo, &pkg(&["x/turbo/a.gguf", "x/turbo2/b.gguf"])),
+            format!("{repo}/x")
+        );
+        assert_eq!(suggest_path(repo, &pkg(&[])), "");
     }
 
     /// The browser view is the old page's install-state rules verbatim:

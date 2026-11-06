@@ -220,8 +220,7 @@ fn aux_row(model_id: &str, gguf: &str, kind: AuxKind, pooling: Option<&str>) -> 
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
     }
 }
 
@@ -233,7 +232,7 @@ async fn serve(state: SharedState) -> String {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { crate::common::serve_on(listener, app).await });
     base
 }
 
@@ -764,8 +763,7 @@ async fn a_chat_row_with_embedding_args_is_probed_for_embeddings() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -801,8 +799,7 @@ async fn a_plain_chat_model_is_still_tested_by_generation() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -854,8 +851,7 @@ async fn local_model_test_reports_props_and_an_empty_disagreement_list_when_they
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },
@@ -930,8 +926,7 @@ async fn local_model_test_names_a_tool_support_disagreement() {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             capabilities_override: None,
             ladder: vec![],
         },

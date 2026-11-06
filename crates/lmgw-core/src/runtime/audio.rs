@@ -46,9 +46,15 @@ const CONTAINER_PORT: u16 = 8080;
 ///   limit has nothing to choose between.
 /// - `live_ingest` — bounds for `/v1/audio/*/live`, which the gateway does not
 ///   proxy (the body is a duplex chunked stream).
-/// - `cors_origins`, `ui`, `ui_management`, `frontend_listener` — the
-///   container is reachable from lmgw and nothing else; its browser surface
-///   stays off.
+/// - `ui` — not rendered, so the engine default (on) applies: the embedded
+///   WebUI at `/` is what Overview's web-UI link opens. Rendering
+///   `"ui": true` would also mark it as requested, which makes audio.cpp add
+///   its demo voices when no `voice_dir` is set, and would change the
+///   rendered bytes (adoption §3.4 compares them, so every container would
+///   be recreated).
+/// - `cors_origins`, `ui_management`, `frontend_listener` — the container is
+///   reachable from lmgw and nothing else; these browser-facing keys stay
+///   off.
 /// - `log_request_body` — needs `--log` on the argv as well, and puts prompt
 ///   text in the container log.
 pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String {
@@ -254,8 +260,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
+            fallback: None,
             residency: None,
         }
     }

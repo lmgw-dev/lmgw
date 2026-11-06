@@ -1,0 +1,38 @@
+{
+  "requests": [
+    {
+      "body": "{\"input\":[{\"content\":[{\"text\":\"hi there\",\"type\":\"input_text\"}],\"role\":\"user\",\"type\":\"message\"}],\"instructions\":\"You are m. Be brief.\",\"model\":\"chat-gguf\",\"reasoning\":{\"summary\":\"auto\"},\"service_tier\":\"auto\",\"store\":false,\"stream\":true}",
+      "body_json": {
+        "input": [
+          {
+            "content": [
+              {
+                "text": "hi there",
+                "type": "input_text"
+              }
+            ],
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "instructions": "You are m. Be brief.",
+        "model": "chat-gguf",
+        "reasoning": {
+          "summary": "auto"
+        },
+        "service_tier": "auto",
+        "store": false,
+        "stream": true
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/responses"
+    }
+  ],
+  "status": 200
+}

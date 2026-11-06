@@ -10,8 +10,13 @@
 //! Code client, 2026-06-30) is preserved verbatim from the spike:
 //!   - single JSON-RPC request/notification/response per POST — **no batching**
 //!     (removed in MCP 2025-06-18);
-//!   - `Accept` must allow `application/json` (we only return JSON in MVP);
+//!   - `Accept` must allow `application/json`; a `tools/call` that asked for
+//!     progress, from a client that also takes `text/event-stream`, is
+//!     answered as SSE ([`progress`], chat-media-tools design §7.2);
 //!   - notifications/responses → `202 Accepted`, no body;
+//!     `notifications/cancelled` stops the call it names first (§7.3) — an
+//!     image or audio call; a southbound server's call is not cancelled
+//!     yet;
 //!   - `initialize` negotiates `MCP-Protocol-Version`, assigns `MCP-Session-Id`;
 //!   - later requests must carry a known session id (`400` missing / `404` gone);
 //!   - lifecycle ordering (non-`initialize`/`ping` before init is rejected — it
@@ -49,8 +54,10 @@ use crate::erased::Erased;
 use crate::mcp::scope::ToolScope;
 use crate::mcp::{selfadmin, CallError};
 use crate::proxy::RequestCtx;
+use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 
+mod progress;
 mod resources;
 mod server_meta;
 mod tool_row;
@@ -62,9 +69,11 @@ const PROTOCOL_VERSION: &str = "2025-11-25";
 /// Revisions we accept on the `MCP-Protocol-Version` header / `initialize`.
 const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 
-/// `GET /mcp` SSE keep-alive interval (§6/§9). Axum emits an SSE comment line
-/// (`:`) every this-often when the stream is idle, so a proxy/client that times
-/// out a quiet connection keeps it open between `tools/list_changed` pushes. A
+/// SSE keep-alive interval of `GET /mcp` (§6/§9) and of a `tools/call`
+/// answered as a progress stream ([`progress`]). Axum emits an SSE comment
+/// line (`:`) every this-often when the stream is idle, so a proxy/client that
+/// times out a quiet connection keeps it open between `tools/list_changed`
+/// pushes, or between two progress notifications. A
 /// **visible** named constant, not a hidden cap — it only paces keep-alive
 /// comments and never bounds or truncates the notification stream itself.
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
@@ -166,11 +175,19 @@ pub trait ToolPlane: Send + Sync {
     /// Route + invoke a tool by exposed name. `Ok` carries the serialized
     /// `CallToolResult` (`content` + `isError`, verbatim, §7); `Err` carries the
     /// typed failure the dispatcher maps to JSON-RPC + a non-ok log row (§10).
+    /// `cx`: who follows the call's progress, and its stop.
     fn call_tool<'a>(
         &'a self,
         name: &'a str,
         args: Option<Map<String, Value>>,
+        cx: CallCx,
     ) -> Erased<'a, Result<Value, CallError>>;
+
+    /// Whether tool `name` reports progress while it runs: a call of it that
+    /// asked for progress is answered as a stream ([`progress`]).
+    fn reports_progress(&self, _name: &str) -> bool {
+        false
+    }
 
     /// `resources/*` (client-apps design §7.2): `None` for a plane that
     /// serves no resources, whose dispatch answers `-32601` as for any
@@ -182,6 +199,16 @@ pub trait ToolPlane: Send + Sync {
     ) -> Erased<'a, Option<Result<Value, (i64, String)>>> {
         Box::pin(async move { None })
     }
+}
+
+/// A `tools/call`'s context (chat-media-tools design §7.1): who follows its
+/// progress — the client, when it asked and takes a stream — and its stop,
+/// raised by the client's `notifications/cancelled`. A plane whose tools
+/// report nothing ignores both.
+#[derive(Default)]
+pub struct CallCx {
+    pub(crate) progress: Option<Box<dyn crate::mcp::media::Progress>>,
+    pub(crate) stop: Option<crate::proxy::StopSignal>,
 }
 
 /// Server name recorded on the log row for a built-in `lmgw__*` call, so the
@@ -204,6 +231,7 @@ const DOCS_SERVER_NAME: &str = "lmgw (docs)";
 /// credential, and filtering its view by its manifest would read as a boundary
 /// while changing nothing about what it may do. Presenting an agent token here
 /// therefore behaves exactly as presenting none.
+#[derive(Clone)]
 struct AdminPlane {
     state: SharedState,
     ctx: RequestCtx,
@@ -223,6 +251,7 @@ impl ToolPlane for AdminPlane {
         &'a self,
         name: &'a str,
         args: Option<Map<String, Value>>,
+        _cx: CallCx,
     ) -> Erased<'a, Result<Value, CallError>> {
         Box::pin(async move {
             let started = Instant::now();
@@ -282,6 +311,7 @@ impl ToolPlane for AdminPlane {
 /// deliberately (quickdoc §7): it is the tool surface for ordinary agents, and
 /// putting the documentation lookup behind the configuration token would leave
 /// every agent guessing from pretraining instead.
+#[derive(Clone)]
 struct AggregatePlane {
     state: SharedState,
     ctx: RequestCtx,
@@ -298,6 +328,15 @@ impl ToolPlane for AggregatePlane {
             // rmcp `Tool` serializes camelCase (`inputSchema` etc.) — pass through.
             let mut tools: Vec<Value> = super::docs::list();
             tools.extend(super::kb::list());
+            // The image and audio tools the rows offer now
+            // (chat-media-tools §3.1).
+            // The models the request's key may use (§3.7).
+            tools.extend(
+                super::media::offer(&self.state)
+                    .await
+                    .within(&snap, self.ctx.client_key.as_deref())
+                    .all(),
+            );
             // An app-only tool is for an MCP Apps host's views; a client that
             // declared no such host is offered only what a model may see.
             tools.extend(
@@ -331,6 +370,7 @@ impl ToolPlane for AggregatePlane {
         &'a self,
         name: &'a str,
         args: Option<Map<String, Value>>,
+        cx: CallCx,
     ) -> Erased<'a, Result<Value, CallError>> {
         Box::pin(async move {
             let started = Instant::now();
@@ -392,12 +432,37 @@ impl ToolPlane for AggregatePlane {
                     name,
                     args,
                     &super::kb::KbAccess::McpVisible,
-                    (None, charged.as_ref()),
+                    (None, charged.as_ref(), Origin::Owner),
                 )
                 .await;
                 let (server, outcome) = match &result {
                     Ok(v) => (
                         Some(super::exec::KB_SERVER.to_string()),
+                        CallOutcome::Completed {
+                            tool_error: builtin_tool_error(v),
+                        },
+                    ),
+                    Err(e) => (None, CallOutcome::Failed(e)),
+                };
+                record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
+                return result;
+            }
+            // The image and audio tools (chat-media-tools §3.5): the model
+            // rows are the request's key's, checked against its policy.
+            // The client follows its progress when it asked (§7.2), and
+            // stops it with `notifications/cancelled` (§7.3).
+            if super::media::owns(name) {
+                let result = super::media::call_mcp(
+                    &self.state,
+                    (name, args),
+                    &self.ctx,
+                    cx.progress.as_deref(),
+                    cx.stop.as_ref(),
+                )
+                .await;
+                let (server, outcome) = match &result {
+                    Ok(v) => (
+                        Some(super::media::server_of(name).to_string()),
                         CallOutcome::Completed {
                             tool_error: builtin_tool_error(v),
                         },
@@ -413,7 +478,7 @@ impl ToolPlane for AggregatePlane {
                     name,
                     args,
                     self.session.client_name.as_deref(),
-                    charged.as_ref(),
+                    (charged.as_ref(), Origin::Owner),
                 )
                 .await;
                 let (server, outcome) = match &result {
@@ -488,6 +553,10 @@ impl ToolPlane for AggregatePlane {
         params: &'a Value,
     ) -> Erased<'a, Option<Result<Value, (i64, String)>>> {
         Box::pin(async move { resources::serve(&self.state, &self.ctx, method, params).await })
+    }
+
+    fn reports_progress(&self, name: &str) -> bool {
+        super::media::owns(name)
     }
 }
 
@@ -649,16 +718,152 @@ enum Plane {
     Admin,
 }
 
+/// The admin plane's `initialize` instructions: what its tools are for,
+/// and the normal paths through them. Every `lmgw__` name in it is a tool
+/// of the self-admin catalog (a test holds it).
+pub(crate) const ADMIN_INSTRUCTIONS: &str =
+    "lmgw self-admin plane: built-in `lmgw__*` tools for inspecting and \
+    configuring this gateway. Start with `lmgw__status`. Whether the \
+    mutating tools are listed depends on the owner's self-admin setting; at \
+    'read only' they are absent and calling one is refused with that \
+    reason. The registered upstream MCP servers' tools are not served here \
+    — they are on /mcp.\n\n\
+    To serve a new local llama.cpp model, the normal path is:\n\
+    1. `lmgw__model_find` with the model's name as someone said it (digits \
+    as digits) — it answers one card: the original, the upload and the file \
+    that fits this machine's graphics card, from the listings' sizes.\n\
+    2. `lmgw__hf_repo` with `fit=true` on the card's upload for the exact \
+    pick: it reads the candidate file's header (1 to 16 MiB) and marks every \
+    file by what fits.\n\
+    3. `lmgw__model_get` with that repo and file — it downloads the weights \
+    with their companions and, in the background, plans the file on disk, \
+    fits its context to the card (the largest conversation that fits) and \
+    creates the row, without starting it.\n\
+    4. `lmgw__model_get_status` with the answer's `get_id` until its state \
+    isn't 'running': it says the stage, the bytes so far and, at the end, the \
+    row it made (`row_id`, `model_id`) or why it stopped and what to do. An \
+    answer with `row_id` and no `get_id` is a row that already serves the \
+    file.\n\
+    5. `lmgw__local_model_test` to confirm it actually loads and generates — \
+    it starts the model's own container itself, so there is no separate \
+    'apply' step for a model that has never run before.\n\n\
+    To choose everything yourself, go step by step: `lmgw__hf_repo` to see \
+    what a Hugging Face repo contains (files come back classified as weights \
+    / mmproj projector / speculative drafter); `lmgw__hf_add` to download a \
+    weights file together with its companions, then `lmgw__hf_downloads` \
+    with ids = the queued ids until the status is 'done'; \
+    `lmgw__local_model_plan` on the downloaded weights — it reads the GGUF \
+    metadata and returns a complete, ready-to-apply parameter set with a \
+    rationale for each value, so you do not need to know llama.cpp, at the \
+    trained context; `lmgw__local_model_set action=create` with those \
+    parameters; then `lmgw__local_model_test`. If a model with that id might \
+    already be running under stale config, run `lmgw__container \
+    model=<id> action=apply` first to recreate it.\n\n\
+    Embedding and rerank models are the AUX class, not chat: they are \
+    encoders (a `pooling_type` or classifier head in the GGUF header, no LM \
+    head), live in their own models directory, and are exposed under the \
+    aux prefix (usually `embed/<id>`). Same path, different target: \
+    `lmgw__hf_add … target=aux`, `lmgw__local_model_plan … target=aux` \
+    (returns kind, pooling and ctx_size read from the header, and the \
+    ubatch_size, batch_size, mmproj_path and backend that an encoder \
+    reading each input in one ubatch, a decision or a multimodal model \
+    needs), \
+    `lmgw__aux_model_set action=create`, then `lmgw__local_model_test … \
+    target=aux` (it embeds, reranks or asks one decision question — an \
+    encoder cannot generate). Never create a chat-class row for an embedding model, and \
+    never copy or hard-link a GGUF between the class directories: \
+    `lmgw__gguf_files target=aux` lists the aux dir, and a file only stays \
+    updatable where the downloader put it. CPU-only placement is \
+    `backend: \"cpu\"` on the aux row: no VRAM, and it keeps serving under \
+    the GPU hold. Decision models are the aux class's third kind: a GGUF \
+    whose header declares `decision.type` plans as kind `decision` and \
+    answers System One questions, which lmgw serves on `/v1/systemone` \
+    only. It cannot embed or rerank, and the types that read embeddings \
+    run llama-server in embedding mode, where it cannot generate either (a \
+    label-logit type's context still can); never give it a chat row. It \
+    has a \
+    prefix of its own, the aux class's `decision_prefix` (usually \
+    `decide/<id>`), and `embed/<id>` does not reach it; its plan sets \
+    the ubatch, the batch and, for a small non-causal model, the CPU.\n\n\
+    IMAGE models (stable-diffusion.cpp) are the fourth class and the one \
+    place the hf_add chain does not fit: a pipeline is a diffusion model \
+    (or an all-in-one checkpoint) plus a VAE plus one to three text \
+    encoders, living in DIFFERENT Hugging Face repos, and most of them are \
+    `.safetensors` rather than GGUF. So the path is \
+    `lmgw__image_recipes` (the shipped families, each with every file it \
+    needs, its size, whether the repo is licence-gated and whether it is \
+    already on the box) -> `lmgw__image_recipe_add key=<key>` (queues the \
+    missing components and hands back a prefilled row) -> \
+    `lmgw__hf_downloads` with ids = the queued ids until every one says 'done' -> \
+    `lmgw__image_model_set action=create` with that row -> \
+    `lmgw__local_model_test target=image`, which generates one small image. \
+    For a pipeline no recipe covers: `lmgw__hf_add target=image` per file \
+    (it fetches no companions — the components are in other repos), \
+    `lmgw__gguf_files target=image` to see what landed (it lists every kind \
+    sd-server loads, not just GGUF), `lmgw__local_model_plan target=image` \
+    to see whether a recipe matches it after all, and `files` written by \
+    hand otherwise. `edit` on the row is load-bearing, not descriptive: \
+    sd-server segfaults on a reference-image request to a pipeline that \
+    cannot take one, so lmgw refuses /v1/images/edits for every row without \
+    it.\n\n\
+    AUDIO models (audio.cpp: speech recognition, text-to-speech, cloning, \
+    music, …) come as catalog packages: `lmgw__audio_catalog action=list` \
+    (`action=refresh` first when nothing is cached) names each package's \
+    suggested model id, path, task and mode, `action=download` queues its \
+    files, `lmgw__hf_downloads` with ids = the queued ids until done, then `lmgw__audio_model_set \
+    action=create` with those suggestions; prove it with a request to \
+    /v1/audio/speech or /v1/audio/transcriptions on `audio/<id>` and read it \
+    back with `lmgw__local_model_get target=audio`.\n\n\
+    Models already on disk that lmgw did not download are supported — pass \
+    `gguf_path` to `lmgw__local_model_set` (or `lmgw__aux_model_set`) and \
+    use `lmgw__gguf_files` to find them — but that route cannot fetch \
+    anything and finds no companions, so prefer the HF path. Use \
+    `lmgw__model_inspect` to learn what any GGUF is (architecture, context \
+    length, which class serves it, whether the running llama.cpp build \
+    even supports it) and `lmgw__local_model_get` to read back a \
+    configured model of either class, including the exact command line it \
+    renders.\n\n\
+    If `lmgw__status` reports `vram.hold_active: true`, the GPU is held: \
+    requests to a local model with no configured fallback come back as a 503 \
+    `gpu_hold`; models that run on the CPU (an audio or aux row with backend \
+    `cpu`) keep serving. \
+    `lmgw__hold_set active=false` releases the hold; \
+    `active=true` engages it and stops idle local containers. Each model \
+    and alias has its own `fallback` (on `lmgw__local_model_set`, \
+    `lmgw__aux_model_set`, `lmgw__audio_model_set`, `lmgw__image_model_set`, \
+    `lmgw__candidate_alias_set`, `lmgw__model_set`), a model of the same \
+    type that answers whenever it cannot; there is no global one, and a \
+    fallback may have its own. While a benchmark run \
+    holds the GPU (`vram.benchmark` on `lmgw__status`, started with \
+    `lmgw__bench_start`), local requests are answered the same way, with a \
+    503 `gpu_benchmark` instead.\n\n\
+    CONTAINER BUILDS: lmgw builds its own engine images (llama.cpp, \
+    ik_llama.cpp, audio.cpp, stable-diffusion.cpp) from git, optionally with \
+    PRs merged on top. `lmgw__builds` lists the builds and the repo presets; \
+    `lmgw__forge_prs` finds PR numbers; `lmgw__build_set action=create \
+    preset=official slug=official-master-pr123 extras='pr 123'` defines one; \
+    `lmgw__build_check_merge id=<id>` says in seconds whether the extras \
+    merge; `lmgw__build_run id=<id>` starts a run (minutes) — follow it with \
+    `lmgw__build_log` and `lmgw__builds id=<id>`. A verified run moves the \
+    build's moving tag; models whose image names that tag pick it up when \
+    recreated (`lmgw__container model=<id> action=apply`), and \
+    `lmgw__local_model_test` proves it serves. `lmgw__container_images` \
+    lists every engine image with its users; `lmgw__container_image_delete` \
+    removes one nothing uses. Builds carry an `update` badge from the periodic \
+    update check (a moved ref, a pushed or merged PR); registry images in use \
+    carry `registry_update`, and `lmgw__container_image_pull` pulls a newer \
+    one.";
+
 /// The protocol dispatcher proper, generic over the [`ToolPlane`] so it is
 /// golden-testable without a live southbound MCP server (§16). Owns the §6
 /// MUST-list; the tool plane owns aggregation + routing.
-async fn dispatch(
-    plane: &dyn ToolPlane,
+async fn dispatch<P: ToolPlane + Clone + 'static>(
+    plane: &P,
     headers: &HeaderMap,
     body: &Bytes,
     which: Plane,
 ) -> Response {
-    // We only emit application/json in MVP, so the client must accept it.
+    // Every answer but a progress stream is JSON, so the client must accept it.
     if !accepts_json(headers) {
         return (StatusCode::NOT_ACCEPTABLE, "must accept application/json").into_response();
     }
@@ -679,8 +884,13 @@ async fn dispatch(
     let id = obj.get("id").cloned();
 
     // A notification (method, no id) or a client→server response (no method):
-    // acknowledged with 202 and no body.
+    // acknowledged with 202 and no body — a cancellation once it has stopped
+    // the call it names on the session that sent it (§7.3).
     match (method, &id) {
+        (Some("notifications/cancelled"), None) => {
+            progress::cancelled_notification(headers, obj.get("params"));
+            return StatusCode::ACCEPTED.into_response();
+        }
         (Some(_), None) | (None, _) => {
             return StatusCode::ACCEPTED.into_response();
         }
@@ -744,120 +954,7 @@ async fn dispatch(
                      The gateway's own `lmgw__*` self-admin tools are NOT served here — they \
                      are on /mcp/admin, behind a separate token."
                 }
-                Plane::Admin => {
-                    "lmgw self-admin plane: built-in `lmgw__*` tools for inspecting and \
-                     configuring this gateway. Start with `lmgw__status`. Whether the \
-                     mutating tools are listed depends on the owner's self-admin setting; at \
-                     'read only' they are absent and calling one is refused with that \
-                     reason. The registered upstream MCP servers' tools are not served here \
-                     — they are on /mcp.\n\n\
-                     To serve a new local llama.cpp model, the normal path is:\n\
-                     1. `lmgw__hf_repo` to see what a Hugging Face repo contains (files come \
-                     back classified as weights / mmproj projector / speculative drafter).\n\
-                     2. `lmgw__hf_add` to download a weights file together with its \
-                     companions, then `lmgw__hf_downloads` until the status is 'done'.\n\
-                     3. `lmgw__local_model_plan` on the downloaded weights — it reads the \
-                     GGUF metadata and returns a complete, ready-to-apply parameter set with \
-                     a rationale for each value, so you do not need to know llama.cpp.\n\
-                     4. `lmgw__local_model_set action=create` with those parameters.\n\
-                     5. `lmgw__local_model_test` to confirm it actually loads and generates — \
-                     it starts the model's own container itself, so there is no separate \
-                     'apply' step for a model that has never run before. If a model with that \
-                     id might already be running under stale config, run \
-                     `lmgw__container model=<id> action=apply` first to recreate it.\n\n\
-                     Embedding and rerank models are the AUX class, not chat: they are \
-                     encoders (a `pooling_type` or classifier head in the GGUF header, no LM \
-                     head), live in their own models directory, and are exposed under the \
-                     aux prefix (usually `embed/<id>`). Same path, different target: \
-                     `lmgw__hf_add … target=aux`, `lmgw__local_model_plan … target=aux` \
-                     (returns kind, pooling and ctx_size read from the header, and the \
-                     ubatch_size, batch_size, mmproj_path and backend that an encoder \
-                     reading each input in one ubatch, a decision or a multimodal model \
-                     needs), \
-                     `lmgw__aux_model_set action=create`, then `lmgw__local_model_test … \
-                     target=aux` (it embeds, reranks or asks one decision question — an \
-                     encoder cannot generate). Never create a chat-class row for an embedding model, and \
-                     never copy or hard-link a GGUF between the class directories: \
-                     `lmgw__gguf_files target=aux` lists the aux dir, and a file only stays \
-                     updatable where the downloader put it. CPU-only placement is \
-                     `backend: \"cpu\"` on the aux row: no VRAM, and it keeps serving under \
-                     the GPU hold. Decision models are the aux class's third kind: a GGUF \
-                     whose header declares `decision.type` plans as kind `decision` and \
-                     answers System One questions, which lmgw serves on `/v1/systemone` \
-                     only. It cannot embed or rerank, and the types that read embeddings \
-                     run llama-server in embedding mode, where it cannot generate either (a \
-                     label-logit type's context still can); never give it a chat row. It \
-                     has a \
-                     prefix of its own, the aux class's `decision_prefix` (usually \
-                     `decide/<id>`), and `embed/<id>` does not reach it; its plan sets \
-                     the ubatch, the batch and, for a small non-causal model, the CPU.\n\n\
-                     IMAGE models (stable-diffusion.cpp) are the fourth class and the one \
-                     place the hf_add chain does not fit: a pipeline is a diffusion model \
-                     (or an all-in-one checkpoint) plus a VAE plus one to three text \
-                     encoders, living in DIFFERENT Hugging Face repos, and most of them are \
-                     `.safetensors` rather than GGUF. So the path is \
-                     `lmgw__image_recipes` (the shipped families, each with every file it \
-                     needs, its size, whether the repo is licence-gated and whether it is \
-                     already on the box) -> `lmgw__image_recipe_add key=<key>` (queues the \
-                     missing components and hands back a prefilled row) -> \
-                     `lmgw__hf_downloads` until every queued id says 'done' -> \
-                     `lmgw__image_model_set action=create` with that row -> \
-                     `lmgw__local_model_test target=image`, which generates one small image. \
-                     For a pipeline no recipe covers: `lmgw__hf_add target=image` per file \
-                     (it fetches no companions — the components are in other repos), \
-                     `lmgw__gguf_files target=image` to see what landed (it lists every kind \
-                     sd-server loads, not just GGUF), `lmgw__local_model_plan target=image` \
-                     to see whether a recipe matches it after all, and `files` written by \
-                     hand otherwise. `edit` on the row is load-bearing, not descriptive: \
-                     sd-server segfaults on a reference-image request to a pipeline that \
-                     cannot take one, so lmgw refuses /v1/images/edits for every row without \
-                     it.\n\n\
-                     AUDIO models (audio.cpp: speech recognition, text-to-speech, cloning, \
-                     music, …) come as catalog packages: `lmgw__audio_catalog action=list` \
-                     (`action=refresh` first when nothing is cached) names each package's \
-                     suggested model id, path, task and mode, `action=download` queues its \
-                     files, `lmgw__hf_downloads` until done, then `lmgw__audio_model_set \
-                     action=create` with those suggestions; prove it with a request to \
-                     /v1/audio/speech or /v1/audio/transcriptions on `audio/<id>` and read it \
-                     back with `lmgw__local_model_get target=audio`.\n\n\
-                     Models already on disk that lmgw did not download are supported — pass \
-                     `gguf_path` to `lmgw__local_model_set` (or `lmgw__aux_model_set`) and \
-                     use `lmgw__gguf_files` to find them — but that route cannot fetch \
-                     anything and finds no companions, so prefer the HF path. Use \
-                     `lmgw__model_inspect` to learn what any GGUF is (architecture, context \
-                     length, which class serves it, whether the running llama.cpp build \
-                     even supports it) and `lmgw__local_model_get` to read back a \
-                     configured model of either class, including the exact command line it \
-                     renders.\n\n\
-                     If `lmgw__status` reports `vram.hold_active: true`, the GPU is held: \
-                     requests to a local model with no configured fallback come back as a 503 \
-                     `gpu_hold`; models that run on the CPU (an audio or aux row with backend \
-                     `cpu`) keep serving. \
-                     `lmgw__hold_set active=false` releases the hold; \
-                     `active=true` engages it and stops idle local containers. The global \
-                     fallback (chat-class local models only) is `hold_fallback_alias` on \
-                     `lmgw__settings_set`; a per-model one is set on `lmgw__local_model_set` \
-                     via `hold_fallback_mode` and `hold_fallback`. While a benchmark run \
-                     holds the GPU (`vram.benchmark` on `lmgw__status`, started with \
-                     `lmgw__bench_start`), local requests are answered the same way, with a \
-                     503 `gpu_benchmark` instead.\n\n\
-                     CONTAINER BUILDS: lmgw builds its own engine images (llama.cpp, \
-                     ik_llama.cpp, audio.cpp, stable-diffusion.cpp) from git, optionally with \
-                     PRs merged on top. `lmgw__builds` lists the builds and the repo presets; \
-                     `lmgw__forge_prs` finds PR numbers; `lmgw__build_set action=create \
-                     preset=official slug=official-master-pr123 extras='pr 123'` defines one; \
-                     `lmgw__build_check_merge id=<id>` says in seconds whether the extras \
-                     merge; `lmgw__build_run id=<id>` starts a run (minutes) — follow it with \
-                     `lmgw__build_log` and `lmgw__builds id=<id>`. A verified run moves the \
-                     build's moving tag; models whose image names that tag pick it up when \
-                     recreated (`lmgw__container model=<id> action=apply`), and \
-                     `lmgw__local_model_test` proves it serves. `lmgw__container_images` \
-                     lists every engine image with its users; `lmgw__container_image_delete` \
-                     removes one nothing uses. Builds carry an `update` badge from the periodic \
-                     update check (a moved ref, a pushed or merged PR); registry images in use \
-                     carry `registry_update`, and `lmgw__container_image_pull` pulls a newer \
-                     one."
-                }
+                Plane::Admin => ADMIN_INSTRUCTIONS,
             };
             // The aggregate passes resources and the MCP Apps metadata
             // through (client-apps design §7.2); the admin plane has tools.
@@ -912,19 +1009,31 @@ async fn dispatch(
                     );
                 }
             };
-            match plane.call_tool(&name, args).await {
-                Ok(result) => json_rpc(StatusCode::OK, None, rpc_ok(id, result)),
-                Err(e) => {
-                    // §14: unknown tool → -32601; transport/timeout → internal.
-                    // Always HTTP 200 with a JSON-RPC error object (the surface
-                    // is JSON-RPC); the *log row* is what's mapped non-ok (§10).
-                    json_rpc(
-                        StatusCode::OK,
-                        None,
-                        rpc_err(id, e.rpc_code(), &e.to_string()),
-                    )
-                }
+            // The call's stop, raised by the session's
+            // `notifications/cancelled` for this id while it runs (§7.3).
+            let (handle, stop) = crate::proxy::stop_pair();
+            let registered = hget(headers, "mcp-session-id")
+                .map(|sid| progress::Calls::register(sid, &id, handle));
+            // A client that asked for progress, takes a stream, and called
+            // a tool that reports some: answered as SSE (§7.2).
+            let token = progress::token(&params, accepts_sse(headers))
+                .filter(|_| plane.reports_progress(&name));
+            if let Some(token) = token {
+                return progress::progress_stream(
+                    plane.clone(),
+                    (id, name, args),
+                    token,
+                    stop,
+                    registered,
+                );
             }
+            let cx = CallCx {
+                progress: None,
+                stop: Some(stop),
+            };
+            let answer = progress::call_answer(plane.call_tool(&name, args, cx).await, id);
+            drop(registered);
+            json_rpc(StatusCode::OK, None, answer)
         }
         other => match plane.resources(other, &params).await {
             Some(Ok(result)) => json_rpc(StatusCode::OK, None, rpc_ok(id, result)),
@@ -1088,6 +1197,12 @@ fn hget<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name).and_then(|v| v.to_str().ok())
 }
 
+/// Whether the client takes an SSE answer to a POST (`text/event-stream`
+/// named, or `*/*`).
+fn accepts_sse(h: &HeaderMap) -> bool {
+    hget(h, "accept").is_some_and(|a| a.contains("text/event-stream") || a.contains("*/*"))
+}
+
 /// Accept missing or allowing `application/json` (or `*/*` / `application/*`).
 /// Lenient on purpose: we only return JSON, and over-strict negotiation would
 /// reject otherwise-valid clients.
@@ -1194,12 +1309,16 @@ fn session_of(headers: &HeaderMap) -> Session {
 }
 
 #[cfg(test)]
+mod instructions_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// A fake tool plane for the golden dispatch tests (§16): one tool
     /// `time__now`, a happy-path call, and a not-found for anything else — no
     /// live MCP server, no `McpManager`.
+    #[derive(Clone)]
     struct FakePlane;
 
     impl ToolPlane for FakePlane {
@@ -1217,6 +1336,7 @@ mod tests {
             &'a self,
             name: &'a str,
             _args: Option<Map<String, Value>>,
+            _cx: CallCx,
         ) -> Erased<'a, Result<Value, CallError>> {
             Box::pin(async move {
                 if name == "time__now" {
@@ -1387,7 +1507,7 @@ mod tests {
 
     /// Mint a session through `initialize` and return headers carrying it (for
     /// the malformed-`tools/call` tests below).
-    async fn session_headers(plane: &dyn ToolPlane) -> HeaderMap {
+    async fn session_headers<P: ToolPlane + Clone + 'static>(plane: &P) -> HeaderMap {
         let init = dispatch(
             plane,
             &json_headers(),

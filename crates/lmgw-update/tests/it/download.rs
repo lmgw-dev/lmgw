@@ -92,3 +92,27 @@ async fn a_hash_mismatch_removes_the_partial_file() {
     );
     assert!(!dest.exists(), "the partial file is removed");
 }
+
+#[tokio::test]
+async fn the_file_is_created_0600_and_a_planted_symlink_is_not_followed() {
+    use std::os::unix::fs::{symlink, MetadataExt};
+    let (server, feed) = serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"precious").unwrap();
+    let dest = dir.path().join("update.rpm");
+    symlink(&victim, &dest).unwrap();
+    download_rpm(
+        &reqwest::Client::new(),
+        &feed,
+        &artifact(&server, ""),
+        &dest,
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(meta.is_file(), "the link was replaced by a regular file");
+    assert_eq!(meta.mode() & 0o7777, 0o600);
+    assert_eq!(std::fs::read(&dest).unwrap(), BODY);
+}

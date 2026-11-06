@@ -288,6 +288,8 @@ pub struct ModelCatalog {
     fetched_at: RwSignal<f64>,
     /// Which fetch is the latest: an older one landing late is dropped.
     generation: StoredValue<u64>,
+    /// The transport the host handed the page when the catalog was made.
+    http: crate::http::Http,
 }
 
 impl ModelCatalog {
@@ -300,7 +302,7 @@ impl ModelCatalog {
         this.generation.set_value(gen);
         this.loading.set(true);
         spawn_local(async move {
-            let res = crate::http::get::<Value>("/v1/models").await;
+            let res = this.http.get::<Value>("/v1/models").await;
             if this.generation.try_get_value() != Some(gen) {
                 return;
             }
@@ -327,7 +329,8 @@ impl ModelCatalog {
 
 /// Install the catalog and fetch it whenever the session opens (on load, and
 /// again after a login — the gate swaps the pages, and a catalog fetched
-/// while locked is a 401). `locked` is the host's session gate. Call once, in `App`.
+/// while locked is a 401). `locked` is the host's session gate. Call once, in `App`,
+/// after the host provided its transport (`crate::http::Http`) if it has one.
 pub fn provide_model_catalog(locked: Signal<bool>) {
     let catalog = ModelCatalog {
         entries: RwSignal::new(Vec::new()),
@@ -335,6 +338,7 @@ pub fn provide_model_catalog(locked: Signal<bool>) {
         loading: RwSignal::new(false),
         fetched_at: RwSignal::new(0.0),
         generation: StoredValue::new(0),
+        http: crate::http::use_http(),
     };
     provide_context(catalog);
     Effect::new(move |prev: Option<bool>| {

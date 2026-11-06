@@ -14,8 +14,8 @@
 
 use std::convert::Infallible;
 
-use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::sse::Event as SseFrame;
+use axum::response::Response;
 use futures::StreamExt;
 use lmgw_api_types::chat_frames as frames;
 use tokio::sync::mpsc;
@@ -64,7 +64,7 @@ impl SentAs {
     pub fn of(answered_by: Option<String>, ir: &crate::ir::ChatRequest) -> Self {
         Self {
             answered_by,
-            images: crate::gate::media_parts(ir).images > 0,
+            images: crate::gate::media_parts(ir, None).images > 0,
             llama_server: false,
         }
     }
@@ -105,7 +105,7 @@ impl TurnFrame {
     }
 
     /// The `error` frame of a gateway error: `{message, code}`, the code
-    /// being the one a client branches on (`GatewayError::code`, e.g.
+    /// being the one a client branches on (`GatewayError::kind`, e.g.
     /// `gpu_hold`, `context_length_exceeded`, `vram_queue_timeout`).
     pub fn error(e: &GatewayError) -> Self {
         Self {
@@ -114,7 +114,7 @@ impl TurnFrame {
                 "error",
                 &frames::ErrorFrame {
                     message: e.to_string(),
-                    code: Some(e.code().to_string()),
+                    code: Some(e.kind().to_string()),
                     ..Default::default()
                 },
             )
@@ -272,7 +272,5 @@ pub(super) fn sse(
     rx: mpsc::Receiver<TurnFrame>,
 ) -> Response {
     let events = ReceiverStream::new(rx).map(|f| Ok::<_, Infallible>(f.into_sse()));
-    Sse::new(caller.sse(state, events))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    caller.sse_response(state, events)
 }

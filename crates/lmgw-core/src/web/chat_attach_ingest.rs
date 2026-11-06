@@ -65,6 +65,8 @@ pub(super) async fn ingest(
         extracted: None,
         meta: json!({}),
         mode: None,
+        source: lmgw_api_types::chat_media::SOURCE_UPLOAD.to_string(),
+        call_id: None,
     };
     match sniffed.kind {
         Kind::Image => {}

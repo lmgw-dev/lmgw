@@ -17,6 +17,11 @@ pub struct NewAttachment {
     pub extracted: Option<String>,
     pub meta: serde_json::Value,
     pub mode: Option<String>,
+    /// `upload`, `tool` or `action` (chat-media-tools design §6.3).
+    pub source: String,
+    /// The tool call that made a `tool` file, the card action (`act-<boot>-<n>`)
+    /// that made an `action` file.
+    pub call_id: Option<String>,
 }
 
 impl NewAttachment {
@@ -30,6 +35,8 @@ impl NewAttachment {
             extracted: None,
             meta: serde_json::json!({}),
             mode: None,
+            source: lmgw_api_types::chat_media::SOURCE_UPLOAD.to_string(),
+            call_id: None,
         }
     }
 
@@ -48,6 +55,8 @@ impl NewAttachment {
             meta: self.meta.clone(),
             blockers: None,
             hints: None,
+            source: self.source.clone(),
+            call_id: self.call_id.clone(),
         }
     }
 }
@@ -59,8 +68,9 @@ pub async fn insert_chat_attachment_new(
     a: &NewAttachment,
 ) -> DbResult<i64> {
     let res = sqlx::query(
-        "INSERT INTO chat_attachments (thread_id, kind, name, mime, size, data, extracted, meta, mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO chat_attachments
+           (thread_id, kind, name, mime, size, data, extracted, meta, mode, source, call_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(thread_id)
     .bind(&a.kind)
@@ -71,6 +81,8 @@ pub async fn insert_chat_attachment_new(
     .bind(&a.extracted)
     .bind(a.meta.to_string())
     .bind(&a.mode)
+    .bind(&a.source)
+    .bind(&a.call_id)
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())

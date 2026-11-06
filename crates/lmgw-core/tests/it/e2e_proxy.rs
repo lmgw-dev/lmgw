@@ -52,6 +52,7 @@ pub(crate) async fn setup_kind(
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -79,7 +80,7 @@ async fn openai_to_openai_unary_with_log_and_event() {
         .mount(&mock)
         .await;
 
-    let (state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
 
     // Auth on + a named key, so the request/log/SSE frame all carry a real
     // client_key — "which key made this call", visible end to end (the P8
@@ -137,7 +138,7 @@ async fn openai_to_openai_unary_with_log_and_event() {
     assert_eq!(log.requested_alias, "my-model");
     assert_eq!(log.upstream_model.as_deref(), Some("tgt-model"));
     assert_eq!(log.ingress_proto, "openai");
-    assert_eq!(log.egress_proto.as_deref(), Some("openai"));
+    assert_eq!(log.egress_proto.as_deref(), Some("openai_compatible"));
     assert_eq!(log.status, 200);
     assert_eq!(log.completion_tokens, Some(34));
     assert!(!log.streamed);
@@ -242,7 +243,7 @@ async fn anthropic_ingress_to_openai_egress_translation() {
         .mount(&mock)
         .await;
 
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header("anthropic-version", "2023-06-01")
@@ -271,7 +272,7 @@ async fn anthropic_ingress_to_openai_egress_translation() {
 #[tokio::test]
 async fn an_input_audio_part_reaches_the_upstream_verbatim() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
@@ -315,7 +316,7 @@ async fn streaming_openai_passthrough_translates_and_logs() {
         .mount(&mock)
         .await;
 
-    let (state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
         .json(&json!({
@@ -377,7 +378,7 @@ async fn anthropic_client_streaming_from_openai_upstream() {
         .mount(&mock)
         .await;
 
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let text = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header("anthropic-version", "2023-06-01")
@@ -410,7 +411,7 @@ async fn upstream_error_is_normalized_and_logged() {
         .mount(&mock)
         .await;
 
-    let (state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
         .json(&json!({"model": "my-model", "messages": [{"role": "user", "content": "x"}]}))
@@ -419,7 +420,7 @@ async fn upstream_error_is_normalized_and_logged() {
         .unwrap();
     assert_eq!(resp.status(), 429);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["type"], "api_error");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
@@ -435,7 +436,7 @@ async fn upstream_error_is_normalized_and_logged() {
 
 #[tokio::test]
 async fn unknown_alias_is_404_in_client_shape() {
-    let (state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
 
     // OpenAI shape
     let resp = reqwest::Client::new()
@@ -471,7 +472,7 @@ async fn unknown_alias_is_404_in_client_shape() {
 /// missing name used to answer.
 #[tokio::test]
 async fn legacy_completion_without_model_is_400() {
-    let (state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/completions"))
         .json(&json!({"prompt": "Once upon a time"}))
@@ -500,7 +501,7 @@ async fn legacy_completion_without_model_is_400() {
 
 #[tokio::test]
 async fn models_endpoint_serves_both_shapes() {
-    let (_state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (_state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     let openai: Value = client
@@ -529,7 +530,7 @@ async fn models_endpoint_serves_both_shapes() {
 
 #[tokio::test]
 async fn auth_blocks_v1_when_enabled() {
-    let (state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
 
     // enable auth + create a key
     let mut settings = state.snapshot().settings.clone();
@@ -590,7 +591,7 @@ async fn embeddings_passthrough() {
         .mount(&mock)
         .await;
 
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let body: Value = reqwest::Client::new()
         .post(format!("{base}/v1/embeddings"))
         .json(&json!({"model": "my-model", "input": "hello"}))
@@ -609,7 +610,7 @@ async fn embeddings_passthrough() {
 async fn count_tokens_openai_generic_uses_tiktoken() {
     // Real-OpenAI-style upstream (kind=Generic): no /tokenize endpoint, so the
     // count is computed locally — no upstream call is made.
-    let (_state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (_state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let body: Value = reqwest::Client::new()
         .post(format!("{base}/v1/count_tokens"))
         .json(&json!({"model": "my-model", "input": "hello world"}))
@@ -691,7 +692,7 @@ async fn count_tokens_llama_server_forwards_model() {
 
 #[tokio::test]
 async fn count_tokens_unknown_alias_is_404() {
-    let (_state, base) = setup("http://127.0.0.1:1", Protocol::Openai).await;
+    let (_state, base) = setup("http://127.0.0.1:1", Protocol::OpenaiCompatible).await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/count_tokens"))
         .json(&json!({"model": "ghost", "input": "x"}))
@@ -754,7 +755,7 @@ async fn assistant_reasoning_is_replayed_to_the_upstream() {
         .expect(2)
         .mount(&mock)
         .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     // OpenAI-shaped client: `reasoning_content` on the assistant turn.
@@ -908,7 +909,7 @@ async fn reasoning_off_reaches_a_llama_server_as_a_template_kwarg() {
 #[tokio::test]
 async fn contradicting_headers_are_a_400_in_the_callers_dialect() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -955,7 +956,7 @@ async fn contradicting_headers_are_a_400_in_the_callers_dialect() {
 #[tokio::test]
 async fn a_malformed_reasoning_header_is_a_400_naming_it() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     for (header, value, needle) in [
@@ -985,7 +986,7 @@ async fn a_malformed_reasoning_header_is_a_400_naming_it() {
 #[tokio::test]
 async fn an_ignored_control_is_reported_on_the_response() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await; // generic kind
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await; // generic kind
     let client = reqwest::Client::new();
 
     let resp = client
@@ -1164,7 +1165,7 @@ async fn an_ignored_control_is_reported_on_a_stream_too() {
         )
         .mount(&mock)
         .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
@@ -1208,6 +1209,7 @@ async fn setup_with_alias_reasoning(
             },
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -1279,7 +1281,7 @@ async fn a_body_effort_overrides_an_alias_that_is_off() {
 #[tokio::test]
 async fn an_off_header_contradicting_a_level_or_budget_is_a_400() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     for (header, value) in [
@@ -1328,7 +1330,7 @@ async fn a_malformed_header_does_not_break_routes_that_ignore_it() {
         })))
         .mount(&mock)
         .await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -1464,7 +1466,7 @@ async fn an_absurd_budget_is_refused_by_name() {
 #[tokio::test]
 async fn an_unparseable_reasoning_effort_reaches_the_upstream_verbatim() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
@@ -1487,7 +1489,7 @@ async fn an_unparseable_reasoning_effort_reaches_the_upstream_verbatim() {
 #[tokio::test]
 async fn an_openrouter_object_is_reconciled_without_a_scalar() {
     let mock = chat_mock().await;
-    let (_state, base) = setup(&mock.uri(), Protocol::Openai).await;
+    let (_state, base) = setup(&mock.uri(), Protocol::OpenaiCompatible).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -1615,7 +1617,7 @@ async fn setup_with_timeout(upstream_base: &str, timeout_ms: u64) -> (SharedStat
         &state.db,
         &NewUpstream {
             name: "test-up".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: upstream_base.trim_end_matches('/').to_string(),
             api_key: Some("sk-up".into()),
@@ -1639,6 +1641,7 @@ async fn setup_with_timeout(upstream_base: &str, timeout_ms: u64) -> (SharedStat
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await

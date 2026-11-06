@@ -66,59 +66,20 @@ pub(super) fn check(t: &mut ChatThread) -> Result<(), String> {
 }
 
 /// Split the thread's own params into what `route` takes and the names of
-/// what it does not: llama-server takes all of them; a generic
-/// OpenAI-compatible provider knows no `top_k`, `min_p` or `repeat_penalty`;
-/// Anthropic takes `temperature`, `top_p`, `top_k` and `stop` and nothing
-/// else; Gemini takes those and `seed`. Only fields the
-/// thread set are reported, in a fixed order; `max_tokens` and `reasoning`
-/// are not sampling and pass through untouched.
+/// what it does not, by the egress's own table
+/// ([`crate::egress::sampling`]): llama-server and OpenAI-compatible
+/// providers take all of them; the OpenAI platform no `top_k`, `min_p` or
+/// `repeat_penalty`; Anthropic `temperature`, `top_p`, `top_k` and `stop`
+/// and nothing else; Gemini those and `seed`. Only fields the thread set are
+/// reported, in a fixed order; `max_tokens` and `reasoning` are not sampling
+/// and pass through untouched.
 pub(super) fn split(params: &Params, route: &Route) -> (Params, Vec<&'static str>) {
     split_for(params, route.upstream.protocol)
 }
 
 /// [`split`] on the one fact it reads.
 fn split_for(params: &Params, protocol: Protocol) -> (Params, Vec<&'static str>) {
-    let (top_k, min_p, repeat, penalties, seed) = match protocol {
-        Protocol::LlamaCpp => (true, true, true, true, true),
-        Protocol::Openai => (false, false, false, true, true),
-        Protocol::Anthropic => (true, false, false, false, false),
-        Protocol::Gemini => (true, false, false, false, true),
-    };
-    let mut sent = params.clone();
-    let mut ignored = Vec::new();
-    let mut drop = |name: &'static str, set: bool, takes: bool| {
-        if set && !takes {
-            ignored.push(name);
-        }
-        set && !takes
-    };
-    if drop("top_k", sent.top_k.is_some(), top_k) {
-        sent.top_k = None;
-    }
-    if drop("min_p", sent.min_p.is_some(), min_p) {
-        sent.min_p = None;
-    }
-    if drop("repeat_penalty", sent.repeat_penalty.is_some(), repeat) {
-        sent.repeat_penalty = None;
-    }
-    if drop(
-        "presence_penalty",
-        sent.presence_penalty.is_some(),
-        penalties,
-    ) {
-        sent.presence_penalty = None;
-    }
-    if drop(
-        "frequency_penalty",
-        sent.frequency_penalty.is_some(),
-        penalties,
-    ) {
-        sent.frequency_penalty = None;
-    }
-    if drop("seed", sent.seed.is_some(), seed) {
-        sent.seed = None;
-    }
-    (sent, ignored)
+    crate::egress::sampling::split(params, protocol)
 }
 
 #[cfg(test)]
@@ -147,8 +108,13 @@ mod tests {
         assert!(ignored.is_empty());
     }
 
+    /// A compatible row's egress writes the llama samplers, so the Chat sends
+    /// them; the OpenAI platform's leaves them out.
     #[test]
-    fn generic_openai_drops_the_llama_extensions_only() {
+    fn a_compatible_row_takes_everything_the_platform_no_llama_samplers() {
+        let (sent, ignored) = split_for(&all(), Protocol::OpenaiCompatible);
+        assert_eq!(sent, all());
+        assert!(ignored.is_empty());
         let (sent, ignored) = split_for(&all(), Protocol::Openai);
         assert_eq!(ignored, ["top_k", "min_p", "repeat_penalty"]);
         assert_eq!(sent.top_k, None);

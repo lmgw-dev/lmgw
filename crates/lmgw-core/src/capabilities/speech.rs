@@ -1,9 +1,11 @@
 //! `capabilities.speech` (audio-class gap 9): what a text-to-speech model
 //! does with the expressive parts of a request — instructions, inline tags,
-//! languages, streaming — so a client (a realtime session's prompt, a voice
-//! picker) knows what takes effect before it sends anything.
+//! streaming — so a client (a realtime session's prompt, a voice picker)
+//! knows what takes effect before it sends anything. The languages are not
+//! here: they are the model's, whatever its task, and live at
+//! `capabilities.languages`.
 //!
-//! A local audio row's is derived from its speech profile
+//! A local audio row's `speech` object is derived from its speech profile
 //! ([`crate::audio::profile`]); a cloud alias has one only through the
 //! owner's `capabilities_override` (`{"capabilities": {"speech": {…}}}`),
 //! which is also what shaping then goes by
@@ -43,14 +45,14 @@ pub fn from_profile(
         } else {
             Vec::new()
         },
-        languages: crate::audio::language::iso_languages(profile),
         streaming: Some(row.mode == "streaming"),
         sample_rate,
     }
 }
 
-/// The plain-language line of the same facts, for `notes`.
-pub fn note(c: &SpeechCaps) -> String {
+/// The plain-language line of the same facts, for `notes`; `languages` are
+/// the row's `capabilities.languages`.
+pub fn note(c: &SpeechCaps, languages: &[String]) -> String {
     let instructions = match c.instructions.as_deref() {
         Some("none") => "instructions are not read by this model (lmgw drops them and says so \
                          in x-lmgw-speech)"
@@ -76,10 +78,10 @@ pub fn note(c: &SpeechCaps) -> String {
         _ => "inline tags such as [laughs] are stripped, never read out".to_string(),
     };
     let mut parts = vec![instructions, tags];
-    if !c.languages.is_empty() {
+    if !languages.is_empty() {
         parts.push(format!(
             "language takes ISO 639-1 codes ({}), sent in the model's own spelling",
-            c.languages.join(", ")
+            languages.join(", ")
         ));
     }
     match c.streaming {

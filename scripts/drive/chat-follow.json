@@ -1,0 +1,121 @@
+[
+ {
+  "js": "'The Chat follows the end of the transcript through every growth while the reader is at it, and leaves a reader who scrolled up where they are: a picture call\\'s live pane taller than the follow\\'s 120 px, the picture replacing it, a re-roll\\'s pane and strip, a spoken result\\'s player, a scroll up the page made while the transcript grew (what WebKitGTK did as a live pane mounted), then a picture and a re-roll landing with the reader scrolled up 300 px (not pulled toward the end; WebKitGTK on a real frame clock drops such a reader about 42 px up as the live pane gives way to the card, with or without the follow), and the follow back once they return to the end. Each check waits for the pane to settle (5 frames unchanged) and reads gap = scrollHeight - scrollTop - clientHeight. Run: scripts/chat-media-drive.sh --drive scripts/drive/chat-follow.json --tools scripts/drive/chat-follow.tools.json [--chrome] [--webkit] [--kwin] (it fills in the thread id and the helpers of scripts/drive/chat-media.js and chat-follow.js).'"
+ },
+ {"size": "1152x640"},
+ {"nav": "/chat?t=__THREAD__"},
+ {"js": "__HELPERS__"},
+ {"js": "__HELPERS:scripts/drive/chat-follow.js__"},
+ {
+  "until": "!!document.querySelector('.composer-input') && !!document.querySelector('button[aria-label=\"Send\"]')",
+  "timeout": 60,
+  "label": "the thread is open"
+ },
+ {"js": "__cf.hookScroll()"},
+ {"until": "__cm.canSend()", "timeout": 30, "label": "Send is ready"},
+ {"js": "__cm.send('Draw a tall lighthouse.')"},
+ {"until": "__cm.sent('Draw a tall lighthouse')", "timeout": 20, "label": "the message went out"},
+ {"until": "!!__cm.live()", "timeout": 30, "label": "a running picture shows its live pane"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the live pane has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "the live pane, taller than the follow's 120 px, is in view to the end"},
+ {"shot": "01-live-pane"},
+ {
+  "until": "!!__cm.card() && !__cm.live() && __cm.loaded() && __cf.pics() && __cm.canSend()",
+  "timeout": 40,
+  "label": "the picture replaces the live pane and the turn ends"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the picture has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "the picture that replaced the live pane is in view to the end of the reply"},
+ {"shot": "02-picture"},
+ {"js": "__cf.bottom()"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "at the end before the re-roll (5 frames unchanged)"},
+ {"js": "__cm.act('reroll')"},
+ {
+  "until": "!!__cm.card().querySelector('.media-strip-row > .media-live')",
+  "timeout": 15,
+  "label": "a re-roll runs beside the strip"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the re-roll's pane has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "the running re-roll's pane is in view to the end"},
+ {
+  "until": "__cm.thumbs() === 2 && !__cm.card().querySelector('.media-live') && __cm.loaded() && __cf.pics()",
+  "timeout": 40,
+  "label": "the re-roll lands in the strip"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the strip has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "the re-roll's strip and picture are in view to the end"},
+ {"shot": "03-reroll"},
+ {"js": "__cf.bottom()"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "at the end before the spoken result (5 frames unchanged)"},
+ {"until": "__cm.canSend()", "timeout": 30, "label": "Send is ready"},
+ {"js": "__cm.send('Say that the lighthouse is ready.')"},
+ {"until": "__cm.sent('Say that the lighthouse')", "timeout": 20, "label": "the message went out"},
+ {
+  "until": "!!__cm.player() && !!__cm.player().querySelector('audio[src^=\"/chat/api/attachments/\"]') && __cm.canSend()",
+  "timeout": 40,
+  "label": "a spoken result gets a player and the turn ends"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the player has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "the player and the rest of the reply are in view to the end"},
+ {"shot": "04-player"},
+ {"js": "__cf.jolt(200, 300)"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the jolt has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "a scroll up the page made while the transcript grew (no wheel, key or press) leaves the reader at the end"},
+ {"js": "__cf.unjolt()"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the jolt's block is out (5 frames unchanged)"},
+ {"expect": "__cf.gap() <= 1", "label": "and still at the end once the transcript shrank back"},
+ {"until": "__cm.canSend()", "timeout": 30, "label": "Send is ready"},
+ {"js": "__cm.send('Draw it once more.')"},
+ {"until": "__cm.sent('Draw it once more')", "timeout": 20, "label": "the message went out"},
+ {"until": "!!__cm.live()", "timeout": 30, "label": "the next picture's live pane shows"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the live pane has settled (5 frames unchanged)"},
+ {"js": "__cf.bottom()"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "at the end while the picture runs (5 frames unchanged)"},
+ {"js": "__cf.up(300)"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "scrolled up (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {
+  "expect": "__cf.top() === window.__cfTop && __cf.gap() >= 290",
+  "label": "the reader is 300 px above the end while the picture runs"
+ },
+ {
+  "until": "!!__cm.card() && !__cm.live() && __cm.loaded() && __cf.pics() && __cm.canSend()",
+  "timeout": 40,
+  "label": "the picture lands and the turn ends"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the picture has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' kept ' + window.__cfTop"},
+ {
+  "expect": "__cf.top() <= window.__cfTop + 1 && __cf.gap() >= 290",
+  "label": "a reader who scrolled up is not pulled toward the end while the picture lands below"
+ },
+ {"js": "__cm.act('reroll')"},
+ {
+  "until": "__cm.thumbs() === 2 && !__cm.card().querySelector('.media-live') && __cm.loaded() && __cf.pics()",
+  "timeout": 40,
+  "label": "a re-roll lands with the reader scrolled up"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the strip has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' kept ' + window.__cfTop"},
+ {
+  "expect": "__cf.top() <= window.__cfTop + 1 && __cf.gap() >= 290",
+  "label": "a reader who scrolled up is not pulled toward the end while a re-roll lands"
+ },
+ {"js": "__cf.bottom()"},
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "back at the end (5 frames unchanged)"},
+ {"js": "__cm.act('reroll')"},
+ {
+  "until": "__cm.thumbs() === 3 && !__cm.card().querySelector('.media-live') && __cm.loaded() && __cf.pics()",
+  "timeout": 40,
+  "label": "another re-roll lands"
+ },
+ {"until": "__cf.settled(5)", "timeout": 30, "label": "the strip has settled (5 frames unchanged)"},
+ {"js": "__cf.m() + ' scrolls ' + __cf.log()"},
+ {"expect": "__cf.gap() <= 1", "label": "back at the end, the reader is followed again"}
+]

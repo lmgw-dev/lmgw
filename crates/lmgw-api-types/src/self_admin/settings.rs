@@ -23,6 +23,10 @@ pub struct SettingsRead {
     pub jobs_max_rows: i64,
     /// Largest request body on the JSON `/v1` routes, in MiB; `0` = unlimited.
     pub max_body_mb: u32,
+    /// How long an upstream remembered out of quota is left alone before one
+    /// request asks it again, in seconds, when its answer named no
+    /// `Retry-After` (openai egress design §14.6).
+    pub quota_recheck_seconds: u64,
     /// Archive a Chat thread this many days after its last activity; `0` = never.
     pub chat_archive_days: i64,
     /// Delete an archived, unpinned Chat thread this many days after it was
@@ -105,6 +109,10 @@ pub struct SettingsRead {
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry.
     pub chat_kb_budget_tokens: u32,
+    /// The image and audio tools' default models, in the shape
+    /// `lmgw__settings_set chat_media_defaults` takes back; an absent field
+    /// is no default.
+    pub chat_media_defaults: crate::chat_media::MediaDefaults,
     /// Where container builds keep their git mirrors, worktrees and logs, as
     /// configured; `null` = the default `builds_dir_effective` spells out.
     pub builds_dir: Option<String>,
@@ -196,21 +204,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The 53 keys are all there on a default value, the optionals as `null`
+    /// The 55 keys are all there on a default value, the optionals as `null`
     /// (a key that is there, never left out), the token map an empty object,
     /// the secrets as `has_*` flags.
     #[test]
     fn a_default_answer_sends_every_key_with_the_unset_ones_null() {
         let wire = serde_json::to_value(SettingsRead::default()).unwrap();
         let keys = wire.as_object().unwrap();
-        assert_eq!(keys.len(), 53, "{wire}");
+        assert_eq!(keys.len(), 55, "{wire}");
         for nullable in ["chat_profile", "builds_dir", "builds_dir_warning"] {
             assert!(keys[nullable].is_null(), "{nullable}: {wire}");
         }
         assert_eq!(wire["has_hf_token"], json!(false));
         assert_eq!(wire["has_update_token"], json!(false));
         assert!(wire.get("hf_token").is_none() && wire.get("update_token").is_none());
-        assert!(wire["hold"]["fallback_alias"].is_null());
+        assert_eq!(wire["hold"], json!({"active": false}));
         assert_eq!(wire["forge_tokens"], json!({}));
         assert_eq!(wire["self_admin"], json!("off"));
     }

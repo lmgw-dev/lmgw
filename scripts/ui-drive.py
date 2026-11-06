@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Usage: scripts/ui-drive.py STEPS.json [--size 1440x900] [--dsf 1] [--shots DIR] [--base URL] [--block-writes]
-#                            [--fake-mic WAV] [--mute-audio]
+#                            [--fake-mic WAV] [--mute-audio] [--init-script JS ...]
 """Drive the dashboard through a scripted interaction and check what it did.
 
 ui-matrix.py answers "does every page fit at every size"; this answers "does
@@ -73,6 +73,13 @@ no real microphone is opened and nothing is audible. For the chat voice drives
 --block-writes answers every non-GET fetch in the page with a local 400 and
 records it in window.__blocked, so a destructive control can be pressed (a
 double-click on Delete) without anything reaching the server.
+
+--init-script JS (repeatable) evaluates the file in every new document
+before the page's own scripts: a fake the app reads as it boots, such as
+scripts/drive/machine-fake.js (the machine check's answers, and the app
+window's shell bridge with a scripted machine_apply, for
+scripts/drive/machine-check.json). The fake lives in the driver, never in
+the app.
 
 Live-bus code (a tail, a tick, a reconnect) is driven without traffic:
 `window.__frame("request", row)` dispatches a synthetic SSE frame of that
@@ -363,6 +370,9 @@ async def run(args, steps, token) -> int:
             await call("Page.addScriptToEvaluateOnNewDocument", source=PROBE)
             if args.block_writes:
                 await call("Page.addScriptToEvaluateOnNewDocument", source=BLOCK_WRITES)
+            for path in args.init_script:
+                await call("Page.addScriptToEvaluateOnNewDocument",
+                           source=Path(path).read_text())
             await call("Page.navigate", url=f"{args.base}/api/session/login?token={token}")
             await settle(1.5)
 
@@ -535,6 +545,9 @@ def main() -> int:
     ap.add_argument("--shots", metavar="DIR", help="where {\"shot\": name} steps write")
     ap.add_argument("--block-writes", action="store_true",
                     help="answer every non-GET fetch with a local 400 (window.__blocked)")
+    ap.add_argument("--init-script", action="append", default=[], metavar="JS",
+                    help="evaluate JS in every new document before the page's own scripts "
+                         "(repeatable): an in-page fake the app reads as it boots")
     ap.add_argument("--fake-mic", metavar="WAV",
                     help="a fake microphone playing WAV once; the browser muted")
     ap.add_argument("--mute-audio", action="store_true",

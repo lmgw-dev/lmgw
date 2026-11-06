@@ -1,6 +1,6 @@
 //! Snapshot
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::config::{DisabledTool, McpToolOverride, Settings, Snapshot};
 use crate::error::GatewayError;
@@ -8,32 +8,12 @@ use crate::error::GatewayError;
 use super::*;
 
 pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
-    let upstream_rows = sqlx::query("SELECT * FROM upstreams")
-        .fetch_all(pool)
-        .await?;
-    let alias_rows = sqlx::query("SELECT * FROM models").fetch_all(pool).await?;
-    let candidate_alias_rows = sqlx::query("SELECT * FROM candidate_aliases")
-        .fetch_all(pool)
-        .await?;
-    let local_rows = sqlx::query("SELECT * FROM local_models ORDER BY model_id")
-        .fetch_all(pool)
-        .await?;
-    let aux_rows = sqlx::query("SELECT * FROM aux_models ORDER BY model_id")
-        .fetch_all(pool)
-        .await?;
-    let audio_rows = sqlx::query("SELECT * FROM audio_models ORDER BY model_id")
-        .fetch_all(pool)
-        .await?;
-    let image_rows = sqlx::query("SELECT * FROM image_models ORDER BY model_id")
-        .fetch_all(pool)
-        .await?;
+    let mut snap = Snapshot::default();
+    load_routing_in(&mut *pool.acquire().await?, &mut snap).await?;
     let key_rows = sqlx::query("SELECT * FROM api_keys")
         .fetch_all(pool)
         .await?;
     let price_rows = sqlx::query("SELECT * FROM prices").fetch_all(pool).await?;
-    let hidden_rows = sqlx::query("SELECT upstream_id, model_id FROM hidden_passthrough_models")
-        .fetch_all(pool)
-        .await?;
     let mcp_rows = sqlx::query("SELECT * FROM mcp_servers")
         .fetch_all(pool)
         .await?;
@@ -45,44 +25,10 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
         sqlx::query("SELECT tool_name, source, disabled_at FROM tool_disabled")
             .fetch_all(pool)
             .await?;
-    let settings = load_settings(pool).await?;
-    let chat_profiles = chat_profiles::list_chat_profiles(pool).await?;
-
-    let mut snap = Snapshot {
-        settings,
-        chat_profiles,
-        ..Default::default()
-    };
-    for r in &upstream_rows {
-        let u = upstream_from_row(r);
-        if r.get::<i64, _>("catalog_all_modalities") == 0 {
-            snap.catalog_bare.insert(u.id);
-        }
-        snap.upstreams.insert(u.id, u);
-    }
-    for r in &alias_rows {
-        let a = alias_from_row(r);
-        snap.aliases.insert(a.alias.clone(), a);
-    }
-    for r in &candidate_alias_rows {
-        let c = candidate_alias_from_row(r);
-        snap.candidate_aliases.insert(c.alias.to_lowercase(), c);
-    }
-    snap.local_models = local_rows.iter().map(local_model_from_row).collect();
-    snap.aux_models = aux_rows.iter().map(aux_model_from_row).collect();
-    snap.audio_models = audio_rows.iter().map(audio_model_from_row).collect();
-    snap.image_models = image_rows.iter().map(image_model_from_row).collect();
+    snap.settings = load_settings(pool).await?;
+    snap.chat_profiles = chat_profiles::list_chat_profiles(pool).await?;
     snap.api_keys = key_rows.iter().map(api_key_from_row).collect();
     snap.prices = price_rows.iter().map(price_from_row).collect();
-    snap.hidden_passthrough = hidden_rows
-        .iter()
-        .map(|r| {
-            (
-                r.get::<i64, _>("upstream_id"),
-                r.get::<String, _>("model_id"),
-            )
-        })
-        .collect();
     for r in &mcp_rows {
         let s = mcp_server_from_row(r);
         snap.mcp_servers.insert(s.id, s);
@@ -113,6 +59,84 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
             )
         })
         .collect();
+    Ok(snap)
+}
+
+/// The part of the snapshot that says what a name a client sends reaches:
+/// the upstreams, the plain and candidate aliases, the four local classes'
+/// rows and the hidden passthrough models. [`load_snapshot`] reads it, and so
+/// does [`routing_after`], the dry run of a write.
+async fn load_routing_in(conn: &mut SqliteConnection, snap: &mut Snapshot) -> DbResult<()> {
+    let upstream_rows = sqlx::query("SELECT * FROM upstreams")
+        .fetch_all(&mut *conn)
+        .await?;
+    let alias_rows = sqlx::query("SELECT * FROM models")
+        .fetch_all(&mut *conn)
+        .await?;
+    let candidate_alias_rows = sqlx::query("SELECT * FROM candidate_aliases")
+        .fetch_all(&mut *conn)
+        .await?;
+    let local_rows = sqlx::query("SELECT * FROM local_models ORDER BY model_id")
+        .fetch_all(&mut *conn)
+        .await?;
+    let aux_rows = sqlx::query("SELECT * FROM aux_models ORDER BY model_id")
+        .fetch_all(&mut *conn)
+        .await?;
+    let audio_rows = sqlx::query("SELECT * FROM audio_models ORDER BY model_id")
+        .fetch_all(&mut *conn)
+        .await?;
+    let image_rows = sqlx::query("SELECT * FROM image_models ORDER BY model_id")
+        .fetch_all(&mut *conn)
+        .await?;
+    let hidden_rows = sqlx::query("SELECT upstream_id, model_id FROM hidden_passthrough_models")
+        .fetch_all(&mut *conn)
+        .await?;
+    for r in &upstream_rows {
+        let u = upstream_from_row(r);
+        if r.get::<i64, _>("catalog_all_modalities") == 0 {
+            snap.catalog_bare.insert(u.id);
+        }
+        snap.upstreams.insert(u.id, u);
+    }
+    for r in &alias_rows {
+        let a = alias_from_row(r);
+        snap.aliases.insert(a.alias.clone(), a);
+    }
+    for r in &candidate_alias_rows {
+        let c = candidate_alias_from_row(r);
+        snap.candidate_aliases.insert(c.alias.to_lowercase(), c);
+    }
+    snap.local_models = local_rows.iter().map(local_model_from_row).collect();
+    snap.aux_models = aux_rows.iter().map(aux_model_from_row).collect();
+    snap.audio_models = audio_rows.iter().map(audio_model_from_row).collect();
+    snap.image_models = image_rows.iter().map(image_model_from_row).collect();
+    snap.hidden_passthrough = hidden_rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<i64, _>("upstream_id"),
+                r.get::<String, _>("model_id"),
+            )
+        })
+        .collect();
+    Ok(())
+}
+
+/// **The dry run of a write** (openai egress design §14.2): what the names
+/// would reach if `tx`, which holds a write not committed, were committed —
+/// the routing part of the snapshot ([`load_routing_in`]) and the settings
+/// as stored — and then `tx` rolled back. The fallback save checks compare
+/// it with the snapshot before the write, so a write that changes what a
+/// stored fallback points at is checked before it is made.
+pub async fn routing_after(mut tx: sqlx::Transaction<'static, sqlx::Sqlite>) -> DbResult<Snapshot> {
+    let mut snap = Snapshot::default();
+    load_routing_in(&mut tx, &mut snap).await?;
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'settings'")
+            .fetch_optional(&mut *tx)
+            .await?;
+    snap.settings = settings_from_row(raw.as_deref());
+    tx.rollback().await?;
     Ok(snap)
 }
 
@@ -275,8 +299,31 @@ fn capture_legacy_container_names(raw: &str, settings: &mut Settings) {
 /// transaction, but a save made from a snapshot that still held the id (its
 /// reload after the delete failed) would otherwise write it back.
 pub async fn save_settings(pool: &SqlitePool, s: &Settings) -> DbResult<()> {
+    save_settings_rewriting(pool, s, &[]).await
+}
+
+/// [`save_settings`], with the fallbacks a changed class prefix renames
+/// rewritten in the same transaction (openai egress design §14.2, decision
+/// 27): a prefix change renames every local name of its class.
+pub async fn save_settings_rewriting(
+    pool: &SqlitePool,
+    s: &Settings,
+    rewrites: &[FallbackRewrite],
+) -> DbResult<()> {
     // Reads before it writes: the write lock first.
     let mut tx = begin_write(pool).await?;
+    save_settings_rewriting_in(&mut tx, s, rewrites).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`save_settings_rewriting`] inside a caller's write transaction (the
+/// fallback save checks' dry run, `ops::fallback::referrers`).
+pub async fn save_settings_rewriting_in(
+    tx: &mut SqliteConnection,
+    s: &Settings,
+    rewrites: &[FallbackRewrite],
+) -> DbResult<()> {
     let cleared: Settings;
     let mut s = s;
     if let Some(id) = s.chat_profile {
@@ -297,7 +344,7 @@ pub async fn save_settings(pool: &SqlitePool, s: &Settings) -> DbResult<()> {
         }
     }
     let json = serde_json::to_string(s).map_err(|e| GatewayError::Internal(e.to_string()))?;
-    let was = gateway_self_admin_in(&mut tx).await?;
+    let was = gateway_self_admin_in(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('settings', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -306,9 +353,9 @@ pub async fn save_settings(pool: &SqlitePool, s: &Settings) -> DbResult<()> {
     .execute(&mut *tx)
     .await?;
     if was != s.self_admin {
-        feed::record_gateway_reach(&mut tx, s.self_admin, was).await?;
+        feed::record_gateway_reach(&mut *tx, s.self_admin, was).await?;
     }
-    tx.commit().await?;
+    rewrite_fallbacks_in(&mut *tx, rewrites).await?;
     Ok(())
 }
 

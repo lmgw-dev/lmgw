@@ -35,6 +35,7 @@ use crate::state::SharedState;
 use crate::store;
 
 pub mod hf_download;
+pub mod model_get;
 
 /// How often a running job's progress is written to its row and pushed to the
 /// live feed. Progress callbacks fire per network chunk — thousands per second
@@ -82,10 +83,15 @@ pub enum JobKind {
     /// so one live job per run. The items and their answers are the lab
     /// store's; the job only answers them, and its row may be pruned.
     LabBatch,
+    /// One Get it (find-a-model design §6.2): waits for its downloads,
+    /// plans, fits and creates the row. Key `model_get:<repo>/<file>`, so
+    /// one live get per file; its intent is a `model_gets` row, which the
+    /// boot gives a job again.
+    ModelGet,
 }
 
 impl JobKind {
-    pub const ALL: [JobKind; 12] = [
+    pub const ALL: [JobKind; 13] = [
         Self::HfDownload,
         Self::Ingest,
         Self::ReEmbed,
@@ -98,6 +104,7 @@ impl JobKind {
         Self::KbIngest,
         Self::KbReembed,
         Self::LabBatch,
+        Self::ModelGet,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -121,6 +128,7 @@ impl JobKind {
             // `lmgw_api_types::decision_lab::batch::JOB_KIND`, which the
             // dashboard filters the live feed by.
             Self::LabBatch => lmgw_api_types::decision_lab::batch::JOB_KIND,
+            Self::ModelGet => model_get::JOB_KIND,
         }
     }
 
@@ -409,6 +417,7 @@ impl JobManager {
         m.register(Arc::new(crate::knowledge::ingest::KbIngestExecutor));
         m.register(Arc::new(crate::knowledge::reembed::KbReembedExecutor));
         m.register(Arc::new(crate::labs::batch::LabBatchExecutor));
+        m.register(Arc::new(model_get::ModelGetExecutor));
         m
     }
 
@@ -500,6 +509,15 @@ impl JobManager {
 
     fn broadcast(&self, state: &SharedState) {
         state.telemetry.jobs(self.live());
+    }
+
+    /// A frame on the jobs feed now, for a change a job's watcher reads
+    /// that no job made: a download row's status written outside its
+    /// transfer (a cancel of a paused row, an untrack, a pause at boot). A
+    /// get waits on the feed (`model_get`), and reads its download rows
+    /// again at every frame.
+    pub fn publish(&self, state: &SharedState) {
+        self.broadcast(state);
     }
 
     async fn note_progress(&self, state: &SharedState, id: i64, p: JobProgress, force: bool) {
@@ -675,6 +693,10 @@ pub async fn spawn(
 /// on its own terms, so this returns as soon as the request is delivered.
 pub async fn cancel(state: &SharedState, id: i64) -> Result<String, String> {
     if state.jobs.request_cancel(id) {
+        // A frame on the feed, so a job that waits on the feed rather than
+        // on its own work (a get waiting for its downloads) sees the cancel
+        // now and not at the next transfer's progress.
+        state.jobs.broadcast(state);
         return Ok(format!("cancel requested for job {id}"));
     }
     match store::get_job(&state.db, id)

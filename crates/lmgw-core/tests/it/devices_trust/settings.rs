@@ -77,6 +77,7 @@ async fn the_settings_page_reads_the_devices_class() {
             enrol_refuse_per_min: 120,
             unauthenticated_max: 64,
             unauthenticated_per_peer: 8,
+            transfer_expiry_days: 7,
         }
     );
     assert_eq!(full.devices.token_minutes, d.token_minutes);

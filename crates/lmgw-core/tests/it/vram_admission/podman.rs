@@ -189,6 +189,11 @@ impl CommandRunner for Podman {
         Box::pin(async move {
             assert_eq!(program, "podman", "the registry only ever shells podman");
             self.world.lock().unwrap().calls.push(args.to_vec());
+            // What the machine check asks a podman that works (a test that
+            // states a machine, `machine_world::Machine`).
+            if let Some(out) = crate::support::machine_world::working_podman(args) {
+                return Ok(out);
+            }
             let ok = CmdOutput {
                 status: 0,
                 stdout: "c0ffee\n".into(),
@@ -323,6 +328,25 @@ impl CommandRunner for Podman {
                         status: if stderr.is_empty() { 0 } else { 125 },
                         stdout,
                         stderr,
+                    })
+                }
+                // Whether a start's engine image is here (machine-check
+                // design §5): podman's exit 1 for one that is not.
+                "image" if args.get(1).map(String::as_str) == Some("exists") => {
+                    let image = args.last().cloned().unwrap_or_default();
+                    let w = self.world.lock().unwrap();
+                    if w.unknown_images.contains(&image) {
+                        return Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: "Error: database is locked\n".into(),
+                        });
+                    }
+                    let missing = w.missing_images.contains(&image);
+                    Ok(CmdOutput {
+                        status: if missing { 1 } else { 0 },
+                        stdout: String::new(),
+                        stderr: String::new(),
                     })
                 }
                 "rm" if *self.fail_rm.lock().unwrap() => Ok(CmdOutput {

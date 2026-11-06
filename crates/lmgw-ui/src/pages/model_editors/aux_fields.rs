@@ -300,8 +300,7 @@ mod tests {
             image: None,
             extra_run_args: None,
             warm_start: false,
-            hold_fallback_mode: "inherit".into(),
-            hold_fallback: None,
+            fallback: None,
         }
     }
 

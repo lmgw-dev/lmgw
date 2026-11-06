@@ -185,7 +185,7 @@ fn sent_description(body: &Map<String, Value>) -> Option<&str> {
 }
 
 /// The row's default request options hold a description.
-fn row_describes(row: &AudioModel) -> bool {
+pub(crate) fn row_describes(row: &AudioModel) -> bool {
     ["instruction", "instruct"]
         .iter()
         .any(|k| said(row.default_request_options.get(*k)).is_some())

@@ -10,7 +10,7 @@
 
 use lmgw_core::candidates::Facet;
 use lmgw_core::capabilities::exposed;
-use lmgw_core::config::{HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::config::{Protocol, UpstreamKind};
 use lmgw_core::ops::{self, CandidateAliasPatch};
 use lmgw_core::runtime::Class;
 use lmgw_core::state::{AppState, SharedState};
@@ -109,8 +109,7 @@ fn local_row(
         image: None,
         extra_run_args: None,
         warm_start: false,
-        hold_fallback_mode: Default::default(),
-        hold_fallback: None,
+        fallback: None,
         capabilities_override: Some(json!({
             "capabilities": {
                 "vision": vision,
@@ -437,7 +436,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name_case_insens
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -461,6 +460,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name_case_insens
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -489,7 +489,7 @@ async fn a_shadowed_plain_alias_stays_editable() {
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -513,6 +513,7 @@ async fn a_shadowed_plain_alias_stays_editable() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -529,7 +530,6 @@ async fn a_shadowed_plain_alias_stays_editable() {
             alias: "claude-fast".into(),
             candidates: vec!["m1".into()],
             background: false,
-            fallback_mode: HoldFallbackMode::Inherit,
             fallback: None,
             capabilities_disabled: vec![],
             capabilities_enabled: vec![],
@@ -577,7 +577,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name() {
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,
@@ -601,6 +601,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name() {
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -645,8 +646,10 @@ async fn a_duplicate_candidate_is_refused() {
     assert!(err.contains("m1"), "{err}");
 }
 
+/// A local model may be a fallback now (openai egress design §14.2): under
+/// the hold its own fallback answers in turn.
 #[tokio::test]
-async fn a_local_fallback_is_refused() {
+async fn a_local_fallback_is_taken() {
     let (state, _dir) = fixture().await;
     store::insert_local_model(&state.db, &full_row("m1"))
         .await
@@ -657,10 +660,10 @@ async fn a_local_fallback_is_refused() {
     state.reload_snapshot().await.unwrap();
 
     let mut p = patch("create", "smart", "m1");
-    p.fallback_mode = Some(HoldFallbackMode::Alias);
     p.fallback = Some("m2".to_string());
-    let err = create(&state, p).await.unwrap_err();
-    assert!(err.contains("local"), "{err}");
+    create(&state, p).await.unwrap();
+    let saved = store::list_candidate_aliases(&state.db).await.unwrap();
+    assert_eq!(saved[0].fallback.as_deref(), Some("m2"));
 }
 
 #[tokio::test]
@@ -678,7 +681,6 @@ async fn a_candidate_alias_cannot_fall_back_to_another_candidate_alias() {
         .unwrap();
 
     let mut p = patch("create", "smart", "m1");
-    p.fallback_mode = Some(HoldFallbackMode::Alias);
     p.fallback = Some("other".to_string());
     let err = create(&state, p).await.unwrap_err();
     assert!(err.contains("candidate alias"), "{err}");
@@ -701,7 +703,7 @@ async fn request_fallback_reads_the_alias_fallback_for_a_candidate_alias_name() 
         &state.db,
         &NewUpstream {
             name: "cloud".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::OpenaiCompatible,
             kind: UpstreamKind::Generic,
             base_url: mock.uri(),
             api_key: None,
@@ -725,6 +727,7 @@ async fn request_fallback_reads_the_alias_fallback_for_a_candidate_alias_name() 
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: None,
+            fallback: None,
         },
     )
     .await
@@ -737,7 +740,6 @@ async fn request_fallback_reads_the_alias_fallback_for_a_candidate_alias_name() 
         .unwrap();
     state.reload_snapshot().await.unwrap();
     let mut p = patch("create", "smart", "m1");
-    p.fallback_mode = Some(HoldFallbackMode::Alias);
     p.fallback = Some("cloud-fb".to_string());
     // The mock upstream publishes no catalog, so its capabilities are
     // entirely unknown — disable every facet so the fallback's
@@ -755,8 +757,7 @@ async fn request_fallback_reads_the_alias_fallback_for_a_candidate_alias_name() 
     // `row-fb`'s own row fallback would answer for a *direct* request to it;
     // through the candidate alias, the alias' own fallback answers instead.
     let mut row_fb = full_row("row-fb");
-    row_fb.hold_fallback_mode = HoldFallbackMode::Alias;
-    row_fb.hold_fallback = Some("cloud-fb".to_string());
+    row_fb.fallback = Some("cloud-fb".to_string());
 
     let snap = state.reload_snapshot().await.unwrap();
     let target = Target {
@@ -1011,11 +1012,14 @@ async fn preview_of_a_bad_fallback_names_it_but_still_derives() {
     state.reload_snapshot().await.unwrap();
 
     let mut p = patch("preview", "smart", "m1");
-    p.fallback_mode = Some(HoldFallbackMode::Alias);
-    // No `fallback` named at all: resolve_fallback refuses.
+    // A fallback nothing answers to: the save check refuses it.
+    p.fallback = Some("no-such-model".into());
     let out = create(&state, p).await.unwrap();
     assert_eq!(out["ok"], false, "{out}");
-    assert!(out["error"].as_str().unwrap().contains("fallback"), "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains("does not resolve"),
+        "{out}"
+    );
     // The candidate-side derivation still ran.
     assert!(out["enabled_facets"]
         .as_array()

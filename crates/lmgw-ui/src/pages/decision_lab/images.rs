@@ -14,7 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::form_state::Img;
 use super::page::Lab;
-use crate::fmt::human_bytes;
+use crate::fmt::fmt_bytes;
 
 /// A picked file as a data URL, its type the browser's word for it.
 async fn read_data_url(file: web_sys::File) -> Result<(String, u64), String> {
@@ -131,7 +131,7 @@ pub(super) fn ImagesCard(lab: Lab) -> impl IntoView {
                                             {name.clone()}
                                         </span>
                                         <span class="dim mono-sm">
-                                            {human_bytes(img.size)}
+                                            {fmt_bytes(img.size)}
                                             {kept.then_some(" · kept")}
                                         </span>
                                         <button

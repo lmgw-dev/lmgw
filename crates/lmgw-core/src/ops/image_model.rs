@@ -4,8 +4,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use lmgw_api_types as dto;
+use lmgw_api_types::chat_media::{PreviewMode, PromptStyle};
 
-use crate::config::{HoldFallbackMode, ImageModel, Snapshot};
+use crate::config::{HopKey, ImageModel, Snapshot};
+use crate::detached::detached;
 use crate::hf;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
@@ -156,21 +158,60 @@ pub struct ImageModelPatch {
     pub extra_run_args: Option<Vec<String>>,
     pub warm_start: Option<bool>,
     pub idle_seconds: Option<i64>,
-    /// `inherit` (default — no fallback for this class) | `none` | `alias`.
-    pub hold_fallback_mode: Option<String>,
-    pub hold_fallback: Option<String>,
+    /// The model or alias that answers when this one cannot (openai egress
+    /// design §14.2): another image model. `clear: "fallback"` removes it.
+    pub fallback: Option<String>,
     /// Override of the derived `/v1/models` facts; a JSON object, or a
     /// JSON string holding one.
     pub capabilities_override: Option<Value>,
+    /// How the chat model writes this row's prompts (chat-media-tools design
+    /// §3.4): `natural`, `keywords` or `tags`; `clear` (or naming it in
+    /// `clear`) goes back to the matching recipe's.
+    pub prompt_style: Option<String>,
+    /// How a running generation's preview is drawn (design §5.2): `none`,
+    /// `proj`, `tae` or `vae`; `clear` (or naming it in `clear`) goes back
+    /// to the default.
+    pub preview_mode: Option<String>,
     /// Field names to reset: `args`, `modes`, `extra_run_args`, `image`,
-    /// `hold_fallback`, `capabilities_override`. Not `files` — a row with no
-    /// files names no pipeline, so emptying it could only ever be refused.
+    /// `fallback`, `capabilities_override`, `prompt_style`,
+    /// `preview_mode`. Not `files` — a row with no files names no pipeline,
+    /// so emptying it could only ever be refused.
     pub clear: Option<String>,
 }
 
 impl ImageModelPatch {
     fn clears(&self, field: &str) -> bool {
         clear_has(self.clear.as_deref(), field)
+    }
+
+    /// The row's prompt style after this patch, `cur` what it has.
+    fn prompt_style(&self, cur: Option<PromptStyle>) -> Result<Option<PromptStyle>, String> {
+        match self.prompt_style.as_deref().map(str::trim) {
+            _ if self.clears("prompt_style") => Ok(None),
+            None | Some("") => Ok(cur),
+            Some("clear") => Ok(None),
+            Some(s) => PromptStyle::parse(s).map(Some).ok_or_else(|| {
+                format!(
+                    "prompt_style '{s}' is not one of {} (or clear)",
+                    PromptStyle::ALL.map(PromptStyle::as_str).join(", ")
+                )
+            }),
+        }
+    }
+
+    /// The row's preview mode after this patch, `cur` what it has.
+    fn preview_mode(&self, cur: Option<PreviewMode>) -> Result<Option<PreviewMode>, String> {
+        match self.preview_mode.as_deref().map(str::trim) {
+            _ if self.clears("preview_mode") => Ok(None),
+            None | Some("") => Ok(cur),
+            Some("clear") => Ok(None),
+            Some(s) => PreviewMode::parse(s).map(Some).ok_or_else(|| {
+                format!(
+                    "preview_mode '{s}' is not one of {} (or clear)",
+                    PreviewMode::ALL.map(PreviewMode::as_str).join(", ")
+                )
+            }),
+        }
     }
 
     /// Every name in `clear` has to be a field this patch can actually reset —
@@ -185,8 +226,10 @@ impl ImageModelPatch {
                 | "modes"
                 | "extra_run_args"
                 | "image"
-                | "hold_fallback"
-                | "capabilities_override" => {}
+                | "fallback"
+                | "capabilities_override"
+                | "prompt_style"
+                | "preview_mode" => {}
                 "files" => {
                     return Err(
                         "clear: 'files' is not clearable — a row with no files names no \
@@ -375,9 +418,10 @@ fn check_image_row(
         }
         if models_dir.trim().is_empty() {
             return Err(format!(
-                "the image models directory is not configured, so '{rel}' cannot be resolved — \
-                 set it first (Settings → Runtimes → Image, or the `image.models_dir` section of \
-                 /api/op/settings_set_full). Every files value is relative to that directory."
+                "the image models directory is not set, so '{rel}' cannot be resolved — choose \
+                 where image models are stored first: {}. Every files value is relative to \
+                 that directory.",
+                crate::hf::models_dir_location("image")
             ));
         }
         let path = image_cfg::file_target(models_dir, rel);
@@ -442,10 +486,16 @@ fn merged_map(
 /// models dir as the path boundary, `reload_snapshot()` after every write, and
 /// container hygiene keyed on the *current* model id so a rename drops the
 /// container that exists.
+/// Each write is followed, in the task it runs as, by the reload, the
+/// container's hygiene and `/mcp` sessions told to list again: the image and
+/// audio tools list the rows and aliases that serve them (chat-media-tools
+/// design §3.2).
 pub async fn image_model_set(
     state: &SharedState,
     p: ImageModelPatch,
 ) -> Result<dto::ImageModelSaved, String> {
+    // From the snapshot the checks read to the commit (§14.2).
+    let routing = state.routing_write().await;
     let snap = state.snapshot();
     let all = snap.image_models.clone();
     let find = || -> Result<ImageModel, String> {
@@ -475,7 +525,6 @@ pub async fn image_model_set(
             })
     };
     let models_dir = snap.settings.image.models_dir.clone();
-    let reload = || async { state.reload_snapshot().await.map_err(|e| e.to_string()) };
     p.check_clear()?;
 
     match p.action.as_str() {
@@ -492,13 +541,16 @@ pub async fn image_model_set(
             let (caps, vocab_note) =
                 image_vocabulary(state, &effective_image_image(state, &opt(&p.image))).await;
             check_image_row(&caps, &models_dir, &files, &args)?;
-            let (hold_fallback_mode, hold_fallback) = resolve_hold_fallback_text(
-                &snap,
-                p.hold_fallback_mode.as_deref(),
-                p.hold_fallback.as_deref(),
-                p.clear.as_deref(),
-                (HoldFallbackMode::Inherit, None),
-            )?;
+            let row_fallback = super::fallback::patched(p.clear.as_deref(), &p.fallback, None)?;
+            let mut fallback_notes = Vec::new();
+            if let Some(f) = &row_fallback {
+                let owner = super::fallback::Owner::typed(
+                    None,
+                    snap.image_public_name(&model_id),
+                    super::fallback::ModelType::image(),
+                );
+                fallback_notes = super::fallback::validate(state, &owner, f).await?;
+            }
             let new = store::NewImageModel {
                 model_id: model_id.clone(),
                 files,
@@ -517,39 +569,71 @@ pub async fn image_model_set(
                 },
                 warm_start: p.warm_start.unwrap_or(false),
                 idle_seconds: p.idle_seconds.unwrap_or(300),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
                 capabilities_override: match &p.capabilities_override {
                     Some(v) => parse_capabilities_override(v)?,
                     None => None,
                 },
+                prompt_style: p.prompt_style(None)?,
+                preview_mode: p.preview_mode(None)?,
             };
             let mut warnings: Vec<String> = vocab_note.into_iter().collect();
             warnings.extend(image_model_problems(&models_dir, &as_image_model(&new)));
-            let id = store::insert_image_model(&state.db, &new)
+            // A fallback that holds the new name reaches this row from now
+            // on: checked in a dry run (§14.2, `fallback::referrers`).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            let snap = reload().await?;
-            Ok(dto::ImageModelSaved {
-                ok: true,
-                id,
-                warnings: Some(warnings),
-                public_name: Some(snap.image_public_name(&model_id)),
-                command_line: Some(command_line_preview(state, Class::Image, &model_id)),
-                message: format!(
-                    "image model '{model_id}' created — clients request it as '{}' on \
-                     /v1/images/generations{}; run lmgw__local_model_test model_id={model_id} \
-                     target=image to prove it loads and draws (its container starts on the \
-                     first request)",
-                    snap.image_public_name(&model_id),
-                    if new.edit {
-                        " and /v1/images/edits"
-                    } else {
-                        ""
-                    },
-                ),
-                ..Default::default()
+            let dry = store::insert_image_model_in(&mut tx, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::ImageModels, dry);
+            super::fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(row.0, dry)],
+                Some(row),
+            )
+            .await?;
+            // The write and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot without the new model.
+            let task_st = state.clone();
+            detached("creating the image model", async move {
+                let state = &task_st;
+                let id = store::insert_image_model(&state.db, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let snap = state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state.mcp.notify_tools_changed();
+                Ok(dto::ImageModelSaved {
+                    ok: true,
+                    id,
+                    warnings: Some(warnings),
+                    public_name: Some(snap.image_public_name(&model_id)),
+                    command_line: Some(command_line_preview(state, Class::Image, &model_id)),
+                    message: format!(
+                        "image model '{model_id}' created — clients request it as '{}' on \
+                         /v1/images/generations{}; run lmgw__local_model_test model_id={model_id} \
+                         target=image to prove it loads and draws (its container starts on the \
+                         first request)",
+                        snap.image_public_name(&model_id),
+                        if new.edit {
+                            " and /v1/images/edits"
+                        } else {
+                            ""
+                        },
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "update" | "enable" | "disable" => {
             let cur = find()?;
@@ -580,13 +664,8 @@ pub async fn image_model_set(
                 }
             };
             let extra_run_args = run_args_override(extra_run_args);
-            let (hold_fallback_mode, hold_fallback) = resolve_hold_fallback_text(
-                &snap,
-                p.hold_fallback_mode.as_deref(),
-                p.hold_fallback.as_deref(),
-                p.clear.as_deref(),
-                (cur.hold_fallback_mode, cur.hold_fallback.clone()),
-            )?;
+            let row_fallback =
+                super::fallback::patched(p.clear.as_deref(), &p.fallback, cur.fallback.clone())?;
             let new_image_model_id = match (p.id, opt(&p.model_id)) {
                 (Some(_), Some(m)) => m,
                 _ => cur.model_id.clone(),
@@ -599,6 +678,29 @@ pub async fn image_model_set(
                     &snap.image_public_name(&new_image_model_id),
                 )?;
             }
+            let key = HopKey::Local(Class::Image, cur.model_id.clone());
+            let (old_name, new_name) = (
+                snap.image_public_name(&cur.model_id),
+                snap.image_public_name(&new_image_model_id),
+            );
+            let mut fallback_notes = Vec::new();
+            if let (Some(f), true) = (&row_fallback, row_fallback != cur.fallback) {
+                let owner = super::fallback::Owner::typed(
+                    Some(key.clone()),
+                    new_name.clone(),
+                    super::fallback::ModelType::image(),
+                )
+                .renamed_from(Some(old_name.clone()));
+                fallback_notes = super::fallback::validate(state, &owner, f).await?;
+            }
+            // A rename never breaks a chain (decision 27).
+            let rewrites = match new_name != old_name {
+                true => {
+                    super::fallback::rename_rewrites(&snap, &[(key.clone(), new_name)], Some(&key))
+                }
+                false => super::fallback::Rewrites::default(),
+            };
+            fallback_notes.extend(rewrites.notes.iter().cloned());
             let new = store::NewImageModel {
                 model_id: new_image_model_id,
                 files,
@@ -614,8 +716,7 @@ pub async fn image_model_set(
                 extra_run_args,
                 warm_start: p.warm_start.unwrap_or(cur.warm_start),
                 idle_seconds: p.idle_seconds.unwrap_or(cur.idle_seconds),
-                hold_fallback_mode,
-                hold_fallback,
+                fallback: row_fallback,
                 capabilities_override: if p.clears("capabilities_override") {
                     None
                 } else {
@@ -624,99 +725,162 @@ pub async fn image_model_set(
                         None => cur.capabilities_override.clone(),
                     }
                 },
+                prompt_style: p.prompt_style(cur.prompt_style)?,
+                preview_mode: p.preview_mode(cur.preview_mode)?,
             };
             let mut warnings: Vec<String> = vocab_note.into_iter().collect();
             warnings.extend(image_model_problems(&models_dir, &as_image_model(&new)));
-            store::update_image_model(&state.db, cur.id, &new)
+            // What a rename, an enable or a disable does to the fallbacks
+            // naming this row, in a dry run (§14.2).
+            let mut tx = store::begin_write(&state.db)
                 .await
                 .map_err(|e| e.to_string())?;
-            // The learned peak belongs to the pipeline that was measured
-            // (image-generation §9). A different file set is a different
-            // pipeline, and one changed flag — `offload_to_cpu`, `vae_tiling`,
-            // a default width — moves the compute buffers by gigabytes, so the
-            // measurement no longer describes anything. Reset rather than kept
-            // and quietly wrong; said out loud rather than reset in silence,
-            // because it is a promise admission has stopped making.
-            let peak_reset =
-                cur.peak_extra_bytes.is_some() && (new.files != cur.files || new.args != cur.args);
-            if peak_reset {
-                store::set_image_model_peak(&state.db, cur.id, None)
+            store::update_image_model_in(&mut tx, cur.id, &new)
+                .await
+                .map_err(|e| e.to_string())?;
+            store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = (store::FallbackTable::ImageModels, cur.id);
+            super::fallback::dry_run(
+                state,
+                &snap,
+                tx,
+                &[super::fallback::Touch::Row(row.0, row.1)],
+                (new.fallback.is_some() && new.fallback != cur.fallback).then_some(row),
+            )
+            .await?;
+            let verb = saved_verb(&p.action);
+            // The write and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the learned peak, the snapshot serving the old row and
+            // the container on the old configuration (or, renamed or disabled,
+            // running).
+            let task_st = state.clone();
+            detached("updating the image model", async move {
+                let state = &task_st;
+                let mut tx = store::begin_write(&state.db)
                     .await
                     .map_err(|e| e.to_string())?;
-            }
-            reload().await?;
-            // Container hygiene (per-model-containers §3.4/§3.6), keyed on the
-            // *current* model id: an image container's argv names every file
-            // and flag, so stopping it is the whole apply — the next start
-            // renders the new row. A rename is a drop, because the container
-            // belongs to a model that no longer exists.
-            let note = if new.model_id != cur.model_id {
-                lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
-                Some(format!(
-                    "it was renamed from '{}', so that container was stopped and removed — the \
-                     next request starts '{}' fresh",
-                    cur.model_id, new.model_id
-                ))
-            } else if enabled {
-                lifecycle::stop_for_apply(state, Class::Image, &cur.model_id).await
-            } else {
-                lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
-                Some(format!(
-                    "'{}' is disabled — its container was stopped and removed",
-                    cur.model_id
-                ))
-            };
-            let peak_note = if peak_reset {
-                format!(
-                    "; learned peak reset — {} no longer describes this pipeline, so admission \
-                     charges nothing for its compute buffers until one generation has taught \
-                     them again",
-                    hf::fmt_bytes(cur.peak_extra_bytes.unwrap_or(0))
-                )
-            } else {
-                String::new()
-            };
-            Ok(dto::ImageModelSaved {
-                ok: true,
-                id: cur.id,
-                warnings: Some(warnings),
-                peak_reset: Some(peak_reset),
-                command_line: Some(command_line_preview(state, Class::Image, &new.model_id)),
-                message: match note {
-                    Some(note) => {
-                        format!(
-                            "image model '{}' {} — {note}{peak_note}",
-                            new.model_id,
-                            saved_verb(&p.action)
-                        )
-                    }
-                    None => format!(
-                        "image model '{}' {} — it is not running, so the next request \
-                         starts it with the new configuration{peak_note}",
-                        new.model_id,
-                        saved_verb(&p.action)
-                    ),
-                },
-                ..Default::default()
+                store::update_image_model_in(&mut tx, cur.id, &new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                store::rewrite_fallbacks_in(&mut tx, &rewrites.rows)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
+                // The learned peak belongs to the pipeline that was measured
+                // (image-generation §9). A different file set is a different
+                // pipeline, and one changed flag — `offload_to_cpu`, `vae_tiling`,
+                // a default width — moves the compute buffers by gigabytes, so the
+                // measurement no longer describes anything. Reset rather than kept
+                // and quietly wrong; said out loud rather than reset in silence,
+                // because it is a promise admission has stopped making.
+                let peak_reset = cur.peak_extra_bytes.is_some()
+                    && (new.files != cur.files || new.args != cur.args);
+                if peak_reset {
+                    store::set_image_model_peak(&state.db, cur.id, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state.mcp.notify_tools_changed();
+                // Container hygiene (per-model-containers §3.4/§3.6), keyed on the
+                // *current* model id: an image container's argv names every file
+                // and flag, so stopping it is the whole apply — the next start
+                // renders the new row. A rename is a drop, because the container
+                // belongs to a model that no longer exists.
+                let note = if new.model_id != cur.model_id {
+                    lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
+                    Some(format!(
+                        "it was renamed from '{}', so that container was stopped and removed — the \
+                         next request starts '{}' fresh",
+                        cur.model_id, new.model_id
+                    ))
+                } else if enabled {
+                    lifecycle::stop_for_apply(state, Class::Image, &cur.model_id).await
+                } else {
+                    lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
+                    Some(format!(
+                        "'{}' is disabled — its container was stopped and removed",
+                        cur.model_id
+                    ))
+                };
+                let peak_note = if peak_reset {
+                    format!(
+                        "; learned peak reset — {} no longer describes this pipeline, so admission \
+                         charges nothing for its compute buffers until one generation has taught \
+                         them again",
+                        hf::fmt_bytes(cur.peak_extra_bytes.unwrap_or(0))
+                    )
+                } else {
+                    String::new()
+                };
+                Ok(dto::ImageModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    warnings: Some(warnings),
+                    peak_reset: Some(peak_reset),
+                    command_line: Some(command_line_preview(state, Class::Image, &new.model_id)),
+                    message: match note {
+                        Some(note) => {
+                            format!(
+                                "image model '{}' {} — {note}{peak_note}",
+                                new.model_id, verb
+                            )
+                        }
+                        None => format!(
+                            "image model '{}' {} — it is not running, so the next request \
+                             starts it with the new configuration{peak_note}",
+                            new.model_id, verb
+                        ),
+                    },
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         "delete" => {
             let cur = find()?;
-            store::delete_image_model(&state.db, cur.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            reload().await?;
-            // §3.4: immediately, not at the next boot.
-            lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
-            Ok(dto::ImageModelSaved {
-                ok: true,
-                id: cur.id,
-                message: format!(
-                    "image model '{}' deleted — its container was stopped and removed",
-                    cur.model_id
-                ),
-                ..Default::default()
+            let fallback_notes = super::fallback::delete_notes(
+                &snap,
+                &HopKey::Local(Class::Image, cur.model_id.clone()),
+            );
+            // The delete and everything after it are a task of their own (*changed
+            // 2026-10-24*, see [`crate::detached::detached`]): a dropped request
+            // would leave the snapshot serving the deleted row and its container
+            // running.
+            let task_st = state.clone();
+            detached("deleting the image model", async move {
+                let state = &task_st;
+                store::delete_image_model(&state.db, cur.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state
+                    .reload_snapshot_releasing(routing)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                state.mcp.notify_tools_changed();
+                // §3.4: immediately, not at the next boot.
+                lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
+                Ok(dto::ImageModelSaved {
+                    ok: true,
+                    id: cur.id,
+                    message: format!(
+                        "image model '{}' deleted — its container was stopped and removed",
+                        cur.model_id
+                    ),
+                    fallback_notes,
+                    ..Default::default()
+                })
             })
+            .await
+            .map_err(|r| r.message)?
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"
@@ -739,14 +903,15 @@ fn as_image_model(n: &store::NewImageModel) -> ImageModel {
         extra_run_args: n.extra_run_args.clone(),
         warm_start: n.warm_start,
         idle_seconds: n.idle_seconds,
-        hold_fallback_mode: n.hold_fallback_mode,
-        hold_fallback: n.hold_fallback.clone(),
+        fallback: n.fallback.clone(),
         capabilities_override: n.capabilities_override.clone(),
         // Not part of a patch at all — the checks that read rows never look at
         // it, and the real row keeps whatever was learned (or has just been
         // reset by the save, which `image_model_set` does explicitly).
         peak_extra_bytes: None,
         peak_learned_at: None,
+        prompt_style: n.prompt_style,
+        preview_mode: n.preview_mode,
     }
 }
 
@@ -805,8 +970,7 @@ pub(super) fn image_model_get(
         extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
         idle_seconds: m.idle_seconds,
-        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
-        hold_fallback: m.hold_fallback.clone(),
+        fallback: m.fallback.clone(),
         capabilities_override: m.capabilities_override.clone(),
         // Learned, not configured (image-generation §9): what one generation
         // was measured to need above this pipeline's idle residency, and what

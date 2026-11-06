@@ -8,6 +8,8 @@
 use lmgw_api_types::chat;
 use lmgw_api_types::chat_attachments as att;
 use lmgw_api_types::chat_export as export;
+use lmgw_api_types::chat_frames::ErrorFrame;
+use lmgw_api_types::chat_media as media;
 use lmgw_api_types::chat_threads::AttachmentMeta;
 
 use super::super::registry::{DocRoute, Req, Resp};
@@ -19,6 +21,19 @@ fn export_query(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
 
 fn bundle(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
     g.root_schema_for::<export::ChatExport>()
+}
+
+fn action_started(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    g.root_schema_for::<media::MediaActionStarted>()
+}
+fn action_progress(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    g.root_schema_for::<media::ToolProgressFrame>()
+}
+fn action_done(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    g.root_schema_for::<media::MediaActionDone>()
+}
+fn action_error(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    g.root_schema_for::<ErrorFrame>()
 }
 
 pub(crate) fn routes() -> Vec<DocRoute> {
@@ -131,8 +146,12 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  (image/png, application/pdf, audio/wav, ...); a text file is served as \
                  text/plain; charset=utf-8. The answer carries X-Content-Type-Options: nosniff \
                  and Content-Security-Policy: sandbox, so a file opened in a browser cannot run \
-                 anything. 404 not_found for an attachment that is not there or not the \
-                 caller's.",
+                 anything, and Accept-Ranges: bytes. One Range (bytes=a-b, bytes=a- or \
+                 bytes=-n) answers 206 with Content-Range, as a media player resumes or seeks; \
+                 a Range lmgw does not read (several ranges, another unit), or any If-Range, \
+                 serves the whole file. 416 range_not_satisfiable, with Content-Range: bytes \
+                 */size, for a range that names no byte of the file. 404 not_found for an \
+                 attachment that is not there or not the caller's.",
             )
         },
         DocRoute {
@@ -179,6 +198,52 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  nosniff and Content-Security-Policy: sandbox. 404 not_found for an attachment \
                  that is not there or not the caller's, and 404 no_text for an image, or an \
                  audio file with no transcript yet.",
+            )
+        },
+        DocRoute {
+            path_ints: &["id"],
+            request: Req::Json(|g| g.root_schema_for::<media::MediaActionRequest>()),
+            response: Resp::Sse(&[
+                ("action", action_started),
+                ("progress", action_progress),
+                ("done", action_done),
+                ("error", action_error),
+            ]),
+            ..chat_route(
+                "POST",
+                "/chat/api/attachments/{id}/media",
+                "Run an image card's action",
+                "Runs one action on a picture of a thread, directly — no chat model is called: \
+                 reroll draws it again with the same prompt and settings and a new seed (an \
+                 edit is made again from the picture it started from), vary makes a variation \
+                 of it on a model without instruction edits and edit changes it by an \
+                 instruction on a model with them (prompt defaults to the picture's own, \
+                 strength to its own for vary), upscale runs an ESRGAN upscaler (upscaler: a \
+                 file stem of the image models dir's upscalers/, the server's first one when \
+                 omitted; repeats 1 to 4) on a local image model — a resident one that can \
+                 upscale, preferring the one that made the picture, else that one, else the \
+                 smallest. The model rows are the caller's. The answer is SSE: `action` first \
+                 (call_id act-<boot>-<n>, unique across restarts, the action, the model, the \
+                 source attachment), `progress` \
+                 frames while it runs (lossy: a newer one supersedes an older), then `done` \
+                 with the stored picture's attachment metadata and a sentence about it, or \
+                 `error`. The picture is stored as an attachment of the thread with source \
+                 action, bound to the source's message, its meta.media naming parent; it is \
+                 not shown to the thread's model, nor named to it by att:N, unless the user \
+                 attaches it (a copy as an upload). The action goes on when the stream is \
+                 closed; a key that is revoked stops it and ends the stream with an `error` \
+                 frame (code revoked), a gateway that stops ends the stream with code \
+                 gateway_stopping; a \
+                 thread deleted or kept as a stored chat while it runs stops it, its `error` \
+                 code thread_gone, and nothing of it is kept. An upscale whose result would \
+                 exceed the chosen image model's max_upscale_width/height is refused with \
+                 too_large, naming the numbers. Refused \
+                 before any frame: 404 not_found for an attachment that is not there or not \
+                 the caller's, 422 not_an_image, 409 not_sent for a picture of no message yet \
+                 (a draft, a reply still being written), 422 no_model, model_unavailable, \
+                 not_rerollable, source_missing, wrong_action, prompt_required, no_upscaler, \
+                 no_image_model, unknown_upscaler or bad_request for what the picture or the \
+                 body lacks.",
             )
         },
     ]

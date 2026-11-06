@@ -181,6 +181,10 @@ fi
 # The dashboard is a Trunk-built WASM bundle that lmgw-core serves at `/` (from
 # disk in debug), and tests/it/web_pages.rs asserts it is really served — so the
 # bundle has to exist before the suite runs. Cheap after the first build.
+# LMGW_UI_BUNDLE_REQUIRED tells the tests that read the served bundle
+# (tests/it/ui_scripts.rs) that it is there: without it they fail rather than
+# skip. A plain `cargo test` without a bundle skips them and says so.
+export LMGW_UI_BUNDLE_REQUIRED=1
 if $changed && [[ "$RUN_TRUNK" == 0 ]]; then
   echo "==> trunk build skipped (see the selection above)"
 else
@@ -238,6 +242,27 @@ if $changed && [[ "$RUN_PUBLISH" == 0 ]]; then
 else
   stage "publish script check (temp repos)"
   python3 scripts/publish_github_test.py
+fi
+
+# scripts/compat-live.sh is the manual live API compatibility check (api-compat design); its
+# wire rules, error classification and run diff are pure Python, tested here on fixed samples
+# (no network, no lmgw, no SDKs).
+if $changed && [[ "$RUN_COMPAT" == 0 ]]; then
+  echo "==> compat rules check skipped (see the selection above)"
+else
+  stage "compat rules check (scripts/compat_live_test.py)"
+  python3 scripts/compat_live_test.py
+fi
+
+# ci/rpm_guard.py stands between the bundle and what root installs (ci/build.sh runs it on
+# every RPM). Its test builds sample RPMs with rpmbuild under target/ (no root, no network;
+# skipped, visibly, without rpm-build) and checks ci/rpm-allowlist.toml against what
+# src-tauri/tauri.conf.json bundles.
+if $changed && [[ "$RUN_RPM_GUARD" == 0 ]]; then
+  echo "==> RPM guard check skipped (see the selection above)"
+else
+  stage "RPM guard check (sample RPMs)"
+  python3 ci/rpm_guard_test.py
 fi
 
 if $changed && have_nextest; then
