@@ -16,7 +16,7 @@ use lmgw_api_types::audio_alignment::AudioAlignment;
 use lmgw_api_types::openapi_ext::{endpoint_group, model_task};
 
 use super::super::registry::{Dialect, DocRoute, Req, Resp};
-use super::super::v1::{anthropic, aux, chat, mcp, media, models, responses, systemone};
+use super::super::v1::{anthropic, aux_models, chat, mcp, media, models, responses, systemone};
 
 /// `POST /v1/realtime/calls` and its hangup.
 mod calls;
@@ -182,16 +182,16 @@ fn own() -> Vec<DocRoute> {
                 non-OpenAI-protocol upstream with 400 rather than sending it a request its \
                 own API cannot answer. A missing model is a 400 (missing 'model'), as on \
                 every other ingress.",
-            request: Req::Json(aux::completions_request),
+            request: Req::Json(aux_models::completions_request),
             response: Resp::JsonOrSse {
-                json: aux::completions_response,
-                events: &[("chunk", aux::completions_stream_chunk)],
+                json: aux_models::completions_response,
+                events: &[("chunk", aux_models::completions_stream_chunk)],
             },
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI],
             model_task: Some(model_task::CHAT),
             writes: Some(false),
-            example: Some(aux::completions_example),
+            example: Some(aux_models::completions_example),
             ..base(
                 "POST",
                 "/v1/completions",
@@ -204,25 +204,25 @@ fn own() -> Vec<DocRoute> {
             description: "dimensions is forwarded in the upstream's own spelling, and a \
                 route that ignores it (llama-server) is a 400, not full-length vectors. \
                 encoding_format base64 is encoded by the gateway for every upstream.",
-            request: Req::Json(aux::embeddings_request),
-            response: Resp::Json(aux::embeddings_response),
+            request: Req::Json(aux_models::embeddings_request),
+            response: Resp::Json(aux_models::embeddings_response),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI],
             model_task: Some(model_task::EMBEDDING),
             writes: Some(false),
-            example: Some(aux::embeddings_example),
+            example: Some(aux_models::embeddings_example),
             ..base("POST", "/v1/embeddings", "openai", "Create embeddings")
         },
         DocRoute {
             description: "Jina and TEI request shapes both work (documents or texts); an \
                 embedding-only row is refused. Answers Jina's results shape either way.",
-            request: Req::Json(aux::rerank_request),
-            response: Resp::Json(aux::rerank_response),
+            request: Req::Json(aux_models::rerank_request),
+            response: Resp::Json(aux_models::rerank_response),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
             model_task: Some(model_task::RERANK),
             writes: Some(false),
-            example: Some(aux::rerank_example),
+            example: Some(aux_models::rerank_example),
             ..base("POST", "/v1/rerank", "lmgw-inference", "Rerank documents")
         },
         // -- Decisions (decision-models design §2.8) ---------------------------
@@ -329,13 +329,13 @@ fn own() -> Vec<DocRoute> {
                 OpenAI-protocol upstream tiktoken cannot identify) and message_framing (an \
                 Anthropic/Gemini upstream counts messages, so the text went as one user \
                 turn).",
-            request: Req::Json(aux::count_request),
-            response: Resp::Json(aux::count_response),
+            request: Req::Json(aux_models::count_request),
+            response: Resp::Json(aux_models::count_response),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
             model_task: Some(model_task::CHAT),
             writes: Some(false),
-            example: Some(aux::count_example),
+            example: Some(aux_models::count_example),
             ..base(
                 "POST",
                 "/v1/count_tokens",

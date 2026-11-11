@@ -18,7 +18,7 @@
 //! reading every sibling's would cost 1 to 16 MiB a file (§2.2). The two
 //! agree for every repo the design's spike listed; where a name lies about
 //! a file, the hub plan says so in its warnings rather than plan it as the
-//! name says (draft call D52).
+//! name says (D52).
 //!
 //! **The whole model** (D7, D131). A split file's parts each hold some of
 //! its tensors, so the parameter count and the repeating layers' width are

@@ -392,11 +392,15 @@ pub(super) async fn confirm(
 }
 
 /// `device_ca_rotate {}`: replace lmgw's device CA (§5.5, D19). A new key
-/// under a new wrapping key and a new certificate replace `tls/ca.key` and
-/// `tls/ca.crt`, the old key is not kept, the server certificates are issued
-/// anew, every enrolled device loses its key and certificate (its policy
-/// kept) and waits for a new token, and every token alive ends, since its
-/// link pins the old CA. Each reset device's connections close.
+/// and a new certificate replace `tls/ca.key` and `tls/ca.crt` and the old
+/// key is not kept: on the desktop the new key is wrapped under a new
+/// wrapping key and the old one deleted, in the server image it is sealed
+/// under the same secret, which still opens an older copy of the old key
+/// file until the secret is replaced (headless server design D98). The
+/// server certificates are issued anew, every enrolled device loses its key
+/// and certificate (its policy kept) and waits for a new token, and every
+/// token alive ends, since its link pins the old CA. Each reset device's
+/// connections close.
 pub(super) async fn ca_rotate(st: &SharedState) -> Result<dto::DeviceCaRotated, Refusal> {
     let ca = st.devices.trust.status(&st.data_dir).ca;
     if ca.state == dto::device_link::DeviceCaState::Missing {

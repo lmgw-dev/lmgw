@@ -315,7 +315,8 @@ async fn the_reply_language_is_checked_on_every_save_path() {
     for bad in ["eng", "auto", "en-GB"] {
         let e = settings_set(&state, patch(json!({ "chat_voice_reply_language": bad })))
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .message;
         assert!(
             e.contains("chat_voice_reply_language") && e.contains("ISO 639-1"),
             "{bad}: {e}"

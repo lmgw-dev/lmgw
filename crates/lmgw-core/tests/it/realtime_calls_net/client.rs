@@ -238,6 +238,10 @@ impl Client {
                     self.rtc.handle_input(Input::Receive(now, r)).unwrap();
                 }
             }
+            // Windows reports an ICMP "port unreachable" for an earlier
+            // datagram (the server's group closed or moved) as a reset on
+            // the next read (WSAECONNRESET); the socket itself is fine.
+            Ok(Err(e)) if cfg!(windows) && e.kind() == std::io::ErrorKind::ConnectionReset => {}
             Ok(Err(e)) => panic!("the client's socket: {e}"),
             Err(_) => self.rtc.handle_input(Input::Timeout(now)).unwrap(),
         }

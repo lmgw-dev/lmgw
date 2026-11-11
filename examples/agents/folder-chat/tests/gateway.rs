@@ -4,6 +4,8 @@
 //! rerank answered by a hold fallback), a streaming chat completion cut into
 //! awkward pieces, and an index loaded while the embedding model is held.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::collections::HashMap;

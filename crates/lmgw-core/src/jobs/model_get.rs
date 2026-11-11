@@ -18,7 +18,8 @@
 //!    ([`crate::modelinfo::refit::for_get`]): the largest context that fits,
 //!    an aux row re-planned at it.
 //! 5. **Create** the row, its id settled again against the names taken by
-//!    now (D28), its note recorded on the get first and written after.
+//!    now (D28) under the routing-write lock the create commits under, its
+//!    note recorded on the get first and written after.
 //! 6. **Done**, with the row. Nothing starts the model (D27): loading it is
 //!    the Test button's job, or the first message's.
 //!
@@ -496,9 +497,15 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
         .and_then(AuxKind::parse)
         .unwrap_or_else(|| kind_of(row));
 
-    // The id again, against the names taken by now (D28).
+    // The id again, against the names taken by now (D28). The pass-through
+    // catalogs are read first (an upstream's listing can take its timeout);
+    // the rows and the gets are read under the routing-write lock, held
+    // through the create's commit: a row another save creates meanwhile is
+    // in the snapshot read here or waits for this create, never committed
+    // between the pick and the insert (a UNIQUE failure on model_id).
+    let pt = crate::ops::PassThrough::of(state, &state.snapshot()).await;
+    let routing = state.routing_write().await;
     let snap = state.snapshot();
-    let pt = crate::ops::PassThrough::of(state, &snap).await;
     let others: Vec<String> = store::running_model_gets(&state.db)
         .await
         .map_err(|e| e.to_string())?
@@ -529,15 +536,22 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
     let mut warnings = fitted.warnings.clone();
     let row_id = match class {
         Class::Aux => {
-            let saved =
-                crate::ops::aux_model_set(state, crate::ops::patch_from_args(Some(patch))?).await?;
+            let saved = crate::ops::aux_model_set_holding(
+                state,
+                routing,
+                crate::ops::patch_from_args(Some(patch))?,
+            )
+            .await?;
             warnings.extend(saved.warnings.unwrap_or_default());
             saved.id
         }
         _ => {
-            let saved =
-                crate::ops::local_model_set(state, crate::ops::patch_from_args(Some(patch))?)
-                    .await?;
+            let saved = crate::ops::local_model_set_holding(
+                state,
+                routing,
+                crate::ops::patch_from_args(Some(patch))?,
+            )
+            .await?;
             warnings.extend(saved.warnings.unwrap_or_default());
             saved.id
         }

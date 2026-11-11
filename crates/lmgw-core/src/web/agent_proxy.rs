@@ -21,7 +21,9 @@
 //! ([`HOP_BY_HOP`]), and on the way *in* so is everything in [`NEVER_FORWARD`]
 //! — the dashboard's credentials, the whole `X-Forwarded-*` family, and
 //! `X-Lmgw-Face`. lmgw sets its own four of those (§4.6): the
-//! `X-Forwarded-Host`/`-Proto` pair, `X-Forwarded-For` from the TCP peer, and
+//! `X-Forwarded-Host`/`-Proto` pair, `X-Forwarded-For` from the client (the
+//! TCP peer, or behind a trusted proxy the client it forwarded, headless
+//! server design §4.5), and
 //! `X-Lmgw-Face` naming which face the request came in on — the two facts an
 //! app needs to decide whom it serves, and that only lmgw knows. On the way
 //! *out* the MCP face, a path on the dashboard's own origin, drops
@@ -454,7 +456,8 @@ async fn app_moved(
     Path(captures): Path<HashMap<String, String>>,
 ) -> Response {
     let id = captures.get("id").cloned().unwrap_or_default();
-    let origin = service::agent_origin(&st.snapshot().settings, &id);
+    let snap = st.snapshot();
+    let origin = service::agent_origin(&snap.settings, snap.serving_tls.as_ref(), &id);
     let body = serde_json::json!({
         "code": "agent_app_moved",
         "origin": origin,
@@ -504,6 +507,17 @@ async fn proxy_agent(
     // The server this request came in on: an app's streamed answer ends at
     // its stop (review F-4), as every other long-lived stream does.
     let served_at = req.extensions().get::<crate::server::ServedAt>().copied();
+    // The MCP face's caller holds a credential (the gate is `Admin`): what
+    // it opens here ends when that credential does, its session included
+    // (headless server design D58), as every other long-lived stream does.
+    // The agent origin asks for none, so there is nothing to watch there.
+    let watch = match face {
+        Face::Mcp => req
+            .extensions()
+            .get::<crate::proxy::RequestCtx>()
+            .and_then(|ctx| crate::devices::watch(&st, ctx)),
+        Face::Origin => None,
+    };
     if service::service_of(&agent).is_none() {
         return err(
             StatusCode::NOT_FOUND,
@@ -550,13 +564,13 @@ async fn proxy_agent(
     // in `X-Forwarded-Host` (§4.5, §4.6). Computed per request, because a
     // suffix change renames every origin at once.
     let snap = st.snapshot();
-    let origin = service::agent_origin_base(&snap.settings, &id);
+    let origin = service::agent_origin_base(&snap.settings, snap.serving_tls.as_ref(), &id);
     let to = Answering {
         face,
         origin: &origin,
         container_base: &upstream_base,
     };
-    let authority = service::origin_authority(&snap.settings, &id);
+    let authority = service::origin_authority(&snap.settings, snap.serving_tls.as_ref(), &id);
     let method = req.method().clone();
     let upgrading = wants_upgrade(req.headers());
     let mut headers = forwarded_request_headers(req.headers(), upgrading);
@@ -566,22 +580,29 @@ async fn proxy_agent(
     if let Ok(v) = HeaderValue::from_str(&authority) {
         headers.insert(HeaderName::from_static("x-forwarded-host"), v);
     }
+    // The scheme the request came in with (headless server design §4.3,
+    // §4.5): `https` on the TLS listener, `http` on the plain one, which
+    // lmgw's own MCP client dials, or behind a trusted proxy the scheme it
+    // said the client used.
     headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
-        HeaderValue::from_static("http"),
+        HeaderValue::from_static(crate::server::scheme_of(req.extensions()).as_str()),
     );
     // The two facts an app needs to decide whom it serves (§4.6), and that
     // only lmgw knows — both `insert`, both dropped from the client's own
     // headers by [`NEVER_FORWARD`]. Set here, before the upgrade branch, so a
     // WebSocket carries them too.
     headers.insert(HeaderName::from_static(FACE_HEADER), face.header_value());
-    // The TCP peer of the connection that reached lmgw. On the agent origin
-    // that is the reader: loopback for a browser on this box, a LAN address
-    // for another machine — and for another container on this box too, which
-    // reaches the gateway through host.containers.internal. On the MCP face it
-    // is lmgw's own MCP client dialling itself (loopback, or this host's own
+    // The client of the connection that reached lmgw: its TCP peer, or
+    // behind a trusted proxy the client address the proxy forwarded
+    // (headless server design §4.5). On the agent origin that is the
+    // reader: loopback for a browser on this box, a LAN address for another
+    // machine — and for another container on this box too, which reaches
+    // the gateway through host.containers.internal. On the MCP face it is
+    // lmgw's own MCP client dialling itself (loopback, or this host's own
     // address when the gateway is bound to one): that face's trust is the
-    // `Admin` gate in front of it, not this address.
+    // `Admin` gate in front of it, not this address. A client a proxy
+    // could not name goes without the header.
     if let Some(peer) = peer_ip(&req) {
         if let Ok(v) = HeaderValue::from_str(&peer.to_string()) {
             headers.insert(HeaderName::from_static("x-forwarded-for"), v);
@@ -591,7 +612,7 @@ async fn proxy_agent(
     if upgrading {
         let inbound = req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>();
         return upgrade(
-            st, &id, &url, method, headers, inbound, guard, to, served_at,
+            st, &id, &url, method, headers, inbound, guard, to, served_at, watch,
         )
         .await;
     }
@@ -653,7 +674,10 @@ async fn proxy_agent(
         chunk
     });
     // Until the server stops, then the end: an app's event stream open in a
-    // frame or a tab does not hold the drain (review F-4).
+    // frame or a tab does not hold the drain (review F-4). And on the MCP
+    // face until its credential ends, without a frame: the body is the
+    // container's, not lmgw's to append to.
+    let stream = crate::devices::until_revoked(stream, watch, |_| None);
     let stream = crate::server::until_stopped(&st.stops, served_at, stream, None);
     out.body(Body::from_stream(stream)).unwrap_or_else(|e| {
         err(
@@ -680,7 +704,10 @@ fn unreachable(id: &str, container: &str, e: reqwest::Error, evicted: bool) -> R
     )
 }
 
-/// The IP address of the TCP peer this request arrived from.
+/// The IP address of the client this request arrived from: the TCP peer,
+/// or behind a trusted proxy the client it forwarded (headless server
+/// design §4.5); `None` for a client the proxy's chain names no address
+/// for ([`crate::server::forwarded::UNKNOWN_CLIENT`]).
 ///
 /// Read from the `ConnectInfo<Conn>` [`server::run`](crate::server::run)
 /// attaches to every connection (`into_make_service_with_connect_info`), its
@@ -695,7 +722,9 @@ fn unreachable(id: &str, container: &str, e: reqwest::Error, evicted: bool) -> R
 fn peer_ip(req: &Request) -> Option<std::net::IpAddr> {
     req.extensions()
         .get::<axum::extract::ConnectInfo<crate::server::Conn>>()
-        .map(|ci| ci.0.peer.ip().to_canonical())
+        .map(|ci| ci.0.peer)
+        .filter(|p| *p != crate::server::forwarded::UNKNOWN_CLIENT)
+        .map(|p| p.ip().to_canonical())
 }
 
 /// A `Connection: Upgrade` + `Upgrade: websocket` request (case-insensitive,
@@ -850,6 +879,8 @@ async fn upgrade(
     guard: Option<service::InFlight>,
     to: Answering<'_>,
     served_at: Option<crate::server::ServedAt>,
+    // The MCP face's credential watch (`proxy_agent`), `None` on the origin.
+    watch: Option<crate::devices::Watched>,
 ) -> Response {
     let Some(inbound) = inbound else {
         return err(
@@ -892,6 +923,7 @@ async fn upgrade(
             }
             chunk
         });
+        let stream = crate::devices::until_revoked(stream, watch, |_| None);
         let stream = crate::server::until_stopped(&st.stops, served_at, stream, None);
         return out.body(Body::from_stream(stream)).unwrap_or_else(|e| {
             err(
@@ -949,6 +981,15 @@ async fn upgrade(
             r = to_container => r.map(|n| format!("the browser sent {n} bytes and then EOF")),
             r = to_browser => r.map(|n| format!("the container sent {n} bytes and then EOF")),
             () = stopped => Ok("the gateway stopped".to_string()),
+            why = async move {
+                match watch {
+                    Some(mut w) => {
+                        let reason = w.revoked().await;
+                        w.said(reason).message
+                    }
+                    None => std::future::pending().await,
+                }
+            } => Ok(format!("its credential ended: {why}")),
         };
         match ended {
             Ok(why) => {

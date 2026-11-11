@@ -5,12 +5,14 @@
 //! persistence, telemetry, the per-model container runtime, and the Axum
 //! router factory.
 
+pub mod accounts;
 pub mod agent;
 /// The agent catalog (agent-catalog design): manifests, the store behind them,
 /// and the built-ins that ship embedded. Distinct from [`agent`], which is the
 /// server-side *tool loop* one of these manifests eventually drives.
 pub mod agents;
 pub mod audio;
+pub mod audit;
 /// Container builds from git — the Backends page (container-builds design):
 /// build definitions, their runs, validation, tags and the builds directory.
 pub mod backends;

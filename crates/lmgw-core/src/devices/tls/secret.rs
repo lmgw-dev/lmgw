@@ -9,8 +9,13 @@
 //! the two leaves the old file openable by the old item, and a provider that
 //! ignores `replace` piles nothing up.
 //!
+//! On Windows the items are generic credentials in Windows Credential
+//! Manager ([`CredentialManagerStore`], `secret/credman.rs`).
+//!
 //! The store is a seam ([`WrapKeyStore`]): a production start installs
-//! [`SecretServiceStore`] (`AppState::init_with`, `state::wrap_key_store`);
+//! [`SecretServiceStore`] (`AppState::init_with`, `state::wrap_key_store`;
+//! on Windows [`CredentialManagerStore`]),
+//! a container-mode start the image's fixed key (`wrap_secret`);
 //! every other gateway — a dev instance (the headless runner, a debug build,
 //! `LMGW_DEV`) and the test gateways included — starts with
 //! [`NoSecretService`], which answers as a headless start does, so no dev
@@ -26,6 +31,31 @@ use secrecy::zeroize::Zeroizing;
 use super::wrap::WrapKey;
 use crate::erased::Erased;
 
+#[cfg(windows)]
+mod credman;
+#[cfg(windows)]
+pub use credman::CredentialManagerStore;
+
+/// The desktop's store as sentences name it: the Secret Service on Linux,
+/// Windows Credential Manager on Windows ([`CredentialManagerStore`]).
+#[cfg(not(windows))]
+pub const STORE: &str = "the Secret Service";
+#[cfg(windows)]
+pub const STORE: &str = "Windows Credential Manager";
+
+/// "No store answers", as the sentences say it.
+#[cfg(not(windows))]
+pub const NO_STORE: &str = "no Secret Service answers";
+#[cfg(windows)]
+pub const NO_STORE: &str = "Windows Credential Manager does not answer";
+
+/// How a plain key file is kept, as the sentences say it: its mode on
+/// Linux, its private DACL on Windows (`files/windows.rs`).
+#[cfg(not(windows))]
+pub const PLAIN_KEPT: &str = "(0600)";
+#[cfg(windows)]
+pub const PLAIN_KEPT: &str = "(readable by this account alone)";
+
 /// The item's `application` attribute.
 pub const ATTR_APPLICATION: &str = "application";
 pub const APPLICATION: &str = "lmgw";
@@ -39,7 +69,8 @@ pub const ATTR_DATA_DIR: &str = "data_dir";
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
     /// No Secret Service answers: no session bus, or no provider on it. A
-    /// headless start.
+    /// headless start; in the server image, no wrapping key secret mounted
+    /// (`wrap_secret`).
     #[error("no Secret Service answers ({0})")]
     Unavailable(String),
     /// The unlock prompt was dismissed, or closed before it was answered.
@@ -69,6 +100,24 @@ pub trait WrapKeyStore: Send + Sync + 'static {
         dir: &'a Path,
         keep: &'a WrapKey,
     ) -> Erased<'a, Result<usize, StoreError>>;
+
+    /// The one key this store wraps with, for a store of one fixed key (the
+    /// server image's Podman secret, `wrap_secret`), asked before any key
+    /// is made: `Some(Ok)`, the key, which the key file is sealed under
+    /// instead of a new one ([`Self::add`] and [`Self::prune`] are no-ops
+    /// then); `Some(Err)` when it has none to use, `Unavailable` (none
+    /// mounted: the key is kept plain) or `Failed` (a file that holds none).
+    /// `None` for a store that takes a new key at every write.
+    fn fixed_key(&self) -> Option<Result<&WrapKey, StoreError>> {
+        None
+    }
+
+    /// The file the store reads its key from, for the sentences that name
+    /// where the key should be (`wrap_secret`); `None` for the Secret
+    /// Service and its stand-ins.
+    fn secret_file(&self) -> Option<&Path> {
+        None
+    }
 }
 
 /// The attributes of `dir`'s item.

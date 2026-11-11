@@ -5,7 +5,9 @@
 //!
 //! - **the CA** (`ca`): created at the device listener's first start, its
 //!   key wrapped at rest under a key in the session's Secret Service
-//!   (`wrap`, `secret`), plain only on a headless start, its files checked
+//!   (`wrap`, `secret`) or, in the server image, under the fixed key of a
+//!   Podman secret (`wrap_secret`), plain only on a start with neither, its
+//!   files checked
 //!   for mode and owner (`files`);
 //! - **the server certificates** (`leaf`): one per local address, issued in
 //!   memory, re-issued from half their validity, carrying every host of
@@ -24,6 +26,7 @@ mod secret;
 mod server_config;
 mod trust;
 mod wrap;
+mod wrap_secret;
 
 pub use ca::{fingerprint, Ca, CaFacts, KeyMode, NO_EXPIRY};
 pub use files::{TrustFiles, CA_CERT, CA_KEY, CERT_NAME, KEY_NAME, TLS_DIR};
@@ -32,6 +35,8 @@ pub use issue::{
     PublicKeyRefused,
 };
 pub use leaf::{Leaf, LeafCache, LeafSlot, UrlHost};
+#[cfg(windows)]
+pub use secret::CredentialManagerStore;
 pub use secret::{
     MemoryWrapStore, NoSecretService, SecretServiceStore, StoreError, WrapKeyStore, APPLICATION,
     ATTR_APPLICATION, ATTR_DATA_DIR, ATTR_KIND, KIND_CA_WRAP,
@@ -39,3 +44,4 @@ pub use secret::{
 pub use server_config::{provider, ClientAuth, ALPN_HTTP1};
 pub use trust::{Trust, TrustError};
 pub use wrap::{WrapKey, PLAIN_LABEL, WRAPPED_LABEL};
+pub use wrap_secret::{WrapKeySecret, WRAP_KEY_SECRET, WRAP_KEY_SECRET_HOW, WRAP_KEY_SECRET_NAME};

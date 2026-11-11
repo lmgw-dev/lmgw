@@ -478,7 +478,14 @@ async fn remove_build_caches(
         return Vec::new();
     }
     let spec = &build.spec;
-    let root = run::cache_mount_root(&state.builds.buildah_tmp(), run::real_uid());
+    let Some(uid) = run::real_uid() else {
+        tracing::info!(
+            "build '{}' delete: per-build cache dirs kept (buildah's cache root is not supported on Windows yet)",
+            build.spec.slug
+        );
+        return Vec::new();
+    };
+    let root = run::cache_mount_root(&state.builds.buildah_tmp(), uid);
     let podman = Podman::of(state);
     let mut removed = Vec::new();
     for id in tags::own_cache_ids_of(spec, runs) {
@@ -657,6 +664,45 @@ pub async fn container_images(
     args: ContainerImagesArgs,
 ) -> Result<ContainerImagesResponse, String> {
     images::list_images(state, args.engine, args.disk).await
+}
+
+/// `engine_releases` (Windows design §4.2): the Engines page's Windows
+/// column — the pinned release builds, the one this machine runs per
+/// engine, what is installed, and the release check's last answers. No
+/// download and no network: the check runs with the registry images'.
+pub async fn engine_releases(
+    state: &SharedState,
+    _args: lmgw_api_types::engine_releases::EngineReleasesArgs,
+) -> Result<lmgw_api_types::engine_releases::EngineReleasesResponse, String> {
+    use crate::runtime::engine_assets::{self, view, Engines};
+    let engines = Engines::new(engine_assets::engines_root(&state.data_dir));
+    // Without pins (Linux) there is no choice to explain, and NVML is not
+    // loaded for it.
+    let facts = match engines.pins() {
+        Some(_) => engines.facts().await,
+        None => Default::default(),
+    };
+    let stored = state.builds.updates().loaded(state).await;
+    Ok(view::response(
+        &engines,
+        &facts,
+        cfg!(windows),
+        &stored.engines,
+        stored.last_all,
+    ))
+}
+
+/// `engine_fallback_clear` (Windows design §4.2): remove one pinned build's
+/// "no kernel image" mark, so the next start of its engine may choose it
+/// again; answers [`engine_releases`] after the change.
+pub async fn engine_fallback_clear(
+    state: &SharedState,
+    args: lmgw_api_types::engine_releases::EngineFallbackClearArgs,
+) -> Result<lmgw_api_types::engine_releases::EngineReleasesResponse, String> {
+    use crate::runtime::engine_assets::{self, Engines};
+    Engines::new(engine_assets::engines_root(&state.data_dir))
+        .clear_fallback(&args.engine, &args.variant)?;
+    engine_releases(state, Default::default()).await
 }
 
 /// `container_image_delete` (§15): refused while in use unless forced, and

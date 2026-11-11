@@ -36,6 +36,16 @@ pub(super) fn image_model_from_row(row: &sqlx::sqlite::SqliteRow) -> ImageModel 
             .get::<Option<i64>, _>("peak_extra_bytes")
             .and_then(|b| u64::try_from(b).ok()),
         peak_learned_at: row.get("peak_learned_at"),
+        // Learned too (0103), by `set_image_model_idle` only.
+        idle_bytes: row
+            .get::<Option<i64>, _>("idle_bytes")
+            .and_then(|b| u64::try_from(b).ok()),
+        // And (0104) by `set_image_model_work` only.
+        work_bytes: row
+            .get::<Option<i64>, _>("work_bytes")
+            .and_then(|b| u64::try_from(b).ok()),
+        // And the engine they were learned under (0105).
+        learned_key: row.get("learned_key"),
         // A value the CHECK let in but this build does not name reads as
         // unset, the column's own default, rather than failing the load.
         prompt_style: row
@@ -208,10 +218,119 @@ pub async fn set_image_model_peak(
     Ok(())
 }
 
+/// Record what a pipeline whose weights all wait off the card holds on the
+/// card at rest (migration 0103, `vram::partial::floor`). Like
+/// [`set_image_model_peak`], a value lmgw writes by itself: no configured
+/// column and not `updated_at`. `None` clears it back to not measured,
+/// which a `files` or `args` change does.
+pub async fn set_image_model_idle(
+    pool: &SqlitePool,
+    id: i64,
+    idle_bytes: Option<u64>,
+) -> DbResult<()> {
+    sqlx::query("UPDATE image_models SET idle_bytes = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(match idle_bytes {
+            Some(b) => Some(i64::try_from(b).map_err(|_| {
+                GatewayError::Internal(format!(
+                    "a learned idle residency of {b} bytes does not fit an INTEGER"
+                ))
+            })?),
+            None => None,
+        })
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record the smallest `--max-vram` budget a generation of this row
+/// completed under (migration 0104, `vram::partial::work`), or clear it
+/// (`None`) with the peak. Learned like [`set_image_model_idle`]: no
+/// configured column and not `updated_at`.
+pub async fn set_image_model_work(
+    pool: &SqlitePool,
+    id: i64,
+    work_bytes: Option<u64>,
+) -> DbResult<()> {
+    sqlx::query("UPDATE image_models SET work_bytes = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(match work_bytes {
+            Some(b) => Some(i64::try_from(b).map_err(|_| {
+                GatewayError::Internal(format!(
+                    "a learned working budget of {b} bytes does not fit an INTEGER"
+                ))
+            })?),
+            None => None,
+        })
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_image_model(pool: &SqlitePool, id: i64) -> DbResult<()> {
     sqlx::query("DELETE FROM image_models WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// One learned figure of an image row ([`set_image_model_learned`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearnedFigure {
+    /// `peak_extra_bytes` (and its `peak_learned_at`).
+    Peak,
+    /// `idle_bytes`.
+    Idle,
+    /// `work_bytes`.
+    Work,
+}
+
+impl LearnedFigure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Peak => "peak",
+            Self::Idle => "idle",
+            Self::Work => "work",
+        }
+    }
+}
+
+/// Record one learned figure of image row `id` as learned under engine `key`
+/// (migration 0105, `vram::plan::image::engine_key`), in one statement:
+/// where the row's figures belong to another key (or none), the other two
+/// are cleared with it, so a row never holds figures of two engines.
+pub async fn set_image_model_learned(
+    pool: &SqlitePool,
+    id: i64,
+    key: &str,
+    figure: LearnedFigure,
+    value: Option<u64>,
+) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE image_models
+            SET peak_extra_bytes = CASE WHEN ?3 = 'peak' THEN ?4
+                                        WHEN learned_key IS ?2 THEN peak_extra_bytes
+                                        ELSE NULL END,
+                peak_learned_at  = CASE WHEN ?3 = 'peak'
+                                            THEN CASE WHEN ?4 IS NULL THEN NULL
+                                                      ELSE datetime('now') END
+                                        WHEN learned_key IS ?2 THEN peak_learned_at
+                                        ELSE NULL END,
+                idle_bytes       = CASE WHEN ?3 = 'idle' THEN ?4
+                                        WHEN learned_key IS ?2 THEN idle_bytes
+                                        ELSE NULL END,
+                work_bytes       = CASE WHEN ?3 = 'work' THEN ?4
+                                        WHEN learned_key IS ?2 THEN work_bytes
+                                        ELSE NULL END,
+                learned_key      = ?2
+          WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(key)
+    .bind(figure.as_str())
+    .bind(value.map(|b| i64::try_from(b).unwrap_or(i64::MAX)))
+    .execute(pool)
+    .await?;
     Ok(())
 }

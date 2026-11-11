@@ -146,12 +146,14 @@ go to `$XDG_DATA_HOME/lmgw`, usually `~/.local/share/lmgw`, unless
 
 ## Requirements
 
-- **Linux, x86_64.** Developed and used daily on Fedora, and packaged as an RPM or an AppImage. There is no macOS or Windows build.
-- **Podman** runs local models and stdio MCP servers, and the RPM depends on it. Cloud-only use needs no GPU.
+- **Linux or Windows, x86_64.** Linux is the main platform: developed and used daily on Fedora, and packaged as an RPM or an AppImage. Windows has a native build with its own installer (see **Install**). There is no macOS build yet.
+- **Podman** runs local models and stdio MCP servers on Linux, and the RPM depends on it. Cloud-only use needs no GPU. The Windows build has no Podman: it runs the engines as native processes (see **Install**).
 - **NVIDIA GPU** is the tested path. Model containers get the card through `--device nvidia.com/gpu=all --security-opt label=disable` (the default in **Settings → Runtimes**), so you need the driver plus NVIDIA's container toolkit (the `nvidia-container-toolkit-base` package, from [NVIDIA's repository](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)). lmgw writes the card's CDI description itself, without root, into its own runtime directory, writes it again after a driver or package update, and points the containers it gives the card to (models, benchmarks, the probes that read an engine's options, and MCP servers whose run arguments ask for it) at it, so there is no `nvidia-ctk cdi generate` to run for them. Containers you start yourself still read the system's description in `/etc/cdi` or `/var/run/cdi`, and so do lmgw's when the toolkit isn't installed or Podman has no `--cdi-spec-dir` option. lmgw checks at start whether this computer can run local models (the card, its driver, the toolkit, Podman, the model settings) and says in plain words what is missing. The dashboard shows the result on **Settings → GPU** (the "This computer" card), on the Overview and above the Chat's empty state, and the tray gains a "Graphics card needs attention…" item when something needs doing. Where the fix is a package, **Set it up** in the app's window installs NVIDIA's container toolkit (or switches the model settings) after a native confirmation and your password (a polkit prompt) through `lmgw-machine-helper`, a small root helper the RPM installs; **Show the commands** lists exactly what it would run. In a browser the card shows the same commands to type instead, since a remote page can't open a password prompt on your desktop. Through the API the check is the `machine_check` op and the `lmgw__machine_check` tool.
 - **AMD** works on a Ryzen APU with Vulkan images and a few changed settings, as [docs/amd-arch.md](docs/amd-arch.md) describes. Self-built Vulkan and ROCm images are untested.
 
 ## Install
+
+### Linux
 
 Download the RPM from the [latest release](https://github.com/lmgw-dev/lmgw/releases/latest)
 and install it:
@@ -164,6 +166,39 @@ From then on the app checks for new releases in the background and offers to
 install them, unless you switch that off under **Settings → Tokens & updates**.
 Some releases also carry an AppImage. It's built on current Fedora and needs a
 glibc at least that recent. On anything older, build from source.
+
+For a server without a desktop there is a Podman image instead, started by a
+rootless Quadlet unit, with sign-in accounts and native TLS. It ships as an
+OCI archive; [docs/server.md](docs/server.md) covers installing and running it.
+
+### Windows
+
+Download `lmgw_<version>_x64-setup.exe` from the
+[latest release](https://github.com/lmgw-dev/lmgw/releases/latest) and run it.
+It installs for the current user only, into `%LOCALAPPDATA%\Programs\lmgw`, so it
+needs no administrator rights. If the WebView2 runtime is missing, the installer
+fetches Microsoft's bootstrapper for it. The installer is not signed yet, so a
+browser's download of it carries the mark of the web and SmartScreen warns about
+an unknown publisher before it runs. Uninstalling keeps your data: settings and
+the database are in `%APPDATA%\lmgw`, models and engines in `%LOCALAPPDATA%\lmgw`.
+
+There is no Podman on Windows. lmgw runs llama.cpp, stable-diffusion.cpp and
+audio.cpp as native processes of their upstream Windows builds, which it downloads
+from the engines' release pages on first use, checks against a pinned SHA-256 and
+unpacks under `%LOCALAPPDATA%\lmgw\engines`. The build is chosen per engine and per
+card: CUDA on an NVIDIA card its kernels cover, otherwise Vulkan (which also covers
+AMD and Intel cards), and the CPU when no GPU is usable. Cloud-only use needs no GPU.
+
+The app checks the release feed in the background like the Linux one. It downloads
+the new installer, checks its SHA-256 before and again right before it starts it, then
+quits, installs silently and starts lmgw again.
+
+Not on Windows yet: agents (they run as containers and need Podman), fork and git
+builds of engines, text extraction from PDFs (poppler is not shipped), the headless
+server image (Linux only), and a dark mode for the tray menu. High-contrast themes,
+the Windows 10 theme path, AMD ROCm builds, ARM64 and a signed installer are not
+done yet either. The design record is
+[docs/design/2026-11-10-windows-native-design.md](docs/design/2026-11-10-windows-native-design.md).
 
 ## Building from source
 
@@ -237,6 +272,9 @@ access takes three changes. Set the bind address to `0.0.0.0:<port>` under
 **Require gateway API keys on /v1** so the API isn't open to your whole
 network. Then open `http://<host>:<port>/` in any browser on your LAN and sign
 in with the `owner:dashboard` key, copied from **Usage → Keys & budgets**.
+
+For several people with their own passwords, and for HTTPS so remote browsers
+get a secure context, see [docs/accounts.md](docs/accounts.md).
 
 ### Paired devices and clients
 
@@ -457,6 +495,8 @@ spoken.
 | [docs/agents.md](docs/agents.md) | Writing agents: manifests, batch pipelines, container agents |
 | [docs/backends.md](docs/backends.md) | Building and pinning engine images for llama.cpp, ik_llama.cpp, audio.cpp and stable-diffusion.cpp |
 | [docs/amd-arch.md](docs/amd-arch.md) | Running on Arch Linux with an AMD Ryzen APU |
+| [docs/server.md](docs/server.md) | Running lmgw headless on a server: the Podman image, its rootless Quadlet unit, TLS, accounts, updates and migrations |
+| [docs/accounts.md](docs/accounts.md) | Sign-in accounts on the desktop, and its TLS listener for sign-in from other machines |
 | [docs/design/](docs/design/) | Design records for each major feature |
 | [examples/agents/folder-chat](examples/agents/folder-chat/README.md) | A complete container agent that chats with a folder of documents |
 

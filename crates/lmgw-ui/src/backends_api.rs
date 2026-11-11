@@ -123,6 +123,31 @@ pub async fn container_images(disk: bool) -> Result<ContainerImagesResponse> {
     .await
 }
 
+/// The pinned engine release builds (Windows design §4.2): the Windows tab.
+pub async fn engine_releases() -> Result<lmgw_api_types::engine_releases::EngineReleasesResponse> {
+    op(
+        "engine_releases",
+        &lmgw_api_types::engine_releases::EngineReleasesArgs {},
+    )
+    .await
+}
+
+/// Clear one pinned build's "no kernel image" mark (Windows design §4.2);
+/// the answer is the Windows tab's after the change.
+pub async fn engine_fallback_clear(
+    engine: &str,
+    variant: &str,
+) -> Result<lmgw_api_types::engine_releases::EngineReleasesResponse> {
+    op(
+        "engine_fallback_clear",
+        &lmgw_api_types::engine_releases::EngineFallbackClearArgs {
+            engine: engine.to_string(),
+            variant: variant.to_string(),
+        },
+    )
+    .await
+}
+
 /// **Check now** (§8): one build, or every build and every registry image
 /// in use when `id` is `None`. Asks the remotes now.
 pub async fn build_updates_check(id: Option<i64>) -> Result<BuildUpdatesResponse> {

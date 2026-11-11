@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use lmgw_core::config::{AuxBackend, AuxKind, LlamaParams};
 use lmgw_core::runtime::argv::{
-    podman_run_argv, render_engine_args, render_image_args, render_llama_args, EngineArgs,
-    ImageArgs, LlamaArgs, RenderSpec,
+    max_vram_arg, podman_run_argv, render_engine_args, render_image_args, render_llama_args,
+    EngineArgs, ImageArgs, LlamaArgs, RenderSpec,
 };
 use lmgw_core::runtime::{container_name, hash6, slug, Class};
 use lmgw_core::sdcpp_caps::SdcppCaps;
@@ -36,6 +36,7 @@ fn chat_spec(model_id: &str, gguf: &str, params: LlamaParams, args: &[&str]) -> 
             args: args.iter().map(|s| s.to_string()).collect(),
         }),
         health_path: "/health",
+        fitted: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn aux_spec(
             args: args.iter().map(|s| s.to_string()).collect(),
         }),
         health_path: "/health",
+        fitted: None,
     }
 }
 
@@ -602,6 +604,89 @@ fn a_chat_rows_gpu_layers_spelling_loses_to_its_field_like_ngl() {
     assert!(has_pair(&args, "--gpu-layers", "10"), "{args:?}");
 }
 
+/// `n_cpu_moe` renders `--n-cpu-moe N` and drops a copy in the freeform
+/// args in every spelling (the alias, underscores for dashes, which
+/// llama-server reads the same; the `=` form, which it refuses, is dropped
+/// all the same); without the field the copy renders, and `--cpu-moe`
+/// (every layer's experts) is a flag of its own.
+#[test]
+fn n_cpu_moe_renders_and_wins_over_a_copy_in_the_args() {
+    let params = LlamaParams {
+        n_cpu_moe: Some(41),
+        moe_cache_mib: Some(6144),
+        ..Default::default()
+    };
+    for stale in [
+        &["--n-cpu-moe", "3"][..],
+        &["-ncmoe", "3"],
+        &["--n_cpu_moe", "3"],
+        &["--n-cpu-moe=3"],
+        &["--moe_cache_mib", "3"],
+    ] {
+        let mut extra = stale.to_vec();
+        extra.push("--cpu-moe");
+        let args = render_llama_args(&chat_spec("q", "q.gguf", params.clone(), &extra));
+        assert!(has_pair(&args, "--n-cpu-moe", "41"), "{args:?}");
+        assert!(has_pair(&args, "--moe-cache-mib", "6144"), "{args:?}");
+        // The copy and its value are gone: each field's flag once, and
+        // no other spelling or value of it.
+        for flag in ["--n-cpu-moe", "--moe-cache-mib"] {
+            assert_eq!(
+                args.iter().filter(|a| *a == flag).count(),
+                1,
+                "{stale:?}: {args:?}"
+            );
+        }
+        for tok in stale
+            .iter()
+            .filter(|t| !t.starts_with("--n-cpu-moe") && !t.starts_with("--moe-cache-mib"))
+        {
+            assert!(!args.iter().any(|a| a == tok), "{stale:?}: {args:?}");
+        }
+        assert!(!args.iter().any(|a| a == "--n-cpu-moe=3"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--cpu-moe"), "{args:?}");
+    }
+    let args = render_llama_args(&chat_spec(
+        "q",
+        "q.gguf",
+        LlamaParams::default(),
+        &["-ncmoe", "3"],
+    ));
+    assert!(has_pair(&args, "-ncmoe", "3"), "{args:?}");
+}
+
+/// llama-server reads every `_` of a `--` flag as `-` (`common/arg.cpp`), so
+/// `--ctx_size` beside the `ctx_size` field is the field's copy and is
+/// dropped like `--ctx-size`; without the field it renders as written.
+#[test]
+fn an_underscore_spelling_is_the_flag_it_spells() {
+    let params = LlamaParams {
+        ctx_size: Some(4096),
+        ubatch_size: Some(256),
+        ..Default::default()
+    };
+    let args = render_llama_args(&chat_spec(
+        "q",
+        "q.gguf",
+        params,
+        &["--ctx_size", "9999", "--ubatch_size", "7777"],
+    ));
+    assert!(has_pair(&args, "--ctx-size", "4096"), "{args:?}");
+    assert!(
+        !args
+            .iter()
+            .any(|a| a == "--ctx_size" || a == "9999" || a == "7777"),
+        "{args:?}"
+    );
+    let args = render_llama_args(&chat_spec(
+        "q",
+        "q.gguf",
+        LlamaParams::default(),
+        &["--ctx_size", "9999"],
+    ));
+    assert!(has_pair(&args, "--ctx_size", "9999"), "{args:?}");
+}
+
 /// An unset field claims nothing: a row whose placement still rides in its
 /// freeform args renders exactly the argv it rendered before the fields
 /// existed, so boot adoption keeps its container.
@@ -746,8 +831,9 @@ fn podman_run_argv_for_an_audio_model_matches_the_expected_shape() {
         globals: vec![],
         init: false,
         entrypoint: None,
-        engine: EngineArgs::Audio,
+        engine: super::runtime_engine_view::audio_args(),
         health_path: "/v1/models",
+        fitted: None,
     };
 
     let args = podman_run_argv(&spec);
@@ -805,8 +891,9 @@ fn render_llama_args_is_empty_for_an_audio_spec() {
         globals: vec![],
         init: false,
         entrypoint: None,
-        engine: EngineArgs::Audio,
+        engine: super::runtime_engine_view::audio_args(),
         health_path: "/v1/models",
+        fitted: None,
     };
     assert!(render_llama_args(&spec).is_empty());
 }
@@ -893,8 +980,10 @@ fn image_spec(files: Value, args: Value) -> RenderSpec {
             files: files.as_object().cloned().unwrap_or_default(),
             args: args.as_object().cloned().unwrap_or_default(),
             caps: SdcppCaps::embedded(),
+            held: None,
         }),
         health_path: "/sdcpp/v1/capabilities",
+        fitted: None,
     }
 }
 
@@ -967,6 +1056,70 @@ fn podman_run_argv_for_an_image_model_matches_the_expected_shape() {
     .map(|s| s.to_string())
     .collect();
     assert_eq!(args, expected);
+}
+
+/// What VRAM admission gave a partial start (`vram::partial`) renders as an
+/// absolute `--max-vram` in GiB, rounded down to the thousandth and never 0
+/// (which would mean "live free VRAM"); the row's own `max_vram` wins and is
+/// not doubled; a build without the flag gets none.
+#[test]
+fn a_partial_grant_renders_as_max_vram_unless_the_row_sets_it() {
+    const MIB: u64 = 1024 * 1024;
+    assert_eq!(max_vram_arg(3 * 1024 * MIB), "3.000");
+    assert_eq!(max_vram_arg(3 * 1024 * MIB + 511 * MIB), "3.499");
+    assert_eq!(max_vram_arg(256 * MIB), "0.250");
+    assert_eq!(max_vram_arg(1), "0.001");
+
+    let held = lmgw_core::runtime::argv::HeldTo {
+        granted: 4 * 1024 * MIB,
+        max_vram: 3 * 1024 * MIB,
+    };
+    let files = json!({"diffusion_model": "z.gguf"});
+    let flag = |spec: &RenderSpec| {
+        let argv = render_image_args(spec).unwrap();
+        let at: Vec<usize> = argv
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "--max-vram")
+            .map(|(i, _)| i)
+            .collect();
+        (at.len(), at.first().map(|i| argv[i + 1].clone()))
+    };
+    let mut spec = image_spec(files.clone(), json!({"offload_to_cpu": true}));
+    assert_eq!(flag(&spec), (0, None), "no grant, no flag");
+    if let EngineArgs::Image(img) = &mut spec.engine {
+        img.held = Some(held);
+    }
+    assert_eq!(flag(&spec), (1, Some("3.000".into())));
+    // Recorded on the container, so boot adopts it (item 4 of the second
+    // review): both figures, read back as they were written.
+    let argv = lmgw_core::runtime::argv::podman_run_argv(&spec);
+    let label = format!("lmgw.grant={}:{}", 4 * 1024 * MIB, 3 * 1024 * MIB);
+    assert!(argv.contains(&label), "{argv:?}");
+    assert_eq!(
+        lmgw_core::runtime::argv::HeldTo::parse(&label["lmgw.grant=".len()..]),
+        Some(held)
+    );
+    assert_eq!(lmgw_core::runtime::argv::HeldTo::parse("3.0"), None);
+
+    let mut spec = image_spec(files.clone(), json!({"max_vram": "2"}));
+    if let EngineArgs::Image(img) = &mut spec.engine {
+        img.held = Some(held);
+    }
+    assert_eq!(flag(&spec), (1, Some("2".into())), "the row's own wins");
+
+    let help = include_str!("../fixtures/sdcpp/sd-server-help-c678dfe.txt");
+    let without: String = help
+        .lines()
+        .filter(|l| !l.contains("--max-vram"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut spec = image_spec(files, json!({}));
+    if let EngineArgs::Image(img) = &mut spec.engine {
+        img.caps = std::sync::Arc::new(SdcppCaps::parse(&without));
+        img.held = Some(held);
+    }
+    assert_eq!(flag(&spec), (0, None), "a build without the flag");
 }
 
 /// The trap this class exists to avoid: sd-server's long flags mix separators,

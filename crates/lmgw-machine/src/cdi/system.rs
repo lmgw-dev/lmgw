@@ -58,14 +58,14 @@ pub fn containers_conf_files(f: &dyn Facts) -> Vec<PathBuf> {
                 out.push(base.join("containers.conf"));
                 out.extend(drop_ins(f, &base.join("containers.conf.d")));
             }
-            if f.uid() != 0 {
+            if let Some(uid) = f.uid().filter(|&uid| uid != 0) {
                 let etc = Path::new("/etc/containers");
                 out.push(etc.join("containers.rootless.conf"));
                 // containers.conf(5) spells the drop-in dir `containers.rootless.d`;
                 // both spellings are read, a file in either counts.
                 for d in ["containers.rootless.d", "containers.rootless.conf.d"] {
                     out.extend(drop_ins(f, &etc.join(d)));
-                    out.extend(drop_ins(f, &etc.join(d).join(f.uid().to_string())));
+                    out.extend(drop_ins(f, &etc.join(d).join(uid.to_string())));
                 }
             }
             let config = f

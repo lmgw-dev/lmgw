@@ -35,8 +35,10 @@
 //! longer, whatever a client or an upstream does.
 //!
 //! **A generation per listener** (device link design §4.4): the plain
-//! listener and the device listener each have their own, and a request
-//! carries its listener's ([`ServedAt::via`]). Turning the device listener
+//! listener, the main TLS listener (headless server design §4.4) and the
+//! device listener each have their own, and a request carries its
+//! listener's ([`ServedAt::via`]). The TLS listener stops with the plain
+//! one, within the same bound. Turning the device listener
 //! off or moving it ends its streams, sessions and calls, never the plain
 //! listener's; a gateway stop stops both, within the one bound.
 
@@ -97,6 +99,7 @@ pub struct ServedAt {
 #[derive(Debug)]
 pub struct Stops {
     plain: watch::Sender<u64>,
+    tls: watch::Sender<u64>,
     devices: watch::Sender<u64>,
     running: Arc<watch::Sender<BTreeMap<Option<ServedAt>, usize>>>,
     open: Arc<std::sync::Mutex<Open>>,
@@ -114,6 +117,7 @@ impl Default for Stops {
     fn default() -> Self {
         Self {
             plain: watch::Sender::new(0),
+            tls: watch::Sender::new(0),
             devices: watch::Sender::new(0),
             running: Arc::new(watch::Sender::new(BTreeMap::new())),
             open: Arc::default(),
@@ -165,6 +169,7 @@ impl Stops {
     fn lane(&self, via: Via) -> &watch::Sender<u64> {
         match via {
             Via::Plain => &self.plain,
+            Via::Tls => &self.tls,
             Via::Devices => &self.devices,
         }
     }
@@ -330,10 +335,11 @@ where
 }
 
 /// `server::serve_app_within`'s body: serve `app` on `listener`, every
-/// request carrying the plain listener's generation and counted in flight;
-/// at `shutdown`, the stop (module doc), all of it within `within`.
+/// request carrying `via`'s generation and counted in flight; at
+/// `shutdown`, the stop (module doc), all of it within `within`.
 pub(super) async fn serve_stopping<L>(
     state: &SharedState,
+    via: Via,
     listener: L,
     app: Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -348,7 +354,7 @@ where
     // however long it took to open, and the stop waits for the turns its
     // requests started. Outermost, so even the agent proxy (above the
     // principal) sees it, and every request is counted in flight.
-    let served_at = state.stops.now_of(Via::Plain);
+    let served_at = state.stops.now_of(via);
     let app = stamped(state, app, served_at);
     let st = state.clone();
     let stopped = std::sync::Arc::new(std::sync::OnceLock::new());
@@ -356,11 +362,11 @@ where
     let shutdown = async move {
         shutdown.await;
         tracing::info!(
-            "the server stops: its open streams end and its sessions close, then it drains \
-             and waits for its sessions and turns (at most {} s)",
+            "the {via} listener stops: its open streams end and its sessions close, then it \
+             drains and waits for its sessions and turns (at most {} s)",
             within.as_secs_f64()
         );
-        let _ = at.set((st.stops.stop_of(Via::Plain), tokio::time::Instant::now()));
+        let _ = at.set((st.stops.stop_of(via), tokio::time::Instant::now()));
     };
     // With the connection on every request (`Conn`): the agent proxy tells
     // an app who reached lmgw in `X-Forwarded-For` (origins §4.6), and that
@@ -475,7 +481,9 @@ impl hyper::body::Body for Held {
 
 /// The next Ctrl-C (SIGINT) or SIGTERM, by name: what a quit starts on, in
 /// the headless binary and the tray app alike. A SIGTERM handler that cannot
-/// be installed leaves Ctrl-C alone, and says so.
+/// be installed leaves Ctrl-C alone, and says so. On Windows Ctrl-C only:
+/// its console close and shutdown events do not start a quit yet.
+#[cfg(unix)]
 pub async fn quit_signal() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
     match signal(SignalKind::terminate()) {
@@ -489,6 +497,12 @@ pub async fn quit_signal() -> &'static str {
             "Ctrl-C"
         }
     }
+}
+
+#[cfg(not(unix))]
+pub async fn quit_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "Ctrl-C"
 }
 
 /// The exit status a process ends with when a second `signal`

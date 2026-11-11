@@ -8,6 +8,8 @@
 //! what the real host hands them; `stdout` writes into pipes of its own. New test files go in as a new `mod <name>;` line
 //! below (alphabetical), with the file at `tests/it/<name>.rs`.
 
+#![cfg(target_os = "linux")]
+
 mod apply;
 mod grammar;
 mod policy;

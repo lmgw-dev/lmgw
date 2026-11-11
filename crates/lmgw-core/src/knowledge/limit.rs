@@ -36,7 +36,7 @@ use serde::Serialize;
 use crate::config::{Snapshot, UpstreamKind};
 use crate::egress::{for_protocol, CountPlan};
 use crate::quickdoc::query::TiktokenCounter;
-use crate::runtime::aux::{self as aux_rt, CountFrom};
+use crate::runtime::aux_models::{self as aux_rt, CountFrom};
 use crate::runtime::registry::Origin;
 use crate::state::SharedState;
 

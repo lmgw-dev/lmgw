@@ -40,6 +40,11 @@ UI_DIR = "crates/lmgw-ui/"
 CHAT_UI_DIR = "crates/lmgw-chat-ui/"
 CLIENT_DIR = "crates/lmgw-client/"
 
+# Directories outside every crate whose files a crate's tests read: a change there counts as
+# touching that crate, so its tests run. packaging/server/ is the server image's (the unit, the
+# Containerfile), which lmgw-server's tests/it/packaging.rs checks.
+READ_BY_TESTS = {"packaging/server/": "lmgw-server"}
+
 # Files that change how every crate builds: the selection is then everything.
 WORKSPACE_WIDE = ["Cargo.toml", "Cargo.lock", "clippy.toml", "rust-toolchain", "rust-toolchain.toml",
                   ".cargo/*"]
@@ -180,6 +185,9 @@ def main():
                 if not f.startswith(d + "tests/"):
                     beyond_tests.add(name)
                 break
+        for d, name in READ_BY_TESTS.items():
+            if f.startswith(d) and name in dirs:
+                touched.setdefault(name, f)
     if wide:
         touched = {n: wide[0] for n in dirs}
 

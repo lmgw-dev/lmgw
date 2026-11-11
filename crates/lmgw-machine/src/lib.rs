@@ -22,6 +22,10 @@
 //! - [`os`]: os-release and image-based systems;
 //! - [`cdi`]: CDI spec files, the judgement of lmgw's own spec, and Podman's
 //!   resolution of the system's spec dirs;
+//! - [`cpu`]: the processor's name, logical processors and instruction
+//!   sets (`cpuid`), what the Windows check reports;
+//! - [`display`]: the display adapters from the display class's driver keys
+//!   in the registry (read on Windows), Windows' counterpart of [`pci`];
 //! - [`plan`]: the closed list of root steps that installs the container
 //!   toolkit (WP2), its hash, and the instructions for systems without the
 //!   button;
@@ -33,6 +37,8 @@
 //! directory; the plan's steps are run by the root helper (WP6), never here.
 
 pub mod cdi;
+pub mod cpu;
+pub mod display;
 pub mod driver;
 pub mod facts;
 #[cfg(feature = "fake")]
@@ -44,4 +50,4 @@ pub mod plan;
 pub mod repos;
 pub mod rpm;
 
-pub use facts::{CmdOut, Facts, Kind, Meta, Space, SystemFacts};
+pub use facts::{CmdOut, Facts, Kind, Meta, Posix, Space, SystemFacts};

@@ -9,6 +9,10 @@
 //! reads an MCP stub that holds its first call, so nothing reaches past
 //! loopback and no run finishes before a test says so.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use lmgw_api_types as dto;
 use lmgw_core::config::Protocol;
 use serde_json::{json, Value};
@@ -70,6 +74,9 @@ fn board(version: &str) -> String {
     pkg("board", version, IMAGE, "", "")
 }
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_install_answers_the_report_and_where_the_manifest_came_from() {
     let podman = Podman::default().with(IMAGE, Some("sha256:one"), Some(&board("1.0.0")));
@@ -123,6 +130,9 @@ async fn an_install_answers_the_report_and_where_the_manifest_came_from() {
     );
 }
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_install_says_when_it_downloaded_and_when_podman_had_no_digest() {
     // Not on the box until a pull brings it, and podman cannot report its digest.

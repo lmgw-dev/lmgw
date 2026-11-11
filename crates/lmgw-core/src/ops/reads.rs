@@ -676,7 +676,8 @@ pub async fn logs(
 
 /// Current settings, with every secret redacted.
 pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, String> {
-    let s = &state.snapshot().settings;
+    let snap = state.snapshot();
+    let s = &snap.settings;
     // One shape per class (§6): the image every model of the class inherits,
     // where its GGUFs live, the extra `podman run` flags, and the prefix its
     // models are exposed under. Container names are derived (§3.3) and ports
@@ -719,11 +720,13 @@ pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, S
             active: s.hold.active,
         },
         // Next to the hold: both decide when a fallback answers instead of
-        // the local model. The rest of `VramSettings` is not exposed over
-        // MCP yet — only the field a fallback decision reads (unified-KV
-        // spec §12).
+        // the local model; and the headroom, with what it is now. The rest
+        // of `VramSettings` is not exposed over MCP yet.
         vram: self_admin::VramRead {
             fallback_on_external: s.vram.fallback_on_external,
+            headroom_mode: s.vram.headroom_mode,
+            headroom_mb: s.vram.headroom_mb,
+            headroom: state.vram.headroom_now(&snap),
         },
         router: class(&s.router),
         aux_router: self_admin::AuxClassRead {

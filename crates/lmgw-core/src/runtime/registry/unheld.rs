@@ -41,9 +41,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::owned::Down;
-use super::reconcile::{PsRow, Refused};
+use super::reconcile::Refused;
 use super::*;
 use crate::runtime::argv::OWNER_LABEL;
+use crate::runtime::launcher::{Listed, Listing};
 use crate::runtime::{container_name, Class};
 
 mod memory;
@@ -165,14 +166,9 @@ impl Registry {
             }
         };
         report.listed = true;
-        memory.prune(
-            &rows
-                .iter()
-                .filter_map(|r| r.names.first().map(String::as_str))
-                .collect::<HashSet<_>>(),
-        );
+        memory.prune(&rows.iter().filter_map(Listed::name).collect::<HashSet<_>>());
         for row in &rows {
-            let Some(name) = row.names.first().cloned() else {
+            let Some(name) = row.name().map(str::to_string) else {
                 continue;
             };
             if row.state != "running" || not_a_model(&row.labels) || self.holds(row, &name) {
@@ -305,31 +301,16 @@ impl Registry {
         }
     }
 
-    /// `podman ps` of this instance's running containers — no `-a`: an
-    /// exited one holds no memory, and is none of this pass's business.
-    async fn running(&self, container_prefix: &str) -> Result<Vec<PsRow>, String> {
-        let filter = format!("label=lmgw.instance={container_prefix}");
-        let out = self
-            .podman(&["ps", "--format", "json", "--filter", &filter])
-            .await
-            .map_err(|e| format!("podman ps could not be run: {e}"))?;
-        if !out.ok() {
-            return Err(format!(
-                "podman ps failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            ));
-        }
-        if out.stdout.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        serde_json::from_str(&out.stdout)
-            .map_err(|e| format!("podman ps returned unreadable JSON: {e}"))
+    /// This instance's running containers, as the launcher lists them (no
+    /// stopped ones: an exited one holds no memory, and is none of this
+    /// pass's business).
+    async fn running(&self, container_prefix: &str) -> Result<Vec<Listed>, String> {
+        self.launcher.list(container_prefix, Listing::Running).await
     }
 
     /// Does the registry hold this container — by its name, or by the model
     /// its labels name — in any state?
-    fn holds(&self, row: &PsRow, name: &str) -> bool {
+    fn holds(&self, row: &Listed, name: &str) -> bool {
         self.holds_name(name)
             || labelled_key(&row.labels).is_some_and(|k| self.map().contains_key(&k))
     }

@@ -74,15 +74,30 @@ pub struct RequestCtx {
     /// moment it starts, never every revocation the key ever had (review
     /// W2-14). The credential's fingerprint still catches a Rotate.
     pub revocation_mark: Option<u64>,
+    /// The principal came from the session cookie carrying an owner key,
+    /// the cookie of a desktop with accounts off (headless server design
+    /// §5.11): a connection it opened ends when accounts come on, as that
+    /// cookie then reads as nobody.
+    pub owner_key_cookie: bool,
     /// The listener the request came in on and its generation then
     /// ([`ServedAt`](crate::server::ServedAt)): its streams and sessions end
     /// at that listener's stop, and the stop waits for its turns. `None` for
     /// a context built by hand, which takes the plain listener serving then.
     pub served_at: Option<crate::server::ServedAt>,
     /// The listener the request came in on (device link design §4.5): the
-    /// plain one, or the device listener with a client certificate. A
-    /// context built by hand is the plain listener's.
+    /// plain one, the TLS one (headless server design §4.3), or the device
+    /// listener with a client certificate. A context built by hand is the
+    /// plain listener's.
     pub via: crate::server::Via,
+    /// The scheme the request came in with (headless server design §4.3,
+    /// §4.5): the listener's, or the one a trusted proxy said the client
+    /// used. What the session cookie's name, the same-origin rule and
+    /// `/mcp`'s guard compare with. A context built by hand is `http`.
+    pub scheme: crate::net::Scheme,
+    /// The local address the request's connection arrived on; `None` for a
+    /// router served without connect info and a context built by hand.
+    /// `/mcp`'s rebinding guard compares an `Origin`'s port with its port.
+    pub local: Option<std::net::SocketAddr>,
     /// On the device listener, the `notAfter` of the client certificate the
     /// principal was resolved from (device link design D5, §5.1): a
     /// long-lived connection it opens ends at that date with
@@ -98,6 +113,10 @@ pub struct RequestCtx {
     /// `mcp` block's `server_url` naming this gateway is compared with (openai
     /// egress design §6). `None` for a context built by hand.
     pub host: Option<String>,
+    /// The client's address (the TCP peer, or a trusted proxy's forwarded
+    /// client), as the audit log records it (headless server design §5.8).
+    /// `None` for a router served without connect info.
+    pub peer: Option<std::net::IpAddr>,
 }
 
 impl RequestCtx {

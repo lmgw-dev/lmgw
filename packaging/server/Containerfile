@@ -1,0 +1,68 @@
+# The lmgw server image (headless server design §3.1): lmgw-server in container mode, running its
+# model, agent and build containers with a nested Podman (the spike in spike/headless-image/).
+#
+# Built by ci/build-image.sh, never from this directory itself: it copies this dir, NVIDIA's signing
+# key (crates/lmgw-machine/src/plan/nvidia-container-toolkit.asc), the licence notices the RPM ships
+# and the release lmgw-server binary into a build context under target/, and passes FEDORA_RELEASE:
+# the Fedora release the binary was built on, so its glibc and libopus are the ones it linked.
+ARG FEDORA_RELEASE
+FROM registry.fedoraproject.org/fedora:${FEDORA_RELEASE}
+
+# NVIDIA's toolkit repository with package checks on (D19, as machine check D5 does for the
+# desktop): only nvidia-container-toolkit-base, against NVIDIA's key pinned by its fingerprint.
+# The fingerprint is lmgw_machine::plan::embedded::NVIDIA_KEY_FINGERPRINT; a test in
+# crates/lmgw-server/tests/it/packaging.rs keeps the two equal. The import must add exactly one
+# key to rpm's keyring, and its fingerprint (the first field of `rpmkeys --list`) must be that one.
+# Then the base's packages are brought up to date in the same RUN, so the image never carries a
+# base older than the packages installed on top of it.
+COPY nvidia-container-toolkit.repo /etc/yum.repos.d/lmgw-nvidia-container-toolkit.repo
+COPY RPM-GPG-KEY-lmgw-nvidia-container-toolkit /etc/pki/rpm-gpg/RPM-GPG-KEY-lmgw-nvidia-container-toolkit
+RUN rpmkeys --list | cut -d' ' -f1 | sort > /tmp/keys.before \
+    && rpmkeys --import /etc/pki/rpm-gpg/RPM-GPG-KEY-lmgw-nvidia-container-toolkit \
+    && rpmkeys --list | cut -d' ' -f1 | sort > /tmp/keys.after \
+    && added="$(comm -13 /tmp/keys.before /tmp/keys.after)" \
+    && rm -f /tmp/keys.before /tmp/keys.after \
+    && if [ "$added" != "c95b321b61e88c1809c4f759ddcae044f796ecb0" ]; then \
+           echo "NVIDIA's key in the build context is not the pinned one (keys added: ${added:-none})" >&2; \
+           exit 1; \
+       fi \
+    && dnf -y upgrade --refresh \
+    && dnf -y install --setopt=install_weak_deps=False \
+        podman crun catatonit conmon passt fuse-overlayfs netavark aardvark-dns \
+        nvidia-container-toolkit-base \
+        git poppler-utils opus \
+        procps-ng iproute curl jq util-linux-core shadow-utils libcap \
+    && dnf clean all \
+    # A rootless build drops shadow-utils' file capabilities; a non-root inner podman needs them
+    # (not yet used: lmgw runs as root inside, the report's "right user").
+    && setcap cap_setuid+ep /usr/bin/newuidmap && setcap cap_setgid+ep /usr/bin/newgidmap
+
+# The inner Podman's configuration, as drop-ins: a plain /etc/containers/storage.conf loses to the
+# vendor's storage.rootful.conf.d (the report).
+COPY containers.conf /etc/containers/containers.conf.d/99-lmgw.conf
+COPY storage.conf /etc/containers/storage.rootful.conf.d/99-lmgw.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY licenses/ /usr/share/licenses/lmgw-server/
+COPY lmgw-server /usr/local/bin/lmgw-server
+
+# LMGW_DEPLOYMENT=container is what makes this a server start (D1, D2). XDG_RUNTIME_DIR: root in a
+# container has none, and lmgw's CDI spec and pull-service socket live under it (the report).
+# TMPDIR=/var/tmp: --systemd=always mounts a tmpfs on /tmp, which is the host's RAM; lmgw's
+# staging copies (a corpus export or import, a document upload) and the tools it runs (podman,
+# git, poppler) write their temporary files under TMPDIR, and /var/tmp is a volume (D21).
+ENV LMGW_DEPLOYMENT=container \
+    LMGW_DATA_DIR=/data \
+    XDG_RUNTIME_DIR=/run/user/0 \
+    TMPDIR=/var/tmp
+
+# /data: databases, models, builds, the device CA. /var/lib/containers: the inner image store and
+# containers (the confined variant's only store, ruling 3). /var/tmp: buildah's scratch and cache
+# mounts and TMPDIR, so they survive the container being recreated (D21).
+VOLUME ["/data", "/var/lib/containers", "/var/tmp"]
+# Every listener the image may serve and its WebRTC group: the plain one (8787, published without
+# TLS only; behind TLS it is the container's loopback), the device listener (8788), the TLS
+# listener (8443).
+EXPOSE 8787 8787/udp 8788 8788/udp 8443 8443/udp
+# catatonit as PID 1 reaps the conmon and pasta processes the inner Podman leaves to it (D5;
+# with lmgw as PID 1 they stayed zombies).
+ENTRYPOINT ["/usr/libexec/catatonit/catatonit", "--", "/usr/local/bin/entrypoint.sh"]

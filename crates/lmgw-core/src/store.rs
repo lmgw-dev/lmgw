@@ -8,14 +8,40 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::SqlitePool;
+/// The pool type every store function takes, for crates that call them.
+pub use sqlx::SqlitePool;
 
 use crate::error::GatewayError;
 
 pub type DbResult<T> = Result<T, GatewayError>;
 
-/// Open (creating if needed) the SQLite DB, run migrations, enforce 0600.
+/// Open an existing database read-only, without migrations or repairs:
+/// what `lmgw-server`'s command line reads while a gateway holds the data
+/// dir (headless server design §5.7) — the door key and where the plain
+/// listener is.
+pub async fn open_read_only(path: &Path) -> anyhow::Result<SqlitePool> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+        .read_only(true)
+        .busy_timeout(BUSY_TIMEOUT);
+    Ok(SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await?)
+}
+
+/// Open (creating if needed) the SQLite DB, run migrations, enforce 0600:
+/// the desktop's start, and every open that makes no copy before it
+/// migrates ([`open_for_start`] with `None`).
 pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
+    open_for_start(path, None).await
+}
+
+/// [`open`] for a start: with `backups` (container mode, headless server
+/// design ruling 14) the refusals that only read come first, then a
+/// database with a pending migration is copied into that dir (or the copy
+/// that still matches it reused, D113) before anything writes to it, and
+/// the copy's and the migrations' time are logged ([`migration_copy`]).
+pub async fn open_for_start(path: &Path, backups: Option<&Path>) -> anyhow::Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -34,9 +60,61 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
     // through holds those pages in the clear, so a first-boot window in which
     // the sidecars are world-readable is a window in which the secrets are.
     clamp_0600(path)?;
-    run_migrations(&pool).await?;
+    let Some(dir) = backups else {
+        run_migrations(&pool).await?;
+        clamp_0600(path)?;
+        return Ok(pool);
+    };
+    // The copy comes before the repairs, which write too; the refusals that
+    // only read come before the copy.
+    let prepared = migration_copy::before_migrating(&pool, path, dir).await?;
+    let migrating = std::time::Instant::now();
+    if let Err(e) = migrate(&pool, Some(&prepared)).await {
+        // What this start changed is its own: the copy still matches the
+        // database as it leaves it, for the next start's reuse (D113).
+        if let Some(c) = &prepared.copied {
+            c.leaving(&pool).await;
+        }
+        return Err(e);
+    }
+    if let Some(c) = &prepared.copied {
+        c.log_migrated(migrating.elapsed());
+    }
     clamp_0600(path)?;
     Ok(pool)
+}
+
+/// Open an existing database for writing **without migrating it** (the
+/// command line's offline path, headless server design §5.7): `Ok(None)`,
+/// the pool closed, while this build holds a migration the database has not
+/// applied. Migrating is the gateway start's step, with its repairs and its
+/// checks around it; a command that wrote rows into an older schema would
+/// leave them to a migration it never ran. A database a newer build
+/// migrated is refused as a start refuses it, the newest copy in `backups`
+/// named (D108).
+pub async fn open_current(
+    path: &Path,
+    backups: Option<&Path>,
+) -> anyhow::Result<Option<SqlitePool>> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(opts)
+        .await?;
+    clamp_0600(path)?;
+    if let Err(e) = migration_copy::refuse_newer(&pool, &migration_copy::MAIN, backups).await {
+        pool.close().await;
+        return Err(e);
+    }
+    if pending(&pool, &sqlx::migrate!("./migrations")).await? {
+        pool.close().await;
+        return Ok(None);
+    }
+    Ok(Some(pool))
 }
 
 /// `0600` on the database **and both WAL sidecars**.
@@ -156,9 +234,28 @@ pub(crate) async fn anchored_memory_pool(max: u32) -> anyhow::Result<SqlitePool>
 /// through — there is no other honest way to prove that an install stuck at an
 /// earlier version can still start.
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
+    // A newer build's database, before the repairs write to it: sqlx would
+    // refuse it only at the migrator (`VersionMissing`).
+    migration_copy::refuse_newer(pool, &migration_copy::MAIN, None).await?;
+    migrate(pool, None).await
+}
+
+/// [`run_migrations`] from the repairs on. `prepared`: a container start's
+/// copy step ran, which refused a newer database and asked the refusals
+/// that only read ([`refuse_before_copy`]) already, and whose copy records
+/// the database as this start leaves it just before the migrator (D113).
+async fn migrate(
+    pool: &SqlitePool,
+    prepared: Option<&migration_copy::Prepared>,
+) -> anyhow::Result<()> {
+    let early = prepared.map(|p| p.checked);
     repair_before_migrations(pool).await?;
-    refuse_if_aliases_pin_the_managed_upstreams(pool).await?;
-    refuse_unmappable_price_rows(pool).await?;
+    if !early.is_some_and(|c| c.aliases) {
+        refuse_if_aliases_pin_the_managed_upstreams(pool).await?;
+    }
+    if early.is_none() {
+        refuse_unmappable_price_rows(pool).await?;
+    }
     empty_run_args_notice(pool).await?;
     llama_cpp_notice(pool).await?;
     openai_compatible_notice(pool).await?;
@@ -170,6 +267,15 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     // connection has them on. So a start that applies a migration marks the
     // database, and a marked one is checked on every start until it is clean.
     let applied_before = mark_before_migrations(pool, &migrator).await?;
+    // The last write ahead of the migrator. A migration that runs in a
+    // transaction and is killed leaves the database as recorded here (one
+    // that commits moves `<from>` on); one without a transaction commits
+    // statement by statement, so the record also says the migrator was
+    // entered, and the next start with the same step reuses the copy
+    // (D118). A failure records the database again on the way out.
+    if let Some(c) = prepared.and_then(|p| p.copied.as_ref()) {
+        c.entering(pool).await;
+    }
     migrator.run(pool).await?;
     check_after_migrations(pool, applied_before).await?;
     Ok(())
@@ -177,6 +283,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
 mod migration_guards;
 use migration_guards::*;
+
+/// The copy before a container start migrates (headless server design
+/// ruling 14, §6.4).
+pub mod migration_copy;
+pub use migration_copy::{backups_dir, migration_copies, CopyList};
 
 mod rows;
 use rows::*;
@@ -207,6 +318,8 @@ pub use audio_models::*;
 
 mod image_models;
 pub use image_models::*;
+mod vram_outside;
+pub use vram_outside::*;
 
 mod run_overrides;
 pub use run_overrides::*;
@@ -229,6 +342,12 @@ pub use bench::*;
 
 mod keys;
 pub use keys::*;
+
+mod accounts;
+pub use accounts::*;
+
+mod audit;
+pub use audit::*;
 
 mod mcp_servers;
 pub use mcp_servers::*;

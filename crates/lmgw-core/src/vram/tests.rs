@@ -103,6 +103,7 @@ fn entry(model: &str, state: RuntimeState) -> RuntimeView {
         port: 1,
         state,
         in_flight: 0,
+        claims: 0,
         started_at_age_seconds: 0,
         last_used_age_seconds: 0,
         warnings: vec![],
@@ -116,6 +117,10 @@ fn entry(model: &str, state: RuntimeState) -> RuntimeView {
         placement: Default::default(),
         owner: Default::default(),
         draining_for_owner: false,
+        grant: None,
+        served: false,
+        adopted: false,
+        engine_key: None,
     }
 }
 

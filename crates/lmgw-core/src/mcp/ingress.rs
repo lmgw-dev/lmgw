@@ -283,7 +283,19 @@ impl ToolPlane for AdminPlane {
                 .await;
                 return Err(e);
             }
-            let result = selfadmin::call(&self.state, name, args).await;
+            let actor = crate::audit::Actor::with_via(
+                &self.state.snapshot(),
+                &self.ctx,
+                crate::audit::Via::Mcp,
+            );
+            let result = selfadmin::call_capped(
+                &self.state,
+                name,
+                args,
+                selfadmin::Caller::OWNER,
+                Some(&actor),
+            )
+            .await;
             let (server, outcome) = match &result {
                 Ok(v) => (
                     Some(SELF_SERVER_NAME.to_string()),
@@ -676,7 +688,7 @@ async fn mcp_post(
     // catalog — an agent origin is one of the shapes it admits (§4.2) — and
     // `dispatch` is the protocol half, golden-tested against a fake plane with
     // no state behind it.
-    if !origin_allowed(&state, &headers, Plane::Aggregate).await {
+    if !origin_allowed(&state, &headers, Plane::Aggregate, &ctx).await {
         return refuse_origin();
     }
     let session = session_of(&headers);
@@ -704,7 +716,7 @@ async fn admin_post(
 ) -> Response {
     // The same rebinding defense as the aggregate plane, for the same reason
     // and in the same place.
-    if !origin_allowed(&state, &headers, Plane::Admin).await {
+    if !origin_allowed(&state, &headers, Plane::Admin, &ctx).await {
         return refuse_origin();
     }
     let plane = AdminPlane { state, ctx };
@@ -1079,7 +1091,8 @@ async fn mcp_get(
     headers: HeaderMap,
 ) -> Response {
     // Origin first — same DNS-rebinding defense as POST, auth-independent.
-    if !origin_allowed(&state, &headers, Plane::Aggregate).await {
+    let listener = ctx.as_ref().map(|c| c.0.clone()).unwrap_or_default();
+    if !origin_allowed(&state, &headers, Plane::Aggregate, &listener).await {
         return refuse_origin();
     }
     // Honor MCP-Protocol-Version exactly like POST (400 on an unsupported value).
@@ -1220,40 +1233,55 @@ fn refuse_origin() -> Response {
 }
 
 /// Non-browser MCP clients (Claude Code, curl) omit `Origin` → allowed. A present
-/// `Origin` is allowed for loopback — and, on the aggregate plane only, since
-/// origins §4.2, for an agent's own origin (`http://<id>.<suffix>[:<port>]` for
+/// `Origin` is allowed for loopback and the public origin's host (headless
+/// server design §4.3) — and, on the aggregate plane only, since origins
+/// §4.2, for an agent's own origin (`<scheme>://<id>.<suffix>[:<port>]` for
 /// an agent that declares `run.service`), so an agent's UI can call `/mcp` from
 /// the browser with a bearer its backend gave it. Everything else is refused:
 /// this is the DNS-rebinding defense, and a page on `evil.example` is exactly
 /// what it is for.
 ///
-/// **The port is part of the origin.** `http://localhost:9999` is another
-/// process on this box, not this gateway, and a page it serves is as foreign as
-/// one on `evil.example` — so a port, when the `Origin` carries one, must be
-/// lmgw's own ([`own_port`](crate::agents::service::own_port)). An `Origin`
-/// with no port at all names port 80 and is left to the host test, which is
-/// where it was before.
+/// **The scheme and the port are part of the origin.** `http://localhost:9999`
+/// is another process on this box, not this gateway, and a page it serves is
+/// as foreign as one on `evil.example` — so the `Origin`'s scheme must be the
+/// request's (the listener's, or behind a trusted proxy the one it
+/// forwarded, headless server design §4.5), and its port (a portless one
+/// is 443 under `https`, 80 under `http`) the one that host is this
+/// gateway's on: a loopback name with the listener's own port only, the
+/// public URL's host with its port or the listener's (a different outer
+/// number works when `public_url` names it), an agent's origin with the
+/// scheme and port it is published on
+/// ([`crate::agents::service::origin_scheme_port`]). A request without
+/// connect info compares with `bind_addr`'s port.
 ///
-/// **`/mcp/admin` keeps the loopback list** (§4.2): the agent shape exists so
-/// an agent's own page can reach the aggregate plane with the bearer its
-/// backend holds, and the self-admin plane is not something an agent's page is
-/// ever the right caller for. It is a second lock on a route already behind an
-/// owner credential, and it costs an agent nothing it was meant to have.
+/// **`/mcp/admin` keeps the loopback list and the public host** (§4.2): the
+/// agent shape exists so an agent's own page can reach the aggregate plane
+/// with the bearer its backend holds, and the self-admin plane is not
+/// something an agent's page is ever the right caller for. It is a second
+/// lock on a route already behind an owner credential, and it costs an agent
+/// nothing it was meant to have.
 ///
 /// The agent shape costs one lookup by id, on a request that carries an
 /// `Origin` at all — a browser's request, not the hot path lmgw's own clients
 /// take.
-async fn origin_allowed(state: &SharedState, h: &HeaderMap, plane: Plane) -> bool {
+async fn origin_allowed(
+    state: &SharedState,
+    h: &HeaderMap,
+    plane: Plane,
+    ctx: &RequestCtx,
+) -> bool {
     let Some(origin) = hget(h, "origin") else {
         return true;
     };
-    let authority = origin
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(origin)
-        .split('/')
-        .next()
-        .unwrap_or("");
+    let (scheme, rest) = match origin.split_once("://") {
+        Some(("https", rest)) => (crate::net::Scheme::Https, rest),
+        Some(("http", rest)) => (crate::net::Scheme::Http, rest),
+        _ => return false,
+    };
+    if scheme != ctx.scheme {
+        return false;
+    }
+    let authority = rest.split('/').next().unwrap_or("");
     let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
         match rest.split_once(']') {
             // ipv6 [host]:port
@@ -1266,23 +1294,42 @@ async fn origin_allowed(state: &SharedState, h: &HeaderMap, plane: Plane) -> boo
             None => (authority, None),
         }
     };
+    let port = match port {
+        Some(p) => match p.parse::<u16>() {
+            Ok(p) => p,
+            Err(_) => return false,
+        },
+        None => scheme.default_port(),
+    };
     let snap = state.snapshot();
-    if let Some(port) = port {
-        let own = crate::agents::service::own_port(&snap.settings.bind_addr);
-        match (port.parse::<u16>().ok(), own) {
-            (Some(p), Some(own)) if p == own => {}
-            // A port that is not lmgw's, or one of the two that cannot be
-            // read at all: nothing here is the gateway's own origin.
-            _ => return false,
-        }
+    let listener_port = ctx
+        .local
+        .map(|a| a.port())
+        .or_else(|| crate::agents::service::own_port(&snap.settings.bind_addr));
+    let on_listener = Some(port) == listener_port;
+    let host = host.to_ascii_lowercase();
+    // Each host with its own port: a loopback name is this listener's origin
+    // only on this listener's port.
+    if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return on_listener;
     }
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
-        return true;
+    // The public host on the public URL's port, or this listener's (the
+    // published number may be the listener's own).
+    if let Some(u) = crate::net::public_url(&snap.settings) {
+        if u.bare_host() == host {
+            return on_listener || port == u.port;
+        }
     }
     if plane == Plane::Admin {
         return false;
     }
-    match crate::agents::service::origin_label(&snap.settings, host) {
+    // An agent's origin on the scheme and port it is published on.
+    let published =
+        crate::agents::service::origin_scheme_port(&snap.settings, snap.serving_tls.as_ref());
+    if published != (scheme, Some(port)) {
+        return false;
+    }
+    match crate::agents::service::origin_label(&snap.settings, &host) {
         Some(label) => crate::agents::service::is_service_agent(state, &label).await,
         None => false,
     }

@@ -24,7 +24,15 @@
 # pipeline counter is monotonic without any git history. scripts/release.sh
 # bumps the version and makes the tag.
 #
+# LMGW_BUILD_SERVER=only builds the server image's binary instead of the RPM
+# (headless server design §10): the same version, update feed and UI as the RPM
+# gets, then the release lmgw-server, into dist/lmgw-server + dist/build.env for
+# ci/build-image.sh. No RPM, no guard, no latest.json. GitLab runs it as a job of
+# its own after the RPM's (.gitlab-ci.yml `server-binary`); the RPM build never
+# builds the server.
+#
 # Usage: bash ci/build.sh
+#        LMGW_BUILD_SERVER=only bash ci/build.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
@@ -33,6 +41,12 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 # packs, and rpm installs it as root with that mode. Whatever this script creates (the
 # binary, the .desktop file) gets owner-only write from this umask, whatever the caller's.
 umask 022
+
+case "${LMGW_BUILD_SERVER:-}" in
+  "") SERVER_ONLY=0 ;;
+  only) SERVER_ONLY=1 ;;
+  *) echo "ERROR: LMGW_BUILD_SERVER is '${LMGW_BUILD_SERVER}': 'only' builds the server binary, unset builds the RPM" >&2; exit 1 ;;
+esac
 
 # The release this tree belongs to: the [workspace.package] version.
 BASE="$(grep -m1 -oE '^version = "[0-9]+\.[0-9]+\.[0-9]+"' Cargo.toml | grep -oE '[0-9.]+' || true)"
@@ -126,8 +140,15 @@ sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*)\"[0-9]+\.[0-9]+\.[0-9]+\"/\1
 # version too (its plan-changed line names it, machine-check design §3.5), and
 # its clean also means the target/release/lmgw-machine-helper the RPM packs, and
 # ci/rpm_guard.py compares the package's copy with, is this job's build.
-rm -rf target/release/bundle dist
-cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper
+if [[ "$SERVER_ONLY" == 1 ]]; then
+  # The same for the server binary: lmgw-server's --version and lmgw-core's
+  # /api/version carry $VERSION.
+  rm -rf dist
+  cargo clean -p lmgw-server -p lmgw-core
+else
+  rm -rf target/release/bundle dist
+  cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper
+fi
 
 # The Leptos UI must exist before lmgw-core compiles: rust-embed bakes
 # crates/lmgw-ui/dist/ into the binary (the `cargo clean -p lmgw-core` above
@@ -136,6 +157,55 @@ cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper
 if [[ ! -f crates/lmgw-ui/dist/index.html ]]; then
   echo "ERROR: trunk build produced no crates/lmgw-ui/dist/index.html" >&2
   exit 1
+fi
+
+if [[ "$SERVER_ONLY" == 1 ]]; then
+  # `-p lmgw-server` resolves lmgw-core's features for the server alone (no desktop features),
+  # so its feature-dependent units differ from the RPM's: correct, and compiled in this job.
+  # The time and the largest single process's peak memory (GNU time's "Maximum resident set
+  # size": getrusage's RUSAGE_CHILDREN, the largest descendant, in practice the link) are
+  # printed for §10's measurement, also when the build fails. A rustc that sccache runs sits in
+  # sccache's server, not under cargo, so on a machine with sccache the figure undercounts.
+  echo "Building lmgw-server ${VERSION} (no RPM: LMGW_BUILD_SERVER=only)"
+  server_status=0
+  if [[ -x /usr/bin/time ]]; then
+    mkdir -p target
+    /usr/bin/time -v -o target/lmgw-server-build.time cargo build --release -p lmgw-server \
+      || server_status=$?
+    grep -E 'Elapsed \(wall clock\)|Maximum resident set size|Exit status|terminated by signal' \
+      target/lmgw-server-build.time || true
+  else
+    echo "NOTE: /usr/bin/time is not installed (dnf install time), so the build's peak memory is not measured" >&2
+    server_t0=$SECONDS
+    cargo build --release -p lmgw-server || server_status=$?
+    echo "cargo build took $((SECONDS - server_t0)) s"
+  fi
+  if [[ "$server_status" != 0 ]]; then
+    echo "ERROR: cargo build --release -p lmgw-server failed (exit ${server_status})" >&2
+    exit "$server_status"
+  fi
+  if [[ ! -f target/release/lmgw-server || -L target/release/lmgw-server ]]; then
+    echo "ERROR: cargo built no target/release/lmgw-server" >&2
+    exit 1
+  fi
+  SERVER_LINE="$(target/release/lmgw-server --version)"
+  if [[ "$SERVER_LINE" != "lmgw-server ${VERSION}" ]]; then
+    echo "ERROR: target/release/lmgw-server --version printed '${SERVER_LINE}', not 'lmgw-server ${VERSION}'" >&2
+    exit 1
+  fi
+  # The image's Fedora is the one this binary linked against (ci/build-image.sh).
+  # shellcheck disable=SC1091
+  SERVER_FEDORA_RELEASE="$(. /etc/os-release && [[ "${ID:-}" == fedora ]] && echo "${VERSION_ID:-}")" || true
+  if [[ -z "$SERVER_FEDORA_RELEASE" ]]; then
+    echo "ERROR: lmgw-server was built on a system that is not Fedora; the image needs its release" >&2
+    exit 1
+  fi
+  mkdir -p dist
+  install -m 0755 target/release/lmgw-server dist/lmgw-server
+  # Consumed by ci/build-image.sh.
+  { echo "VERSION=${VERSION}"; echo "SERVER_FEDORA_RELEASE=${SERVER_FEDORA_RELEASE}"; } > dist/build.env
+  echo "Built ${SERVER_LINE} on Fedora ${SERVER_FEDORA_RELEASE}"
+  exit 0
 fi
 
 # The bundle packs checked-out files too (the icons, the licence files), with their mode in

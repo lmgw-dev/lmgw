@@ -282,6 +282,12 @@ pub(crate) const TAGS: &[TagDef] = &[
         description: "",
     },
     TagDef {
+        id: "ops-accounts",
+        name: "Account ops",
+        group: Group::Ops,
+        description: "",
+    },
+    TagDef {
         id: "ops-usage",
         name: "Usage & pricing ops",
         group: Group::Ops,

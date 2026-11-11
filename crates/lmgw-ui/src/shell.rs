@@ -523,11 +523,14 @@ pub fn Sidebar() -> impl IntoView {
     let (bench_badge, bench_title) = crate::pages::benchmarks::nav_badge(live);
     // Updates available (container builds §8): builds with newer inputs than
     // their last verified run, plus registry images in use with a newer
-    // digest. Pushed on the bus; nothing polls for it.
+    // digest, plus pinned engine releases (Windows) with a newer upstream
+    // one. Pushed on the bus; nothing polls for it.
     let updates = Signal::derive(move || {
         live.updates.with(|u| {
             u.as_ref().map_or(0, |u| {
-                u64::from(u.builds_with_updates) + u64::from(u.images_with_updates)
+                u64::from(u.builds_with_updates)
+                    + u64::from(u.images_with_updates)
+                    + u64::from(u.engines_with_updates)
             })
         })
     });
@@ -818,6 +821,7 @@ pub fn Sidebar() -> impl IntoView {
             </div>
             <div class="foot">
                 <Pulse/>
+                <crate::session_cards::AccountFoot/>
                 <div class="foot-row">
                     <GpuPill open=gpu_open anchor=gpu_anchor/>
                     <button

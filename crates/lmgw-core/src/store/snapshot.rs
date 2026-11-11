@@ -28,6 +28,7 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
     snap.settings = load_settings(pool).await?;
     snap.chat_profiles = chat_profiles::list_chat_profiles(pool).await?;
     snap.api_keys = key_rows.iter().map(api_key_from_row).collect();
+    snap.accounts = list_accounts(pool).await?;
     snap.prices = price_rows.iter().map(price_from_row).collect();
     for r in &mcp_rows {
         let s = mcp_server_from_row(r);

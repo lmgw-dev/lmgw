@@ -15,10 +15,11 @@
 //! agent on 2026-09-25, which had to hand-apply migrations and forge sqlx's
 //! bookkeeping table just to pre-seed settings without risking it.
 //!
-//! `ensure_dev_instance_safety` below steers a fresh data dir off that
-//! default before `server::run` gets a chance to reconcile anything — this is
-//! the only entry point that needs it: the Tauri app has its own
-//! `src-tauri/src/main.rs`, and cargo examples are never included in an RPM
+//! `ensure_dev_instance_safety` (`lmgw_core::state::dev_instance`) steers a
+//! fresh data dir off that default before `server::run` gets a chance to
+//! reconcile anything — this runner and `lmgw-server` under `LMGW_DEV` take
+//! that step: the Tauri app has its own `src-tauri/src/main.rs` (a debug
+//! shell refuses such a dir), and cargo examples are never included in an RPM
 //! build, so nothing else can reach this binary in production.
 //! `scripts/dev-instance.sh` wraps this with a scratch data dir.
 //!
@@ -33,9 +34,8 @@
 //! device CA it makes when its device listener is turned on keeps its key
 //! plain in its own data dir, whatever the session bus in its environment.
 
-use lmgw_core::config::dev_instance_override;
-use lmgw_core::state::{AppState, SharedState};
-use lmgw_core::{server, store};
+use lmgw_core::server;
+use lmgw_core::state::AppState;
 
 fn main() -> anyhow::Result<()> {
     // The machine check's NVML probe (`--machine-probe nvml`): this runner
@@ -80,6 +80,12 @@ async fn run() -> anyhow::Result<()> {
             data_dir.display()
         );
     }
+    // The data-dir lock lmgw-server holds too (headless server design D28):
+    // two gateways on one scratch dir — this runner started twice, or next
+    // to a dev lmgw-server — would migrate and write one database. Held
+    // until the process ends.
+    let _lock = lmgw_core::state::data_dir_lock::DataDirLock::acquire(&data_dir, "headless")
+        .map_err(anyhow::Error::msg)?;
     // Opens and migrates the store as its first steps. Always a dev
     // instance — see the module docs.
     if !lmgw_core::state::dev_from_env() {
@@ -103,7 +109,13 @@ async fn run() -> anyhow::Result<()> {
     // chance to steer this data dir away from the production
     // `container_prefix` before it does; `server::run` refuses a dev instance
     // still on it.
-    ensure_dev_instance_safety(&state, cli_addr.as_deref()).await?;
+    let env_prefix = std::env::var("LMGW_CONTAINER_PREFIX").ok();
+    lmgw_core::state::dev_instance::ensure_dev_instance_safety(
+        &state,
+        env_prefix.as_deref(),
+        cli_addr.as_deref(),
+    )
+    .await?;
 
     // Ctrl-C or SIGTERM stops the server: its streams end, its sessions
     // close with 1001, and it returns once they and its turns have ended,
@@ -131,42 +143,5 @@ async fn run() -> anyhow::Result<()> {
     // skips this, deliberately — boot reconciliation adopts what a crash
     // leaves behind.
     lmgw_core::runtime::lifecycle::shutdown(&state).await;
-    Ok(())
-}
-
-/// If this data dir's settings still carry the production default
-/// `container_prefix`, move it to `lmgw-dev` (or `LMGW_CONTAINER_PREFIX`) and
-/// pin `bind_addr` to the address this run was actually given, persist both,
-/// and log one line saying so. A data dir that was already customized — an
-/// owner-configured one, or one an earlier run of this same check already
-/// fixed — is left alone entirely (see [`dev_instance_override`], which makes
-/// that call and is unit-tested on its own since this I/O wrapper cannot be
-/// exercised from `cargo test -p lmgw-core`).
-async fn ensure_dev_instance_safety(
-    state: &SharedState,
-    cli_addr: Option<&str>,
-) -> anyhow::Result<()> {
-    let settings = state.snapshot().settings.clone();
-    let env_prefix = std::env::var("LMGW_CONTAINER_PREFIX").ok();
-    let Some((new_prefix, new_bind_addr)) =
-        dev_instance_override(&settings.container_prefix, env_prefix.as_deref(), cli_addr)
-    else {
-        return Ok(());
-    };
-
-    let mut settings = settings;
-    settings.container_prefix = new_prefix;
-    if let Some(addr) = new_bind_addr {
-        settings.bind_addr = addr;
-    }
-    tracing::info!(
-        "dev instance safety: container_prefix -> '{}', bind_addr -> '{}' — a fresh data dir \
-         must never boot under the production container_prefix, or boot reconciliation could \
-         force-remove the real app's model containers (see scripts/dev-instance.sh)",
-        settings.container_prefix,
-        settings.bind_addr,
-    );
-    store::save_settings(&state.db, &settings).await?;
-    state.reload_snapshot().await?;
     Ok(())
 }

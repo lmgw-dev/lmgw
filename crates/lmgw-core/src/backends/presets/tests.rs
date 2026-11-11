@@ -100,21 +100,6 @@ fn the_tested_profiles_reproduce_the_spike_containerfiles() {
         apply_edits(fixture!("audio-cuda.Dockerfile"), &audio_edits, &audio_vars).unwrap();
     assert_eq!(audio, fixture!("audio-cuda.spike.Containerfile"));
 
-    // sd.cpp: the spike did not inject build info (§14.2 "not verified");
-    // without those two edits the result is the spike's file byte for byte.
-    let sd_edits: Vec<BuildEdit> = profile("sdcpp-cuda")
-        .edits_for(true)
-        .into_iter()
-        .filter(|e| e.role != EditRole::BuildInfo)
-        .collect();
-    let (sd, _) = apply_edits(
-        fixture!("sd-cuda.Dockerfile"),
-        &sd_edits,
-        &spike_vars("lmgw-sdcpp-cuda"),
-    )
-    .unwrap();
-    assert_eq!(sd, fixture!("sd-cuda.spike.Containerfile"));
-
     // ik: the build-number ARGs are anchored on the stage line instead of
     // the spike's `ARG CUDA_DOCKER_ARCH="86;90"` (the line most likely to
     // change). Same two lines, same stage, declared earlier.
@@ -146,6 +131,13 @@ fn ccache_off_drops_the_cache_edits_and_keeps_the_build_info() {
         let edits = p.edits_for(false);
         assert!(edits.iter().all(|e| !e.role.needs_ccache()), "{}", p.id);
         let (text, _) = apply_edits(upstream(p.id), &edits, &spike_vars("x")).unwrap();
+        if p.id == "sdcpp-cuda" {
+            // Upstream's own file brings a ccache; with lmgw's cache off it
+            // is left as upstream wrote it.
+            assert!(text.contains("target=/root/.cache/ccache"), "{}", p.id);
+            assert!(!text.contains("id=lmgw"), "{}", p.id);
+            continue;
+        }
         assert!(!text.contains("--mount=type=cache"), "{}", p.id);
         assert!(!text.contains("ccache -s"), "{}", p.id);
     }
@@ -233,6 +225,30 @@ fn choose_dockerfile_carries_the_espeak_edit_for_audio() {
     )
     .unwrap();
     assert!(choice.edits.iter().all(|e| e.name != "runtime-espeak"));
+}
+
+/// The CUDA Dockerfile brings its own ccache (upstream 2026-11-02): the edit
+/// must put the step's cache in lmgw's mount and keep the stats.
+#[test]
+fn the_sd_cuda_step_compiles_into_lmgw_cache_not_upstreams() {
+    let (text, _) = apply_edits(
+        fixture!("sd-cuda.Dockerfile"),
+        &profile("sdcpp-cuda").edits_for(true),
+        &spike_vars("lmgw-sdcpp-cuda"),
+    )
+    .unwrap();
+    let step = &text[text
+        .find("RUN --mount=type=cache,id=lmgw-sdcpp-cuda")
+        .unwrap()..];
+    let step = &step[..step.find("\nFROM ").unwrap()];
+    assert!(!text.contains("target=/root/.cache/ccache"));
+    assert!(step.contains("target=/ccache "), "{step}");
+    assert!(
+        step.contains("export CCACHE_DIR=/ccache CCACHE_MAXSIZE=10G && ccache -z && cmake --build")
+    );
+    assert!(step.contains("ccache --cleanup && \\\n    ccache --show-stats"));
+    assert!(!step.contains("--zero-stats"));
+    assert!(text.contains("CMakeLists.txt && cmake . -B ./build \"$@\""));
 }
 
 #[test]
@@ -409,7 +425,12 @@ fn builds_with_extras_seed_their_own_cache_from_the_shared_one_read_only() {
     for p in &PROFILES {
         let vars = TemplateVars::new(p.engine, p.backend, "x", true, "10G");
         let (text, _) = apply_edits(upstream(p.id), &p.edits_for(false), &vars).unwrap();
-        assert!(!text.contains("/ccache"), "{}", p.id);
+        // sdcpp-cuda keeps upstream's own `/root/.cache/ccache` mount.
+        assert!(
+            !text.replace("/root/.cache/ccache", "").contains("/ccache"),
+            "{}",
+            p.id
+        );
     }
 }
 
@@ -614,7 +635,7 @@ fn stages_and_args_are_read_off_the_upstream_files() {
     assert!(sd.declares_arg("CUDA_ARCHITECTURES"));
     assert_eq!(
         sd.stages[0].from,
-        "nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION}"
+        "nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}"
     );
 
     for p in &PROFILES {

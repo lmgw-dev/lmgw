@@ -1612,7 +1612,9 @@ and an item whose prerequisite failed reports "not checked yet" with that reason
 inventing its own failure. Each item has a plain sentence (what a newcomer sees), a detail fold
 (what was read, where from, with the technical names), and a typed cause the surfaces and the plan
 key on. Figures in the example sentences are illustrative, except where they are marked as
-measured or checked.
+measured or checked. In the server image (container mode) the reader is the server's administrator,
+and the sentences name the lmgw container, the host and its service where that is what to act on
+(headless server design §7, D30).
 
 ### 1.1 Graphics card and driver
 

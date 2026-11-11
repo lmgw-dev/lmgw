@@ -173,6 +173,9 @@ fn label_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 /// `ops::image_model_set` checks a row's keys against.
 const SD_HELP: &str = include_str!("../../fixtures/sdcpp/sd-server-help-c678dfe.txt");
 
+/// llama-server's own `--help` (a build with `--fit`).
+const LLAMA_HELP: &str = include_str!("../../fixtures/llama/llama-server-help-4b1a27fa0.txt");
+
 fn is_sdcpp_help(argv: &[String]) -> bool {
     argv.iter().any(|a| a == "--help")
         && argv
@@ -232,6 +235,18 @@ impl CommandRunner for Podman {
                         },
                     })
                 }
+                "logs" => {
+                    let w = self.world.lock().unwrap();
+                    let name = args.last().cloned().unwrap_or_default();
+                    match w.names.get(&name).and_then(|m| w.logs.get(m)) {
+                        Some(log) => Ok(CmdOutput {
+                            status: 0,
+                            stdout: log.clone(),
+                            stderr: String::new(),
+                        }),
+                        None => Ok(ok),
+                    }
+                }
                 "wait" => {
                     let gate = self.wait_gate.lock().unwrap().clone();
                     parked(gate).await;
@@ -247,6 +262,25 @@ impl CommandRunner for Podman {
                     stdout: SD_HELP.into(),
                     stderr: String::new(),
                 }),
+                // llama-server's own `--help`, which VRAM admission reads
+                // for `--fit` (`vram::fit_vocab`) — without its fit lines
+                // where the world says the image has none.
+                "run" if args.iter().any(|a| a == "--help") => {
+                    let without = self.world.lock().unwrap().llama_without_fit;
+                    Ok(CmdOutput {
+                        status: 0,
+                        stdout: if without {
+                            LLAMA_HELP
+                                .lines()
+                                .filter(|l| !l.contains("--fit"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        } else {
+                            LLAMA_HELP.into()
+                        },
+                        stderr: String::new(),
+                    })
+                }
                 "run" => {
                     let barrier = self.barrier.lock().unwrap().clone();
                     if let Some(b) = barrier {

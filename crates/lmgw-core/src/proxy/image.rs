@@ -221,6 +221,29 @@ where
     ))
 }
 
+/// What a generation on a local image container teaches its row's working
+/// budget (`vram::partial::work`): one that completed under a partial grant,
+/// the budget it works with; one the image server failed (a 5xx), that the
+/// budget it had was not enough.
+async fn learn_from(
+    state: &SharedState,
+    hold: Option<&crate::vram::LocalHold>,
+    sent: &Result<reqwest::Response, GatewayError>,
+) {
+    let Some(hold) = hold.filter(|h| h.class() == crate::runtime::Class::Image) else {
+        return;
+    };
+    match sent {
+        Ok(_) => crate::vram::partial::work::learned(state, hold.model_id()).await,
+        Err(GatewayError::Upstream {
+            status, message, ..
+        }) if *status >= 500 => {
+            crate::vram::partial::work::failed(state, hold.model_id(), message).await
+        }
+        Err(_) => {}
+    }
+}
+
 /// Resolve, admit, rewrite `model`, send — the JSON path behind
 /// `/v1/images/generations`.
 async fn image_json_call(
@@ -267,6 +290,10 @@ async fn image_json_call(
         ))
     })
     .await;
+    // sd-server answers a generation once it is done: one that completed
+    // under a partial grant teaches the row the budget it works with
+    // (`vram::partial::work`).
+    learn_from(state, admission.as_ref(), &sent).await;
     match sent {
         Ok(resp) => Ok(MediaOutcome {
             ttfb_ms: started.elapsed().as_millis() as i64,
@@ -389,7 +416,9 @@ pub async fn handle_image_edit(
                     &r.upstream,
                 ))
             };
-            match image_send(&state, admission.as_ref(), &route, encode).await {
+            let sent = image_send(&state, admission.as_ref(), &route, encode).await;
+            learn_from(&state, admission.as_ref(), &sent).await;
+            match sent {
                 Ok(resp) => Ok(MediaOutcome {
                     ttfb_ms: started.elapsed().as_millis() as i64,
                     resp,

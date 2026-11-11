@@ -7,7 +7,7 @@
 use serde_json::{json, Value};
 
 use super::{projector_ubatch_floor, ImageAttention};
-use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 
 /// Put the `ubatch_size` (and, past llama.cpp's default batch, the
 /// `batch_size`) the projector decoded as `image` needs, when it needs more

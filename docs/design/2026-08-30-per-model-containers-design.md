@@ -310,6 +310,465 @@ Consequences and corrections:
   parallel child loads fine, and independent containers trivially do).
   This is in scope, not follow-up — it is the actual fix for the observed
   queueing. Per-GPU gates stay follow-up.
+- **A model that would work is never refused; one that fits only partially
+  starts with a warning** (the owner's ruling of 2026-11-11: a model that would work is never blocked; one that fits only partially starts with a warning. A start must
+  also not push other residents into OOM; where lmgw does not know a figure
+  it charges conservatively; it refuses only what really cannot work).
+  Today that is an image pipeline that can run with less than all of it on
+  the card (`vram/plan/image.rs`): `offload_to_cpu`, a `params_backend`
+  naming `cpu` or `disk` (for every module or some), or sd.cpp's
+  `--auto-fit`, which is on by default and off only with `auto_fit off` or
+  an explicit `params_backend`. Such a pipeline is charged its files, as
+  every pipeline is, wherever they fit after the evictions any start makes;
+  its largest file is no upper bound for what a generation takes (measured
+  with `offload_to_cpu`: a 3.6 GiB largest file, a 7.7 GiB peak). Only where
+  the whole does not fit does admission give it less (`vram/partial.rs`),
+  and only where its engine sees exactly one card (`partial::cards_seen`:
+  the cards its resolved run args name, else every device the last ledger
+  read listed; a native Vulkan build sees every card whatever the run args
+  name). `--max-vram` is a per-device budget while the ledger pools the
+  devices, so on several cards sd-server could draw the budget on each:
+  such a row takes the whole-pipeline path, and its refusal or wait line
+  says partial fitting on several cards is not done yet. A row whose args
+  set its own `max_vram` gets that budget plus its context where that much
+  is free beyond the headroom, else the normal path; one whose own
+  `max_vram` is 0 or less follows the driver's free memory, which bounds
+  nothing, and needs the whole (its refusal and `local_model_get` say
+  why). Every other row gets:
+  1. its **on-card part** where that fits — for a row whose weights all
+     wait off the card its context plus its learned peak, before the peak
+     its largest file plus its context; for any other row all of it;
+  2. else what is free beyond the headroom, when the budget that leaves
+     (that less the context) is at least the row's **working budget**: the
+     smallest `--max-vram` a generation of the row has completed under
+     (`image_models.work_bytes`, migration 0104, learned by
+     `vram/partial/work.rs` when a generation on a held entry completes;
+     lowered by each smaller one that works);
+  3. else — no working budget learned yet, or less than it — what is free,
+     only when nothing else of lmgw's is on the card or reserved for it and
+     no fallback would answer. Otherwise the start takes the normal path: it
+     waits, drains or evicts, and a configured fallback answers. A measured
+     context that leaves no budget at all never starts.
+  The **context** is sd-server's own memory outside its budget: the row's
+  learned idle residency (`image_models.idle_bytes`, migration 0103), what
+  the container of a row whose weights all wait off the card holds at rest,
+  read per process (`vram/partial/floor.rs`) — once per container, not
+  while a claim was taken during the reading (a per-entry claims counter)
+  and not when the row's files, args, engine image or run args changed
+  meanwhile. Auto-fit and per-module rows have no context measured yet:
+  their idle residency holds whatever weights auto-fit placed, and no
+  reading that separates sd-server's context from them exists yet, so the
+  stand-in and its "not measured yet" stay for them. Where it is not measured,
+  `CONTEXT_STAND_IN` is set aside for it: 1.0 GiB, the most a context has
+  been measured holding (CUDA, `offload_to_cpu`, the 24 GiB test card,
+  image-generation §12.4), said in every sentence that uses it. The context
+  is no working budget, which is why the working budget is a figure of its
+  own: on a Windows test card the Vulkan context is 5 MiB, and a budget just above
+  it does not render (table below).
+
+  A partial start is **held to what it was given**: sd.cpp's auto-fit and
+  its weight streaming otherwise size themselves to the driver's live free
+  memory, which includes the headroom, other pipelines' kept-free peaks,
+  audio's pending loads and a starting model's weights not loaded yet.
+  Admission stages the grant for the registry entry the start creates
+  (`registry/admission_grant.rs`); the entry renders it into every launch
+  as an absolute `--max-vram` (sd-server's per-device budget in GiB for
+  managed weights and runner buffers; sd.cpp parses it as a float with
+  `parse_strict_float` at the pinned `master-1079-a3c49b1` and at
+  `c678dfe`; 0 and negative values follow the live free figure, so lmgw
+  renders the thousandth, never 0), less the context — measured, else the
+  stand-in where the grant leaves room for it, else the whole grant with the
+  context on top, said in the warning. The flag binds whatever placed the
+  weights: sd.cpp's model manager checks every runner's request against it,
+  so `offload_to_cpu` and an explicit `params_backend` are held as auto-fit
+  is (the help's "during automatic graph-cut execution" undersells it). A
+  `max_vram` in the row's args wins at render, which is why admission gives
+  such a row that budget (above); where the row's value is not what
+  admission gave (an edit after the decision) the entry's warnings say it
+  is not held to its grant, and a build without the flag is not held and
+  says that too. The container carries the grant as the label
+  `lmgw.grant=<granted>:<max_vram>` (bytes), so boot reconciliation renders
+  the expected command with that `--max-vram`, adopts the container instead
+  of removing it, and the adopted entry keeps the grant and its charge,
+  with a warning worded by what holds sd-server (the grant's flag, the
+  row's own `max_vram`, or nothing in a build without the flag) and, where
+  that is not the grant, the not-held note restored from the label and the
+  row, so it teaches no working budget.
+
+  The ledger charges a partial entry its grant, or its budget plus its
+  context where that is more (the row's own `max_vram` as the budget where
+  it sets one; the context measured, else read at rest for a row whose
+  weights all wait off the card, else the stand-in). A whole start of a row
+  whose weights all wait off the card is charged, once its peak is
+  learned, the peak plus its context — measured, else what its processes
+  hold at rest (a reading while a generation runs holds the peak too, and
+  is not taken as the context) — and with neither its files plus its peak, what admission
+  charged before it adapted (budget-only mode and a probe without per-process
+  figures never learn a context, so that stays). Before the peak it is
+  charged its files. In measured mode what its processes hold now comes off
+  what is kept free. A container held to a grant teaches no peak: what it
+  draws is what its grant allows.
+
+  Measured 2026-11-11 on a Windows test VM (a GTX 970 test card, 4 GiB, a 560-series driver), sd-server of sd.cpp `master-1079-a3c49b1` (the pinned Vulkan
+  build), Z-Image-Turbo Q4_K with `ae.safetensors` and Qwen3-4B-Instruct
+  Q4_K_M as the text encoder, `--steps 8 --cfg-scale 1`, one 512×512
+  generation per case, the card's `memory.used` from `nvidia-smi` every
+  100 ms less the 154 MiB it showed with nothing running (WDDM lists no
+  per-process figures there):
+
+  | Case | At rest | During the generation | Time |
+  |---|---|---|---|
+  | `--offload-to-cpu`, no `--max-vram` | 5 MiB | 3110 MiB (all that was free) | 146 s |
+  | `--offload-to-cpu --max-vram 1` | 5 MiB | 1010 MiB | 150 s |
+  | `--offload-to-cpu --max-vram 2` | 5 MiB | 2038 MiB | 146 s |
+  | auto-fit (no offload) `--max-vram 2` | 5 MiB | 2038 MiB | 146 s |
+  | `--offload-to-cpu --max-vram 0.5` | 5 MiB | fails: "need 1453.98 MB device / 941.98 MB budget", first segment | — |
+
+  Auto-fit with a 2 GiB budget put every module's weights in RAM (its plan:
+  `--params-backend "diffusion=cpu,te=cpu,vae=cpu"`). Reproduce with
+  `scripts/sdcpp-max-vram-probe.ps1` on a Windows test machine, one case per run with
+  nothing else on the card (its usage line names the parameters: the
+  engine's `sd-server.exe`, the models dir, a scratch dir under the
+  checkout's `target\`, a loopback port in 18900–18999); the CUDA context of
+  1.0 GiB is image-generation §12.4's.
+
+  The sentence: where the whole does not fit, the start goes ahead with "It
+  will work but only fits partially on the GPU, expect slowdowns: …" naming
+  the whole, the headroom, what is free, the setting, what it was given
+  (and against which known budget) and the `--max-vram` it is held to with
+  its context. It is logged and kept on the registry entry from its claim
+  on, through `ready` and every launch of that entry (the Models page's
+  warning chip, `lmgw__status`, the start/restart answer's
+  `ModelDone.warnings`, the image test's `ImageTestPassed.warnings`);
+  `local_model_get` says it of the row against the card's total
+  (`ImageModelDetail.warnings`). Refused, with numbers, is what cannot run:
+  a model all on the card that is larger than the card (an image row that
+  pins its weights is told which setting pins it and which would let it run
+  with less), a measured context that leaves no budget, and nothing beyond
+  the headroom free.
+
+  **A failed generation teaches too** (`vram/partial/work.rs`): a 5xx from
+  sd-server on an entry held to a grant whose budget was at least the
+  row's working one shows that figure is not enough for every generation
+  (a budget learned from a 512² picture need not hold for a 1024² one).
+  The figure is raised to the budget sd.cpp names — its model manager's
+  "need … MB device / … MB budget" or its graph-cut split's "segment …
+  needs … MB on …" (MB of 1024²), read from the error and the container's
+  last 200 log lines — so a start needs that plus its context free; where
+  sd.cpp names none, the figure is cleared and the rule for a row with none
+  learned applies until a generation completes again. A failure under less
+  than the working budget teaches nothing new.
+
+  **Learned figures belong to an engine** (migration 0105,
+  `image_models.learned_key`): the peak, the context and the working
+  budget are keyed by the resolved engine image, run args and native build
+  (`vram::plan::image::engine_key`, the native launcher's variant choice
+  with its failed-CUDA marks on Windows). Each container records the key it
+  started with (after a fallback, the build it fell back to) and teaches
+  its figures under it; a figure learned under another key clears the
+  others. Admission reads a row's figures only under the key the row
+  resolves to now (a running container's under its own), so a class image
+  switched from Vulkan to CUDA, or Windows choosing CUDA again, counts them
+  as not measured and charges conservatively until they are learned again;
+  switching back finds them. Figures learned before 0105 carry no key and
+  are learned again. They are still reset when the row's files or args
+  change.
+
+  Not done yet: the grant is the entry's for its life, so a pipeline
+  squeezed once stays squeezed and warned after the card frees up, until
+  its container stops (no re-grant on a later idle relaunch yet); partial
+  fitting on several cards (per-device budgets); the working budget is the
+  row's, not per size, so a figure raised by a large picture holds for the
+  small ones too. Not counted as partial yet: an aux row's partial
+  `--n-gpu-layers` and llama.cpp's `--fit` on an aux row, which admission
+  charges in full, and an image row's `--backend` assignments (`vae=cpu`) on
+  a row with auto-fit off.
+- **A llama-server row is charged what lands on the card, and where
+  llama.cpp's `--fit` would shrink it, lmgw fits it instead** (the same
+  ruling, 2026-11-11; `vram/plan/chat/fit.rs`, `vram/partial/llama.rs`).
+  - *A partial `--n-gpu-layers N`* (0 < N ≤ the layer count, field or args)
+    is charged its share: llama.cpp counts the output layer as a layer and
+    fills from the back (`i_gpu_start = n_layer + 1 − N`, b12244), so the
+    first `n_layer + 1 − N` layers' weights stay in host memory — summed from
+    the GGUF's tensor list as a lowest-priority CPU override, so an `-ot` to
+    a device still wins — and so does their share of the KV cache and
+    recurrent state (each layer's cache sits with the layer). The compute
+    buffer is charged in full, with op offload's copy of the largest
+    host-kept weight on top. `--no-kv-offload` (`-nkvo`) charges no KV cache.
+    Such a row is held to what it says: it waits, evicts or falls back like
+    any model, never shrunk.
+  - *`--fit`* (on by default in b12244, `common/fit.cpp`) reads each
+    device's free memory as the driver reports it at load and keeps
+    `--fit-target` free on it (default 1024 MiB per device). It lowers an
+    unset context from the trained one, no lower than `--fit-ctx` (4096) per
+    stream in steps of 256, then — only with `--n-gpu-layers` on auto and no
+    tensor override of the row's — moves a mixture of experts' routed
+    experts and then whole layers off the card. A value the row sets is one
+    it leaves alone. `--fit-target` is a margin, not a budget: the driver's
+    free figure includes the headroom, the peaks the ledger keeps free for
+    pipelines and the weights of models still loading, so a margin cannot
+    hold llama-server to what admission gave it. lmgw therefore makes the
+    same choices against its own figures, in the same order (context first,
+    down to the floor; then `--n-cpu-moe` layer by layer for a mixture of
+    experts; then whole layers), and renders them as explicit `--ctx-size`,
+    `--n-cpu-moe` and `--n-gpu-layers` with `--fit off` (the grant's
+    `LlamaPlacement`, `runtime/argv/llama_fit.rs`), so `--fit` has nothing
+    left to adjust and the start skips its dry-run load. Admission's charge
+    and what llama-server is told are then the same placement. A row the
+    card holds as written gets nothing rendered over it, and llama.cpp's
+    own `--fit` runs at its start as it always did. Where admission keeps
+    less than `--fit-target` free beside such a row, llama.cpp may still
+    lower its context a little (it then draws less than it is charged);
+    that is not said anywhere yet.
+  - *Only where the image has `--fit`* (`vram/fit_vocab.rs`). ik_llama.cpp
+    and llama.cpp builds older than `--fit` load a row as written, so a row
+    is fitted only where its image's `--help` lists `--fit` (`llama_caps`,
+    read by every admission decision of such a row and by the model
+    editor's checks, cached per image ID). Anywhere else, and until the
+    flags were read, it is charged as written with no fit flag rendered,
+    and its footprint note says why. The native launcher's own llama.cpp
+    build (Windows) counts as having it: its `--help` is not read yet, and
+    the build lmgw installs (b12244 on a Windows test VM) has it.
+  - *The row's own `--fit-target`* (`-fitt`, MiB per device; the largest
+    on the one card) is what it asks to keep free beside it, and `--fit
+    off` would leave llama.cpp nothing to keep it with: admission keeps it
+    instead where it is more than the headroom, in the target, in the
+    start's needs and in the "too large" judgement, and the note says so.
+  - *What it is charged.* Where what the card can give it now cannot hold
+    the row as written beside its margin (a trained context of 262144
+    tokens on a 4 GiB card), it is charged its **target**, the most of it
+    that fits there, and that is what a start makes room for, evicting idle
+    models as any start does. What the card can give it now is its total
+    less what other programs hold there now, with lmgw's own models counted
+    as room, since a wait or an eviction frees them: each decision reads it
+    off its own ledger (what is free, plus what lmgw's other models on the
+    card are charged with their kept-free peaks) and fits the row again on
+    every pass of its wait, so the target and the admission check use the
+    same figures and a target fitted on a card that holds only other
+    programs' memory is admitted. The learned growth never shrinks the
+    target: it only makes the start wait for or evict lmgw's own models,
+    and with none left the start goes ahead without it, warned ("Headroom",
+    below). The target is what the card can give the row at all now, so it
+    goes ahead as an image pipeline's on-card part does, a fallback or not
+    ("Context fitted to the GPU: …", or "It will work but only fits
+    partially on the GPU, expect slowdowns: …" with layers off the card,
+    naming the whole, the headroom, what is free, what it was given and the
+    flags). *Fixed 2026-11-11:* the target
+    had been fitted to the card less the 7-day minimum of other programs'
+    use and the learned growth, then admitted against the driver's free
+    memory now; whenever other programs held more than their minimum (nearly
+    always) it never fitted, so a live fallback answered for good, or every
+    idle model was evicted and the row started below its target, and a
+    growth taught by a game lowered the context for the container's life.
+    The footprint preview outside a decision (`local_model_get`) fits the
+    row to the card less other programs' use at the newest reading, else at
+    rest.
+  - *Less than its target* lasts for the container's whole life, so it is
+    given only where it is the only way the model runs now: nothing more
+    can be freed, nothing else of lmgw's is on the card or reserved for it
+    (busy residents finish, drain or are evicted, and the start waits for
+    them as any start does), and no fallback would answer in its place (a
+    configured fallback always applies). §4.7's verdict judges a fitted row
+    by its least placement and its margin against the card less what other
+    programs hold now: wherever that least fits, a target does, so only a
+    shortfall in other programs' use now sends the request to the fallback.
+    A guest's deferral is its fallback, so a background start
+    never shrinks a row below its target either. Then it goes ahead with
+    the most that fits in what is free beyond the headroom. It waits while
+    not even its least placement (the floor context and, where layers may
+    move, the output layer alone on the card, every routed expert in host
+    memory) fits what is free, and is refused only where that least does
+    not fit the card beside what other programs hold at rest and the margin
+    (the headroom's structural part, below), with what it needs ("Even the
+    least llama.cpp's --fit would run it with (…) needs …"). Both warnings stay on
+    the registry entry and in the start answer. A row whose engine sees
+    more than one card is charged as written: llama.cpp splits layers by
+    each card's free memory while the ledger pools the cards, so fitting on
+    several cards is not done yet.
+  - *Measured 2026-11-11* on a Windows test VM (a GTX 970 test card, 4 GiB, a 560-series driver), llama.cpp `b12244` CUDA 12 as lmgw's engine install fetched
+    it, a debug lmgw (the headless runner, a scratch data dir), fixed
+    headroom 1024 MiB, the desktop at 130 MiB. Qwen3-4B-Instruct-2507 Q4_K_M
+    (36 layers, trained on 262144 tokens), one row alone on the card at a
+    time; "drawn" is `nvidia-smi`'s used memory once the start settled less
+    the 130 MiB before it (lmgw's D3DKMT share agreed within 1 MiB):
+
+    | Row | Before this change | Now: charged | Told | Drawn |
+    |---|---|---|---|---|
+    | no context, layers on auto (`--fit` row) | refused: 38.7 GiB at the trained context | 2827 MiB, the warning | `--ctx-size 4096 --n-gpu-layers 34 --fit off` | 2876 MiB |
+    | `ctx 8192`, `--n-gpu-layers 20` | charged in full (3.5 GiB), refused | 2119 MiB | as written | 2172 MiB |
+    | `ctx 8192`, `--n-gpu-layers 999` | refused | refused: 3.5 GiB plus 1.0 GiB headroom on a 4.0 GiB card | — | — |
+
+    The `--fit` row's target on that card was every layer at 4096 tokens
+    (3.0 GiB); with 3.8 GiB free less the headroom it got 33 of its 36
+    layers and the output layer. Both started rows answered a chat request.
+    The gap between charge and draw (49 and 53 MiB) is the CUDA context and
+    allocator slack the headroom covers. Auto headroom on that test VM after the
+    run: "using the fixed 1.0 GiB until lmgw has watched the graphics card
+    for 24 hours (1 so far; other programs grew by up to 1.2 MiB so far)".
+    Reproduce with `scripts/llama-fit-check.py` (its usage line: an ssh port
+    forward to lmgw's bind address, the owner token, the machine's models
+    dir).
+  - *Measured on Linux 2026-11-11*: a 24 GiB test GPU (driver 600.20.03), image
+    `localhost/lmgw-llama-server:official-master`, a scratch dev instance
+    (`scripts/dev-instance.sh`, its own container prefix) with
+    `vram.budget_mb` 8192 so another lmgw instance kept the rest of the card,
+    fixed headroom 1024 MiB, the desktop at 2.1 GiB. Qwen3-VL-4B-Instruct
+    Q4_K_M as text (36 layers, trained on 262144 tokens); "held" is
+    `nvidia-smi`'s per-process figure for llama-server:
+
+    | Row | Charged | Told | Held after start | Held after the first request |
+    |---|---|---|---|---|
+    | no context, layers on auto (`--fit` row) | 5032 MiB | `--ctx-size 18176 --fit off` | 5516 MiB | 5516 MiB |
+    | `ctx 8192`, `--n-gpu-layers 20` | 2119 MiB | as written | 2576 MiB | 2576 MiB |
+
+    The gap is 484 and 457 MiB, the same for a 2.1 and a 4.9 GiB charge and
+    not grown by a short first request: llama-server's CUDA context and
+    allocator slack, which Linux's per-process figure counts and WDDM's
+    (49 and 53 MiB on the test VM) barely does. That is the remainder the
+    estimate leaves to the headroom by design (`vram/plan.rs`: "the CUDA
+    context, ~450 MiB per container as measured"), and the 807 MiB margin's
+    source gap includes it. It is not added to the estimate yet: doing so
+    moves every chat row's charge on Linux by about 0.5 GiB and would count
+    it twice beside the margin, so it waits for a decision. Meanwhile
+    a row fitted beside the 1 GiB fixed headroom on Linux leaves about
+    0.5 GiB of it for other programs' growth. Reproduce with the script's
+    second usage line (`--rows fit,ngl --file <gguf>`, no `--ssh`).
+    The first run also found that a footprint fitted before any device read
+    (a declared budget makes the total known first) dropped its sizer for
+    good and refused the row's first start as too large; fixed, with a test.
+  - *Adopted at boot.* A fitted start's container carries its placement
+    and charge (`lmgw.llama-fit=<bytes>:ctx=…,n-cpu-moe=…,n-gpu-layers=…,
+    fit=off`). Boot renders the expected command with it — only the values
+    the row still leaves to fitting, so a row since edited to set its own
+    context or layers is not adopted with the stale ones — adopts the
+    container with its grant, and words its warning for the adoption. (An earlier version wrote no label, so boot found a command the row does not
+    render and removed every fitted container on each start of lmgw.)
+  - *The command preview* (`local_model_get`'s `command_line`) is the
+    running container's own where admission fitted it, else what a start on
+    the card as last read is told, and an advisory says which and that the
+    placement is decided at each start.
+  - Not done yet: learned figures for llama-server rows (a ready container
+    is measured by the driver, so this matters only for the start); an aux
+    row's partial `--n-gpu-layers` and `--fit`; ladder rungs, which are
+    charged as written; reading the native build's own `--help`; the target
+    is the entry's for its life, as an image grant is.
+- **Headroom, auto or fixed** (approved by the owner 2026-11-11;
+  `vram/headroom.rs`). The headroom did two jobs as one fixed number
+  (`vram.headroom_mb`, 1024 MiB): (a) room for other programs' GPU memory
+  to grow after a start, and (b) slack for lmgw's own estimates until a
+  model is measured. `vram.headroom_mode` is `auto` (the default) or
+  `fixed` (the old behaviour, `headroom_mb` for both).
+  - *(a) Growth of outside use.* What other programs hold now is already
+    out of the driver's free figure, so only its growth matters. A sampler
+    reads the per-process attribution (§4.7's: used memory less what lmgw's
+    containers hold) every 30 s, where it can — admission on, boot settled,
+    per-process figures, no start in flight — and keeps per hour the lowest
+    and highest reading and the largest rise within the hour (migration
+    0106, `vram_outside_hours`). Auto's headroom is the largest rise over the
+    last 7 days: the most any reading exceeded an earlier one, across hours.
+    A rise shorter than 30 s is not seen. Pooled over the devices, as the
+    ledger pools them; per-device growth is not learned yet. No reading is
+    taken while the GPU hold or a benchmark's lease keeps lmgw's models off
+    the card: whatever has the card then would read as growth of the
+    desktop's (a 19 GiB job under the hold would teach 19 GiB and refuse models for a week).
+  - *(b) A margin while a model starts or is not measured yet*, the class's
+    largest recorded gap between estimate and process: llama.cpp (chat, aux)
+    807 MiB (decision-models design, Appendix C's "estimate against the
+    process" table, Qwen3.8-Flash-Next at `--n-cpu-moe 43`, ubatch 1024,
+    2026-11-09); sd.cpp 1.0 GiB (`CONTEXT_STAND_IN`; none for a partial
+    start, whose grant sets its context aside, nor for a row whose context
+    is measured); audio.cpp as much as its estimate, at least 0.78 GiB
+    (residency about twice the files, pocket-tts 0.90 GiB held against
+    0.12 GiB on disk, realtime design §9.4) until its residency is learned.
+    It rides on the start being admitted, on a starting entry's and a
+    reservation's charge, and on an unlearned audio row's pending load. A
+    llama-server keeps it after `ready` until a request that runs a prompt
+    or encodes has run on it: the claim of a chat, completion, responses,
+    embedding, rerank or decision request it answered is let go, or a
+    ladder send ends (the CUDA pool's temporaries in the 807 MiB arrive with
+    the first prompt). A token count (`/tokenize`, a native count) runs no
+    prompt and leaves it (`vram::send_local_count`; *fixed 2026-11-11*, any
+    answered send had cleared it). The ledger's note on it says so. A
+    climb's new container keeps it until it serves one. *An adopted
+    container* (boot, or a reconciliation pass, after every lmgw restart)
+    has served an unknown number of requests under the earlier lmgw:
+    llama.cpp rows learn no footprint of their own yet, so the one
+    measurement it can have is a per-process reading of what it holds.
+    Where the driver gives per-process figures, the ledger reads it (as it
+    reads an audio or off-card image container) and a reading is its
+    measurement: no margin. Without such figures (a driver with no
+    per-process list, PIDs not read yet) nothing of it was ever measured,
+    and it keeps the margin until it serves a request. *Fixed 2026-11-11:*
+    every adopted chat and aux container had been charged the 807 MiB after every lmgw start until its first request, which an idle embedding or decision
+    row may not see for days. The margin is dropped then, or once an audio
+    row's residency is learned.
+  - *Too large is judged without the growth* (2026-11-11, under the owner's rules). Whether a model can ever run is
+    the card's total less what other programs hold at rest — the lowest
+    reading of the window — and the margin. The learned growth never
+    refuses a model as too large. In `fixed` mode the fixed value does
+    both, as before.
+  - *Learned growth decides waiting* (approved by the owner 2026-11-11: it decides
+    only wait, evict or fall back, never whether a model can run at all,
+    and it must not shrink a container for good). A start waits for, and
+    evicts, lmgw's own models until its footprint, the growth and its
+    margin are free. Once nothing of lmgw's is left on the card to wait for
+    or evict (after the reconciliation pass has looked for containers lmgw
+    lost track of), a start that fits beside what other programs hold now
+    with its margin alone goes ahead with a warning that names the growth
+    and when it was seen ("Learned growth not kept free: other programs'
+    GPU memory grew by up to 200 MiB on 2026-01-15 14:00 (auto headroom),
+    which VRAM admission keeps free beside a start while it can wait for or
+    evict lmgw's own models. None of lmgw's is left on the card, and
+    chat/… fits beside what other programs hold now with its 807 MiB margin
+    (…), so it starts without that room: should other programs grow that
+    much again, the GPU can run out of memory"). The warning stays on the
+    registry entry for its life (a whole start's on the entry's
+    `admission_note`, a partial one's in its grant). This holds for a
+    request's start, an operator or warm start, a guest's start (whose
+    guest may evict only background models, so the owner's still count as
+    something to wait for: it defers) and an owner's ladder climb (logged).
+    The growth never sends a request to its fallback: §4.7's verdict, and a
+    climb's, ask the card for the start and its margin only, so a fallback
+    answers only for a shortfall in other programs' use now, as before.
+    Such a shortfall still waits where there is no fallback, and its
+    timeout names what holds the card. A fitted llama-server row's target
+    is fitted beside its margin, never the growth (above). *Fixed 2026-11-11:* the wait had needed the
+    growth free once too-large stopped counting it, so a row that cannot
+    adapt (explicit context, image, audio) whose footprint fits beside
+    other programs' use now with its margin but not with the growth too
+    evicted every lmgw model, then timed out after the queue timeout with
+    "another process is using the GPU", or waited for ever with no queue
+    timeout. A guest's ladder climb is still denied where the growth is
+    not free (it defers; not changed yet).
+  - *Its source is named, and it can be forgotten* (the same decision).
+    The sentence says when the largest growth was seen ("other programs
+    grew by up to 4.0 GiB, on 2026-01-15 14:00") and every figure behind
+    it — a reading every 30 s, the last 7 days, used once 24 hours have
+    readings, the margins (807 MiB for llama.cpp, 1.0 GiB for an image
+    model, at least 799 MiB for a voice model) and the at-rest figure
+    whether a model can run is judged by — so a game that taught it is
+    plain to see. `headroom_now` carries the same as `learned_at`,
+    `at_rest_bytes`, `sample_seconds`, `window_days`, `hours_needed` and
+    `margins`. Settings (GPU → Admission → Learned growth) has "Forget
+    learned growth…", which confirms and then deletes every reading (owner
+    op `headroom_forget`); auto uses the fixed value until it has learned
+    again.
+  - *Until enough is learned* — fewer than 24 hours of the window with
+    readings, or no per-process figures — auto uses `headroom_mb` for both
+    jobs with no margin on top, and Settings says so ("Headroom: auto, using
+    the fixed 1.0 GiB until lmgw has watched the graphics card for 24 hours
+    (3 so far; other programs grew by up to 12 MiB so far)"). Learned:
+    "Headroom: auto, 640 MiB: other programs grew by up to that much, on 2026-01-15 14:00 (a reading every 30 s, the largest rise over the last 7
+    days, used once 24 hours have readings). A model that is starting or not
+    measured yet gets a margin on top: … Whether a model can run at all is
+    judged without the growth: against the card less what other programs
+    hold at rest (130 MiB) and that margin. The growth only makes a start
+    wait for or evict lmgw's own models: with none of them left, a start
+    that fits beside what other programs hold now with its margin goes
+    ahead, with a warning that names the growth". The settings page (GPU → Admission) has the mode, the fixed
+    value and that sentence; `GET /api/settings-full` carries it as
+    `headroom_now`, `lmgw__settings` as `vram.headroom`, and
+    `lmgw__settings_set` takes `headroom_mode` and `headroom_mb`.
 
 ## 5. Routing, identity, and the forwarding handoff
 

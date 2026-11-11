@@ -174,8 +174,9 @@ pub fn holders(probe: &dyn GpuProbe) -> String {
     let owner: HashMap<u32, &str> = containers
         .iter()
         .flat_map(|(name, root)| {
-            std::iter::once(*root)
-                .chain(tree.descendants(*root))
+            tree.tree_of(*root)
+                .unwrap_or_default()
+                .into_iter()
                 .map(move |pid| (pid, name.as_str()))
         })
         .collect();

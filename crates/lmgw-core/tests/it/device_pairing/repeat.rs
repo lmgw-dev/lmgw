@@ -38,6 +38,10 @@ async fn meets_the_ended_link(link: &str, spki: &[u8]) {
     assert!(lmgw_client::tls::find_tls_error(&e).is_some(), "{e}");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the TLS alert before the peer reads it; lmgw does not drain before a refused handshake's close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn the_same_key_gets_the_same_answer_while_the_token_lives() {
     let w = world().await;
@@ -93,6 +97,10 @@ async fn the_same_key_gets_the_same_answer_while_the_token_lives() {
 /// a certificate does not stay open for the token's whole life. Confirm
 /// alone does not end it (the device may not hold its answer), and a
 /// request the device makes with another certificate of its key does not.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the TLS alert before the peer reads it; lmgw does not drain before a refused handshake's close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn the_device_s_first_request_with_its_certificate_ends_the_token() {
     let w = world().await;

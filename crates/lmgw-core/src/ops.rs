@@ -52,6 +52,7 @@ pub use local_model::*;
 mod local_model_checks;
 pub use local_model_checks::*;
 mod aux_model;
+mod local_model_fit;
 pub use aux_model::*;
 mod image_model;
 pub use image_model::*;

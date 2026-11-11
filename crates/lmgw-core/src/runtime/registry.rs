@@ -39,8 +39,15 @@
 //! [`Registry::readopt`] asks the same of every running container the map
 //! does not hold, for as long as lmgw runs.
 //! The policy *around* it — which models to warm-start, when to reap, the
-//! legacy sweep — is [`super::lifecycle`]'s; this module only owns the podman
-//! verbs and the map.
+//! legacy sweep — is [`super::lifecycle`]'s; this module owns the map and
+//! the decisions over it.
+//!
+//! **How a model's process comes and goes is not here** (Windows design
+//! §4.1): every start, stop, exit check, log read, listing and PID read goes
+//! through the registry's [`crate::runtime::launcher::Launcher`] — the
+//! Podman launcher unless the registry was built with another
+//! ([`Registry::with_launcher`]). Readiness stays here: it is the server's
+//! own HTTP route, whatever started it.
 //!
 //! What is *not* here, on purpose: the scheduler's arbitration around
 //! `acquire` (§4) is [`crate::vram`]'s. This module is the machinery it
@@ -56,6 +63,7 @@ use crate::sdcpp_caps::SdcppCaps;
 mod climb;
 mod ownership;
 
+pub use admission_grant::{is_unheld_note, LlamaPlacement, PartialGrant, Staged};
 use climb::ClimbMark;
 pub use climb::{
     ClaimStatus, ClimbRun, ClimbStart, ClimbStatus, ClimbTicket, DrainEnd, Marked, PhaseWait,
@@ -64,6 +72,7 @@ pub use climb::{
 pub use ownership::{Origin, OwnerDrain};
 
 mod acquire;
+mod admission_grant;
 mod caps_seen;
 mod command;
 mod decision_route;
@@ -78,11 +87,15 @@ mod podman_ops;
 mod raii;
 mod reconcile;
 mod sdcpp;
+mod start_of;
 mod state;
 mod stop;
 mod unheld;
 
+pub use crate::runtime::launcher::podman::HOST_PID_FORMAT;
+pub use crate::runtime::launcher::{log_excerpt_of, Presence, LOG_TAIL};
 use acquire::Started;
+pub(crate) use command::is_address_in_use;
 pub use command::{
     ephemeral_port, llama_server_candidates, throwaway_args, without_gpus, CmdOutput,
     CommandRunner, ImageFacts, NoRuntime, PortAllocator, PortRetry, TokioRunner, HIDE_GPUS,
@@ -92,9 +105,8 @@ pub use errors::RuntimeError;
 pub use freeable::Freeable;
 pub use inputs::{AcquireSpec, StartSpec};
 pub use llama_props::{unknown_until, LlamaEntry, Refresh};
-pub use podman_ops::log_excerpt_of;
 pub use raii::AcquireGuard;
-pub use reconcile::{Presence, PsEntry, ReconcileReport, HOST_PID_FORMAT};
+pub use reconcile::{PsEntry, ReconcileReport};
 use state::{next_generation, Entry, Key, Phase};
 pub use state::{RuntimeState, RuntimeView};
 pub use unheld::{PassLimits, PassWait, ReadoptReport, Unheld};
@@ -149,20 +161,21 @@ pub const LIVE_FACT_READ: Duration = CONTAINER_EXIT_POLL;
 /// that the value is visible in the argv a test (and `podman logs`) can read.
 pub(crate) const STOP_GRACE_SECONDS: u64 = 10;
 
-/// How many container log lines a failed start reads back, and how many of
-/// them the error carries. Same shape (and same reason) as
-/// [`crate::modelinfo`]'s post-mortem tail: with N containers this excerpt is
-/// often the only place the actual failure is visible.
-pub const LOG_TAIL: usize = 60;
-const LOG_EXCERPT_LINES: usize = 12;
-
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
 /// In-memory map of what lmgw believes is running, one entry per model
-/// (§3.2). Never persisted: it is rebuilt from `podman ps` at boot (§3.4).
+/// (§3.2). Never persisted: it is rebuilt from the launcher's listing
+/// (`podman ps`) at boot (§3.4).
 pub struct Registry {
+    /// How a model's process is started, stopped, watched and found
+    /// ([`crate::runtime::launcher`]). Every verb about a model's container
+    /// goes through it.
+    launcher: Arc<dyn crate::runtime::launcher::Launcher>,
+    /// `podman` for the verbs outside the launcher: the engine vocabulary
+    /// probes, and the `ps` / `rm -f` lent to the agents, MCP and builds
+    /// ([`Registry::runner`]).
     runner: Arc<dyn CommandRunner>,
     http: reqwest::Client,
     port: PortAllocator,
@@ -214,14 +227,14 @@ pub struct Registry {
     /// lmgw's own CDI spec (machine-check design §3.6): made fresh before a
     /// GPU start or probe, and the `--cdi-spec-dir` every such podman call
     /// carries. The gateway's, set when it wires this registry
-    /// ([`Registry::set_cdi`]); an unmanaged one until then.
-    cdi: arc_swap::ArcSwap<crate::runtime::cdi::OwnSpec>,
+    /// ([`Registry::set_cdi`]); an unmanaged one until then. Shared with
+    /// the Podman launcher this registry built for itself.
+    cdi: Arc<arc_swap::ArcSwap<crate::runtime::cdi::OwnSpec>>,
+    /// What VRAM admission gave a start — a partial grant, a note — until
+    /// the entry it creates takes it (`admission_grant.rs`): by key, with
+    /// the reservation that staged it.
+    staged: Mutex<HashMap<Key, (u64, admission_grant::Staged)>>,
 }
 
 /// [`Registry::set_on_started`]'s hook.
 pub type OnStarted = Box<dyn Fn() + Send + Sync>;
-
-fn is_no_such_container(stderr: &str) -> bool {
-    let low = stderr.to_ascii_lowercase();
-    low.contains("no such container") || low.contains("no container with name")
-}

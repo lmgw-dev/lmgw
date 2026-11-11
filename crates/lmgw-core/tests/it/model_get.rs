@@ -857,6 +857,7 @@ async fn a_get_larger_than_the_free_disk_warns_in_its_answer() {
 /// A download that meets a full disk (ENOSPC, from `/dev/full` behind the
 /// `.part`) fails the get with the full disk's sentence, and the `.part`
 /// stays for Retry.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_full_disk_fails_the_get_with_its_sentence_and_keeps_the_part() {
     if !std::path::Path::new("/dev/full").exists() {

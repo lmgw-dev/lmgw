@@ -163,7 +163,9 @@ fn repo_files(f: &dyn Facts, dir: &str) -> Vec<PathBuf> {
 /// it says (an `enabled` the override sets), so neither reads it.
 fn readable_text(f: &dyn Facts, path: &Path) -> Result<String, String> {
     match f.stat(path) {
-        Ok(m) if m.mode & 0o004 == 0 => return Err("not readable by every user".into()),
+        Ok(m) if !m.posix.is_some_and(|p| p.mode & 0o004 != 0) => {
+            return Err("not readable by every user".into())
+        }
         Ok(_) => {}
         Err(e) => return Err(e.to_string()),
     }

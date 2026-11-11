@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /tmp/nodesource-repo.gpg.key && \
     gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg /tmp/nodesource-repo.gpg.key && \
     rm /tmp/nodesource-repo.gpg.key && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     npm install -g pnpm@10.15.1 && \
@@ -39,5 +39,7 @@ COPY --from=build /sd.cpp/build/bin /sd.cpp/bin
 RUN printf '#!/bin/sh\nexec /sd.cpp/bin/sd-cli "$@"\n' > /sd-cli && \
     printf '#!/bin/sh\nexec /sd.cpp/bin/sd-server "$@"\n' > /sd-server && \
     chmod +x /sd-cli /sd-server
+
+WORKDIR /sd.cpp
 
 ENTRYPOINT [ "/sd-cli" ]

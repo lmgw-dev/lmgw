@@ -85,6 +85,7 @@ use crate::gguf::{pooling_name, ModelSummary};
 
 pub(crate) mod chat;
 pub(crate) mod layers;
+pub(crate) mod qsa;
 
 /// Where a row's weights are when its compute buffer is reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

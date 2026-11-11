@@ -124,6 +124,9 @@ pub(super) fn blank_image_model() -> ImageModel {
         // has nothing to say about what a generation costs.
         peak_extra_bytes: None,
         peak_learned_at: None,
+        idle_bytes: None,
+        work_bytes: None,
+        learned_key: None,
         // The editor has no fields for these yet: unset derives the prompt
         // style from the recipe and keeps the default preview.
         prompt_style: None,

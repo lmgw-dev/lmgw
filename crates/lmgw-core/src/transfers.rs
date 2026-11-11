@@ -90,8 +90,8 @@ impl Transfers {
         }
         crate::backends::paths::free_bytes(data_dir).unwrap_or_else(|| {
             tracing::warn!(
-                "transfers: the free space of {} cannot be read (statvfs); offers are refused \
-                 as if the disk were full",
+                "transfers: the free space of {} cannot be read (statvfs, on Windows \
+                 GetDiskFreeSpaceExW); offers are refused as if the disk were full",
                 data_dir.display()
             );
             0

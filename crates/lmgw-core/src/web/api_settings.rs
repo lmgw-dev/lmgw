@@ -21,8 +21,11 @@ use crate::store;
 
 /// The device half of the credential ops (client-apps design §1.4).
 mod device_keys;
+mod doors;
 /// `GET /api/settings-full`.
 mod full;
+/// The TLS section and the public URL (headless server design §4.7).
+mod tls;
 pub use full::settings_full;
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
@@ -347,6 +350,19 @@ pub struct SettingsFullPatch {
     /// The device link's bounds (Settings → Network & access → Devices) —
     /// the same patch the `settings_set` op takes, with the same checks.
     devices: Option<crate::ops::DevicesSettingsPatch>,
+    /// The main listener's TLS (Settings → Network & access → TLS,
+    /// headless server design §4.7). Applies at the next start.
+    tls: Option<tls::TlsSettingsPatch>,
+    /// The one public origin (D9), `https://lmgw.example:8443`; empty =
+    /// derived from the TLS listener, else from `bind_addr`.
+    public_url: Option<String>,
+    /// Proxy mode's trusted peers (§4.5): addresses and CIDR networks whose
+    /// forwarded headers are read; empty = off. Applies at once.
+    trusted_proxies: Option<Vec<String>>,
+    /// Accounts (Settings → Network & access → Accounts): a session's
+    /// lifetime. `accounts.enabled` is refused here; the accounts_switch
+    /// op changes it.
+    accounts: Option<crate::config::AccountsSettingsPatch>,
 }
 
 /// VRAM admission control. Every field is optional so one knob moves
@@ -355,6 +371,8 @@ pub struct SettingsFullPatch {
 #[serde(default, deny_unknown_fields)]
 pub struct VramSettingsPatch {
     enabled: Option<bool>,
+    /// `auto` (learned from this machine) or `fixed` (`headroom_mb`).
+    headroom_mode: Option<lmgw_api_types::HeadroomMode>,
     headroom_mb: Option<u64>,
     budget_mb: Option<u64>,
     queue_timeout_seconds: Option<u64>,
@@ -368,6 +386,9 @@ impl VramSettingsPatch {
     fn apply(self, v: &mut VramSettings) -> Result<(), String> {
         if let Some(x) = self.enabled {
             v.enabled = x;
+        }
+        if let Some(x) = self.headroom_mode {
+            v.headroom_mode = x;
         }
         if let Some(x) = self.headroom_mb {
             v.headroom_mb = x;
@@ -529,10 +550,12 @@ fn secret(current: &mut String, supplied: Option<String>, clear: Option<bool>) {
 /// definitions included.
 ///
 /// Answers `Result<Value, Refusal>` rather than the plane's usual
-/// `Result<Value, String>` for the reason the credential ops do (§3.12): two of
-/// its refusals carry a code of their own (`origin_suffix_shadows_gateway`,
+/// `Result<Value, String>` for the reason the credential ops do (§3.12): three
+/// of its refusals carry a code of their own (`origin_suffix_shadows_gateway`,
 /// origins §4.1; `dev_production_prefix`, a dev instance asked to take the
-/// production container prefix, chat-voice WP11 review m1). Everything else
+/// production container prefix, chat-voice WP11 review m1; `setting_pinned`,
+/// a setting the server's container sets, headless server design §2.2, which
+/// `settings_set` answers with too). Everything else
 /// here is still the flat `400 op_failed` every
 /// op-level input error is — which is exactly what [`Refusal`]'s `From<String>`
 /// renders — so nothing else about this surface moved.
@@ -557,6 +580,16 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
         save_full(&st, p, Vec::new(), routing, guard, &mut None).await
     })
     .await?
+}
+
+/// The stop budget's sentence when an unload timeout of `unload` seconds
+/// makes a container's quit need more than its unit gives (headless server
+/// design D20); nothing on the desktop, or while it fits.
+fn stop_budget_note(st: &SharedState, unload: u64) -> Option<String> {
+    st.stop_budget()
+        .map(|b| crate::config::deployment::stop_budget(b.unit_seconds, unload))
+        .filter(|b| b.over)
+        .map(|b| b.sentence)
 }
 
 /// What the machine check's settings switch hands the Settings save
@@ -646,6 +679,28 @@ async fn save_full(
         }
         s.bind_addr = addr;
     }
+    // Before the suffix's check below, which asks the public URL's host.
+    let tls_before = s.tls.clone();
+    let public_url_before = s.public_url.clone();
+    let trusted_before = s.trusted_proxies.clone();
+    let shadowed_before =
+        crate::agents::service::origin_suffix_refusal(&s.agent_origin_suffix, &s).is_some();
+    let suffix_patched = p.agent_origin_suffix.is_some();
+    let tls_saved = tls::apply(
+        &mut s,
+        p.tls,
+        p.public_url,
+        p.trusted_proxies,
+        st.deployment().is_container(),
+    )?;
+    notes.extend(tls_saved.notes);
+    if let Some(a) = p.accounts {
+        if !a.apply(&mut s.accounts)?.is_empty() {
+            notes.push("a session's lifetime applies to sessions signed in from now on".into());
+        }
+    }
+    let origin_moved_by_public_url = tls_saved.origin_moved;
+    let tls_moved = s.tls != tls_before;
     if let Some(v) = p.auth_enabled {
         s.auth_enabled = v;
     }
@@ -819,7 +874,13 @@ async fn save_full(
         s.docs_rerank_model = v;
     }
     if let Some(v) = p.vram {
+        let unload = s.vram.unload_timeout_seconds;
         v.apply(&mut s.vram)?;
+        // A longer unload timeout lengthens the quit (headless server design
+        // D20): said when it no longer fits what the server's unit gives.
+        if s.vram.unload_timeout_seconds != unload {
+            notes.extend(stop_budget_note(st, s.vram.unload_timeout_seconds));
+        }
     }
     let mut ports_touched = false;
     if let Some(r) = p.realtime {
@@ -827,7 +888,7 @@ async fn save_full(
         ports_touched |= touched
             .iter()
             .any(|k| crate::config::WEBRTC_KEYS.contains(k));
-        notes.extend(crate::config::webrtc_applies(&touched));
+        notes.extend(crate::config::webrtc_applies(st.deployment(), &touched));
     }
     if let Some(m) = p.mcp {
         crate::ops::apply_mcp_settings(&mut s.mcp, m)?;
@@ -893,7 +954,7 @@ async fn save_full(
         // dashboard's own door. A code of its own, because it is a rule of the
         // design rather than a typo — the shape complaints above are the
         // typos.
-        if let Some(why) = crate::agents::service::origin_suffix_refusal(&v, &s.bind_addr) {
+        if let Some(why) = crate::agents::service::origin_suffix_refusal(&v, &s) {
             return Err(Refusal {
                 status: StatusCode::BAD_REQUEST,
                 code: "origin_suffix_shadows_gateway",
@@ -902,10 +963,32 @@ async fn save_full(
         }
         if v != s.agent_origin_suffix {
             origin_suffix_moved = true;
-            notes.push(format!(
-                "agent UIs are served at http://<id>.{v}:<port>/ from now on"
-            ));
             s.agent_origin_suffix = v;
+            notes.push(format!(
+                "agent UIs are served at {} from now on",
+                crate::agents::service::agent_origin(
+                    &s,
+                    st.snapshot().serving_tls.as_ref(),
+                    "<id>"
+                )
+            ));
+        }
+    }
+    // The same rule from the public URL's end: a new public URL whose host
+    // the stored suffix would shadow is refused as that suffix's save would
+    // be. A shadow the stored settings had before is the boot warning's
+    // business, not this save's.
+    if !suffix_patched && s.public_url != public_url_before && !shadowed_before {
+        if let Some(why) = crate::agents::service::origin_suffix_refusal(&s.agent_origin_suffix, &s)
+        {
+            return Err(Refusal {
+                status: StatusCode::BAD_REQUEST,
+                code: "origin_suffix_shadows_gateway",
+                message: format!(
+                    "the public URL {} makes the agent origin suffix shadow the dashboard: {why}",
+                    s.public_url
+                ),
+            });
         }
     }
     if let Some(v) = p.agent_script_image {
@@ -1035,8 +1118,12 @@ async fn save_full(
         image_dirs = true;
     }
 
-    if ports_touched {
+    // The shared settings write's check (headless server design §2.2): a
+    // setting the server's container pins is not changed here.
+    crate::config::deployment::refuse_pinned(st.start_facts(), &st.snapshot().settings, &s)?;
+    if ports_touched || tls_moved || bind_addr_moved {
         crate::config::webrtc_port_collision(&s)?;
+        crate::config::tcp_port_collision(&s, st.deployment().is_container())?;
     }
     // A changed class prefix renames every local name of its class: the
     // fallbacks naming them follow, in the same transaction (decision 27).
@@ -1120,6 +1207,11 @@ async fn save_full(
     // Saved is saved (review G-6): a reload that fails is said beside it,
     // and these settings apply all the same.
     let published = st.settings_saved(&s).await;
+    // Proxy mode's record starts again with the list it applies from now
+    // on (headless server design §4.5, D53).
+    if s.trusted_proxies != trusted_before {
+        st.proxy_seen.reset(crate::server::forwarded::Since::Save);
+    }
     // Published under the lock; the MCP reconcile and the agents' resync
     // and stops below run after it (`settings_saved`). None of them writes
     // the settings blob. The reconcile reads the snapshot of then
@@ -1172,7 +1264,7 @@ async fn save_full(
             ));
         }
     }
-    if origin_suffix_moved {
+    if origin_suffix_moved || origin_moved_by_public_url {
         // Nothing to resync — an origin is computed per request — but every
         // running app container is holding the old one in `LMGW_APP_ORIGIN`
         // (§4.10). The ninth reason a service container stops, and the only
@@ -1365,6 +1457,7 @@ fn key_by_id(st: &SharedState, id: i64) -> Result<ApiKey, Refusal> {
 /// exactly who must not be able to ask for it.
 pub(super) async fn key_op(
     st: &SharedState,
+    caller: &crate::principal::Principal,
     name: &str,
     args: Map<String, Value>,
 ) -> Result<Value, Refusal> {
@@ -1373,6 +1466,12 @@ pub(super) async fn key_op(
             .and_then(Value::as_i64)
             .ok_or_else(|| bad_request("pass id"))
     };
+    // Door keys belong to their account (headless server design §5.1).
+    if matches!(name, "key_reveal" | "key_rotate" | "key_set" | "key_delete") {
+        if let Some(key_id) = args.get("id").and_then(Value::as_i64) {
+            doors::refuse_door(st, caller, name, key_id)?;
+        }
+    }
     match name {
         "key_create" => {
             let name = args
@@ -1388,9 +1487,9 @@ pub(super) async fn key_op(
             // A device is created with its whole policy and its pairing link
             // (client-apps design §1.4), not with the scope alone.
             if kind.trim() == "device" {
-                return answer(dto::KeyCreateAnswer::Device(
-                    device_keys::create(st, name.trim(), &args).await?,
-                ));
+                let paired = device_keys::create(st, name.trim(), &args).await?;
+                doors::made(st, caller, paired.id).await?;
+                return answer(dto::KeyCreateAnswer::Device(paired));
             }
             // The admin-tools level is a paired device's (client-apps
             // design L3/L5): asked of any other kind, said, not dropped.
@@ -1418,9 +1517,9 @@ pub(super) async fn key_op(
                 device_tools,
                 ..Default::default()
             };
-            answer(dto::KeyCreateAnswer::Key(
-                key_create(st, &name, &kind, scope).await?,
-            ))
+            let created = key_create(st, caller, &name, &kind, scope).await?;
+            doors::made(st, caller, created.id).await?;
+            answer(dto::KeyCreateAnswer::Key(created))
         }
         "key_set" => {
             let p: KeyPatch = crate::ops::patch_from_args(Some(args)).map_err(bad_request)?;
@@ -1487,6 +1586,7 @@ fn str_arg(args: &Map<String, Value>, key: &str) -> Option<String> {
 /// refusing one of them would only ever be a trap.
 pub async fn key_create(
     st: &SharedState,
+    caller: &crate::principal::Principal,
     name: &str,
     kind: &str,
     scope: KeyPatch,
@@ -1522,6 +1622,9 @@ pub async fn key_create(
     if name == "owner:" {
         return Err(bad_request("key name is required"));
     }
+    if owner {
+        doors::refuse_reserved_name(&name)?;
+    }
     // `api_keys.name` is UNIQUE, so this is also enforced by the database —
     // but the owner path writes through an UPSERT (rotation's primitive), and
     // an UPSERT on a taken name would silently rewrite that row's credential
@@ -1534,7 +1637,12 @@ pub async fn key_create(
 
     if owner {
         let plaintext = token::mint_owner();
-        let id = token::set_owner_key(st, &name, &plaintext, true)
+        let maker = doors::maker(st, caller);
+        let made_by = maker.as_ref().map(|(id, login)| store::KeyAccount {
+            id: *id,
+            login: login.as_deref(),
+        });
+        let id = token::set_owner_key_for(st, &name, &plaintext, true, made_by)
             .await
             .map_err(bad_request)?;
         return Ok(dto::KeyCreated {
@@ -1716,7 +1824,7 @@ pub async fn key_rotate(st: &SharedState, id: i64) -> Result<dto::KeySecret, Ref
     // request would leave the old value working.
     let reloaded = detached("rotating the key", async move {
         let (st, key) = (&task_st, &task_key);
-        token::write_owner_key(st, &key.name, &task_plain, key.enabled)
+        token::write_owner_key(st, &key.name, &task_plain, key.enabled, None)
             .await
             .map_err(bad_request)?;
         // What the old value opened ends now, as a device's does (§1.6) —
@@ -1759,14 +1867,36 @@ pub async fn key_rotate(st: &SharedState, id: i64) -> Result<dto::KeySecret, Ref
 }
 
 /// `POST /api/op/update_check`: polls the feed now and says what it found.
+///
+/// In the server image there is no tray to install from (headless server
+/// design §6.3): the answer is the update notice's line, which About then
+/// shows.
 pub async fn update_check(st: &SharedState) -> Result<dto::MessageAck, String> {
     let current = crate::update::current_version();
     match crate::update::check(st, current).await {
-        Ok(Some(info)) => Ok(dto::MessageAck::new(format!(
-            "update available: {} (you have {}) — install it from the tray menu",
-            info.manifest.version, info.current
-        ))),
-        Ok(None) => Ok(dto::MessageAck::new(format!("up to date ({current})"))),
+        Ok(Some(info)) if st.deployment().is_container() => Ok(dto::MessageAck::new(
+            crate::update::notice::record(st, &info.manifest.version, current).sentence,
+        )),
+        // A host that cannot install it is told why, in the tray's words
+        // (`update::cannot_install`).
+        Ok(Some(info)) => {
+            let found = format!(
+                "update available: {} (you have {})",
+                info.manifest.version, info.current
+            );
+            Ok(dto::MessageAck::new(
+                match crate::update::cannot_install(&info) {
+                    Some(why) => format!("{found}. {why}"),
+                    None => format!("{found} — install it from the tray menu"),
+                },
+            ))
+        }
+        Ok(None) => {
+            if st.deployment().is_container() {
+                st.set_update_notice(None);
+            }
+            Ok(dto::MessageAck::new(format!("up to date ({current})")))
+        }
         Err(e) => Err(format!("update check failed: {e}")),
     }
 }

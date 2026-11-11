@@ -100,6 +100,7 @@ fn names_in(dir: &Path) -> std::io::Result<Vec<String>> {
 /// only read (a `0755` an older umask left) is closed to `0700` and used; a
 /// symbolic link, a file, another user's dir, or one others can write into
 /// is refused, never used or changed.
+#[cfg(unix)]
 fn ensure_private(dir: &Path) -> Result<(), CdiError> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -149,6 +150,45 @@ fn ensure_private(dir: &Path) -> Result<(), CdiError> {
             "{} was open to other users to read (mode {:04o}); lmgw closed it (mode 0700)",
             dir.display(),
             meta.mode() & 0o7777
+        );
+    }
+    Ok(())
+}
+
+/// Windows (Windows design §4.4, WP6): `dir` made with a private DACL when it
+/// is not there, and checked with `lmgw_private`'s meaning of private (this
+/// account's, no other account but `SYSTEM` and the Administrators let
+/// in). One of this account's that others may only read is closed (its
+/// DACL replaced by the private one) and used, as `0755` becomes `0700` on
+/// Linux; a link, a file, another account's dir or one others may change is
+/// refused, never used or changed.
+#[cfg(windows)]
+fn ensure_private(dir: &Path) -> Result<(), CdiError> {
+    use lmgw_private::{NotPrivate, Others};
+    match lmgw_private::create_dir(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(CdiError::Io(format!("creating {}: {e}", dir.display()))),
+    }
+    let refuse = |why: String| CdiError::NotPrivate {
+        dir: dir.to_path_buf(),
+        why,
+    };
+    match lmgw_private::check_path(dir, Others::ReadOnly) {
+        Ok(found) if !found.is_dir => return Err(refuse("it is not a directory".to_string())),
+        Ok(_) => {}
+        Err(NotPrivate::Unreadable(e)) => {
+            return Err(CdiError::Io(format!("reading {}: {e}", dir.display())))
+        }
+        Err(e) => return Err(refuse(e.to_string())),
+    }
+    if let Err(e) = lmgw_private::check_path(dir, Others::Nothing) {
+        lmgw_private::make_private(dir).map_err(|e| {
+            CdiError::Io(format!("closing {} to other accounts: {e}", dir.display()))
+        })?;
+        tracing::info!(
+            "{} was open to other accounts to read ({e}); lmgw closed it",
+            dir.display()
         );
     }
     Ok(())
@@ -350,13 +390,41 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CdiError> {
 
 /// Whether the process `pid` runs (or exists as someone else's): `kill` with
 /// no signal.
-fn alive(pid: libc::pid_t) -> bool {
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    // A name above pid_t's range is no process to ask about: left alone.
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
     // SAFETY: signal 0 sends nothing; `kill` only checks that `pid` exists
     // and may be signalled, and touches no memory of ours.
     if unsafe { libc::kill(pid, 0) } == 0 {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Whether the process `pid` runs: one that cannot be opened because there
+/// is none is gone; one that cannot be opened for another reason (another
+/// account's) counts as running and is left alone.
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain kernel calls; the handle is closed once.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return std::io::Error::last_os_error().raw_os_error()
+                != Some(ERROR_INVALID_PARAMETER as i32);
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok == 0 || code == STILL_ACTIVE as u32
+    }
 }
 
 /// The staging dirs of lmgw processes that ended mid-write (killed, crashed),
@@ -370,11 +438,11 @@ fn sweep_staging(root: &Path) {
     for name in names {
         let Some(pid) = name
             .strip_prefix(STAGING_PREFIX)
-            .and_then(|p| p.parse::<libc::pid_t>().ok())
+            .and_then(|p| p.parse::<u32>().ok())
         else {
             continue;
         };
-        if u32::try_from(pid).is_ok_and(|p| p == me) || alive(pid) {
+        if pid == me || alive(pid) {
             continue;
         }
         let dir = root.join(&name);
@@ -604,6 +672,7 @@ mod tests {
         assert_eq!(why_lines(&plain), vec!["last".to_string()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_dir_that_is_not_private_is_refused_and_left_alone() {
         use std::os::unix::fs::PermissionsExt;
@@ -651,11 +720,64 @@ mod tests {
         );
     }
 
+    /// Windows: the same rules by owner and DACL (`lmgw_private`).
+    #[cfg(windows)]
+    #[test]
+    fn a_dir_that_is_not_private_is_refused_and_left_alone() {
+        let icacls = |dir: &Path, grant: &str| {
+            let out = std::process::Command::new("icacls")
+                .arg(dir)
+                .args(["/grant", grant])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        };
+        let base = tempfile::tempdir().unwrap();
+        let open = base.path().join("open");
+        lmgw_private::create_dir(&open).unwrap();
+        // Ours and only readable by others: closed and used.
+        icacls(&open, "*S-1-5-32-545:(R)");
+        ensure_private(&open).unwrap();
+        lmgw_private::check_path(&open, lmgw_private::Others::Nothing).unwrap();
+        // Others may change it: refused, left alone.
+        icacls(&open, "*S-1-5-32-545:(M)");
+        let e = ensure_private(&open).unwrap_err();
+        assert!(e.to_string().contains("change it"), "{e}");
+        assert!(lmgw_private::check_path(&open, lmgw_private::Others::ReadOnly).is_err());
+
+        let file = base.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(ensure_private(&file)
+            .unwrap_err()
+            .to_string()
+            .contains("not a directory"));
+
+        let new = base.path().join("new");
+        ensure_private(&new).unwrap();
+        lmgw_private::check_path(&new, lmgw_private::Others::Nothing).unwrap();
+    }
+
     #[test]
     fn a_staging_dir_of_a_process_that_is_gone_is_swept_and_a_live_ones_kept() {
         let root = tempfile::tempdir().unwrap();
-        // pid_max is at most 2^22 on Linux: this pid cannot exist.
-        let dead = root.path().join(format!("{STAGING_PREFIX}{}", 1 << 23));
+        // Linux: pid_max is at most 2^22, so this pid cannot exist.
+        #[cfg(unix)]
+        let gone: u32 = 1 << 23;
+        // Windows has no such bound (and opens a pid with its low two bits
+        // cleared, so no odd number is safe either): a child that has exited
+        // and whose handle is still held, so its pid is not reused, and its
+        // process answers with an exit code.
+        #[cfg(windows)]
+        let mut exited = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let gone: u32 = {
+            exited.wait().unwrap();
+            exited.id()
+        };
+        let dead = root.path().join(format!("{STAGING_PREFIX}{gone}"));
         let mine = root
             .path()
             .join(format!("{STAGING_PREFIX}{}", std::process::id()));

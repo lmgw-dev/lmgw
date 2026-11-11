@@ -15,6 +15,8 @@ use std::fmt;
 
 // The categories, as the Settings rail names them.
 
+/// The listeners, the access settings and the device link.
+pub const NETWORK: &str = "Network & access";
 /// Admission control and the GPU hold.
 pub const GPU: &str = "GPU";
 /// The container defaults every model of a class inherits.
@@ -29,6 +31,16 @@ pub const REALTIME: &str = "Realtime";
 
 // The cards a path goes through.
 
+/// Network & access → Gateway: the plain listener.
+pub const GATEWAY: &str = "Gateway";
+/// Realtime → WebRTC calls.
+pub const WEBRTC_CALLS: &str = "WebRTC calls";
+/// Network & access → TLS: the main listener's TLS and the public address.
+pub const TLS: &str = "TLS";
+/// Network & access → Accounts: who signs in (headless server design §5).
+pub const ACCOUNTS: &str = "Accounts";
+/// Network & access → Devices: the device listener and pairing.
+pub const DEVICES: &str = "Devices";
 /// GPU → Admission.
 pub const ADMISSION: &str = "Admission";
 /// Runtimes → the chat class (llama-server).
@@ -50,6 +62,34 @@ pub const CHAT_VOICE: &str = "Voice";
 
 // The settings.
 
+/// `bind_addr`.
+pub const BIND_ADDRESS: &str = "Bind address";
+/// `realtime.webrtc_port`.
+pub const UDP_PORT: &str = "UDP port";
+/// `realtime.webrtc_tls_port`.
+pub const TLS_UDP_PORT: &str = "TLS UDP port";
+/// `tls.cert_path`.
+pub const TLS_CERTIFICATE: &str = "Certificate";
+/// `tls.key_path`.
+pub const TLS_PRIVATE_KEY: &str = "Private key";
+/// `tls.listen`.
+pub const TLS_ADDRESS: &str = "TLS address";
+/// `tls.handshake_timeout_s`.
+pub const TLS_HANDSHAKE_TIMEOUT: &str = "Handshake timeout";
+/// `public_url`.
+pub const PUBLIC_URL: &str = "Public URL";
+/// The accounts' switch and card (headless server design §5.6, §5.11).
+pub const SIGN_IN_ACCOUNTS: &str = "Sign-in accounts";
+/// `accounts.session_days`.
+pub const SESSION_LIFETIME: &str = "Session lifetime";
+/// `accounts.audit_days`.
+pub const AUDIT_KEEP: &str = "Keep audit entries";
+/// The audit log's list on the Accounts card (§5.8).
+pub const AUDIT_LOG: &str = "Audit log";
+/// `trusted_proxies`.
+pub const TRUSTED_PROXIES: &str = "Trusted proxies";
+/// `devices.listener`, `devices.listen` and `devices.port`: one row.
+pub const DEVICE_LISTENER: &str = "Device listener";
 /// `vram.load_timeout_seconds`.
 pub const LOAD_TIMEOUT: &str = "Load timeout";
 /// `vram.unload_timeout_seconds`.
@@ -111,6 +151,33 @@ impl fmt::Display for SettingPath {
     }
 }
 
+/// Network & access → Gateway → Bind address.
+pub const BIND_ADDRESS_AT: SettingPath = SettingPath(&[NETWORK, GATEWAY, BIND_ADDRESS]);
+/// Realtime → WebRTC calls → UDP port.
+pub const WEBRTC_PORT_AT: SettingPath = SettingPath(&[REALTIME, WEBRTC_CALLS, UDP_PORT]);
+/// Realtime → WebRTC calls → TLS UDP port.
+pub const WEBRTC_TLS_PORT_AT: SettingPath = SettingPath(&[REALTIME, WEBRTC_CALLS, TLS_UDP_PORT]);
+/// Network & access → TLS → Certificate.
+pub const TLS_CERT_AT: SettingPath = SettingPath(&[NETWORK, TLS, TLS_CERTIFICATE]);
+/// Network & access → TLS → Private key.
+pub const TLS_KEY_AT: SettingPath = SettingPath(&[NETWORK, TLS, TLS_PRIVATE_KEY]);
+/// Network & access → TLS → TLS address.
+pub const TLS_LISTEN_AT: SettingPath = SettingPath(&[NETWORK, TLS, TLS_ADDRESS]);
+/// Network & access → TLS → Handshake timeout.
+pub const TLS_HANDSHAKE_TIMEOUT_AT: SettingPath =
+    SettingPath(&[NETWORK, TLS, TLS_HANDSHAKE_TIMEOUT]);
+/// Network & access → TLS → Public URL.
+pub const PUBLIC_URL_AT: SettingPath = SettingPath(&[NETWORK, TLS, PUBLIC_URL]);
+/// Network & access → TLS → Trusted proxies.
+pub const TRUSTED_PROXIES_AT: SettingPath = SettingPath(&[NETWORK, TLS, TRUSTED_PROXIES]);
+/// Network & access → Accounts → Sign-in accounts.
+pub const SIGN_IN_ACCOUNTS_AT: SettingPath = SettingPath(&[NETWORK, ACCOUNTS, SIGN_IN_ACCOUNTS]);
+/// Network & access → Accounts → Session lifetime.
+pub const SESSION_LIFETIME_AT: SettingPath = SettingPath(&[NETWORK, ACCOUNTS, SESSION_LIFETIME]);
+/// Network & access → Accounts → Keep audit entries.
+pub const AUDIT_KEEP_AT: SettingPath = SettingPath(&[NETWORK, ACCOUNTS, AUDIT_KEEP]);
+/// Network & access → Devices → Device listener.
+pub const DEVICE_LISTENER_AT: SettingPath = SettingPath(&[NETWORK, DEVICES, DEVICE_LISTENER]);
 /// GPU → Admission → Load timeout.
 pub const LOAD_TIMEOUT_AT: SettingPath = SettingPath(&[GPU, ADMISSION, LOAD_TIMEOUT]);
 /// GPU → Admission → Unload timeout.
@@ -204,6 +271,19 @@ pub fn run_args_at(class: &str) -> SettingPath {
 
 /// Every path above, for the dashboard's check that each is a row it has.
 pub const PATHS: &[SettingPath] = &[
+    BIND_ADDRESS_AT,
+    WEBRTC_PORT_AT,
+    WEBRTC_TLS_PORT_AT,
+    TLS_CERT_AT,
+    TLS_KEY_AT,
+    TLS_LISTEN_AT,
+    TLS_HANDSHAKE_TIMEOUT_AT,
+    PUBLIC_URL_AT,
+    TRUSTED_PROXIES_AT,
+    SIGN_IN_ACCOUNTS_AT,
+    SESSION_LIFETIME_AT,
+    AUDIT_KEEP_AT,
+    DEVICE_LISTENER_AT,
     LOAD_TIMEOUT_AT,
     UNLOAD_TIMEOUT_AT,
     QUEUE_TIMEOUT_AT,

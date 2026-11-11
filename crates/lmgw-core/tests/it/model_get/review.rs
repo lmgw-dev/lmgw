@@ -421,24 +421,35 @@ async fn the_status_read_says_how_a_get_stands_and_the_row_it_made() {
 }
 
 /// A row taking the get's name while it downloads: the create settles the
-/// id again (D28), and the status read says the one it got.
+/// id again (D28), and the status read says the one it got. The row is
+/// saved as every routing save is, under the routing-write lock, held from
+/// before the get starts to the snapshot's reload, and only once the
+/// download is over and the get sets up: the closest the create can come.
+/// The create settles the id under the same lock, so it can neither read
+/// the names before the row's insert and commit after it, nor read them
+/// between the insert and the reload (the UNIQUE failure on model_id this
+/// test once met under load, when the create raced its own save).
 #[tokio::test]
 async fn a_name_taken_during_the_download_is_suffixed_at_the_create() {
     let _env = common::process_env_lock().await;
     let w = world(160).await;
-    let cdn = Cdn {
-        delay: Some(Duration::from_secs(5)),
-        ..Cdn::default()
-    };
-    let (_hub, _cdn_server, _cdn) = hub(&[embed_repo()], cdn).await;
+    let (_hub, _cdn_server, _cdn) = hub(&[embed_repo()], Cdn::default()).await;
+    let routing = w.state.routing_write().await;
     let started = get(&w.gw, json!({"repo": EMBED_REPO, "file": EMBED})).await;
     assert_eq!(started.model_id, "demo-embedder");
+    let get_id = started.get_id.unwrap();
+    let gw = w.gw.clone();
+    patience::until_async("the get to set up", || {
+        let gw = gw.clone();
+        async move { status(&gw, get_id).await.stage == Some(ModelGetStage::SettingUp) }
+    })
+    .await;
     embedder().write_to(&w.dir.path().join("aux/x/e.gguf"));
     store::insert_aux_model(&w.state.db, &aux_row("demo-embedder", "x/e.gguf"))
         .await
         .unwrap();
     w.state.reload_snapshot().await.unwrap();
-    let get_id = started.get_id.unwrap();
+    drop(routing);
     let (row, done, error) = ended(&w.state, get_id).await;
     assert_eq!(row.status, "done", "{error:?}");
     let done = done.unwrap();

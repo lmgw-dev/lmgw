@@ -94,7 +94,8 @@ fn an_unreadable_repo_file_is_skipped_and_named() {
         .repos
         .skipped
         .iter()
-        .any(|s| s.path.to_str() == Some(NVIDIA_REPO_PATH)));
+        // As paths: on Windows the repo dir's join writes `\`.
+        .any(|s| s.path == std::path::Path::new(NVIDIA_REPO_PATH)));
     assert_eq!(
         kinds(&m.plan()),
         ["s1_add_repo", "s2_add_key", "s4_install"]

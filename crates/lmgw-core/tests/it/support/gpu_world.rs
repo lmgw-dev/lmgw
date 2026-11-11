@@ -986,10 +986,7 @@ impl Gpu {
     }
 
     pub fn file(&self, name: &str, bytes: u64) {
-        std::fs::File::create(self.dir.path().join(name))
-            .unwrap()
-            .set_len(bytes)
-            .unwrap();
+        super::sparse::create(self.dir.path().join(name), bytes);
         self.world().files.insert(name.into(), bytes);
     }
 
@@ -1113,10 +1110,7 @@ impl Gpu {
     pub async fn audio(&self, id: &str, task: &str, bytes: u64) {
         let root = self.dir.path().join(id);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::File::create(root.join("model.gguf"))
-            .unwrap()
-            .set_len(bytes)
-            .unwrap();
+        super::sparse::create(root.join("model.gguf"), bytes);
         let family = if task == "tts" {
             std::fs::create_dir_all(root.join("embeddings")).unwrap();
             std::fs::write(root.join("embeddings/alba.safetensors"), b"").unwrap();

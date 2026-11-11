@@ -14,7 +14,8 @@ use leptos::task::spawn_local;
 use lmgw_api_types::builds::UpdatesSummary;
 use lmgw_api_types::machine::MachineSummary;
 use lmgw_api_types::{
-    ChatChanged, JobRow, KeysChanged, McpStatus, RequestRow, RuntimeStatus, StatsView, VramStatus,
+    ChatChanged, JobRow, KeysChanged, McpStatus, RequestRow, RuntimeStatus, StatsView,
+    StreamRevoked, VramStatus,
 };
 
 /// The Chat's inbox of what its live updates named (lmgw-chat-ui's): the
@@ -156,7 +157,7 @@ fn open_stream(set: Setters) {
         };
         let subs = [
             "stats", "request", "runtime", "mcp", "jobs", "vram", "updates", "keys", "machine",
-            "chat",
+            "chat", "revoked",
         ]
         .into_iter()
         .filter_map(|name| es.subscribe(name).ok());
@@ -199,6 +200,29 @@ fn open_stream(set: Setters) {
                     Ok(c) => set.chat.post(c),
                     Err(err) => leptos::logging::error!("SSE decode: {err}"),
                 },
+                // The stream's last frame (headless server design D58): the
+                // credential it was opened with ended. This stream ends here
+                // rather than letting the browser reconnect into a 401. The
+                // browser may hold a newer one already (the Keys card's
+                // rotate signs in again at once), so it asks: still signed
+                // in, a fresh stream; else the gate goes up with the reason
+                // on the sign-in card.
+                "revoked" => {
+                    let message = serde_json::from_str::<StreamRevoked>(&text)
+                        .map(|r| r.message)
+                        .unwrap_or_else(|err| {
+                            leptos::logging::error!("SSE decode: {err}");
+                            "this browser's sign-in ended; sign in again".to_string()
+                        });
+                    spawn_local(async move {
+                        if crate::session::still_signed_in().await {
+                            open_stream(set);
+                        } else {
+                            crate::session::revoked(message);
+                        }
+                    });
+                    break;
+                }
                 _ => {}
             }
         }

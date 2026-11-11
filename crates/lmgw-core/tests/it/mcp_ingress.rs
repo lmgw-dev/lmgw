@@ -311,20 +311,24 @@ async fn must_rules_transport() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 403, "cross-origin must be 403");
 
-    // A localhost Origin **on the gateway's own port** is allowed through to
+    // A localhost Origin **on the listener's own port** is allowed through to
     // dispatch (origins §4.2): the port is part of an origin, and
-    // `http://127.0.0.1:9999` is another process on this box. The port here is
-    // `bind_addr`'s default, which is what the guard compares against — this
-    // suite serves on an ephemeral one.
-    let resp = client()
-        .post(format!("{base}/mcp"))
-        .header("accept", "application/json")
-        .header("origin", "http://127.0.0.1:8787")
-        .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
+    // `http://127.0.0.1:9999` is another process on this box. The listener's
+    // port is what a loopback name is compared with (headless server design
+    // D38, each host with its own port): this suite serves on an ephemeral
+    // one, and `bind_addr`'s default (8787) is another server's.
+    let own = base.clone();
+    for (origin, status) in [(own.as_str(), 202), ("http://127.0.0.1:8787", 403)] {
+        let resp = client()
+            .post(format!("{base}/mcp"))
+            .header("accept", "application/json")
+            .header("origin", origin)
+            .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), status, "{origin}");
+    }
 }
 
 #[tokio::test]

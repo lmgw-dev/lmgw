@@ -187,7 +187,14 @@ mod tests {
         let names = |w| {
             let mut v: Vec<String> = row_ggufs(d.path(), d.path(), w, "pocket_tts")
                 .into_iter()
-                .map(|(p, _)| p.strip_prefix(d.path()).unwrap().display().to_string())
+                // Parts joined with `/` on every system.
+                .map(|(p, _)| {
+                    let rel = p.strip_prefix(d.path()).unwrap();
+                    rel.iter()
+                        .map(|c| c.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
                 .collect();
             v.sort();
             v
@@ -216,6 +223,7 @@ mod tests {
     /// served chip, the residency's figure and the speech profile read it,
     /// not the file the `weight_id` names. A family that picks by `weight`
     /// itself is the exception.
+    #[cfg(unix)]
     #[test]
     fn a_model_gguf_is_what_the_directory_loads() {
         let d = tempfile::tempdir().unwrap();

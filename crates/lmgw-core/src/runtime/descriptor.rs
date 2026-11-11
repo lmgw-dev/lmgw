@@ -17,9 +17,9 @@ use serde::Serialize;
 use crate::config::{AudioModel, AudioSettings, AuxModel, ImageModel, LocalModel, Snapshot};
 use crate::sdcpp_caps::SdcppCaps;
 
-use super::argv::{EngineArgs, ImageArgs, LlamaArgs, RenderSpec};
+use super::argv::{AudioArgs, EngineArgs, ImageArgs, LlamaArgs, RenderSpec};
 use super::{
-    audio as audio_cfg, aux as aux_cfg, container_name, image as image_cfg, Class, Placement,
+    audio as audio_cfg, aux_models as aux_cfg, container_name, image as image_cfg, Class, Placement,
 };
 
 /// The binary inside the stable-diffusion.cpp image (§2.5): its `ENTRYPOINT`
@@ -148,6 +148,15 @@ impl ModelRuntime {
             .map_or(Placement::Gpu, |s| Placement::of_backend(&s.backend))
     }
 
+    /// The engine an image container started from this descriptor runs,
+    /// with `build` the native launcher's resolved build, as the figures it
+    /// teaches its row are keyed ([`crate::vram::plan::image::engine_key`])
+    /// — `None` for every other class.
+    pub fn engine_key(&self, build: Option<&str>) -> Option<String> {
+        (self.class == Class::Image)
+            .then(|| crate::vram::plan::image::engine_key(&self.image, &self.extra_run_args, build))
+    }
+
     /// The configuration an audio container started from this descriptor
     /// runs, as the residency it teaches is keyed
     /// ([`crate::vram::residency::resident_key`]) — `None` for every other
@@ -273,8 +282,12 @@ impl ModelRuntime {
                     files: model.files.clone(),
                     args: model.args.clone(),
                     caps: self.sdcpp_caps.clone().unwrap_or_else(SdcppCaps::embedded),
+                    // A start's own: its registry entry's grant, set where
+                    // the start renders (`registry::admission_grant`).
+                    held: None,
                 }),
                 health_path: IMAGE_HEALTH_PATH,
+                fitted: None,
             });
         }
         let (engine, config_mount, health_path) = match (&self.llama, &self.audio) {
@@ -290,7 +303,14 @@ impl ModelRuntime {
                 // llama-server's); `GET /v1/models` is what it does answer —
                 // the same path `catalog::fetch_models` already polls for the
                 // shared router-mode upstream today.
-                (EngineArgs::Audio, Some(dir), "/v1/models")
+                (
+                    EngineArgs::Audio(Box::new(AudioArgs {
+                        settings: settings.clone(),
+                        model: model.clone(),
+                    })),
+                    Some(dir),
+                    "/v1/models",
+                )
             }
             (llama, audio) => unreachable!(
                 "a ModelRuntime must carry exactly one of llama/audio/image (llama={}, \
@@ -317,6 +337,7 @@ impl ModelRuntime {
             entrypoint: None,
             engine,
             health_path,
+            fitted: None,
         })
     }
 }

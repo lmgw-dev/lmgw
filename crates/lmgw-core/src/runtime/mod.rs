@@ -29,6 +29,14 @@
 //! - [`descriptor`]: [`descriptor::ModelRuntime`] — the per-model-vs-class
 //!   override resolution (§3.1, §6) derived from a `Snapshot`, and the bridge
 //!   from that descriptor to [`argv::RenderSpec`].
+//! - [`launcher`]: how a model's process is started, stopped, watched and
+//!   found — the [`launcher::Launcher`] seam between the registry and the
+//!   machine (Windows design §4.1), and [`launcher::Podman`], one container
+//!   per model, behind it.
+//! - [`engine_assets`]: where a native engine comes from on Windows — the
+//!   pinned upstream release builds, the per-engine variant choice from
+//!   their recorded CUDA coverage, download/verify/unpack, the Vulkan
+//!   fallback and the upstream release check (Windows design §4.2).
 //! - [`lifecycle`]: when the registry's verbs run (§3.4, §3.7) — boot
 //!   reconciliation and the legacy sweep, warm starts, the idle reaper,
 //!   graceful shutdown, and the delete/disable/apply hygiene the ops surfaces
@@ -43,10 +51,12 @@
 
 pub mod argv;
 pub mod audio;
-pub mod aux;
+pub mod aux_models;
 pub mod cdi;
 pub mod descriptor;
+pub mod engine_assets;
 pub mod image;
+pub mod launcher;
 pub mod lifecycle;
 mod placement;
 pub mod registry;

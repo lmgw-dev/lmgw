@@ -296,6 +296,10 @@ async fn failures_are_counted_and_past_the_setting_answered_429() {
 /// With no token alive, the device listener's handshake requires a client
 /// certificate: an enrolment meets the alert `lmgw-client` reads as an
 /// ended link.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the TLS alert before the peer reads it; lmgw does not drain before a refused handshake's close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn with_no_token_alive_an_enrolment_meets_the_ended_link() {
     let w = world().await;

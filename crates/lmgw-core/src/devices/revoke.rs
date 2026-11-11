@@ -37,6 +37,11 @@ pub enum RevokeReason {
     /// `notAfter` (device link design D5, §5.1). Never raised as a signal:
     /// each watch wakes at its own certificate's date.
     CertificateExpired,
+    /// The session the connection came in with ended (headless server
+    /// design §5.2): signed out, ended from the Accounts card, a password
+    /// change, the account disabled or deleted, or accounts switched.
+    /// Never raised as a signal: each watch reads the session desk.
+    SessionEnded,
 }
 
 impl RevokeReason {
@@ -48,6 +53,7 @@ impl RevokeReason {
             Self::Deleted => "deleted",
             Self::Expired => "expired",
             Self::CertificateExpired => "certificate_expired",
+            Self::SessionEnded => "session_ended",
         }
     }
 
@@ -66,6 +72,8 @@ impl RevokeReason {
             Self::Expired => RevokeKind::KeyExpired,
             Self::Rotated | Self::Deleted => RevokeKind::KeyUnknown,
             Self::CertificateExpired => RevokeKind::CertificateExpired,
+            // A device never holds a session.
+            Self::SessionEnded => RevokeKind::Revoked,
         }
     }
 
@@ -87,6 +95,7 @@ impl RevokeReason {
             Self::Deleted => format!("{who} was deleted"),
             Self::Expired => format!("{who} expired"),
             Self::CertificateExpired => format!("the certificate of {who} expired — pair it again"),
+            Self::SessionEnded => format!("the session of {who} ended — sign in again"),
         }
     }
 }
@@ -150,6 +159,7 @@ impl Revocations {
             mark,
             fingerprint,
             lapses,
+            seat: Seat::default(),
             rx: self.generation.subscribe(),
         }
     }
@@ -172,7 +182,21 @@ pub struct RevocationWatch {
     /// The client certificate's `notAfter`, for a connection of the device
     /// listener.
     lapses: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session and the cookie the principal came with (headless server
+    /// design §5.2, §5.11).
+    seat: Seat,
     rx: watch::Receiver<u64>,
+}
+
+/// What a watch knows of how its principal signed in.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Seat {
+    /// The session it came in with: the watch ends when the session leaves
+    /// the desk.
+    pub session: Option<i64>,
+    /// An owner key in the session cookie: the watch ends when accounts are
+    /// on, which no longer honour that cookie.
+    pub owner_key_cookie: bool,
 }
 
 /// How long a watch sleeps before it looks at the wall clock again — a
@@ -188,6 +212,12 @@ pub const RECHECK: Duration = Duration::from_secs(30);
 impl RevocationWatch {
     pub fn key_id(&self) -> i64 {
         self.key_id
+    }
+
+    /// The watch with its principal's seat (§5.2).
+    pub fn seated(mut self, seat: Seat) -> Self {
+        self.seat = seat;
+        self
     }
 
     /// Resolves with the first revocation of this key after the mark.
@@ -211,6 +241,22 @@ impl RevocationWatch {
             };
             if !key.enabled {
                 return RevokeReason::Disabled;
+            }
+            // Accounts (headless server design §5.1, §5.11): an owner row
+            // of a disabled or paused account, a session no longer on the
+            // desk, an owner-key cookie once accounts are on.
+            if key.kind == crate::config::ApiKeyKind::Owner
+                && snap.owner_row_blocked(key.account_id).is_some()
+            {
+                return RevokeReason::Disabled;
+            }
+            if self
+                .seat
+                .session
+                .is_some_and(|id| !state.accounts.sessions.alive(id))
+                || (self.seat.owner_key_cookie && snap.accounts_on)
+            {
+                return RevokeReason::SessionEnded;
             }
             // Rotated, whether or not this watch saw the signal: one raised
             // before the mark it was resolved with — a Rotate racing the

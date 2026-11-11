@@ -146,10 +146,12 @@ pub async fn insert_owner_key(
     key_hash: &str,
     key_plain: &str,
     enabled: bool,
+    account: Option<KeyAccount<'_>>,
 ) -> DbResult<Option<i64>> {
     let row = sqlx::query(
-        "INSERT INTO api_keys (name, key_hash, key_plain, enabled, kind, note)
-              VALUES (?1, ?2, ?3, ?4, 'owner', ?5)
+        "INSERT INTO api_keys (name, key_hash, key_plain, enabled, kind, note, account_id,
+                               made_by_login)
+              VALUES (?1, ?2, ?3, ?4, 'owner', ?5, ?6, ?7)
          ON CONFLICT (name) DO NOTHING
          RETURNING id",
     )
@@ -158,6 +160,8 @@ pub async fn insert_owner_key(
     .bind(key_plain)
     .bind(i64::from(enabled))
     .bind(format!("Owner credential '{name}'"))
+    .bind(account.map(|a| a.id))
+    .bind(account.and_then(|a| a.login))
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| r.get("id")))
@@ -166,16 +170,22 @@ pub async fn insert_owner_key(
 /// Create the owner key, or rewrite **both** credential columns of the one
 /// that has that name — which is what rotation is (§3.12): hash and plaintext
 /// in one write, so the two can never disagree.
+///
+/// A new row belongs to `account` (§5.1); a rotated one keeps the account
+/// it had, as it keeps its id: the upsert writes the credential columns
+/// only.
 pub async fn upsert_owner_key(
     pool: &SqlitePool,
     name: &str,
     key_hash: &str,
     key_plain: &str,
     enabled: bool,
+    account: Option<KeyAccount<'_>>,
 ) -> DbResult<i64> {
     let row = sqlx::query(
-        "INSERT INTO api_keys (name, key_hash, key_plain, enabled, kind, note)
-              VALUES (?1, ?2, ?3, ?4, 'owner', ?5)
+        "INSERT INTO api_keys (name, key_hash, key_plain, enabled, kind, note, account_id,
+                               made_by_login)
+              VALUES (?1, ?2, ?3, ?4, 'owner', ?5, ?6, ?7)
          ON CONFLICT (name)
               DO UPDATE SET key_hash = excluded.key_hash,
                             key_plain = excluded.key_plain,
@@ -187,9 +197,30 @@ pub async fn upsert_owner_key(
     .bind(key_plain)
     .bind(i64::from(enabled))
     .bind(format!("Owner credential '{name}'"))
+    .bind(account.map(|a| a.id))
+    .bind(account.and_then(|a| a.login))
     .fetch_one(pool)
     .await?;
     Ok(row.get("id"))
+}
+
+/// The account a key is made for or by (headless server design §5.1):
+/// its id, and the creator's login copied beside it.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyAccount<'a> {
+    pub id: i64,
+    pub login: Option<&'a str>,
+}
+
+/// Attach key `id` to `account` (a client key's creator, §5.1).
+pub async fn set_key_account(pool: &SqlitePool, id: i64, account: KeyAccount<'_>) -> DbResult<()> {
+    sqlx::query("UPDATE api_keys SET account_id = ?2, made_by_login = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(account.id)
+        .bind(account.login)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

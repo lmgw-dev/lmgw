@@ -99,7 +99,12 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 changed up to it, so a stream sends at most one chat frame per 200 ms plus that \
                 read (but for one its keep-alive read finds). \
                 The chat frame on connect is a resync: read everything shown again, since \
-                frames are not replayed across a reconnect. Never closes on its own.",
+                frames are not replayed across a reconnect. It closes when the server stops \
+                (reconnect to the next start) and when the credential it was opened with ends \
+                (a sign-out, a session ended on the Accounts card, a password change, a \
+                disabled or deleted account, accounts turned on or off, a rotated or deleted \
+                key): a last revoked frame says why, and the page signs in again rather than \
+                reconnecting.",
             response: Resp::Sse(&[
                 ("stats", |g| g.root_schema_for::<dto::StatsView>()),
                 ("jobs", |g| g.root_schema_for::<Vec<dto::JobRow>>()),
@@ -117,6 +122,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                     g.root_schema_for::<dto::machine::MachineSummary>()
                 }),
                 ("chat", |g| g.root_schema_for::<dto::ChatChanged>()),
+                ("revoked", |g| g.root_schema_for::<dto::StreamRevoked>()),
             ]),
             ..base("GET", "/api/events", "status", "Open the live event stream")
         },

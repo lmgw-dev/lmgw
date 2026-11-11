@@ -47,7 +47,7 @@ use super::background::{self, GuestClimb};
 use super::{
     broadcast, busy_slots, describe_holders, lifecycle_spec, log_external, ExternalFallback,
     ExternalShortfall, ExternalVerdict, Fill, Gated, Ledger, LocalHold, Target, VramScheduler,
-    Waiter, CONTROL_TIMEOUT, MIB, POLL,
+    Waiter, CONTROL_TIMEOUT, POLL,
 };
 use crate::config::{FallbackRoute, Route, Snapshot};
 use crate::error::GatewayError;
@@ -227,7 +227,7 @@ async fn climb_with(
             match Box::pin(
                 state
                     .vram
-                    .verdict_for(state, &snap, &target, plan.needs, Fill::Verdict),
+                    .verdict_for(state, &snap, &target, plan.real, Fill::Verdict),
             )
             .await
             {
@@ -363,7 +363,7 @@ async fn climb_with(
     if snap.settings.vram.enabled {
         if let Some(cap) = &state.vram.ledger(state, &snap).await.capacity {
             plan.fits_the_card(&target, cap.total)?;
-            joiner = joiner.filter(|j| j.needs <= cap.total);
+            joiner = joiner.filter(|j| j.bytes.saturating_add(j.structural) <= cap.total);
         }
     }
     state.vram.set_needs(queued.id, plan.needs);
@@ -538,9 +538,18 @@ struct Plan {
     slot: u64,
     /// The rung's footprint, sized like any row ([`VramScheduler::footprint_at`]).
     bytes: u64,
-    /// `bytes` plus `vram.headroom_mb`: what admission waits for.
+    /// `bytes` plus the start's headroom: what admission waits for while
+    /// lmgw has anything on the card a wait could free.
     needs: u64,
-    headroom: u64,
+    /// `bytes` plus its margin alone (`VramScheduler::start_margin`): what
+    /// it starts with once nothing of lmgw's is left, and what §4.7's
+    /// verdict asks of the card — the learned growth only decides waiting
+    /// (per-model containers §4, "Learned growth decides waiting").
+    real: u64,
+    /// What it needs beside it on an otherwise empty card
+    /// (`VramScheduler::card_headroom`): whether it fits the card at all
+    /// is judged against this, never against the learned growth.
+    structural: u64,
     gguf: String,
 }
 
@@ -593,12 +602,29 @@ impl Plan {
             }
             _ => 0,
         };
-        let bytes = state
+        let fp = state
             .vram
             .footprint_at(snap, target.class, &target.model_id, charge.as_ref())
-            .await
-            .map_or(0, |f| f.total_bytes);
-        let headroom = snap.settings.vram.headroom_mb.saturating_mul(MIB);
+            .await;
+        let bytes = fp.as_ref().map_or(0, |f| f.total_bytes);
+        let headroom = match &fp {
+            Some(f) => state
+                .vram
+                .start_headroom(snap, target.class, &target.model_id, f),
+            None => state.vram.headroom(snap).bytes,
+        };
+        let structural = match &fp {
+            Some(f) => state
+                .vram
+                .card_headroom(snap, target.class, &target.model_id, f),
+            None => headroom,
+        };
+        let margin = match &fp {
+            Some(f) => state
+                .vram
+                .start_margin(snap, target.class, &target.model_id, f),
+            None => headroom,
+        };
         Some(Self {
             pos,
             slot,
@@ -609,7 +635,8 @@ impl Plan {
             runtime,
             bytes,
             needs: bytes.saturating_add(headroom),
-            headroom,
+            real: bytes.saturating_add(margin),
+            structural,
         })
     }
 
@@ -631,12 +658,12 @@ impl Plan {
     /// A rung that cannot fit on an empty card is refused before anything is
     /// marked (`vram_too_large`): no eviction and no wait can make it fit.
     fn fits_the_card(&self, target: &Target, capacity: u64) -> Result<(), GatewayError> {
-        if self.needs > capacity {
+        if self.bytes.saturating_add(self.structural) > capacity {
             return Err(GatewayError::VramTooLarge {
                 model: self.label(target),
-                need: fmt_bytes(self.bytes),
-                headroom: fmt_bytes(self.headroom),
+                need: GatewayError::vram_need(self.bytes, self.structural),
                 capacity: fmt_bytes(capacity),
+                hint: String::new(),
             });
         }
         Ok(())
@@ -908,7 +935,7 @@ impl VramScheduler {
                 state,
                 target,
                 alias,
-                Some(plan.needs),
+                Some(plan.real),
                 started,
                 budget,
                 &mut fallback,
@@ -972,6 +999,27 @@ impl VramScheduler {
             {
                 continue;
             }
+            // Nothing of lmgw's is left to evict or wait for: the learned
+            // growth is no reason to wait any longer, and a rung that fits
+            // beside what other programs hold now with its margin starts,
+            // warned (per-model containers §4, "Learned growth decides
+            // waiting").
+            if !super::queue::others_hold(&l, target) && free >= plan.real {
+                if let Some(note) = self.growth_let_go(
+                    target,
+                    plan.bytes,
+                    (plan.needs - plan.bytes, plan.real - plan.bytes),
+                    free,
+                ) {
+                    tracing::warn!(
+                        "climbing chat model '{}' to rung {}: {note}",
+                        target.model_id,
+                        plan.rung_text()
+                    );
+                }
+                self.set_stage(waiter_id, "starting the new rung");
+                return Ok(start_climb(state, snap, ticket, plan, false));
+            }
             // Climbs that can only fit on each other's memory never end by
             // waiting (§12 entry 93): this one gives way now.
             if let Some(why) = self.climbs_deadlocked(state, target, &l, plan.needs, running) {
@@ -985,7 +1033,7 @@ impl VramScheduler {
             stage("waiting for a busy model to finish");
             tokio::time::sleep(POLL).await;
             if self
-                .climb_recheck(state, target, plan.needs, alias, &mut fallback)
+                .climb_recheck(state, target, plan.real, alias, &mut fallback)
                 .await
                 .is_some()
             {
@@ -1000,7 +1048,7 @@ impl VramScheduler {
                         state,
                         target,
                         alias,
-                        Some(plan.needs),
+                        Some(plan.real),
                         started,
                         budget,
                         &mut fallback,

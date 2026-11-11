@@ -280,7 +280,7 @@ impl PeakSampler {
 
         // model_id -> the delta that window ended on. Collected under the lock
         // and written outside it: the store is async and this is a `Mutex`.
-        let mut learned: Vec<(String, u64)> = Vec::new();
+        let mut learned: Vec<(String, u64, Option<String>)> = Vec::new();
         let in_flight = image.iter().any(|e| e.in_flight > 0);
         {
             let mut rows = self.rows.lock().unwrap();
@@ -327,8 +327,11 @@ impl PeakSampler {
                     // and only when it saw what the window saw.
                     let delta = w.max_used.saturating_sub(w.baseline.unwrap_or(used));
                     let clean = w.clean && (w.baseline.is_some() || w.shape == shape);
-                    if clean && delta > 0 {
-                        learned.push((e.model_id.clone(), delta));
+                    // A container held to a partial grant draws what its
+                    // grant allows, which says nothing of what the pipeline
+                    // takes when it is not held (`vram::partial`).
+                    if clean && delta > 0 && e.grant.is_none() {
+                        learned.push((e.model_id.clone(), delta, e.engine_key.clone()));
                     } else if !clean {
                         tracing::debug!(
                             "image/{}: the in-flight window is not usable — something else \
@@ -342,8 +345,12 @@ impl PeakSampler {
             }
         }
 
-        for (model_id, delta) in learned {
-            self.store(state, &model_id, delta).await;
+        for (model_id, delta, key) in learned {
+            // Learned under the engine the container runs (migration 0105);
+            // one whose engine is not known teaches nothing.
+            if let Some(key) = key {
+                self.store(state, &model_id, delta, &key).await;
+            }
         }
         if in_flight {
             IN_FLIGHT_INTERVAL
@@ -354,16 +361,24 @@ impl PeakSampler {
 
     /// Raise the stored peak, never lower it, and reload the snapshot the
     /// ledger reads.
-    async fn store(&self, state: &SharedState, model_id: &str, delta: u64) {
+    async fn store(&self, state: &SharedState, model_id: &str, delta: u64, key: &str) {
         let snap = state.snapshot();
         let Some(row) = snap.image_models.iter().find(|m| m.model_id == model_id) else {
             return;
         };
-        if row.peak_extra_bytes.is_some_and(|stored| stored >= delta) {
+        let previous = super::plan::image::learned_for(row, key).peak;
+        if previous.is_some_and(|stored| stored >= delta) {
             return;
         }
-        let previous = row.peak_extra_bytes;
-        if let Err(e) = crate::store::set_image_model_peak(&state.db, row.id, Some(delta)).await {
+        if let Err(e) = crate::store::set_image_model_learned(
+            &state.db,
+            row.id,
+            key,
+            crate::store::LearnedFigure::Peak,
+            Some(delta),
+        )
+        .await
+        {
             tracing::warn!("could not record the learned peak of image/{model_id}: {e}");
             return;
         }

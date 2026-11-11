@@ -1274,6 +1274,7 @@ async fn cancel_works_on_a_paused_download() {
 /// header, not their name, sized as the file a symlink points at. A chat
 /// model named like a 16-bit projector is passed over, and a symlinked
 /// projector is as large as its target.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_capabilities_note_names_the_projector_the_plans_take() {
     let dir = tempfile::tempdir().unwrap();

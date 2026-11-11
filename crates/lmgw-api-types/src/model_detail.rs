@@ -125,6 +125,12 @@ pub struct ImageModelDetail {
     pub peak: String,
     pub command_line: String,
     pub problems: Vec<String>,
+    /// What this card says about the row: a pipeline that can run with less
+    /// on the card and would not fit on it whole starts all the same, and
+    /// says so ("It will work but only fits partially on the GPU, expect
+    /// slowdowns: …", VRAM admission). Empty when there is nothing to say.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// An audio.cpp model read back.

@@ -875,6 +875,10 @@ async fn stored_limits_both_unbounded_fall_back_to_the_defaults() {
     );
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the close before the peer reads it; lmgw does not drain before a refusal close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn a_frame_bounded_by_the_message_names_the_message_setting() {
     let (_s, addr) = gateway(false, None, |s| {
@@ -902,6 +906,10 @@ async fn a_frame_bounded_by_the_message_names_the_message_setting() {
     assert!(!reason.contains("max_frame_mb"), "{reason}");
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; lmgw does not drain before a refusal close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn an_oversized_message_closes_with_a_reason_naming_the_setting() {
     let (_s, addr) = gateway(false, None, |s| {

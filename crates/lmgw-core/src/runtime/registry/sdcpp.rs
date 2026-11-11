@@ -22,6 +22,20 @@ impl Registry {
         if spec.runtime.class != Class::Image {
             return (None, Vec::new());
         }
+        if !self.launcher.runs_containers() {
+            // The vocabulary is read from the image, and a native engine has
+            // none: no read of the native executable's own `--help` is built
+            // yet (Windows design §4.1, WP4's engine pins).
+            return (
+                None,
+                vec![
+                    "sd-server's flag vocabulary is read from its container image, and this lmgw \
+                     starts sd-server as a native process, which has no image to read it from: \
+                     the argv was spelled against the sd-server build lmgw ships with"
+                        .to_string(),
+                ],
+            );
+        }
         match self
             .sdcpp_caps(
                 spec.container_prefix,
@@ -75,6 +89,9 @@ impl Registry {
         image: &str,
         extra_run_args: &[String],
     ) -> Result<Arc<SdcppCaps>, String> {
+        if !self.launcher.runs_containers() {
+            return Err(super::podman_ops::NATIVE_HELP.to_string());
+        }
         let facts = self.image_facts(image).await;
         if let Ok(f) = &facts {
             if let Some(hit) = self

@@ -32,8 +32,9 @@
 //! Everything else llama.cpp allocates — the CUDA context (~450 MiB per
 //! container as measured), allocator slack, a projector's own compute
 //! buffer — has no metadata to derive it from. It is not folded in here as a
-//! multiplier; it is the `headroom_mb` setting, one visible number the owner
-//! can raise when a load still OOMs, and the total leaves it out.
+//! multiplier; it is the headroom's job — the fixed `headroom_mb`, or in
+//! auto mode a margin per class while a model starts (`vram::headroom`) —
+//! and the total leaves it out.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,8 +46,9 @@ use crate::config::{AudioModel, ImageModel};
 use crate::gguf::{self, ModelSummary};
 use crate::runtime::argv::flag_value;
 
-pub(crate) mod aux;
+pub(crate) mod aux_models;
 pub(crate) mod chat;
+pub(crate) mod image;
 pub(crate) mod split;
 
 /// One model's GPU footprint.
@@ -66,6 +68,20 @@ pub struct Footprint {
     pub ctx_tokens: Option<u64>,
     /// Why a term is missing or approximate, when it is. Surfaced verbatim.
     pub note: Option<String>,
+    /// Set for an image pipeline that can run with less than all of it on
+    /// the card ([`image`]): what it needs there when the whole — still
+    /// `total_bytes`, and what admission charges wherever it fits — does not
+    /// fit ([`crate::vram::partial`]). `None` for every other model, and for
+    /// a pipeline that pins its weights on the card.
+    #[serde(skip)]
+    pub partial: Option<image::PartialFit>,
+    /// Set for a chat row llama.cpp's `--fit` would shrink (an unset
+    /// context, `--n-gpu-layers` on auto): how far it can go
+    /// ([`chat::fit`]), which admission fits to the card instead
+    /// ([`crate::vram::partial::llama`]). `total_bytes` is then what the
+    /// placement admission fitted it to puts on the card.
+    #[serde(skip)]
+    pub llama: Option<chat::fit::LlamaFit>,
 }
 
 impl From<Footprint> for lmgw_api_types::RungFootprint {
@@ -79,6 +95,8 @@ impl From<Footprint> for lmgw_api_types::RungFootprint {
             total_bytes,
             ctx_tokens,
             note,
+            partial: _,
+            llama: _,
         } = f;
         Self {
             weights_bytes,
@@ -100,6 +118,8 @@ impl Footprint {
             total_bytes: weights.saturating_add(kv),
             ctx_tokens: ctx,
             note,
+            partial: None,
+            llama: None,
         }
     }
 
@@ -423,7 +443,17 @@ impl PlanCache {
     /// memoized as one, while the peak is a measurement of a *running*
     /// pipeline that the row carries and the ledger charges. The note below
     /// says which of the two the row currently has.
-    pub async fn image(&self, models_dir: &str, m: &ImageModel) -> Footprint {
+    ///
+    /// A row that can run with less than all of it on the card
+    /// (`offload_to_cpu`, a `params_backend` of `cpu`/`disk`, sd.cpp's
+    /// auto-fit) carries what it needs there when the whole does not fit
+    /// beside it ([`image`]).
+    pub async fn image(
+        &self,
+        models_dir: &str,
+        m: &ImageModel,
+        learned: image::Learned,
+    ) -> Footprint {
         let files: Vec<(String, String)> = m
             .files
             .iter()
@@ -445,35 +475,28 @@ impl PlanCache {
         // file set with and without a measured peak are two different things
         // to say, and a memo that outlived the measurement would go on saying
         // "not learned yet" for the rest of the process.
+        let how = image::placement(&m.args).ok();
+        let own_budget = crate::vram::partial::own_budget(&m.args);
         let key = format!(
-            "image|{models_dir}|{}|{}|{}",
+            "image|{models_dir}|{}|{}|{}|{how:?}|{:?}|{:?}|{own_budget:?}",
             files
                 .iter()
                 .map(|(k, p)| format!("{k}={p}"))
                 .collect::<Vec<_>>()
                 .join(","),
             unusable.join(","),
-            m.peak_extra_bytes
+            learned
+                .peak
                 .map(|b| b.to_string())
-                .unwrap_or_else(|| "unlearned".into())
+                .unwrap_or_else(|| "unlearned".into()),
+            learned.idle,
+            learned.work
         );
         let dir = models_dir.to_string();
-        let peak = m.peak_extra_bytes;
+        let peak = learned.peak;
         self.get_or_insert(key, move || {
-            let mut weights = 0u64;
-            let mut missing: Vec<String> = Vec::new();
-            for (key, rel) in &files {
-                let path = crate::runtime::image::file_target(&dir, rel);
-                let size = if crate::runtime::image::is_dir_key(key) {
-                    dir_size(&path)
-                } else {
-                    file_size(&path)
-                };
-                if size == 0 && !path.exists() {
-                    missing.push(format!("{key} '{rel}'"));
-                }
-                weights = weights.saturating_add(size);
-            }
+            let (parts, missing) = image::read(&dir, &files);
+            let weights = parts.iter().fold(0u64, |s, p| s.saturating_add(p.bytes));
             let mut note = String::from(
                 "the on-disk size of the files this pipeline loads: --offload-to-cpu \
                  and --params-backend make it an upper bound for the idle figure, \
@@ -509,7 +532,12 @@ impl PlanCache {
                     unusable.join(", ")
                 ));
             }
-            Footprint::new(weights, 0, None, Some(note))
+            // A row that can run with less carries what it needs on the card
+            // when the whole does not fit (`image`'s module doc).
+            match how {
+                Some(how) => image::adapting(&parts, how, learned, own_budget, note),
+                None => Footprint::new(weights, 0, None, Some(note)),
+            }
         })
         .await
     }
@@ -550,6 +578,9 @@ mod tests {
             capabilities_override: None,
             peak_extra_bytes: None,
             peak_learned_at: None,
+            idle_bytes: None,
+            work_bytes: None,
+            learned_key: None,
             prompt_style: None,
             preview_mode: None,
         };
@@ -563,6 +594,7 @@ mod tests {
                     "vae": "z/ae.safetensors",
                     "lora_model_dir": "loras"
                 })),
+                image::Learned::default(),
             )
             .await;
         assert_eq!(fp.weights_bytes, 4096 + 1024 + 512);
@@ -584,6 +616,7 @@ mod tests {
                     "diffusion_model": "z/diffusion.gguf",
                     "llm": "encoders/qwen3-4b.gguf"
                 })),
+                image::Learned::default(),
             )
             .await;
         assert_eq!(missing.weights_bytes, 4096, "the absent file is charged 0");
@@ -605,6 +638,7 @@ mod tests {
                     "vae": "",
                     "clip_l": true
                 })),
+                image::Learned::default(),
             )
             .await;
         assert_eq!(odd.weights_bytes, 4096);
@@ -638,7 +672,7 @@ mod tests {
         crate::gguf::synth::embedding("qwen3", 3, 32768).write_to(&dir.path().join(rel));
         let models_dir = dir.path().display().to_string();
         // Run args that pass no GPU: `--n-gpu-layers 0` then leaves nothing
-        // on the card (`aux::Placement::HostNoDevice`).
+        // on the card (`aux_models::Placement::HostNoDevice`).
         let class = crate::config::RouterSettings {
             models_dir: models_dir.clone(),
             extra_run_args: vec!["--security-opt".into(), "label=disable".into()],

@@ -167,7 +167,7 @@ Checked against the `feat/api-docs` branch. Each finding says what this design d
 | `src/openapi/headers.rs` | `LMGW_HEADERS` (§4.9), `headers_block()` for `/v1/models` |
 | `src/openapi/endpoints.rs` | `lmgw_endpoints()` for `/v1/models` (§4.11) |
 | `src/openapi/planes/{mod.rs, inference.rs, dashboard.rs, usage.rs, docs.rs, agents.rs, session.rs}` | route lists per plane, each `pub(crate) fn routes() -> Vec<DocRoute>`. *(Owner decision, 2026-09-28: `labs.rs` — Chat, Audio lab, Image lab — was deleted; those rows moved to `exclusions.rs` instead, see §4.2.)* |
-| `src/openapi/v1/{mod.rs, chat.rs, responses.rs, anthropic.rs, aux.rs, media.rs, models.rs, errors.rs, mcp.rs}` | hand-written `/v1` schemas and examples (§4.8) |
+| `src/openapi/v1/{mod.rs, chat.rs, responses.rs, anthropic.rs, aux_models.rs, media.rs, models.rs, errors.rs, mcp.rs}` | hand-written `/v1` schemas and examples (§4.8) |
 | `src/openapi/ops/{mod.rs, table.rs, args.rs, merge.rs, divergence.rs}` | op table (74 entries), hand-written argument schemas, struct + catalog merge, `pub const DIVERGENCES` |
 | `src/web/op_names.rs` | `pub const MAIN_OPS`, `AGENT_OPS`, `KEY_OPS`, `SETTINGS_OPS`; `pub fn all()`, `pub fn is_op()` (§4.7) |
 | `src/proxy/count.rs` | moved from `legacy.rs:415–540` (`handle_count_tokens`, `count_tokens_inner`, `count_tokens_route`, renamed `count_text_route`), plus `Count`, `Approx`, `approx_header` (§5.1) |

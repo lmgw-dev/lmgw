@@ -669,7 +669,8 @@ async fn execute_unerased(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, Str
     // would file their rows under Admin Chat and /v1/responses.
     let mut exec = SplitExecutor::new(
         SelfAdminExecutor::new(state.clone(), run_caller(state, input.started_by))
-            .with_proto(AGENT_TOOL_PROTO),
+            .with_proto(AGENT_TOOL_PROTO)
+            .audited_as(crate::audit::Via::Agent),
         DocsExecutor::new(state.clone(), RequestCtx::default())
             .with_client(format!("agent {}", agent.manifest.id))
             .with_proto(AGENT_TOOL_PROTO),
@@ -736,6 +737,8 @@ fn run_caller(state: &SharedState, started_by: Option<i64>) -> RequestCtx {
             kind: crate::config::ApiKeyKind::Device,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         });
     let client_key = match &principal {
         crate::principal::Principal::Key { name, .. } => Some(name.clone()),

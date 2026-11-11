@@ -632,6 +632,8 @@ async fn the_rung_plan_reports_the_trained_context_the_slot_is_capped_at() {
             mmproj_path: None,
             draft_gguf_path: None,
             n_gpu_layers: None,
+            n_cpu_moe: None,
+            moe_cache_mib: None,
         },
     )
     .await

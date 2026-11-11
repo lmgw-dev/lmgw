@@ -67,7 +67,9 @@ seconds = sum(int(n) * unit[u] for n, u in re.findall(r"(\d+)(ms|s|m|h)", period
 print(f"{seconds * setting['terminate-after']:g}s" if "terminate-after" in setting else 0)
 PY
   )
-  bin=$(cargo nextest list -p lmgw-core --test it --message-format json 2>/dev/null |
+  # The gate's selection (--workspace): `-p lmgw-core` resolves some
+  # dependencies' features differently and builds the binary cold.
+  bin=$(cargo nextest list --workspace --message-format json 2>/dev/null |
     python3 -c "import json,sys; print(json.load(sys.stdin)['rust-suites']['lmgw-core::it']['binary-path'])")
   frozen="$out/it-$$"
   # The copies run in the background, where a non-interactive shell's Ctrl-C

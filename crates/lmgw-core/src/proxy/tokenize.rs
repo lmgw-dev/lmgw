@@ -134,7 +134,7 @@ async fn tokenize(
     }
 
     let timeout = route.upstream.request_timeout();
-    let sent = crate::vram::send_local(hold.as_ref(), &route, None, |r| {
+    let sent = crate::vram::send_local_count(hold.as_ref(), &route, None, |r| {
         let mut forwarded = body.clone();
         forwarded["model"] = json!(r.upstream_model);
         Ok(with_timeout(

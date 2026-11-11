@@ -17,7 +17,7 @@
 
 use crate::config::{AuxModel, RouterSettings};
 use crate::runtime::argv::flag_value;
-use crate::runtime::aux::{self as aux_rt, LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{self as aux_rt, LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 use crate::vram::compute::{self, Ask, Weights};
 
 use super::{cache_bits, cpu_only, cpu_only_args, kv_footprint, Footprint, GgufFiles, PlanCache};

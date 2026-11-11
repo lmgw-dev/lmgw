@@ -10,6 +10,7 @@
 
 mod api;
 mod blame;
+mod container;
 mod download;
 pub mod driver_states;
 mod fixed;
@@ -17,4 +18,6 @@ mod machines;
 mod settings_fit;
 mod spec_writes;
 mod verdicts;
+// Sets a directory's mode.
+#[cfg(unix)]
 mod words;

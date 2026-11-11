@@ -227,6 +227,9 @@ async fn the_agent_set_tool_answers_the_report_with_the_next_step_that_follows_f
     );
 }
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_agent_install_tool_answers_where_the_manifest_came_from_and_names_the_agent() {
     let podman = Podman::default()

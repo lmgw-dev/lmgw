@@ -111,6 +111,14 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 # `quick-xml` reads their XML, spreadsheets included (own sparse readers).
 quick-xml = "0.41"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# eSpeak NG's only Windows release asset is an MSI (Windows design §4.2): `msi`
+# reads its tables and streams (its cabinet is read by
+# `runtime::engine_assets::cab`), so lmgw unpacks it without msiexec, which a
+# non-administrator's network logon cannot reach (error 1601).
+msi = "0.11.1"
+# The cabinet's MSZIP blocks are raw deflate (`runtime::engine_assets::cab`).
+# Already in the lock through zip.
+flate2 = "1.1.9"
 # GPU memory telemetry for VRAM admission control (quickdoc §9b). Loads
 # `libnvidia-ml.so` at *runtime* (libloading), so a build and a test run on a
 # machine with no NVIDIA driver link and start fine — a missing library is an
@@ -125,6 +133,11 @@ rand = "0.10.1"
 # design §6.3, §13): a 400-point f64 real FFT per 10 ms hop. Pure Rust (pulls
 # in rustfft 6).
 realfft = "3"
+# A chat row's `--override-tensor` patterns are ECMAScript regexes to
+# llama.cpp (`std::regex`); this one reads their lookaheads and
+# backreferences too (`vram/plan/chat/offload.rs`). Already in the build at
+# this version through tiktoken-rs.
+fancy-regex = "0.17"
 # The container-builds verify step reads its verdict out of probe output with
 # per-engine patterns (container-builds design §14.3). Already in the lock at
 # this version through tiktoken-rs and wiremock.
@@ -184,7 +197,11 @@ secret-service = { version = "5.2", features = ["rt-tokio-crypto-rust"] }
 # The device listener's server configurations, built with each leaf (device
 # link design §2.2, §4.2): TLS 1.3, `WebPkiClientVerifier` over the device
 # CA, no resumption. The rustls reqwest already builds, aws-lc-rs provider.
-rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
+# `tls12` declared here, not left to another crate unifying it in: the main
+# TLS listener speaks TLS 1.2 beside 1.3 for clients whose TLS stack
+# predates 1.3 (headless server design D7). The device listener stays 1.3
+# only.
+rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 # `gzip`: Hugging Face's listings come compressed, a whole page of a search
 # about a quarter of its size (find-a-model design D141). The feature is
 # process-wide: only `AppState::hub_http` uses it, every other client of the
@@ -214,6 +231,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 # detour through one alphabetizes a manifest's config-form fields (agents §2.6).
 serde_json = { version = "1.0.150", features = ["raw_value"] }
 sha2 = "0.11.0"
+# Account passwords (headless server design D12, §5.2): argon2id with RFC
+# 9106's second recommended parameter set, PHC strings. RustCrypto's crate;
+# without its `parallel` feature it computes the four lanes one after another
+# (§5.10 measures that).
+argon2 = "0.6.0"
 shlex = "1.3.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "json", "chrono", "macros"] }
 # Corpus export/import stages the file outside the live DB (quickdoc §10), so a
@@ -252,6 +274,47 @@ caseless = "0.2.2"
 # No dependencies of its own; already in the lock through insta, which
 # builds it for the tests.
 similar = { version = "2.7.0", default-features = false }
+
+# The native launcher's job object (Windows design §4.1): every engine
+# process lmgw starts on Windows is in one job with
+# JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, so none outlives lmgw. std has no job
+# objects; this is the version already in the lock through tokio and Tauri.
+# VRAM on Windows (§4.3) adds the D3DKMT statistics (Wdk_Graphics_Direct3D),
+# the Toolhelp process snapshot, and GetSystemDirectoryW and LoadLibraryExW
+# for nvml.dll's path and its imports' search.
+#
+# Private files (Windows design §4.4, WP6): lmgw-private holds what "private"
+# means there (owner SID, DACL, creates that follow no link), for the device
+# CA, lmgw's CDI spec dir and the main TLS key's readers.
+#
+# The data dirs (`state::data_dirs`): Windows' roaming and local
+# application-data known folders, through the `dirs` Tauri already locks.
+[target.'cfg(windows)'.dependencies]
+dirs = "6.0.0"
+lmgw-private = { path = "../lmgw-private" }
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Graphics_Direct3D",
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+# A stand-in for llama-server that the native launcher's tests start
+# (tests/it/runtime_launcher_native.rs, through CARGO_BIN_EXE_lmgw-fake-engine):
+# std only, never packaged.
+[[bin]]
+name = "lmgw-fake-engine"
+path = "fake-engine/main.rs"
+test = false
+doc = false
+bench = false
 
 [features]
 # The vendored libopus 1.6.1, built with cmake and linked statically, for a
@@ -304,3 +367,9 @@ tokio-tungstenite = "0.29.0"
 # A feature of the tokio already built, nothing new.
 tokio = { version = "1.52.3", features = ["test-util"] }
 wiremock = "0.6.5"
+
+# The test fixtures' model files on Windows (tests/it/support/sparse.rs):
+# FSCTL_SET_SPARSE through DeviceIoControl, so a file of gigabytes is metadata
+# on NTFS as it is on Linux. The windows-sys of the dependencies above.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_IO", "Win32_System_Ioctl"] }

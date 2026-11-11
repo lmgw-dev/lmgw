@@ -246,6 +246,8 @@ impl Serving {
         let conn = Conn {
             via: Via::Devices,
             peer,
+            proxy: None,
+            forwarded_scheme: None,
             local,
             device,
             socket,

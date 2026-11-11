@@ -11,7 +11,7 @@ hello" opens a chat with it. WP1 (the hub reads, the projector rule and resumabl
 WP2 (one plan input, the fit and the pick), WP3 (the file list's marks and its recommended
 file), WP4 (search by name), WP5 (Get it, server-side) and WP6 (the finder in the dashboard) are
 built (2026-11-04); nothing after them is yet. "Decisions" separates the owner's rulings from this
-draft's own calls. D7, D18 and D26 were ruled on 2026-11-04. "Not yet" lists what this version leaves out, and nothing there is
+record's own calls. D7, D18 and D26 were ruled on 2026-11-04. "Not yet" lists what this version leaves out, and nothing there is
 ruled out.
 
 Companion records, cited by short name:
@@ -59,12 +59,11 @@ then do; a configured fallback always applies; the `/v1` routes stay true to the
 model licences are shown, never used as a filter or to rank lower; local LLMs are llama.cpp only;
 a download never starts a model (2026-10-13); fake data in examples looks fake.
 
-*Draft calls (this record's own). D1 to D39 are this design's first pass,
+*Design calls (this record's own). D1 to D39 are this design's first pass,
 and D120 and up are the review round's (D1 to D39 has no free number left). Each work package of
 §11 owns a range for the calls made while building it: WP1 D40–D49 (its review round D128–D135),
 WP2 D50–D59 (and D136–D140), WP3 D60–D69, WP4 D70–D79 (its review round D141–D142), WP5 D80–D89, WP6 D90–D99 (its review round D143–D146), WP7 D100–D109 (its review round D147), WP8 D110–D119, the owner's rulings of 2026-11-04 D148–D149, binary byte units D160–D164. D7, D18 and D26 were put to the
-owner on 2026-11-03 and ruled on 2026-11-04 (each below says how). D175 to D179 are not
-draft calls: they are the owner's rulings of 2026-11-04, recorded as ruled.*
+owner on 2026-11-03 and ruled on 2026-11-04 (each below says how). D175 to D179 are not design calls: they are the owner's rulings of 2026-11-04, recorded as ruled.*
 
 *The owner's rulings of 2026-11-04 (each entry it touches says "ruled
 2026-11-04"):*
@@ -2658,8 +2657,13 @@ land in sequence, WP3 then WP4 then WP5, each rebased on the one before. No WP e
   computer with no usable graphics card. The card says "no graphics card lmgw can use" for now.
 - MoE expert offload to the CPU in the fit: a mixture-of-experts model whose experts could live in
   the computer's memory while the rest is on the card (llama.cpp's `--n-cpu-moe`), such as
-  Qwen3.6-35B-A3B on an 8 GB card, which §4.4 answers `NothingFits` today. The fit counts every
-  weight on the card for now.
+  Qwen3.6-35B-A3B on an 8 GB card, which §4.4 answers `NothingFits` today. Since 2026-11-09
+  admission and the footprint count a row's `n_cpu_moe` field, `--n-cpu-moe`, `--cpu-moe` and
+  `--override-tensor` patterns to the CPU, matched against every part's tensors, with the
+  op-offload copy in the compute buffer and the `moe_cache_mib` / `--moe-cache-mib` expert cache (decision-models design, Appendix C.2, "Tensors kept in
+  host memory"). No plan path sets `n_cpu_moe` yet, so choosing N is not yet done anywhere: the
+  plan, `hf_repo fit` and `model_find` don't pick an `n_cpu_moe` for a model that doesn't fit,
+  and their fit counts every weight on the card for now.
 - Taking an untied output head from a split file's later part (D3): WP2 reads those headers for
   the count and the width (D54), and the output head is still `token_embd.weight`'s; the plan's
   footprint, as admission's, still charges `token_embd.weight` to the card when the untied head is

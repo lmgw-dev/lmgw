@@ -27,6 +27,7 @@ impl Registry {
                 state: RuntimeState::Ready,
                 started_at: now,
                 in_flight,
+                claims: u64::from(in_flight),
                 last_used: now,
                 stop_timeout: Duration::from_secs(5),
                 phase: Arc::new(tx),
@@ -40,6 +41,11 @@ impl Registry {
                 sends: watch::channel(0).0,
                 climb: None,
                 owner: Origin::Owner,
+                grant: None,
+                admission_note: None,
+                served: false,
+                adopted: false,
+                engine_key: None,
             },
         );
         generation

@@ -18,4 +18,17 @@ pub struct SessionView {
     /// The name of the API key in use (`owner:dashboard` for the dashboard's
     /// own), empty when nobody is signed in.
     pub name: String,
+    /// Accounts are on (headless server design D25): the sign-in card asks
+    /// for a sign-in name and a password. Said to a browser with no session
+    /// too, since it is the card's question.
+    pub accounts_on: bool,
+    /// The server image (container mode, headless server design D2): the
+    /// sign-in card names `lmgw-server login-link` there and the desktop's
+    /// login line elsewhere. Said to a browser with no session too, as
+    /// `accounts_on` is.
+    pub container: bool,
+    /// The session's account (§5.2), while the cookie carries a session.
+    pub account: Option<crate::SessionAccount>,
+    /// The session's expiry (RFC 3339 UTC), while it carries one.
+    pub expires_at: Option<String>,
 }

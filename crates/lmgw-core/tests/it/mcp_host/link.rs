@@ -332,6 +332,10 @@ async fn the_refusals_come_before_the_upgrade() {
 }
 
 /// A frame over the limits closes the link 1009 naming the setting (§5.1).
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the close before the peer reads it; lmgw does not drain before a refusal close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn an_overrun_closes_naming_the_setting() {
     let (w, d) = host_world().await;

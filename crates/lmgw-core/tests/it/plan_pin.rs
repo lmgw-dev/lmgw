@@ -203,15 +203,30 @@ fn recording() -> bool {
     std::env::var_os("LMGW_PLAN_PIN_RECORD").is_some()
 }
 
+/// Every string in `v` with the fixture dir `dir` read as `<dir>`; on
+/// Windows such a path's `\` read as `/`, as the fixtures write it.
+fn scrub(v: &mut Value, dir: &str) {
+    match v {
+        Value::String(s) if s.contains(dir) => {
+            let mut t = s.replace(dir, "<dir>");
+            if cfg!(windows) {
+                t = t.replace('\\', "/");
+            }
+            *s = t;
+        }
+        Value::Array(a) => a.iter_mut().for_each(|v| scrub(v, dir)),
+        Value::Object(o) => o.values_mut().for_each(|v| scrub(v, dir)),
+        _ => {}
+    }
+}
+
 /// `plan` against the fixture `name`: every key the answer had before the
 /// move compared whole, and only `source` and `fit` new. The fixture's
 /// temporary dir `dir` reads as `<dir>`.
 fn pinned(name: &str, plan: &Value, dir: &tempfile::TempDir) {
     let path = fixture_path(name);
-    let text = plan
-        .to_string()
-        .replace(&dir.path().display().to_string(), "<dir>");
-    let plan: Value = serde_json::from_str(&text).unwrap();
+    let mut plan = plan.clone();
+    scrub(&mut plan, &dir.path().display().to_string());
     let mut today = plan.as_object().unwrap().clone();
     // The CPU's rationale names this machine's cores, which the fixture
     // can't: it is compared up to them.
@@ -288,7 +303,7 @@ async fn an_aux_plan_with_its_projector_is_todays() {
             .contains("largest ctx_size that fits"),
         "{plan}"
     );
-    pinned("aux", &plan, &dir);
+    pinned("aux_models", &plan, &dir);
 }
 
 /// Without a card to measure against, the plan carries no fit warning, as

@@ -307,7 +307,7 @@ impl AuxModel {
             };
             let slot = tok
                 .starts_with('-')
-                .then(|| Slot::of(canonical_key(tok.trim_start_matches('-'))))
+                .then(|| Slot::of(&canonical_key(tok.trim_start_matches('-'))))
                 .flatten();
             let Some(slot) = slot else {
                 kept.push(raw.clone());

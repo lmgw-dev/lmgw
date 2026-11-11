@@ -301,6 +301,17 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
             send it this way. Inert on every other route.",
     },
     LmgwHeader {
+        name: "x-lmgw-client",
+        direction: Direction::Request,
+        audience: Audience::Owner,
+        scope: Scope::None,
+        schema: HeaderSchema::Text,
+        description: "The program behind an /api request, as it says itself: lmgw-server's \
+            command line sends cli on the calls it makes through the running gateway \
+            (headless server design §5.7). A claim, never a credential; nothing is refused \
+            or granted by it: the audit log records the call's way in as cli (§5.8).",
+    },
+    LmgwHeader {
         name: "x-lmgw-face",
         direction: Direction::Request,
         audience: Audience::Internal,

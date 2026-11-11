@@ -62,6 +62,7 @@ mod tests;
 pub(crate) use bridge::in_app;
 pub use state::provide_machine_state;
 pub(crate) use state::{use_machine_state, MachineState};
+pub(crate) use surfaces::card_heading;
 pub use surfaces::{chat_slot, MachineCard, MachineInCard};
 
 use items::{DetailFold, ItemRow, Mark, MarkView};

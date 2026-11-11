@@ -243,6 +243,14 @@ fn op_names_match_the_dispatcher_arms() {
         set(op_names::KEY_OPS),
         "web/api_settings.rs's key_op() and web::op_names::KEY_OPS have drifted"
     );
+
+    let accounts_rs = std::fs::read_to_string(src.join("web/accounts.rs")).unwrap();
+    let account_found = dispatched(function_body(&accounts_rs, "fn account_op("));
+    assert_eq!(
+        account_found,
+        set(op_names::ACCOUNT_OPS),
+        "web/accounts.rs's account_op() and web::op_names::ACCOUNT_OPS have drifted"
+    );
 }
 
 /// The gate answers before any dispatcher does (§4.7). Every name a
@@ -356,7 +364,11 @@ fn every_listed_op_is_documented_and_vice_versa() {
         documented, listed,
         "the doc's x-lmgw-op set and web::op_names::all() have drifted"
     );
-    assert_eq!(listed.len(), 96, "web::op_names::all() should name 96 ops");
+    assert_eq!(
+        listed.len(),
+        110,
+        "web::op_names::all() should name 110 ops"
+    );
 }
 
 /// The property *names* a JSON Schema object declares (`properties`'s keys) —
@@ -549,6 +561,11 @@ fn reveals_secret_and_writes_flags_are_pinned() {
         revealing,
         BTreeSet::from(
             [
+                // Accounts (headless server design §5.5, §5.6): links that
+                // sign in or set a password.
+                "account_create",
+                "account_login_link",
+                "account_password_link",
                 "agent_token_get",
                 "agent_token_rotate",
                 "device_token",

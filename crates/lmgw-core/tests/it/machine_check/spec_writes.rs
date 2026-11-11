@@ -102,6 +102,7 @@ async fn a_write_that_ran_out_of_time_is_the_cards_and_needs_a_restart() {
 
 /// A folder of lmgw's that others may write into: its own cause and plain
 /// sentence, the folder in the detail, and no plan of root steps.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_folder_that_is_not_private_is_its_own_cause_without_a_plan() {
     use std::os::unix::fs::PermissionsExt;

@@ -913,7 +913,10 @@ async fn key_last_used(pool: &SqlitePool, key_id: i64) -> Result<Option<String>,
 /// `"0000-01-01T00"` sentinel `from`.
 const FAR_FUTURE_HOUR_KEY: &str = "9999-12-31T23";
 
-async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
+async fn keys_inner(
+    st: &SharedState,
+    caller_account: Option<i64>,
+) -> Result<dto::KeysResponse, String> {
     let snap = st.snapshot();
     let now = Utc::now();
     // Every device's pairing token, for its pairing (device link design
@@ -999,6 +1002,14 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
             open_links: open_links(st, k.id),
             pairing: device.then(|| crate::devices::pairing_view(k, tokens.get(&k.id), now)),
             app_id: k.link.app_id.clone().filter(|_| device),
+            made_by: crate::accounts::ops::made_by(&snap, k),
+            paused: crate::accounts::ops::paused(&snap, k),
+            door_of: snap
+                .accounts
+                .iter()
+                .find(|a| a.door_key_id == k.id)
+                .map(|a| a.login.clone()),
+            yours: caller_account.is_some() && k.account_id == caller_account,
         });
     }
 
@@ -1029,8 +1040,12 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
     })
 }
 
-pub async fn keys(State(st): State<SharedState>) -> Response {
-    ops_result(keys_inner(&st).await.and_then(ok_value))
+pub async fn keys(
+    State(st): State<SharedState>,
+    ctx: Option<axum::Extension<crate::proxy::RequestCtx>>,
+) -> Response {
+    let caller = ctx.and_then(|axum::Extension(c)| c.principal.account());
+    ops_result(keys_inner(&st, caller).await.and_then(ok_value))
 }
 
 // ---------------------------------------------------------------------------

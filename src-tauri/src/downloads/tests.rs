@@ -6,6 +6,18 @@ fn env(home: &str, user_dirs: &str) -> DownloadEnv {
     DownloadEnv {
         home: Some(PathBuf::from(home)),
         user_dirs: user_dirs.to_string(),
+        known: None,
+    }
+}
+
+/// `unix`, an absolute Unix path, as an absolute path of this system: on
+/// Windows a path without a drive is not absolute, so it gets `C:`. XDG's
+/// rule that a relative folder is ignored applies on both.
+fn abs(unix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{unix}")
+    } else {
+        unix.to_string()
     }
 }
 
@@ -36,30 +48,34 @@ fn a_taken_download_name_gets_a_counter_before_the_extension() {
 fn a_download_goes_to_the_downloads_folder_whatever_wry_proposed() {
     // No XDG_DOWNLOAD_DIR: wry proposes the working directory, and the
     // file still lands in ~/Downloads.
-    let none = env("/home/u", "");
+    let home = abs("/home/u");
+    let none = env(&home, "");
     assert_eq!(
         download_target(Path::new("/some/cwd/lmgw-chat-1-x.md"), &none).unwrap(),
-        PathBuf::from("/home/u/Downloads/lmgw-chat-1-x.md")
+        PathBuf::from(abs("/home/u/Downloads/lmgw-chat-1-x.md"))
     );
     // Configured, as xdg-user-dirs writes it.
     let conf = env(
-        "/home/u",
+        &home,
         "# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Herunterladen\"\n",
     );
     assert_eq!(
         download_target(Path::new("/home/u/Herunterladen/a.zip"), &conf).unwrap(),
-        PathBuf::from("/home/u/Herunterladen/a.zip")
+        PathBuf::from(abs("/home/u/Herunterladen/a.zip"))
     );
-    let abs = env("/home/u", "XDG_DOWNLOAD_DIR=\"/data/dl\"\n");
+    let configured = env(
+        &home,
+        &format!("XDG_DOWNLOAD_DIR=\"{}\"\n", abs("/data/dl")),
+    );
     assert_eq!(
-        download_target(Path::new("x.json"), &abs).unwrap(),
-        PathBuf::from("/data/dl/x.json")
+        download_target(Path::new("x.json"), &configured).unwrap(),
+        PathBuf::from(abs("/data/dl/x.json"))
     );
     // A relative value is not a folder to trust.
-    let rel = env("/home/u", "XDG_DOWNLOAD_DIR=\"dl\"\n");
+    let rel = env(&home, "XDG_DOWNLOAD_DIR=\"dl\"\n");
     assert_eq!(
         download_target(Path::new("x.json"), &rel).unwrap(),
-        PathBuf::from("/home/u/Downloads/x.json")
+        PathBuf::from(abs("/home/u/Downloads/x.json"))
     );
 }
 
@@ -85,18 +101,59 @@ fn a_download_keeps_only_its_file_name() {
     let no_home = DownloadEnv {
         home: None,
         user_dirs: String::new(),
+        known: None,
     };
     assert!(download_target(Path::new("a.md"), &no_home).is_err());
 }
 
-/// `is_dir` for a disk holding just `dirs`.
+/// The Downloads folder the system names (Windows' known folder) is the
+/// one, with a home or without, whatever `user-dirs.dirs` says.
+#[test]
+fn the_systems_own_downloads_folder_wins() {
+    let known = PathBuf::from(abs("/data/Downloads"));
+    let with_home = DownloadEnv {
+        known: Some(known.clone()),
+        ..env(&abs("/home/u"), "XDG_DOWNLOAD_DIR=\"$HOME/dl\"\n")
+    };
+    let homeless = DownloadEnv {
+        home: None,
+        user_dirs: String::new(),
+        known: Some(known.clone()),
+    };
+    for e in [&with_home, &homeless] {
+        assert_eq!(
+            download_target(Path::new("a.md"), e).unwrap(),
+            known.join("a.md")
+        );
+    }
+}
+
+/// Windows: the process's Downloads folder is the shell's known folder, so
+/// a download without a dialog has a place without `HOME`.
+#[cfg(windows)]
+#[test]
+fn windows_downloads_go_to_the_known_folder() {
+    let known = known_downloads().unwrap();
+    assert!(known.is_absolute(), "{}", known.display());
+    let env = DownloadEnv::from_process();
+    assert_eq!(env.known.as_deref(), Some(known.as_path()));
+    assert_eq!(
+        download_target(Path::new("a.md"), &env).unwrap(),
+        known.join("a.md")
+    );
+}
+
+/// `is_dir` for a disk holding just `dirs` (written as [`abs`] takes them).
 fn there(dirs: &'static [&'static str]) -> impl Fn(&Path) -> bool {
-    move |p| dirs.iter().any(|d| p == Path::new(d))
+    move |p| dirs.iter().any(|d| p == Path::new(&abs(d)))
 }
 
 #[test]
 fn the_dialog_opens_in_the_folder_chosen_last_else_downloads_else_home() {
-    let e = env("/home/u", "XDG_DOWNLOAD_DIR=\"$HOME/Herunterladen\"\n");
+    let e = env(
+        &abs("/home/u"),
+        "XDG_DOWNLOAD_DIR=\"$HOME/Herunterladen\"\n",
+    );
     let mut s = SaveSession::default();
     let first = s.start(
         "lmgw-lab-audio-2026-10-17.zip",
@@ -106,33 +163,35 @@ fn the_dialog_opens_in_the_folder_chosen_last_else_downloads_else_home() {
     assert_eq!(
         first,
         DialogStart {
-            folder: Some(PathBuf::from("/home/u/Herunterladen")),
+            folder: Some(PathBuf::from(abs("/home/u/Herunterladen"))),
             name: "lmgw-lab-audio-2026-10-17.zip".into(),
         },
         "the first one: the Downloads folder, the server's name"
     );
-    let dest = s.chosen(PathBuf::from("/home/u/Music/takes/000042-kokoro.wav"));
-    assert_eq!(dest, PathBuf::from("/home/u/Music/takes/000042-kokoro.wav"));
+    let chosen = PathBuf::from(abs("/home/u/Music/takes/000042-kokoro.wav"));
+    let dest = s.chosen(chosen.clone());
+    assert_eq!(dest, chosen);
     let all = there(&["/home/u/Herunterladen", "/home/u/Music/takes"]);
     assert_eq!(
         s.start("x.png", &e, all).folder,
-        Some(PathBuf::from("/home/u/Music/takes")),
+        Some(PathBuf::from(abs("/home/u/Music/takes"))),
         "the next one: where the last one went"
     );
     assert_eq!(
         s.start("x.png", &e, there(&["/home/u/Herunterladen"]))
             .folder,
-        Some(PathBuf::from("/home/u/Herunterladen")),
+        Some(PathBuf::from(abs("/home/u/Herunterladen"))),
         "that folder gone: Downloads again"
     );
     assert_eq!(
         s.start("x.png", &e, there(&[])).folder,
-        Some(PathBuf::from("/home/u")),
+        Some(PathBuf::from(abs("/home/u"))),
         "no Downloads folder: home"
     );
     let homeless = DownloadEnv {
         home: None,
         user_dirs: String::new(),
+        known: None,
     };
     assert_eq!(
         SaveSession::default()

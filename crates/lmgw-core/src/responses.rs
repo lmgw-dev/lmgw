@@ -791,7 +791,7 @@ async fn run_loop(
     };
     let exec = ScopedExecutor::new(
         SplitExecutor::new(
-            SelfAdminExecutor::new(state.clone(), ctx.clone()),
+            SelfAdminExecutor::new(state.clone(), ctx.clone()).audited_as(crate::audit::Via::Api),
             docs_exec,
             resolved.builtin.clone(),
             // A name runs where this request listed it from, or not at all.

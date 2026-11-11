@@ -113,6 +113,12 @@ pub struct RealtimeSettingsPatch {
     #[serde(deserialize_with = "crate::config::nullable_port")]
     #[schemars(with = "Option<u16>")]
     pub webrtc_port: Option<Option<i64>>,
+    /// The UDP port WebRTC calls use beside the TLS listener: `null` = the
+    /// TLS port's number, `0` = chosen by the OS, else 1 to 65535. Applies
+    /// at the next start.
+    #[serde(deserialize_with = "crate::config::nullable_port")]
+    #[schemars(with = "Option<u16>")]
+    pub webrtc_tls_port: Option<Option<i64>>,
     /// How long a WebRTC call's frame waits for a missing earlier one, in
     /// ms; `0` = no wait, the gap concealed at once. At most 40 950 (what
     /// str0m can hold behind a gap). Applies to the next call.
@@ -355,6 +361,10 @@ impl RealtimeSettingsPatch {
             r.webrtc.set_port(v)?;
             touched.push("realtime.webrtc_port");
         }
+        if let Some(v) = self.webrtc_tls_port {
+            r.webrtc.set_tls_port(v)?;
+            touched.push("realtime.webrtc_tls_port");
+        }
         if let Some(v) = self.webrtc_reorder_ms {
             r.webrtc_audio.set_reorder_ms(v)?;
             touched.push("realtime.webrtc_reorder_ms");
@@ -546,6 +556,7 @@ pub fn realtime_view(r: &RealtimeSettings) -> dto::RealtimeSettings {
         ping_interval_s: r.ping_interval_s,
         webrtc_enabled: r.webrtc.webrtc_enabled,
         webrtc_port: r.webrtc.webrtc_port,
+        webrtc_tls_port: r.webrtc.webrtc_tls_port,
         webrtc_reorder_ms: r.webrtc_audio.webrtc_reorder_ms,
         webrtc_commit_window_ms: r.webrtc_audio.webrtc_commit_window_ms,
         webrtc_output_kbps: r.webrtc_audio.webrtc_output_kbps,

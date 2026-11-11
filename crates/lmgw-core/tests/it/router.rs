@@ -58,6 +58,11 @@ fn snapshot(ups: Vec<Upstream>, aliases: Vec<ModelAlias>) -> Snapshot {
         disabled_tools: Default::default(),
         chat_profiles: vec![],
         gpu_lease: None,
+        serving_tls: None,
+        trusted_nets: vec![],
+        accounts: vec![],
+        accounts_on: false,
+        sessions: Default::default(),
     }
 }
 

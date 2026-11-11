@@ -71,9 +71,14 @@ unsafe fn fail_the_process_on_a_violation() {
         found.len(),
         found.join("\n")
     );
+    // The CRT's write takes a u32 count on Windows.
+    #[cfg(unix)]
+    let len = text.len();
+    #[cfg(windows)]
+    let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
     // SAFETY: plain libc calls on a buffer that outlives them, at exit.
     unsafe {
-        libc::write(2, text.as_ptr().cast(), text.len());
+        libc::write(2, text.as_ptr().cast(), len);
         libc::_exit(1);
     }
 }

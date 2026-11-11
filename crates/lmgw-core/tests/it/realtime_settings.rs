@@ -242,7 +242,10 @@ async fn the_tool_plane_saves_the_same_patch() {
     assert_eq!(realtime(&gw).await.echo_tail_ms, 400);
     let p: lmgw_core::ops::SettingsPatch =
         serde_json::from_value(json!({"realtime": {"tts_alias": "my-asr"}})).unwrap();
-    let e = lmgw_core::ops::settings_set(&state, p).await.unwrap_err();
+    let e = lmgw_core::ops::settings_set(&state, p)
+        .await
+        .unwrap_err()
+        .message;
     assert!(e.contains("realtime.tts_alias"), "{e}");
     // The read the tool plane has carries the section too.
     let read = lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap();
@@ -331,10 +334,7 @@ async fn a_voice_design_alias_is_a_text_to_speech_alias_for_realtime() {
 async fn audio_row(g: &Gpu, id: &str, task: &str, on_disk: u64) -> i64 {
     let dir = g.models_dir().join(id);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::File::create(dir.join("model.gguf"))
-        .unwrap()
-        .set_len(on_disk)
-        .unwrap();
+    crate::support::sparse::create(dir.join("model.gguf"), on_disk);
     let id = store::insert_audio_model(
         &g.state.db,
         &NewAudioModel {

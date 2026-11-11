@@ -34,6 +34,7 @@ mod extras;
 mod images;
 mod pull;
 mod recreate;
+mod releases;
 mod reports;
 mod run_log;
 
@@ -41,12 +42,13 @@ pub use editor::EditorSeed;
 pub use pull::PullTarget;
 pub use run_log::LogTarget;
 
-pub const TABS: &[&str] = &["builds", "images"];
+pub const TABS: &[&str] = &["builds", "images", "windows"];
 
 /// Where a tab lives.
 pub fn href(tab: &str) -> String {
     match tab {
         "images" => "/backends/images".to_string(),
+        "windows" => "/backends/windows".to_string(),
         _ => "/backends".to_string(),
     }
 }
@@ -149,6 +151,12 @@ pub fn updates_title(u: &UpdatesSummary) -> String {
             crate::fmt::count_of(u.images_with_updates as usize, "images"),
         ));
     }
+    if u.engines_with_updates > 0 {
+        parts.push(format!(
+            "{} with a newer upstream release than lmgw's pin",
+            crate::fmt::count_of(u.engines_with_updates as usize, "engines"),
+        ));
+    }
     let mut t = if parts.is_empty() {
         "no updates".to_string()
     } else {
@@ -228,6 +236,11 @@ pub struct Bk {
     /// dropped instead of putting back what a newer one replaced.
     builds_read: Latest,
     images_read: Latest,
+    /// The pinned engine release builds (`engine_releases`, Windows design
+    /// §4.2): the Windows tab, shown when lmgw starts its engines natively.
+    pub releases: RwSignal<Option<lmgw_api_types::engine_releases::EngineReleasesResponse>>,
+    pub releases_err: RwSignal<Option<String>>,
+    releases_read: Latest,
 }
 
 impl Bk {
@@ -284,6 +297,53 @@ impl Bk {
                     self.images.set(Some(r));
                 }
                 Err(e) => self.images_err.set(Some(e.to_string())),
+            }
+        });
+    }
+
+    /// Read the pinned engine release builds again (the Windows tab; on
+    /// Linux the answer says the engines are not native and the tab stays
+    /// hidden). Safe from any continuation, like [`Bk::load_builds`].
+    pub fn load_releases(self) {
+        if !self.scope.alive() {
+            return;
+        }
+        let Some(ticket) = self.releases_read.next() else {
+            return;
+        };
+        self.scope.spawn(async move {
+            let res = api::engine_releases().await;
+            if !self.releases_read.is(ticket) {
+                return;
+            }
+            match res {
+                Ok(r) => {
+                    self.releases_err.set(None);
+                    self.releases.set(Some(r));
+                }
+                Err(e) => self.releases_err.set(Some(e.to_string())),
+            }
+        });
+    }
+
+    /// Clear the "no kernel image" mark of `engine`'s `variant` build (the
+    /// Windows tab's **Try CUDA again**), then show the answer.
+    pub fn clear_fallback(self, engine: String, variant: String) {
+        if !self.scope.alive() {
+            return;
+        }
+        self.scope.spawn(async move {
+            match api::engine_fallback_clear(&engine, &variant).await {
+                Ok(r) => {
+                    self.toasts.ok(format!(
+                        "{engine} {variant}: mark cleared, the next start tries this build again"
+                    ));
+                    if self.scope.alive() {
+                        self.releases_err.set(None);
+                        self.releases.set(Some(r));
+                    }
+                }
+                Err(e) => self.toasts.err(format!("{engine} {variant}: {e}")),
             }
         });
     }
@@ -409,9 +469,11 @@ impl Bk {
                         }
                     }
                     // The images' registry badges come along: load_builds
-                    // re-reads the Images tab too once it has been shown.
+                    // re-reads the Images tab too once it has been shown,
+                    // and the engine releases' check ran in the same call.
                     if self.scope.alive() {
                         self.load_builds();
+                        self.load_releases();
                     }
                 }
                 Err(e) => self.toasts.err(format!("{name}: {e}")),
@@ -472,9 +534,13 @@ pub fn Backends() -> impl IntoView {
         pulled: RwSignal::new(HashMap::new()),
         builds_read: Latest::new(),
         images_read: Latest::new(),
+        releases: RwSignal::new(None),
+        releases_err: RwSignal::new(None),
+        releases_read: Latest::new(),
     };
     provide_context(bk);
     bk.load_builds();
+    bk.load_releases();
 
     // A run starting or ending is when the durable rows change.
     let run_jobs = Memo::new(move |_| {
@@ -508,6 +574,7 @@ pub fn Backends() -> impl IntoView {
         let now = bus.updates.get();
         if prev.is_some_and(|p| p.is_some() && p != now) {
             bk.load_builds();
+            bk.load_releases();
         }
         now
     });
@@ -553,7 +620,24 @@ pub fn Backends() -> impl IntoView {
                 ))
                 .tone(Tone::Attn);
         }
-        vec![b, i]
+        let mut tabs = vec![b, i];
+        // The pinned release builds, where lmgw runs its engines from them.
+        if bk.releases.with(|r| r.as_ref().is_some_and(|r| r.native)) {
+            let mut w = NavTab::new("Windows", href("windows"));
+            let n = bus
+                .updates
+                .with(|u| u.as_ref().map_or(0, |u| u.engines_with_updates));
+            if n > 0 {
+                w = w
+                    .count(format!(
+                        "{n} upstream release{}",
+                        if n == 1 { "" } else { "s" }
+                    ))
+                    .tone(Tone::Attn);
+            }
+            tabs.push(w);
+        }
+        tabs
     });
     let summary = move || {
         let Some(n) = bk.builds.with(|b| b.as_ref().map(Vec::len)) else {
@@ -572,6 +656,7 @@ pub fn Backends() -> impl IntoView {
         if tab.get_untracked() == "images" {
             bk.load_images();
         }
+        bk.load_releases();
     };
     let check_all = move |_| bk.check_updates(None, "update check".to_string());
     let checking_all = move || bk.checking.with(|c| c.contains(&0));
@@ -582,7 +667,7 @@ pub fn Backends() -> impl IntoView {
             .map(|at| format!("Last full check {} ({}).", ago(&at), local_ts(&at)))
             .unwrap_or_else(|| "No full check has run yet.".to_string());
         format!(
-            "Ask the remotes now: every build's ref and unpinned extras, and the registry images in use. {last} The schedule is in Settings → Engines."
+            "Ask the remotes now: every build's ref and unpinned extras, the registry images in use, and on Windows the pinned engine releases' upstream projects. {last} The schedule is in Settings → Engines."
         )
     };
     let new_build = move |_| {
@@ -622,6 +707,7 @@ pub fn Backends() -> impl IntoView {
         >
             {move || match tab.get() {
                 "images" => view! { <images::ImagesTab/> }.into_any(),
+                "windows" => view! { <releases::ReleasesTab/> }.into_any(),
                 _ => view! { <builds::BuildsTab/> }.into_any(),
             }}
             <editor::BuildEditorModal/>
@@ -1051,7 +1137,7 @@ mod tests {
         let u = UpdatesSummary {
             builds_with_updates: 1,
             images_with_updates: 2,
-            checked_at: None,
+            ..Default::default()
         };
         assert_eq!(
             updates_title(&u),
@@ -1062,6 +1148,14 @@ mod tests {
             ..Default::default()
         };
         assert!(updates_title(&u).contains("3 builds with newer inputs than their"));
+        let u = UpdatesSummary {
+            engines_with_updates: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            updates_title(&u),
+            "Updates: 1 engine with a newer upstream release than lmgw's pin"
+        );
         assert_eq!(updates_title(&UpdatesSummary::default()), "no updates");
     }
 

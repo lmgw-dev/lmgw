@@ -12,8 +12,14 @@
 //! picked in System Settings shows when you come back to the window. The
 //! focus is passed on too: an unfocused window's title bar takes the scheme's
 //! inactive shade, and the sidebar follows it.
+//!
+//! On Windows the same mechanism carries Windows 11's neutrals and the
+//! user's accent colour instead, for the system's dark or light mode (win.rs).
 
 mod ramp;
+// The colour maths are built everywhere, so their tests run on Linux too.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod win;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -29,10 +35,17 @@ struct TitleBar {
     inactive: Rgb,
 }
 
+/// What the shell reads of the desktop: KWin's title bar, or on Windows the
+/// system's mode and accent.
+#[cfg(not(windows))]
+type Reading = TitleBar;
+#[cfg(windows)]
+type Reading = win::Theme;
+
 /// The latest reading, shared by the window's focus handler and its page
 /// loads.
 #[derive(Clone, Default)]
-pub struct Desktop(Arc<Mutex<Option<TitleBar>>>);
+pub struct Desktop(Arc<Mutex<Option<Reading>>>);
 
 /// The page's end: sets the classes and custom properties app.css keys the
 /// desktop palette on. Defined by the initialization script, so it exists
@@ -49,33 +62,47 @@ const HOOK: &str = r#"window.__lmgwDesktop = function (p) {
 
 impl Desktop {
     pub fn read() -> Self {
-        Self(Arc::new(Mutex::new(read_title_bar())))
+        Self(Arc::new(Mutex::new(read_desktop())))
     }
 
     /// Runs at document start, before the first paint: the hook plus the
     /// reading the window was built with.
+    #[cfg(not(windows))]
     pub fn init_script(&self) -> String {
         format!("{HOOK}\n{}", self.apply_js(true))
     }
 
+    /// On Windows the hook is wrapped by win.rs's, which picks the theme.
+    #[cfg(windows)]
+    pub fn init_script(&self) -> String {
+        format!("{HOOK}\n{}\n{}", win::HOOK, self.apply_js(true))
+    }
+
     /// Hands the page the current reading and the window's focus.
     pub fn apply_js(&self, focused: bool) -> String {
-        let p = serde_json::json!({ "desktop": self.get().map(page_colours), "focused": focused });
+        let p = serde_json::json!({ "desktop": self.get().map(page_payload), "focused": focused });
         format!("window.__lmgwDesktop && window.__lmgwDesktop({p});")
     }
 
-    fn get(&self) -> Option<TitleBar> {
+    fn get(&self) -> Option<Reading> {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn reload(&self) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = read_title_bar();
+    /// Reads again; true when the reading changed.
+    fn reload(&self) -> bool {
+        let now = read_desktop();
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = *held != now;
+        *held = now;
+        changed
     }
 }
 
 /// Keeps the page in step with the window's focus, re-reading kdeglobals
 /// whenever it comes back.
 pub fn follow<R: Runtime>(window: &WebviewWindow<R>, desktop: Desktop) {
+    #[cfg(windows)]
+    win::follow(window, desktop.clone());
     let page = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Focused(focused) = event {
@@ -87,8 +114,27 @@ pub fn follow<R: Runtime>(window: &WebviewWindow<R>, desktop: Desktop) {
     });
 }
 
+#[cfg(not(windows))]
+fn read_desktop() -> Option<Reading> {
+    read_title_bar()
+}
+#[cfg(windows)]
+fn read_desktop() -> Option<Reading> {
+    win::read()
+}
+
+#[cfg(not(windows))]
+fn page_payload(t: Reading) -> serde_json::Value {
+    page_colours(t)
+}
+#[cfg(windows)]
+fn page_payload(t: Reading) -> serde_json::Value {
+    win::page(t)
+}
+
 /// What app.css reads, as `--desk-<name>`: the sidebar's two shades and the
 /// stepped neutrals, plus which of its themes they belong to.
+#[cfg_attr(windows, allow(dead_code))]
 fn page_colours(t: TitleBar) -> serde_json::Value {
     let dark = ramp::is_dark(t.active);
     let mut colours = serde_json::Map::new();
@@ -101,6 +147,7 @@ fn page_colours(t: TitleBar) -> serde_json::Value {
 }
 
 /// None off KDE: only KWin paints the title bar from kdeglobals.
+#[cfg_attr(windows, allow(dead_code))]
 fn read_title_bar() -> Option<TitleBar> {
     let kde = std::env::var("XDG_CURRENT_DESKTOP")
         .is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")));
@@ -118,6 +165,7 @@ fn read_title_bar() -> Option<TitleBar> {
 
 /// kdeglobals as KConfig cascades it: the system files, least important
 /// first, then the user's, whose keys win.
+#[cfg_attr(windows, allow(dead_code))]
 fn kdeglobals_files() -> Vec<PathBuf> {
     let dirs = std::env::var("XDG_CONFIG_DIRS")
         .ok()
@@ -277,6 +325,7 @@ inactiveBackground=32,36,40
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn the_page_gets_css_colours() {
         let d = Desktop(Arc::new(Mutex::new(scheme(&[BREEZE_DARK]))));
         let js = d.apply_js(false);

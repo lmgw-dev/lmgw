@@ -8,7 +8,6 @@ use crate::state::SharedState;
 
 use super::attribution::Fill;
 use super::nvml::GpuMemory;
-use super::scheduler::MIB;
 use super::{trigger_off, VramScheduler};
 
 /// One model lmgw believes is holding GPU memory.
@@ -64,7 +63,12 @@ pub struct KeptFree {
     /// up yet: weights on their way onto the card.
     pub starting_bytes: u64,
     /// What resident image pipelines have been measured to take above their
-    /// idle residency while they draw (the residents' `peak_extra_bytes`).
+    /// idle residency while they draw (the residents' `peak_extra_bytes`),
+    /// and for each whose weights wait off the card (`vram::partial`) the
+    /// part of its charge — a partial start's grant (or its budget and
+    /// context, where more), or its context and peak — that it does not hold
+    /// now and the next generation puts there. In the budget-only branch only the former: the latter is in
+    /// the estimate.
     pub image_peak_bytes: u64,
     /// What ready audio containers will still load on their first request
     /// (the residents' `pending_bytes`).
@@ -278,7 +282,7 @@ impl VramScheduler {
             inactive_reason,
             telemetry: self.probe().source(),
             telemetry_ok: l.telemetry_error.is_none(),
-            headroom_bytes: snap.settings.vram.headroom_mb.saturating_mul(MIB),
+            headroom_bytes: self.headroom(&snap).bytes,
             capacity_bytes: l.capacity.as_ref().map(|c| c.total).unwrap_or(0),
             free_bytes: l.capacity.as_ref().map(|c| c.free),
             free_measured: l.capacity.as_ref().is_some_and(|c| c.measured),

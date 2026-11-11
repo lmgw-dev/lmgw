@@ -161,7 +161,9 @@ fn request_reach(paths: &Map<String, Value>, g: &schemars::SchemaGenerator) -> B
 /// `lmgw_api_types::openapi_ext::secret` schemars transform on a struct
 /// field, `x-lmgw-secret` written into a hand-written schema (`ops/args.rs`).
 /// `openapi_structure.rs`'s `secret_inputs_per_operation` pins the result.
-const SECRET_NAMES: &[&str] = &["token", "api_key", "hf_token", "update_token"];
+/// `nonce` is the one-time sign-in of a login link (headless server design
+/// §5.7), a credential for its 60 s.
+const SECRET_NAMES: &[&str] = &["token", "nonce", "api_key", "hf_token", "update_token"];
 
 /// Walk the whole document once, marking every `properties.<name>` schema and
 /// every parameter object whose `name` is in [`SECRET_NAMES`].
@@ -254,8 +256,9 @@ fn security_schemes() -> Value {
             "type": "apiKey",
             "in": "cookie",
             "name": crate::principal::SESSION_COOKIE,
-            "description": "The dashboard's own session cookie. Same-origin only, and only \
-                ever an owner row.",
+            "description": "The dashboard's own session cookie, on the plain listener; on the \
+                TLS listener it is `__Host-lmgw_session`, with `Secure`. Same-origin only, and \
+                only ever an owner row.",
         },
         "adminToken": {
             "type": "apiKey",
@@ -992,6 +995,8 @@ fn principals_matrix_for(covered: &[Cap]) -> Value {
         kind: ApiKeyKind::Owner,
         agent_id: None,
         fingerprint: String::new(),
+        account: None,
+        session: None,
     };
     let agent = Principal::Key {
         id: 0,
@@ -999,6 +1004,8 @@ fn principals_matrix_for(covered: &[Cap]) -> Value {
         kind: ApiKeyKind::Agent,
         agent_id: None,
         fingerprint: String::new(),
+        account: None,
+        session: None,
     };
     let key = Principal::Key {
         id: 0,
@@ -1006,6 +1013,8 @@ fn principals_matrix_for(covered: &[Cap]) -> Value {
         kind: ApiKeyKind::Key,
         agent_id: None,
         fingerprint: String::new(),
+        account: None,
+        session: None,
     };
     let device = Principal::Key {
         id: 0,
@@ -1013,6 +1022,8 @@ fn principals_matrix_for(covered: &[Cap]) -> Value {
         kind: ApiKeyKind::Device,
         agent_id: None,
         fingerprint: String::new(),
+        account: None,
+        session: None,
     };
     let anonymous = Principal::Anonymous;
 
@@ -1261,6 +1272,8 @@ mod tests {
             kind: ApiKeyKind::Owner,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         };
         assert!(owner.holds(Cap::Public, &snap));
         assert!(!owner.holds(Cap::Ledger, &snap));
@@ -1454,9 +1467,13 @@ mod tests {
     }
 
     /// The public operations that are not for developers: the dashboard's login
-    /// (`/api/session*`), meaningful only in a browser with the session cookie.
+    /// (`/api/session*`) and a set-password link's submit
+    /// (`/api/account/password`, headless server design §5.5), meaningful only
+    /// in a browser.
     fn is_browser_session_path(path: &str) -> bool {
-        path == "/api/session" || path.starts_with("/api/session/")
+        path == "/api/session"
+            || path.starts_with("/api/session/")
+            || path == "/api/account/password"
     }
 
     /// Every public-capability operation is classified: a developer one (in

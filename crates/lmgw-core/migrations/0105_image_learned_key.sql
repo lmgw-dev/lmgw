@@ -1,0 +1,24 @@
+-- The engine an image pipeline's learned figures belong to (VRAM admission,
+-- `vram::plan::image::engine_key`; third review of the admission branch).
+--
+-- `peak_extra_bytes` (0035), `idle_bytes` (0103) and `work_bytes` (0104) are
+-- measurements of sd-server as one engine runs it: a CUDA build's context
+-- is 1.0 GiB where a Vulkan build's is 5 MiB (image-generation §12.4, the WP8
+-- GTX 970 on 2026-11-11), and compute buffers move with it. Most rows
+-- inherit the class's engine image and run args, and on Windows the native
+-- build comes from the variant choice and the failed-CUDA marks, so an edit
+-- of the row itself is not what tells a figure is stale. This column holds
+-- the key of the engine they were learned under: the first 12 hex digits of
+-- the SHA-256 of the resolved engine image, run args and native build.
+-- Figures whose key is not the one the row resolves to now count as not
+-- measured, and VRAM admission charges conservatively until they are
+-- learned again; a figure learned under another key clears the others.
+--
+-- NULL (every row learned before this migration): no figure counts until it
+-- is learned again under a key.
+--
+-- 0103's comment calls the idle residency "the least such a pipeline runs
+-- with". That is stale: it is sd-server's own context outside its
+-- `--max-vram` budget, no working budget; the least budget it renders with
+-- is 0104's `work_bytes`.
+ALTER TABLE image_models ADD COLUMN learned_key TEXT;

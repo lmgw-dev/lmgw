@@ -2,15 +2,15 @@
 resolver = "2"
 # First-party example agents (examples/agents/*) are ordinary members, so
 # `cargo test --workspace` and `cargo fmt --all` cover them like the gateway.
-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-update", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 # lmgw-ui and the Chat it mounts (lmgw-chat-ui) are wasm32-only (built by Trunk);
 # keep them out of plain `cargo build`.
 # lmgw-client builds for both: natively here, for wasm32 inside the dashboard
 # (and on its own in ci/check.sh).
-default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-update", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 
@@ -70,6 +70,15 @@ debug = false
 
 [profile.dev.package.lmgw-chat-ui]
 debug = false
+
+# Account passwords' argon2id (headless server design D12): one verification
+# took 1753 ms unoptimised in a debug dev instance against 95 ms in release
+# (2026-11-08, a 16-core desktop CPU), and the accounts suite verifies dozens.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 # rubato's sinc loops (realtime audio resampling) are ~20x slower unoptimised:
 # the realtime DSP tests take 21 s with it at opt-level 0 and 1.3 s at 3.

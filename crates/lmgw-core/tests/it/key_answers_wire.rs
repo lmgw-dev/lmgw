@@ -338,13 +338,7 @@ async fn the_update_check_answers_a_message() {
         .await;
     let live = op(&gw, "update_check", json!({})).await;
     let newer = common::round_trips::<dto::MessageAck>("update_check, newer", &live);
-    assert_eq!(
-        newer.message,
-        format!(
-            "update available: 999.0.0 (you have {}) — install it from the tray menu",
-            env!("CARGO_PKG_VERSION")
-        )
-    );
+    assert_eq!(newer.message, common::desktop_update_answer("999.0.0"));
 
     Mock::given(method("GET"))
         .and(path("/latest.json"))

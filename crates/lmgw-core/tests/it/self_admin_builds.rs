@@ -8,6 +8,10 @@
 //! adds, drops, renames or turns from absent into `null` shows up as a
 //! difference between the text and what the type writes back.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use lmgw_api_types as dto;
 use lmgw_api_types::builds::{
     BuildGetResponse, BuildRunStarted, ContainerImagePullStarted, Engine, Forge, RunLogChunk,
@@ -140,6 +144,8 @@ async fn a_save_says_what_to_call_next_unless_the_build_is_gone() {
     assert!(parse(&text)["build"].is_null(), "{text}");
 }
 
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_run_says_where_to_follow_it_and_its_log_is_one_chunk() {
     let h = Harness::new().await;

@@ -241,6 +241,15 @@ async fn a_truncate_just_before_the_close_cuts_the_reply() {
     say(&mut ws).await;
     let item = reply_item(&until_spoken(&mut ws, "Beispiel").await);
     send(&mut ws, truncate(&item, 1000)).await;
+    // Windows resets a socket dropped with frames still unread, and the reset
+    // throws away what the gateway had received and not read yet, the
+    // truncate among them; so there the page leaves as a browser does, with
+    // a close frame, read to the gateway's own close.
+    #[cfg(windows)]
+    {
+        let _ = futures::SinkExt::close(&mut ws).await;
+        while let Some(Ok(_)) = futures::StreamExt::next(&mut ws).await {}
+    }
     // The held generation is never let go: the session's end stops it.
     drop(ws);
     super::eventually("the reply cut at the truncate", || async {

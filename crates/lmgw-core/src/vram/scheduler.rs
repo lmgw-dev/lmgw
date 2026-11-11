@@ -8,8 +8,11 @@ use crate::runtime::registry::Origin;
 use crate::runtime::Class;
 use crate::state::SharedState;
 
+#[cfg(not(windows))]
 use super::amdgpu::AmdSysfsProbe;
-use super::attribution::{PidCache, ProcFs, ProcTree};
+#[cfg(not(windows))]
+use super::attribution::ProcFs;
+use super::attribution::{PidCache, ProcTree};
 use super::nvml::{GpuMemory, GpuProbe, NvmlProbe};
 use super::stage_watch::{self, StageWatch, WaitPhase};
 use super::{background, broadcast, plan, residency, Target, WaiterView};
@@ -23,11 +26,24 @@ use super::{background, broadcast, plan, residency, Target, WaiterView};
 /// and they are only installed when a card actually exposes them, so the last
 /// case keeps NVML's own failure text: "NVML unavailable: …" is the reason the
 /// owner needs to see, and inventing a second one would bury it.
+///
+/// On Windows NVML is the only source of device totals so far, and its
+/// per-process figures are `[N/A]` under WDDM: the probe there is
+/// [`super::wddm::WddmProbe`], NVML's totals with D3DKMT's per-process
+/// bytes (Windows design §4.3).
 pub fn detect_probe() -> Arc<dyn GpuProbe> {
     let nvml = NvmlProbe::detect();
     if nvml.is_available() {
+        #[cfg(windows)]
+        return Arc::new(super::wddm::WddmProbe::new(nvml));
+        #[cfg(not(windows))]
         return Arc::new(nvml);
     }
+    without_nvml(nvml)
+}
+
+#[cfg(not(windows))]
+fn without_nvml(nvml: NvmlProbe) -> Arc<dyn GpuProbe> {
     match AmdSysfsProbe::detect() {
         Some(amd) => {
             tracing::info!(
@@ -37,6 +53,21 @@ pub fn detect_probe() -> Arc<dyn GpuProbe> {
         }
         None => Arc::new(nvml),
     }
+}
+
+/// amdgpu's counters are Linux sysfs; Windows has no second source yet.
+#[cfg(windows)]
+fn without_nvml(nvml: NvmlProbe) -> Arc<dyn GpuProbe> {
+    Arc::new(nvml)
+}
+
+/// The host's process tree for attribution's descendant walk: `/proc`, or a
+/// Toolhelp snapshot on Windows.
+fn default_proc_tree() -> Arc<dyn ProcTree> {
+    #[cfg(windows)]
+    return Arc::new(super::wddm::toolhelp::Toolhelp);
+    #[cfg(not(windows))]
+    return Arc::new(ProcFs::default());
 }
 
 pub(super) const MIB: u64 = 1024 * 1024;
@@ -143,7 +174,27 @@ pub struct VramScheduler {
     /// reading, without a device read of its own (per-request background
     /// design §11.14).
     pub(super) device_total: AtomicU64,
+    /// How many devices the last ledger read listed, 0 before any did: what
+    /// a partial image start counts the cards it would see by
+    /// ([`super::partial::cards_seen`]).
+    pub(super) device_count: std::sync::atomic::AtomicUsize,
+    /// The engine build the next start of a class would run, where the
+    /// launcher chooses one ([`Self::set_engine_build`]).
+    engine_build: RwLock<EngineBuild>,
+    /// The image containers read at rest for their row's idle residency
+    /// ([`super::partial::floor`]), by generation: once each.
+    pub(super) image_at_rest: Mutex<std::collections::HashSet<u64>>,
+    /// The record of outside use auto headroom learns from
+    /// ([`super::headroom::growth`]).
+    pub(super) growth: Mutex<super::headroom::growth::Growth>,
+    /// What each chat image's llama-server said about `--fit`
+    /// ([`super::fit_vocab`]).
+    pub(super) fit_vocab: super::fit_vocab::FitVocab,
 }
+
+/// What says which engine build the next start of a class would run
+/// ([`VramScheduler::set_engine_build`]).
+pub type EngineBuild = Arc<dyn Fn(crate::runtime::Class) -> Option<String> + Send + Sync>;
 
 impl Default for VramScheduler {
     fn default() -> Self {
@@ -165,12 +216,17 @@ impl VramScheduler {
             next_id: AtomicU64::new(1),
             waits: AtomicU64::new(0),
             gate_asks: AtomicU64::new(0),
-            procs: RwLock::new(Arc::new(ProcFs::default())),
+            procs: RwLock::new(default_proc_tree()),
             pids: Arc::new(Mutex::new(PidCache::default())),
             boot_settled: AtomicBool::new(false),
             guest_turns: background::GuestTurns::default(),
             residency: residency::Residency::default(),
             device_total: AtomicU64::new(0),
+            device_count: std::sync::atomic::AtomicUsize::new(0),
+            engine_build: RwLock::new(Arc::new(|_| None)),
+            image_at_rest: Mutex::new(Default::default()),
+            growth: Mutex::new(Default::default()),
+            fit_vocab: Default::default(),
         }
     }
 
@@ -199,6 +255,51 @@ impl VramScheduler {
     /// [`Self::set_probe`].
     pub fn set_proc_tree(&self, tree: Arc<dyn ProcTree>) {
         *self.procs.write().unwrap() = tree;
+    }
+
+    /// Install what says which engine build the next start of a class runs:
+    /// the native launcher's choice (`Native::expected_build`, Windows), which
+    /// the image row's learned figures are keyed by beside the engine image
+    /// and run args ([`super::plan::image::engine_key`]). Without one (Podman,
+    /// where the image names the build) it answers `None`.
+    pub fn set_engine_build(&self, build: EngineBuild) {
+        *self.engine_build.write().unwrap() = build;
+    }
+
+    /// The engine build the next start of `class` would run, where the
+    /// launcher chooses one ([`Self::set_engine_build`]).
+    pub fn engine_build(&self, class: crate::runtime::Class) -> Option<String> {
+        let f = self.engine_build.read().unwrap().clone();
+        f(class)
+    }
+
+    /// The engine key image row `m` resolves to now
+    /// ([`super::plan::image::engine_key`]): its engine image and run args,
+    /// else the class's, and the build the launcher would start.
+    pub fn image_engine_key(
+        &self,
+        snap: &crate::config::Snapshot,
+        m: &crate::config::ImageModel,
+    ) -> String {
+        let i = &snap.settings.image;
+        super::plan::image::engine_key(
+            m.image.as_deref().unwrap_or(&i.image),
+            m.extra_run_args.as_ref().unwrap_or(&i.extra_run_args),
+            self.engine_build(crate::runtime::Class::Image).as_deref(),
+        )
+    }
+
+    /// The key a running image container reads its row's figures by: the
+    /// engine it was started with, else (still starting) the row's now.
+    pub(super) fn entry_engine_key(
+        &self,
+        snap: &crate::config::Snapshot,
+        e: &crate::runtime::registry::RuntimeView,
+        m: &crate::config::ImageModel,
+    ) -> String {
+        e.engine_key
+            .clone()
+            .unwrap_or_else(|| self.image_engine_key(snap, m))
     }
 
     /// How many admissions have entered the queue since this scheduler was
@@ -324,19 +425,63 @@ impl VramScheduler {
         }
     }
 
-    /// Claim `bytes` for a start that has been decided but not begun. Taken
-    /// inside the gate; released by dropping the returned token.
-    pub(super) fn reserve(&self, state: &SharedState, target: &Target, bytes: u64) -> Reserved {
+    /// Claim what admission decided for a start that has not begun (`vram::partial`): the
+    /// whole footprint (with a note, `Grant::Noted`), or a partial grant,
+    /// which is logged with its warning here and staged for the registry
+    /// entry the start creates
+    /// (`registry::admission_grant`) — the entry carries it from its claim
+    /// on, renders sd-server's `--max-vram` from it and is charged it.
+    pub(super) fn reserve_as(
+        &self,
+        state: &SharedState,
+        target: &Target,
+        grant: super::partial::Grant,
+    ) -> Reserved {
         let id = self.next_id();
+        let (bytes, partial, note) = match grant {
+            super::partial::Grant::Whole(b) => (b, None, None),
+            super::partial::Grant::Noted(b, note) => (b, None, Some(note)),
+            super::partial::Grant::Partial(g) => (g.bytes, Some(g), None),
+        };
         self.live.lock().unwrap().reservations.push(Reservation {
             id,
             class: target.class,
             model_id: target.model_id.clone(),
             bytes,
         });
+        if let Some(g) = partial.as_ref().filter(|g| !g.warning.is_empty()) {
+            tracing::warn!(
+                model = %target.model_id,
+                "{} model '{}' starts with less than all of it on the GPU: {}",
+                target.class.as_str(),
+                target.model_id,
+                g.warning
+            );
+        }
+        if let Some(n) = &note {
+            tracing::warn!(
+                model = %target.model_id,
+                "{} model '{}' starts with a warning: {n}",
+                target.class.as_str(),
+                target.model_id,
+            );
+        }
+        let staged = (partial.is_some() || note.is_some()).then(|| {
+            state.runtime().stage_grant(
+                target.class,
+                &target.model_id,
+                id,
+                crate::runtime::registry::Staged {
+                    grant: partial,
+                    note,
+                },
+            );
+            target.clone()
+        });
         Reserved {
             state: state.clone(),
             id,
+            staged,
         }
     }
 
@@ -386,11 +531,19 @@ impl VramScheduler {
 pub(super) struct Reserved {
     state: SharedState,
     id: u64,
+    /// The model whose registry entry this start's partial grant is staged
+    /// for: dropped with the token when no entry took it.
+    staged: Option<Target>,
 }
 
 impl Drop for Reserved {
     fn drop(&mut self) {
         self.state.vram.unreserve(self.id);
+        if let Some(t) = self.staged.take() {
+            self.state
+                .runtime()
+                .unstage_grant(t.class, &t.model_id, self.id);
+        }
     }
 }
 

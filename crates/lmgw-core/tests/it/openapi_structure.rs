@@ -301,8 +301,20 @@ fn secret_inputs(doc: &Value, op: &Value) -> BTreeSet<String> {
 #[test]
 fn secret_inputs_per_operation() {
     let expected: BTreeMap<&str, &[&str]> = BTreeMap::from([
-        ("get /api/session/login", &["query:token"][..]),
-        ("post /api/session", &["body.token"][..]),
+        (
+            "get /api/session/login",
+            &["query:nonce", "query:token"][..],
+        ),
+        ("post /api/session", &["body.password", "body.token"][..]),
+        // Accounts (headless server design §5.2, §5.5).
+        (
+            "post /api/account/password",
+            &["body.password", "body.token"][..],
+        ),
+        (
+            "post /api/op/account_password_set",
+            &["body.current", "body.password"][..],
+        ),
         ("post /api/op/upstream_set", &["body.api_key"][..]),
         (
             "post /api/op/upstream_set_full",

@@ -350,7 +350,9 @@ fn executor(
     };
     ScopedExecutor::new(
         SplitExecutor::new(
-            SelfAdminExecutor::new(state.clone(), ctx.clone()).with_proto(REALTIME_TOOL_PROTO),
+            SelfAdminExecutor::new(state.clone(), ctx.clone())
+                .with_proto(REALTIME_TOOL_PROTO)
+                .audited_as(crate::audit::Via::Api),
             docs,
             tools.builtin.iter().cloned(),
             McpExecutor::new(state.clone(), ctx.clone())

@@ -12,7 +12,7 @@ use lmgw_api_types::device_link::{self as wire, DeviceListenerState, DeviceListe
 use lmgw_api_types::{GatewayStatus, MessageAck};
 use serde_json::{json, Value};
 
-use super::{f, Ctl, Def, Page};
+use super::{f, labels, Ctl, Def, Page};
 use crate::widgets::{use_toasts, Modal, Select};
 
 const fn range(b: wire::Bound) -> Ctl {
@@ -25,7 +25,7 @@ pub(super) const DEVICES: &[Def] = &[
         "network",
         "devices",
         "devices.listener",
-        "Device listener",
+        labels::DEVICE_LISTENER,
         Ctl::DeviceListener,
     )
     .terms("device listener tls https mtls port scope loopback all bind lan wireguard phone"),

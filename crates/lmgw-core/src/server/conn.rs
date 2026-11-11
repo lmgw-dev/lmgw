@@ -1,10 +1,16 @@
 //! What a request knows about the connection it came in on (device link
 //! design §4.5): one connect-info type for both listeners, [`Conn`].
 //!
-//! - **`via`**: the plain listener (`bind_addr`, http) or the device
+//! - **`via`**: the plain listener (`bind_addr`, http), the main TLS
+//!   listener (`tls.listen`, https, headless server design §4) or the device
 //!   listener (`devices.listen`, https with client certificates);
-//! - **`peer`**: the TCP peer, which the agent proxy forwards as
-//!   `X-Forwarded-For` (origins §4.6);
+//! - **`peer`**: the client: the TCP peer, or, behind a trusted proxy
+//!   (headless server design §4.5), the client address the proxy forwarded
+//!   — what the agent proxy forwards as `X-Forwarded-For` (origins §4.6),
+//!   and what every reader of a client's address reads;
+//! - **`proxy`** and **`forwarded_scheme`**: behind a trusted proxy, its own
+//!   TCP address and the scheme it said the client used
+//!   ([`super::forwarded`]), so [`Conn::scheme`] is the client's;
 //! - **`local`**: the local address the connection arrived on, made
 //!   canonical (an IPv4 client of a `[::]` listener reads as IPv4): a
 //!   WebRTC call's candidate (calls §3.2) and the device listener's choice of
@@ -19,7 +25,6 @@
 //!   connects there, D12), nor any other: a handle costs a descriptor.
 
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -30,6 +35,12 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
+/// The scheme a listener speaks and a request came in with (§4.3).
+mod scheme;
+pub use scheme::scheme_of;
+/// Whether a request came straight from this machine's loopback (§4.5).
+mod loopback;
+
 /// Which listener a connection came in on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Via {
@@ -37,6 +48,10 @@ pub enum Via {
     /// dashboard's cookie.
     #[default]
     Plain,
+    /// The main TLS listener (`tls.listen`, headless server design §4.3):
+    /// the same router as the plain one, over TLS 1.2 or 1.3 with the
+    /// administrator's certificate.
+    Tls,
     /// The device listener: TLS 1.3, a device's client certificate.
     Devices,
 }
@@ -46,6 +61,7 @@ impl Via {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plain => "plain",
+            Self::Tls => "tls",
             Self::Devices => "devices",
         }
     }
@@ -62,8 +78,15 @@ impl std::fmt::Display for Via {
 #[derive(Debug, Clone)]
 pub struct Conn {
     pub via: Via,
-    /// The TCP peer, canonical.
+    /// The client, canonical: the TCP peer, or behind a trusted proxy the
+    /// client address it forwarded (`proxy` then holds the TCP peer).
     pub peer: SocketAddr,
+    /// The trusted proxy's TCP address, when the request came through one
+    /// (headless server design §4.5); `None` for a direct connection.
+    pub proxy: Option<SocketAddr>,
+    /// The scheme a trusted proxy said the client used; `None` when no
+    /// proxy said one, and the listener's own stands ([`Conn::scheme`]).
+    pub forwarded_scheme: Option<crate::net::Scheme>,
     /// The local address the connection arrived on, canonical.
     pub local: SocketAddr,
     /// The device listener's verified client certificate, if the client
@@ -80,6 +103,8 @@ impl Conn {
         Self {
             via: Via::Plain,
             peer: canonical(peer),
+            proxy: None,
+            forwarded_scheme: None,
             local: canonical(local),
             device: None,
             socket: None,
@@ -247,7 +272,7 @@ pub struct SocketHandle(Arc<Mutex<Shared>>);
 /// timer overrides in force on it.
 #[derive(Default)]
 struct Shared {
-    fd: Option<OwnedFd>,
+    fd: Option<SocketFd>,
     /// The connection's timers before the first override, read then: what
     /// the last one gone restores.
     base: Option<Applied>,
@@ -293,14 +318,143 @@ impl Shared {
         let (Some(fd), Some(t)) = (self.fd.as_ref(), self.wanted()) else {
             return Ok(());
         };
-        let s = socket2::SockRef::from(fd);
-        s.set_tcp_keepalive(
-            &socket2::TcpKeepalive::new()
-                .with_time(t.idle)
-                .with_interval(t.interval),
-        )?;
-        s.set_tcp_user_timeout(t.user_timeout)
+        write_timers(fd, t)
     }
+}
+
+/// The handle's own copy of the connection's socket.
+#[cfg(unix)]
+type SocketFd = std::os::fd::OwnedFd;
+#[cfg(windows)]
+type SocketFd = std::os::windows::io::OwnedSocket;
+
+#[cfg(unix)]
+fn dup_socket(s: &TcpStream) -> std::io::Result<SocketFd> {
+    use std::os::fd::AsFd;
+    s.as_fd().try_clone_to_owned()
+}
+
+#[cfg(windows)]
+fn dup_socket(s: &TcpStream) -> std::io::Result<SocketFd> {
+    use std::os::windows::io::AsSocket;
+    s.as_socket().try_clone_to_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn read_timers(fd: &SocketFd) -> std::io::Result<Applied> {
+    let s = socket2::SockRef::from(fd);
+    Ok(Applied {
+        idle: s.tcp_keepalive_time()?,
+        interval: s.tcp_keepalive_interval()?,
+        user_timeout: s.tcp_user_timeout()?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn write_timers(fd: &SocketFd, t: Applied) -> std::io::Result<()> {
+    let s = socket2::SockRef::from(fd);
+    s.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(t.idle)
+            .with_interval(t.interval),
+    )?;
+    s.set_tcp_user_timeout(t.user_timeout)
+}
+
+#[cfg(target_os = "linux")]
+fn read_user_timeout(fd: &SocketFd) -> std::io::Result<Option<Duration>> {
+    socket2::SockRef::from(fd).tcp_user_timeout()
+}
+
+/// Windows (Windows design §4.4, WP6): the keep-alive times are read back
+/// with `TCP_KEEPIDLE` and `TCP_KEEPINTVL` (Windows 10 1709 and later) and set
+/// through `socket2` (`SIO_KEEPALIVE_VALS`). Windows has no
+/// `TCP_USER_TIMEOUT`: a socket reads as having none, and a stream that asks
+/// for one gets its keep-alive alone, which the log says once per process.
+#[cfg(windows)]
+fn read_timers(fd: &SocketFd) -> std::io::Result<Applied> {
+    use windows_sys::Win32::Networking::WinSock::{TCP_KEEPIDLE, TCP_KEEPINTVL};
+    Ok(Applied {
+        idle: Duration::from_secs(tcp_seconds(fd, TCP_KEEPIDLE)?),
+        interval: Duration::from_secs(tcp_seconds(fd, TCP_KEEPINTVL)?),
+        user_timeout: None,
+    })
+}
+
+/// An `IPPROTO_TCP` option that holds seconds as a `DWORD`.
+#[cfg(windows)]
+fn tcp_seconds(fd: &SocketFd, option: i32) -> std::io::Result<u64> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{getsockopt, IPPROTO_TCP, SOCKET_ERROR};
+    let mut value: u32 = 0;
+    let mut len = std::mem::size_of::<u32>() as i32;
+    // SAFETY: the socket is open while `fd` is; `value` and `len` describe
+    // a buffer of the option's size.
+    let rc = unsafe {
+        getsockopt(
+            fd.as_raw_socket() as usize,
+            IPPROTO_TCP,
+            option,
+            (&mut value as *mut u32).cast(),
+            &mut len,
+        )
+    };
+    if rc == SOCKET_ERROR {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(u64::from(value))
+}
+
+#[cfg(windows)]
+fn write_timers(fd: &SocketFd, t: Applied) -> std::io::Result<()> {
+    let s = socket2::SockRef::from(fd);
+    s.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(t.idle)
+            .with_interval(t.interval),
+    )?;
+    if let Some(wanted) = t.user_timeout {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            tracing::info!(
+                "a stream asked for TCP_USER_TIMEOUT ({wanted:?}), which Windows does not have: \
+                 its connection gets the keep-alive alone, so a peer that vanished while data \
+                 was in flight is found by the keep-alive probes and the system's retransmission \
+                 limit (said once per process)"
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_user_timeout(_fd: &SocketFd) -> std::io::Result<Option<Duration>> {
+    Ok(None)
+}
+
+/// Neither Linux nor Windows (macOS is not built yet): a stream's timers are
+/// refused, which its caller logs and serves on without.
+#[cfg(not(any(target_os = "linux", windows)))]
+fn timers_unsupported() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "a stream's TCP keep-alive and TCP_USER_TIMEOUT are not supported on this system yet",
+    )
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn read_timers(_fd: &SocketFd) -> std::io::Result<Applied> {
+    Err(timers_unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn write_timers(_fd: &SocketFd, _t: Applied) -> std::io::Result<()> {
+    Err(timers_unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn read_user_timeout(_fd: &SocketFd) -> std::io::Result<Option<Duration>> {
+    Err(timers_unsupported())
 }
 
 impl std::fmt::Debug for SocketHandle {
@@ -339,12 +493,7 @@ impl SocketHandle {
         let mut g = self.lock();
         let fd = g.fd.as_ref().ok_or_else(closed)?;
         if g.base.is_none() {
-            let s = socket2::SockRef::from(fd);
-            g.base = Some(Applied {
-                idle: s.tcp_keepalive_time()?,
-                interval: s.tcp_keepalive_interval()?,
-                user_timeout: s.tcp_user_timeout()?,
-            });
+            g.base = Some(read_timers(fd)?);
         }
         let id = g.next;
         g.next += 1;
@@ -370,7 +519,7 @@ impl SocketHandle {
     pub fn tcp_user_timeout(&self) -> std::io::Result<Option<Duration>> {
         let g = self.lock();
         let fd = g.fd.as_ref().ok_or_else(closed)?;
-        socket2::SockRef::from(fd).tcp_user_timeout()
+        read_user_timeout(fd)
     }
 
     /// Whether the connection is still open.
@@ -427,7 +576,7 @@ impl TrackedStream {
     pub(crate) fn handle(&self) -> SocketHandle {
         let mut shared = self.handle.lock().unwrap_or_else(|e| e.into_inner());
         if shared.fd.is_none() {
-            shared.fd = self.inner.as_fd().try_clone_to_owned().ok();
+            shared.fd = dup_socket(&self.inner).ok();
         }
         SocketHandle(self.handle.clone())
     }
@@ -489,6 +638,44 @@ impl AsyncWrite for TrackedStream {
 mod tests {
     use super::*;
 
+    /// Windows: a stream's keep-alive is set and read back, the asked
+    /// TCP_USER_TIMEOUT is not applied (Windows has none), and the
+    /// accept-time times are back once the stream's override is gone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_keep_alive_is_set_and_restored_on_windows() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server, _) = listener.accept().await.unwrap();
+        let _client = client.await.unwrap();
+        let s = Duration::from_secs;
+        socket2::SockRef::from(&server)
+            .set_tcp_keepalive(
+                &socket2::TcpKeepalive::new()
+                    .with_time(s(23))
+                    .with_interval(s(23)),
+            )
+            .unwrap();
+        let tracked = TrackedStream::new(server);
+        let handle = tracked.handle();
+        let now = || read_timers(handle.lock().fd.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            now(),
+            Applied {
+                idle: s(23),
+                interval: s(23),
+                user_timeout: None
+            }
+        );
+        let over = handle.override_timers(Some(s(41)), Some(s(41))).unwrap();
+        assert_eq!((now().idle, now().interval), (s(41), s(41)));
+        assert_eq!(handle.tcp_user_timeout().unwrap(), None);
+        drop(over);
+        assert_eq!((now().idle, now().interval), (s(23), s(23)));
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_socket_handle_closes_with_its_stream() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -523,6 +710,7 @@ mod tests {
     /// Two streams on one connection: each one's timers hold while it
     /// runs, the newest's fields winning, and once both are gone the
     /// connection has its accept-time values again, whichever ended first.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn overrides_stack_and_the_last_gone_restores_the_accept_time_timers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

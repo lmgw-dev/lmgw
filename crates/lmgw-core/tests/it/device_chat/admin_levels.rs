@@ -41,6 +41,8 @@ pub(super) async fn call_as(w: &World, d: &Device, name: &str, args: Value) -> (
             kind: ApiKeyKind::Device,
             agent_id: None,
             fingerprint: key.fingerprint(),
+            account: None,
+            session: None,
         },
         ..Default::default()
     };

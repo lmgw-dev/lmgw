@@ -314,6 +314,20 @@ pub struct KeyRow {
     /// offer files to; `null` without one, and on every other kind.
     // The device transfers design record, §2.
     pub app_id: Option<String>,
+    /// Who made it (headless server design §5.1): "sam", or "a deleted
+    /// account (sam)"; for an owner key, the account it belongs to. `null`
+    /// for a key from before accounts and one lmgw made itself.
+    pub made_by: Option<String>,
+    /// An owner key of another account than account 1 on a desktop with
+    /// accounts off (§5.11), or of a disabled account: it authenticates
+    /// nothing until that changes. The sentence says which.
+    pub paused: Option<String>,
+    /// The sign-in key of this account (its door key, §5.1): another
+    /// account's is shown without Copy and Rotate, and none is deleted
+    /// here.
+    pub door_of: Option<String>,
+    /// The caller's own account's key.
+    pub yours: bool,
 }
 
 /// How many connections of one kind a device holds open.

@@ -25,6 +25,10 @@
 //! - [`real`]: the real host, and [`files`] the two ways it writes a file;
 //! - [`stdout`]: the real process's stdout, a queue no reader can stall.
 
+// The pkexec root helper of a Linux system: on any other system the library is empty and the
+// binary says it runs on Linux only (not on Windows yet).
+#![cfg(target_os = "linux")]
+
 use std::ffi::OsString;
 use std::io::Write;
 

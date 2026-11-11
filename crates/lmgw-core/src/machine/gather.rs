@@ -17,6 +17,7 @@ use lmgw_machine::rpm::{query, Package};
 use lmgw_machine::{Facts, Space};
 
 use super::probe::{self, NvmlAnswer};
+use crate::config::deployment::Deployment;
 
 mod images;
 use crate::runtime::cdi::{DefaultDirs, LastRun, SpecPaths};
@@ -58,6 +59,10 @@ pub(super) struct CardFacts {
     pub amd: Option<Result<Vec<GpuMemory>, String>>,
     pub kfd: bool,
     pub render_nodes: Vec<String>,
+    /// Whether `/dev/nvidiactl` is there: in the server image, whether the
+    /// container was started with the NVIDIA card (headless server design
+    /// §7).
+    pub nvidia_nodes: bool,
 }
 
 impl CardFacts {
@@ -132,8 +137,12 @@ pub(super) struct PodmanFacts {
     pub has_option: Option<bool>,
     pub info: Result<PodmanInfo, String>,
     /// The user's subordinate ID ranges, read when `podman info` failed:
-    /// `(in /etc/subuid, in /etc/subgid)`.
+    /// `(in /etc/subuid, in /etc/subgid)`; never in the server image, whose
+    /// Podman runs as the container's root.
     pub subids: Option<(bool, bool)>,
+    /// In the server image: the container's user and group ID maps, which
+    /// say how it runs on the host (headless server design §7).
+    pub id_maps: Option<super::container::IdMaps>,
 }
 
 /// A class's or a row's run arguments and image (§1.4, §1.6).
@@ -165,6 +174,12 @@ pub(super) struct Gathered {
     /// What §1.4 reads beyond the settings: the AMD card, what the images
     /// are built for, the running models.
     pub present: super::fit::present::Present,
+    /// Where this lmgw runs: the server image's container words its items
+    /// for the host (headless server design §7).
+    pub deployment: Deployment,
+    /// In the server image: the container's mount points, which say the
+    /// volume each room lies on (§7).
+    pub mounts: Option<super::container::Mounts>,
 }
 
 /// A program the check ran within the load timeout, failed: the timeout
@@ -211,6 +226,7 @@ fn card_facts(f: &dyn Facts) -> CardFacts {
         nvml: None,
         amd: None,
         kfd: lmgw_machine::facts::exists(f, Path::new(KFD)),
+        nvidia_nodes: lmgw_machine::facts::exists(f, Path::new(super::container::NVIDIACTL)),
         render_nodes,
         pci,
     }
@@ -403,6 +419,10 @@ fn toolkit_facts(f: &dyn Facts, state: &AppState, limit: Duration, full: bool) -
     // Through root's environment with the user's rights (`Facts::root_env`,
     // D87): the hash the person confirms is then one the helper computes.
     let inputs = Inputs::read(f, PROVIDERS);
+    // In the server image the toolkit and its software source are the
+    // image's (headless server design §7): no setup, no updates of its own
+    // to ask the metadata cache about.
+    let container = state.deployment().is_container();
     let ctk_version = if !full {
         Err(format!("nvidia-ctk --version {NOT_FOR_BLAME}"))
     } else {
@@ -414,8 +434,12 @@ fn toolkit_facts(f: &dyn Facts, state: &AppState, limit: Duration, full: bool) -
         .devices
         .get(&format!("{}=all", lmgw_machine::cdi::NVIDIA_KIND))
         .cloned();
-    let frozen = frozen(&inputs, &cache_times(f));
-    let repoquery = if full {
+    let frozen = (!container)
+        .then(|| frozen(&inputs, &cache_times(f)))
+        .flatten();
+    let repoquery = if container {
+        RepoQuery::default()
+    } else if full {
         repoquery(f, &inputs, limit)
     } else {
         RepoQuery {
@@ -424,7 +448,11 @@ fn toolkit_facts(f: &dyn Facts, state: &AppState, limit: Duration, full: bool) -
         }
     };
     ToolkitFacts {
-        helper: lmgw_machine::plan::instructions::helper_installed(f),
+        helper: if container {
+            Err(super::container::NO_SETUP.into())
+        } else {
+            lmgw_machine::plan::instructions::helper_installed(f)
+        },
         appimage: f.env("APPIMAGE").is_some_and(|a| !a.is_empty()),
         ctk_version,
         spec: spec_facts(f, state),
@@ -519,6 +547,15 @@ pub(super) async fn layers_here(
 
 /// §1.3: `podman --version`, `podman --help`, `podman info`.
 async fn podman_facts(state: &AppState, f: &Arc<dyn Facts>, limit: Duration) -> PodmanFacts {
+    let container = state.deployment().is_container();
+    let id_maps = if container {
+        let f = f.clone();
+        tokio::task::spawn_blocking(move || super::container::IdMaps::read(&*f))
+            .await
+            .ok()
+    } else {
+        None
+    };
     let version = match podman(state, &["--version"], limit).await {
         Ok(o) if o.ok() => Ok(o.stdout.trim().to_string()),
         Ok(o) => Err(Some(format!(
@@ -535,6 +572,7 @@ async fn podman_facts(state: &AppState, f: &Arc<dyn Facts>, limit: Duration) -> 
             has_option: None,
             info: Err("podman is not installed".into()),
             subids: None,
+            id_maps,
         };
     }
     let has_option = match podman(state, &["--help"], limit).await {
@@ -545,7 +583,7 @@ async fn podman_facts(state: &AppState, f: &Arc<dyn Facts>, limit: Duration) -> 
         _ => None,
     };
     let info = podman_info(state, limit).await;
-    let subids = if info.is_err() {
+    let subids = if info.is_err() && !container {
         let f = f.clone();
         tokio::task::spawn_blocking(move || subids(&*f))
             .await
@@ -559,20 +597,21 @@ async fn podman_facts(state: &AppState, f: &Arc<dyn Facts>, limit: Duration) -> 
         has_option,
         info,
         subids,
+        id_maps,
     }
 }
 
 /// Whether this user has ranges in `/etc/subuid` and `/etc/subgid`, by name
 /// (from the user database, so an SSSD or LDAP account counts) or by UID.
 fn subids(f: &dyn Facts) -> Option<(bool, bool)> {
-    let uid = f.uid();
+    let uid = f.uid().map(|uid| uid.to_string());
     let name = f.user_name();
     let has = |file: &str| {
         lmgw_machine::facts::read_text(f, Path::new(file))
             .map(|t| {
                 t.lines().any(|l| {
                     let who = l.split(':').next().unwrap_or("");
-                    who == uid.to_string() || Some(who) == name.as_deref()
+                    Some(who) == uid.as_deref() || Some(who) == name.as_deref()
                 })
             })
             .unwrap_or(false)
@@ -698,9 +737,19 @@ pub(super) async fn gather(
             places.push((super::running::SOFTWARE, root.clone()));
         }
     }
+    let deployment = state.deployment();
+    if deployment.is_container() {
+        // The image's third volume (§3.2): builds' scratch and the staging
+        // copies `TMPDIR` points at.
+        places.push((
+            super::container::SCRATCH,
+            super::container::SCRATCH_DIR.into(),
+        ));
+    }
     let f2 = f.clone();
-    let rooms = tokio::task::spawn_blocking(move || {
-        places
+    let container = deployment.is_container();
+    let (rooms, mounts) = tokio::task::spawn_blocking(move || {
+        let rooms = places
             .into_iter()
             .filter(|(_, p)| p.starts_with('/'))
             .map(|(what, path)| Room {
@@ -708,7 +757,11 @@ pub(super) async fn gather(
                 space: f2.space(Path::new(&path)).map_err(|e| e.to_string()),
                 path,
             })
-            .collect()
+            .collect();
+        (
+            rooms,
+            container.then(|| super::container::read_mounts(&*f2)),
+        )
     })
     .await
     .unwrap_or_default();
@@ -759,5 +812,7 @@ pub(super) async fn gather(
         images,
         snap,
         present,
+        deployment,
+        mounts,
     })
 }

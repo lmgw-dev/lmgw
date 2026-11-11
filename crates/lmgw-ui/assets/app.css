@@ -49,6 +49,29 @@ html.desk-dark.desk-inactive:not([data-theme="light"]) .sidebar,
 html.desk-light.desk-inactive[data-theme="light"] .sidebar {
   background: var(--desk-title-inactive); }
 html.desk-dark .sidebar, html.desk-light .sidebar { transition: background-color .15s; }
+/* On Windows the shell hands over Windows 11's neutrals by the same steps,
+   anchored on its base surface as --bg1, and the user's accent colour in the
+   shades Windows paints its own accent fills in, with text on them that reads
+   (src-tauri/src/desktop_palette/win.rs). The page shows the system's dark or
+   light unless the theme setting forces one, and always agrees with it, so
+   the block above applies too. */
+html.desk-win.desk-dark:not([data-theme="light"]),
+html.desk-win.desk-light[data-theme="light"] {
+  --accent: var(--desk-accent); --accent-hi: var(--desk-accent-hi);
+  --accent-ink: var(--desk-accent-ink); --accent-bg: var(--desk-accent-bg);
+}
+/* The leftmost sidebar is the native title bar's colour (the shell sets the
+   caption colour from it; win.rs), so the two read as one L. With the user's
+   accent on title bars the sidebar is that accent, and its text, icons,
+   hover and lines take the colours that read on it; the panes stay. */
+html.desk-win:not(.desk-inactive) .sidebar { background: var(--desk-sidebar); }
+html.desk-win.desk-side .sidebar {
+  --text: var(--desk-sidebar-ink); --text-2: var(--desk-sidebar-ink-2);
+  --text-3: var(--desk-sidebar-ink-3); --surface: var(--desk-sidebar-hover);
+  --border: var(--desk-sidebar-line); --border-strong: var(--desk-sidebar-line);
+  --accent: var(--desk-sidebar-ink); --accent-bg: var(--desk-sidebar-hover);
+  color: var(--text); }
+html.desk-win ::selection { background: var(--desk-selection); color: var(--desk-selection-ink); }
 
 * { box-sizing: border-box; scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent; }
@@ -704,6 +727,8 @@ tr.group:not(.closed) .caret-icon { transform: rotate(90deg); }
 .menu-item.active { background: var(--surface); }
 .menu-item.danger { color: var(--err); }
 .menu-item.danger.armed { background: var(--err-bg); font-weight: 500; }
+.menu-item-note { white-space: normal; max-width: 300px; margin-top: 2px; font-weight: 400;
+  font-size: 12px; color: var(--text-2); }
 .menu-item.disabled { color: var(--text-3); cursor: default; }
 
 /* tabs that are routes (widgets/sub_nav.rs): the segmented control's look */
@@ -2376,10 +2401,19 @@ a.rail-item { text-decoration: none; }
 .set-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
   font-size: var(--fs-sm); }
 .set-line-label { font-weight: 500; color: var(--text-2); }
+/* A picker a server's container pins (headless server design §2.2): the
+   fieldset only carries `disabled` to every control inside, no box. */
+fieldset.set-lock { display: contents; border: 0; margin: 0; padding: 0; min-width: 0; }
 .input.ta.set-ta { min-height: 0; resize: vertical; }
 /* The default Chat system prompt is prose, and long: the card takes the
    whole row rather than one column of the flow. */
 .set-flow-item:has(.set-prompt) { column-span: all; }
+/* The audit log's list is a table of four columns with prose in two: the
+   Accounts card holding it spans the pane too. */
+.set-flow-item:has(.set-audit) { column-span: all; }
+/* Who and What wrap (a data table keeps its cells on one line), so a long
+   settings save or target never pushes the list past the pane. */
+.set-audit table.data td:not(.nowrap):not(.num) { white-space: normal; padding-block: 4px; }
 .set-prompt-foot { display: flex; align-items: flex-start; gap: 10px; margin-top: 4px; }
 .set-prompt-foot .field-hint { flex: 1 1 auto; margin-top: 0; max-width: none; }
 .set-notice { margin-top: 6px; }
@@ -2482,6 +2516,14 @@ table.data:is(.rt-stages, .vad-table) th { position: static; }
 .bk-result code { overflow-wrap: anywhere; }
 .bk-kept { display: flex; flex-direction: column; gap: 2px; }
 .bk-kept + .bk-kept { margin-top: 6px; }
+/* The Windows tab's builds: a variant and its state on one row, a mark's line wrapped
+   below them, so Try CUDA again stays in view (it was past the pane's edge in WebView2
+   at 1024 px and 125 %, 2026-11-11). A grid, because WebView2 broke the state chip onto
+   a line of its own despite the cell's nowrap once the line could wrap. */
+table.bk-releases .bk-release-build { display: grid; grid-template-columns: auto auto;
+  justify-content: start; align-items: center; column-gap: .35em; }
+table.bk-releases .bk-release-build > div { grid-column: 1 / -1; white-space: normal;
+  max-width: 44ch; }
 /* Pull update: podman's latest line, and its whole output folded. */
 .bk-pull-line { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 2.6em; }
 .bk-pull-log { margin-top: 8px; }

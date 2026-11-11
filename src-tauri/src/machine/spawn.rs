@@ -140,15 +140,12 @@ impl Helper for Pkexec {
             let status = child.wait().await;
             let stderr = stderr.await.unwrap_or_default();
             match status {
-                Ok(status) => {
-                    use std::os::unix::process::ExitStatusExt;
-                    Ended {
-                        code: status.code(),
-                        signal: status.signal(),
-                        stderr,
-                        error: read_error,
-                    }
-                }
+                Ok(status) => Ended {
+                    code: status.code(),
+                    signal: signal_of(status),
+                    stderr,
+                    error: read_error,
+                },
                 Err(e) => Ended {
                     code: None,
                     signal: None,
@@ -158,4 +155,16 @@ impl Helper for Pkexec {
             }
         })
     }
+}
+
+#[cfg(unix)]
+fn signal_of(status: std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+/// Windows has no signals: a process there always ends with a code.
+#[cfg(not(unix))]
+fn signal_of(_status: std::process::ExitStatus) -> Option<i32> {
+    None
 }

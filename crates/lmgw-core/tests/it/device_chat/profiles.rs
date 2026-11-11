@@ -230,6 +230,7 @@ async fn the_self_admin_tools_check_a_device_s_tts_alias_scope() {
                 "lmgw__profile_set",
                 args.as_object().cloned(),
                 Caller { device },
+                None,
             )
             .await
             .unwrap()

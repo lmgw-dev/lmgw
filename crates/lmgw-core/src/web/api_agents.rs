@@ -1347,21 +1347,22 @@ async fn service_dto(state: &SharedState, agent: &Agent) -> Option<dto::AgentSer
     let s = agents::service::service_of(agent)?;
     let id = &agent.row.id;
     let live = state.agent_services.get(id);
-    let settings = &state.snapshot().settings;
+    let snap = state.snapshot();
+    let (settings, tls) = (&snap.settings, snap.serving_tls.as_ref());
     Some(dto::AgentService {
         port: s.port,
         health_path: s.health_path.clone(),
         idle_seconds: s.idle_seconds,
         start_timeout_seconds: s.start_timeout_seconds,
         provides_mcp: agents::service::provides_mcp(agent).map(str::to_string),
-        origin: agents::service::agent_origin(settings, id),
+        origin: agents::service::agent_origin(settings, tls, id),
         // Asked at request time, with its own short timeout
         // (`service::ORIGIN_LOOKUP_TIMEOUT`): the answer is a property of the
         // machine's resolver, not of the row, and caching it would keep
         // printing "does not resolve" at an owner who has just added the hosts
         // line. A resolver that does not answer reads as `false`, never as an
         // error on this route.
-        origin_resolves: agents::service::origin_resolves(settings, id).await,
+        origin_resolves: agents::service::origin_resolves(settings, tls, id).await,
         starting: state.agent_services.starting(id),
         running: live.is_some(),
         host_port: live.as_ref().map(|l| l.host_port).unwrap_or(0),
@@ -2003,7 +2004,10 @@ async fn import_now(
             "this agent's app was started from the manifest the import just replaced, so it was \
              stopped ({}). The next request to {} starts the new one.",
             stopped.describe(),
-            agents::service::agent_origin(&state.snapshot().settings, &m.id)
+            {
+                let snap = state.snapshot();
+                agents::service::agent_origin(&snap.settings, snap.serving_tls.as_ref(), &m.id)
+            }
         ));
     }
 
@@ -2702,7 +2706,8 @@ async fn agent_dev_url_set(
         // Answered: whatever a bind-address change had to take away, the owner
         // has now decided about (§3.4).
         agents::service::forget_cleared_dev_url(state, &id).await;
-        let origin = agents::service::agent_origin(&state.snapshot().settings, &id);
+        let snap = state.snapshot();
+        let origin = agents::service::agent_origin(&snap.settings, snap.serving_tls.as_ref(), &id);
         return Ok(wire::dev_url_cleared(&id, &origin));
     };
     let url = agents::service::validate_dev_url(&raw, &state.snapshot().settings.bind_addr)?;
@@ -3389,7 +3394,10 @@ async fn agent_service_start(
             id,
             live.container.clone(),
             live.host_port,
-            agents::service::agent_origin(&state.snapshot().settings, id),
+            {
+                let snap = state.snapshot();
+                agents::service::agent_origin(&snap.settings, snap.serving_tls.as_ref(), id)
+            },
         )),
         Err(e) => Err(if e.log.trim().is_empty() {
             e.reason.clone()

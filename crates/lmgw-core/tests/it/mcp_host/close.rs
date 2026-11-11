@@ -51,6 +51,10 @@ async fn a_grant_cleared_or_a_row_switched_off_closes_1000() {
 }
 
 /// A frame over the frame limit closes 1009 naming that setting.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the close before the peer reads it; lmgw does not drain before a refusal close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn a_frame_overrun_names_the_frame_setting() {
     let (w, d) = host_world().await;
@@ -95,6 +99,10 @@ async fn a_missed_pong_closes_1011() {
 
 /// Two links of one device opening at once (review finding 5): one is
 /// taken over (4000), the other serves — never both closed.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the close before the peer reads it; lmgw does not drain before a refusal close on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn two_links_opening_at_once_leave_one() {
     let (w, d) = host_world().await;

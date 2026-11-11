@@ -293,6 +293,18 @@ pub struct LlamaParams {
     /// `max_output_tokens`; leave it unset rather than inventing one.
     pub n_predict: Option<i64>,
     pub n_gpu_layers: Option<i64>,
+    /// `--n-cpu-moe`: a mixture-of-experts model keeps the routed experts
+    /// of its first N layers in host memory, the rest of its weights on the
+    /// card. The footprint counts it ([`crate::vram::plan::chat`]), and a
+    /// copy in the freeform args too, which the renderer drops beside this
+    /// field. `None` leaves every expert where `n_gpu_layers` puts it.
+    pub n_cpu_moe: Option<i64>,
+    /// `--moe-cache-mib`: a cache of this many MiB on the card for the most
+    /// used of the experts kept in host memory (`n_cpu_moe`, `--cpu-moe`).
+    /// The footprint charges it in full while experts are kept there; a
+    /// copy in the freeform args counts when this is unset. `None` (and 0)
+    /// is llama-server's default, no cache.
+    pub moe_cache_mib: Option<i64>,
     pub threads: Option<i64>,
     pub batch_size: Option<i64>,
     /// `-ub`: physical batch size.

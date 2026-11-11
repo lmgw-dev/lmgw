@@ -16,6 +16,14 @@
 # of this repository, built or not, on a fresh runner: it checks the artifact
 # (the tag's version, the URL the release serves, the RPM's sha256 against
 # latest.json) and creates the release with gh.
+#
+# The Windows installer (Windows design §4.4, §5, WP7) follows in two jobs of its
+# own, so a Windows failure never holds back the RPM's release: `windows`
+# (contents: read) builds the per-user NSIS installer from the tag on a
+# GitHub-hosted Windows runner, with the build job's UI bundle (`ui`), through
+# ci/build-windows.ps1; `publish-windows` (contents: write, no checkout) checks
+# it against the tag, uploads it to the release and adds it to the release's
+# latest.json as its `nsis` entry. The installer is not signed yet. Not run yet.
 name: Release
 
 on:
@@ -142,6 +150,13 @@ jobs:
           path: release/
           if-no-files-found: error
           retention-days: 7
+      # Trunk's UI bundle for the Windows job, which builds no wasm.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui
+          path: crates/lmgw-ui/dist/
+          if-no-files-found: error
+          retention-days: 7
 
       # Best effort, after the release files are handed on. It runs inside the
       # build job, ahead of the publish job, so a hang would hold up the RPM
@@ -178,6 +193,43 @@ jobs:
         with:
           name: appimage
           path: appimage/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows installer
+    needs: build
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    # A cold release build with fat LTO and one codegen unit on a 4-core runner; not measured
+    # yet. This bounds what a hung build can cost.
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ui
+          path: crates/lmgw-ui/dist
+      # ci/build-windows.ps1 bakes the public default feed (GITHUB_ACTIONS), as ci/build.sh does.
+      - name: Build the installer
+        shell: powershell
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          powershell -NoProfile -ExecutionPolicy Bypass -File ci\build-windows.ps1 -Version $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist-windows/
           if-no-files-found: error
           retention-days: 7
 
@@ -310,3 +362,64 @@ jobs:
             exit 0
           fi
           gh release upload "v${VERSION}" "${files[0]}" --clobber
+
+  publish-windows:
+    name: Publish the Windows installer
+    # After the release exists with its latest.json; a failed Windows build skips this, and the
+    # release stays without the installer.
+    needs: [publish, windows]
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload assets
+    timeout-minutes: 15
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    # As `publish`: no checkout, nothing of the build but its artifact.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows
+          path: windows
+
+      - name: Check the installer against the tag and nsis.json
+        id: nsis
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "$TAG is no v<X.Y.Z> tag"
+          version="${BASH_REMATCH[1]}"
+          m=windows/nsis.json
+          [[ -f "$m" ]] || fail "the Windows build handed on no nsis.json"
+          got="$(jq -er .version "$m")" || fail "nsis.json has no version"
+          [[ "$got" == "$version" ]] || fail "nsis.json says $got, the tag $TAG"
+          file="$(jq -er .file "$m")" || fail "nsis.json names no installer"
+          [[ "$file" == "lmgw_${version}_x64-setup.exe" ]] || fail "nsis.json names $file, not lmgw ${version}'s installer"
+          sha="$(jq -er .sha256 "$m")" || fail "nsis.json has no sha256"
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "nsis.json's sha256 is not 64 hex digits: $sha"
+          files="$(cd windows && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          [[ "$files" == "$(printf '%s\n' "$file" nsis.json | LC_ALL=C sort)" ]] \
+            || fail "the Windows build handed on other files than $file and nsis.json: $files"
+          [[ -f "windows/$file" && ! -L "windows/$file" ]] || fail "$file is not a plain file"
+          have="$(sha256sum "windows/$file" | cut -d' ' -f1)"
+          [[ "$have" == "$sha" ]] || fail "$file's sha256 is $have, nsis.json says $sha"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Upload it and add it to latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.nsis.outputs.file }}
+          SHA: ${{ steps.nsis.outputs.sha256 }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          mkdir feed
+          gh release download "$TAG" --pattern latest.json --dir feed
+          version="$(jq -er .version feed/latest.json)" || fail "the release's latest.json has no version"
+          [[ "v$version" == "$TAG" ]] || fail "the release's latest.json says $version, the tag $TAG"
+          url="https://github.com/${GH_REPO}/releases/download/${TAG}/${FILE}"
+          jq --arg file "$FILE" --arg url "$url" --arg sha "$SHA" \
+            '.nsis = {file: $file, url: $url, sha256: $sha}' feed/latest.json > latest.json
+          # The installer first, then the manifest that names its sha256.
+          gh release upload "$TAG" "windows/$FILE" --clobber
+          gh release upload "$TAG" latest.json --clobber

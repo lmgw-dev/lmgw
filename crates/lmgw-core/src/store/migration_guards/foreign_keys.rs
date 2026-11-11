@@ -44,6 +44,18 @@ pub(in crate::store) async fn mark_before_migrations(
     Ok(applied)
 }
 
+/// Whether the marker is set: a start entered the migrator (or applied a
+/// migration) and the references have not been found whole since. The
+/// migration copy asks before it reuses a copy for a start killed inside a
+/// migration (headless server design D118): a start that went on to the
+/// check, the previous image's included, has cleared it.
+pub(in crate::store) async fn check_pending(pool: &SqlitePool) -> anyhow::Result<bool> {
+    if !table_exists(pool, "settings").await? {
+        return Ok(false);
+    }
+    Ok(get_kv(pool, PENDING_KEY).await?.is_some())
+}
+
 /// After the migrator: mark when it applied anything (`applied_before`: the
 /// count [`mark_before_migrations`] returned), then check while marked, and
 /// clear the marker only after a clean check.
@@ -73,7 +85,19 @@ async fn applied_migrations(pool: &SqlitePool) -> anyhow::Result<i64> {
 }
 
 /// Whether `migrator` holds an up migration the database has not recorded.
-async fn pending(pool: &SqlitePool, migrator: &sqlx::migrate::Migrator) -> anyhow::Result<bool> {
+pub(in crate::store) async fn pending(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> anyhow::Result<bool> {
+    Ok(!pending_versions(pool, migrator).await?.is_empty())
+}
+
+/// The up migrations `migrator` holds and the database has not recorded,
+/// in order: all of them before the bookkeeping table exists.
+pub(in crate::store) async fn pending_versions(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> anyhow::Result<Vec<i64>> {
     let recorded: HashSet<i64> = if table_exists(pool, "_sqlx_migrations").await? {
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
             .fetch_all(pool)
@@ -83,10 +107,14 @@ async fn pending(pool: &SqlitePool, migrator: &sqlx::migrate::Migrator) -> anyho
     } else {
         HashSet::new()
     };
-    Ok(migrator
+    let mut pending: Vec<i64> = migrator
         .migrations
         .iter()
-        .any(|m| m.migration_type.is_up_migration() && !recorded.contains(&m.version)))
+        .filter(|m| m.migration_type.is_up_migration() && !recorded.contains(&m.version))
+        .map(|m| m.version)
+        .collect();
+    pending.sort_unstable();
+    Ok(pending)
 }
 
 /// Refuse to start, naming the rows, when a foreign key points at a row that

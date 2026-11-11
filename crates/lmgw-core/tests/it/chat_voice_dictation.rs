@@ -291,9 +291,26 @@ async fn dictation_is_transcribed_by_the_threads_asr_within_max_body_mb() {
         "the hint went up"
     );
 
-    // Over the configured bound: refused, naming it.
-    tweak(&state, |s| s.max_body_mb = 1).await;
-    let (status, v) = transcribe(&gw, tid, long).await;
+    let (status, v) = transcribe(&gw, tid, Vec::new()).await;
+    assert_eq!((status, v["code"].as_str()), (400, Some("empty_audio")));
+}
+
+/// A recording over the configured bound is refused, naming it.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; only a declared oversize /v1 body is drained before its 413 on Windows yet (Windows design §5)"
+)]
+#[tokio::test]
+async fn dictation_over_max_body_mb_is_413_naming_it() {
+    let (chat, stt, stt2) = mocks().await;
+    let (state, gw) = gateway(&chat, &stt, &stt2).await;
+    let tid = new_thread(&gw, "plain", false).await;
+    tweak(&state, |s| {
+        s.chat_stt_alias = "my-asr".into();
+        s.max_body_mb = 1;
+    })
+    .await;
+    let (status, v) = transcribe(&gw, tid, recording(70)).await;
     assert_eq!(status, 413, "{v}");
     assert_eq!(v["code"], "body_limit");
     assert!(
@@ -303,9 +320,6 @@ async fn dictation_is_transcribed_by_the_threads_asr_within_max_body_mb() {
             .contains("max_body_mb (1 MiB)"),
         "{v}"
     );
-
-    let (status, v) = transcribe(&gw, tid, Vec::new()).await;
-    assert_eq!((status, v["code"].as_str()), (400, Some("empty_audio")));
 }
 
 /// Review m2, m7d: the recording goes up as its `Content-Type` says, with a

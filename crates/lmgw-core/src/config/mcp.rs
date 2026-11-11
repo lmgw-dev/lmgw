@@ -333,7 +333,7 @@ pub fn run_only_refusal(extra_run_args: &[String]) -> Option<String> {
 /// MCP: set explicitly on the link's WebSocket, defaulting to realtime's
 /// (realtime design §10.4), each named by the close an overrun causes; and
 /// the MCP Tasks poll interval (MCP Tasks design §5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct McpSettings {
     /// The largest message a device may send over its host link, in MiB.

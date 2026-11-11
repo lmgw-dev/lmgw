@@ -123,6 +123,9 @@ fn image(model_id: &str, image: Option<&str>, warm: bool) -> ImageModel {
         capabilities_override: None,
         peak_extra_bytes: None,
         peak_learned_at: None,
+        idle_bytes: None,
+        work_bytes: None,
+        learned_key: None,
         prompt_style: None,
         preview_mode: None,
     }
@@ -541,9 +544,14 @@ fn config_dir_follows_the_data_dir_audiocpp_slug_hash_scheme() {
             hash6("Qwen3-TTS/12Hz")
         ))
     );
+    // Part by part: the separator is the system's.
     assert!(
-        dir.to_string_lossy()
-            .starts_with("/home/u/.local/share/lmgw/audiocpp/qwen3-tts-12hz-"),
+        dir.starts_with(data_dir.join("audiocpp"))
+            && dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("qwen3-tts-12hz-"),
         "{dir:?}"
     );
 }

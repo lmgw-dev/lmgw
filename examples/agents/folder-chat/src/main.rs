@@ -22,14 +22,22 @@
 //! `ENTRYPOINT`): as PID 1 the kernel delivers no default-action signals, so
 //! SIGTERM reaches only the handler installed here.
 
+#[cfg(target_os = "linux")]
 use std::future::IntoFuture;
+#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
 use std::process::ExitCode;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use folder_chat::server::{Server, SyncStop};
+#[cfg(target_os = "linux")]
 use folder_chat::FolderChat;
+#[cfg(target_os = "linux")]
 use tokio_util::sync::CancellationToken;
 
 /// How long in-flight requests may take to finish after a stop signal before
@@ -38,14 +46,17 @@ use tokio_util::sync::CancellationToken;
 /// query). The sync is stopped before this starts, so it cannot spend it
 /// embedding; five seconds leaves the other half of lmgw's default
 /// `stop_grace_seconds` (10) for closing the index.
+#[cfg(target_os = "linux")]
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
 
 /// How long closing the index may take (SQLite checkpoints its WAL on the
 /// last connection's close). Past it the process exits anyway: the WAL is
 /// replayed on the next open, so nothing is lost. Drain plus this stays under
 /// the default `stop_grace_seconds` of 10.
+#[cfg(target_os = "linux")]
 pub const INDEX_CLOSE_WAIT: Duration = Duration::from_secs(2);
 
+#[cfg(target_os = "linux")]
 fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()
@@ -59,6 +70,7 @@ fn required_env(name: &str) -> Result<String, String> {
         })
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> ExitCode {
     // stderr is the service log lmgw keeps (`agent_service_log`); stdout is
@@ -80,6 +92,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn run() -> Result<(), String> {
     let port: u16 = required_env("LMGW_PORT")?
         .trim()
@@ -180,6 +193,7 @@ async fn run() -> Result<(), String> {
 }
 
 /// Cancel `shutdown` on the first SIGTERM (podman stop) or SIGINT (Ctrl-C).
+#[cfg(target_os = "linux")]
 async fn signals(shutdown: CancellationToken) {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = match signal(SignalKind::terminate()) {
@@ -206,4 +220,10 @@ async fn signals(shutdown: CancellationToken) {
         SHUTDOWN_DRAIN.as_secs()
     );
     shutdown.cancel();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> std::process::ExitCode {
+    eprintln!("folder-chat runs on Linux only (not on Windows yet)");
+    std::process::ExitCode::FAILURE
 }

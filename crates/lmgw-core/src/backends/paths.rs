@@ -183,12 +183,29 @@ fn statvfs_free(path: &Path) -> std::io::Result<u64> {
     Ok((buf.f_bavail as u64).saturating_mul(buf.f_frsize as u64))
 }
 
-#[cfg(not(unix))]
-fn statvfs_free(_path: &Path) -> std::io::Result<u64> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "free space is read with statvfs",
-    ))
+/// Windows: `GetDiskFreeSpaceExW`'s bytes free to the calling user (quotas
+/// count), the counterpart of `f_bavail`; a path that does not exist fails,
+/// so [`free_bytes`] asks its ancestors as on Unix.
+#[cfg(windows)]
+fn statvfs_free(path: &Path) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free = 0u64;
+    // SAFETY: `wide` is NUL-terminated; only the caller's free bytes are
+    // asked for, the other two outputs are null.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(free)
 }
 
 // `f_type` values from linux/magic.h.
@@ -276,20 +293,29 @@ mod tests {
 
     #[test]
     fn a_builds_dir_is_absolute_or_blank() {
+        // An absolute dir and a filesystem's root as this system writes them:
+        // a path with no drive is not absolute on Windows.
+        let (dir, root) = if cfg!(windows) {
+            (r"C:\srv\builds", r"C:\")
+        } else {
+            ("/srv/builds", "/")
+        };
         assert_eq!(validate_builds_dir(" "), Ok(None));
         assert_eq!(
-            validate_builds_dir(" /srv/builds ").unwrap().as_deref(),
-            Some("/srv/builds")
+            validate_builds_dir(&format!(" {dir} ")).unwrap().as_deref(),
+            Some(dir)
         );
         assert!(validate_builds_dir("builds").is_err());
-        assert!(validate_builds_dir("/").is_err());
+        assert!(validate_builds_dir(root).is_err());
+        if cfg!(windows) {
+            assert!(validate_builds_dir("/srv/builds").is_err(), "no drive");
+        }
     }
 
-    #[cfg(unix)]
     #[test]
     fn free_space_is_read_from_the_nearest_existing_ancestor() {
         let tmp = std::env::temp_dir();
-        let here = free_bytes(&tmp).expect("the temp dir's filesystem answers statvfs");
+        let here = free_bytes(&tmp).expect("the temp dir's filesystem answers its free space");
         assert_eq!(
             free_bytes(&tmp.join("lmgw-no-such-dir/builds")).map(|b| b > 0),
             Some(here > 0),

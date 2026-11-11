@@ -1,0 +1,29 @@
+# Spike image: headless lmgw that runs its model containers with a nested podman.
+# Build context: a small dir holding this file, the config files beside it and a copy of
+# the headless example binary (`headless`); see run.sh.
+FROM registry.fedoraproject.org/fedora:45
+
+COPY nvidia-container-toolkit.repo /etc/yum.repos.d/
+RUN dnf -y install --setopt=install_weak_deps=False \
+        podman crun catatonit conmon passt fuse-overlayfs netavark aardvark-dns \
+        nvidia-container-toolkit-base \
+        git poppler-utils opus \
+        procps-ng iproute curl jq util-linux-core shadow-utils libcap \
+    && dnf clean all \
+    # A rootless build drops shadow-utils' file capabilities; a non-root inner podman needs them.
+    && setcap cap_setuid+ep /usr/bin/newuidmap && setcap cap_setgid+ep /usr/bin/newgidmap
+
+COPY containers.conf /etc/containers/containers.conf.d/99-spike.conf
+COPY storage.conf /etc/containers/storage.rootful.conf.d/99-spike.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY headless /usr/local/bin/lmgw-headless
+
+ENV LMGW_DATA_DIR=/data \
+    XDG_RUNTIME_DIR=/run/user/0 \
+    RUST_LOG=headless=info,lmgw_core=info,tower_http=info
+
+VOLUME ["/var/lib/containers"]
+EXPOSE 8897
+# catatonit as PID 1 reaps the conmon and pasta processes the inner podman leaves to it
+# (lmgw as PID 1 left them as zombies).
+ENTRYPOINT ["/usr/libexec/catatonit/catatonit", "--", "/usr/local/bin/entrypoint.sh"]

@@ -1,0 +1,30 @@
+[package]
+name = "lmgw-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lmgw's production start without the tray app, for the server image"
+
+[dependencies]
+# The whole gateway, and the dashboard it embeds (`web/ui.rs`), with the
+# feature set the tray app builds it with: no Tauri, no WebKit here.
+lmgw-core = { path = "../lmgw-core" }
+anyhow = "1.0.102"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The account commands (headless server design §5.7): the calls through the
+# running gateway's loopback listener, their JSON, and the terminal's echo
+# switched off while a password is typed.
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+serde_json = "1.0.150"
+libc = "0.2.186"
+
+[dev-dependencies]
+# Scratch data dirs for the start's refusals and the data-dir lock.
+tempfile = "3.27.0"
+# The start's host seams in its tests: a machine with stated facts.
+lmgw-machine = { path = "../lmgw-machine", features = ["fake"] }
+# The account commands' tests and the migration copy's: a database left
+# one migration behind (the core's migrations, run up to a version).
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }

@@ -63,7 +63,7 @@ codes, with the upstream's own message kept (§8, §9).
    `code: upstream` even for a 400; `to_openai_json` hard-codes `param: null`;
    `to_anthropic_json` has no code slot. The pattern for a classified upstream
    refusal is llama-server's `exceed_context_size_error` →
-   `ContextExceeded` (`egress/openai_wire/aux.rs::context_refusal`, ahead of
+   `ContextExceeded` (`egress/openai_wire/aux_models.rs::context_refusal`, ahead of
    the generic mapping). An upstream 400 never triggers a fallback or a
    candidate re-pick. `proxy/reasoning_fit/send.rs` retries a cloud 400/422
    once without the reasoning off — only when the mapped error is still

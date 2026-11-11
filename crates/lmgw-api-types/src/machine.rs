@@ -15,7 +15,10 @@
 //! settings item offers it as its [`MachineAction`].
 //!
 //! Every `sentence` and `headline` is plain: no "container", no "CDI", no
-//! "Podman". The technical names are in each item's `detail`.
+//! "Podman". The technical names are in each item's `detail`. In the server
+//! image (container mode, headless server design §7) the reader is the
+//! server's administrator, and the sentences name the lmgw container, the
+//! host and its service where that is what to act on.
 
 use serde::{Deserialize, Serialize};
 
@@ -338,6 +341,10 @@ pub enum MachineCause {
     NvmlFailed { error: String },
     /// An AMD card without a device node to compute on.
     AmdNoComputeNode,
+    /// The server image's container was started without the NVIDIA card:
+    /// the card is on the bus and its driver runs on the host, and the
+    /// container has no `/dev/nvidiactl` (headless server design §7).
+    CardNotPassedIn,
     /// NVIDIA's container toolkit is not installed.
     ToolkitMissing,
     /// The toolkit comes from Fedora's retired package.

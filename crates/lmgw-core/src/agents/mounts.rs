@@ -558,5 +558,6 @@ pub async fn ctx(state: &SharedState) -> Ctx {
     }
 }
 
-#[cfg(test)]
+// Symbolic links and modes.
+#[cfg(all(test, unix))]
 mod tests;

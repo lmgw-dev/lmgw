@@ -1,0 +1,379 @@
+{
+  "windows-x86_64": {
+    "llama": {
+      "repo": "ggml-org/llama.cpp",
+      "tag": "b12244",
+      "published": "2026-11-10",
+      "builds": [
+        {
+          "variant": "cuda13",
+          "asset": {
+            "name": "llama-b12244-bin-win-cuda-13.5-x64.zip",
+            "sha256": "b698ca169a8c599eafc5d4c12d7b4d3c04f5a5a4dca0ae66c99a1741d7511b9e",
+            "size": 170994053
+          },
+          "cudart": {
+            "name": "cudart-llama-bin-win-cuda-13.5-x64.zip",
+            "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba",
+            "size": 426314199
+          },
+          "cuda": {
+            "toolkit": "13.5",
+            "files": [
+              {
+                "file": "ggml-cuda.dll",
+                "sass": [
+                  "86",
+                  "89",
+                  "120a",
+                  "121a"
+                ],
+                "ptx": [
+                  "75",
+                  "80",
+                  "90"
+                ],
+                "ptx_isa": "9.5"
+              }
+            ]
+          }
+        },
+        {
+          "variant": "cuda12",
+          "asset": {
+            "name": "llama-b12244-bin-win-cuda-12.4-x64.zip",
+            "sha256": "16eef900b8e952a11c6c654ce9a48e7be124067bdc480acca01cfd581aa122ab",
+            "size": 288964428
+          },
+          "cudart": {
+            "name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+            "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+            "size": 391443627
+          },
+          "cuda": {
+            "toolkit": "12.4",
+            "files": [
+              {
+                "file": "ggml-cuda.dll",
+                "sass": [
+                  "86",
+                  "89"
+                ],
+                "ptx": [
+                  "50",
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "90"
+                ],
+                "ptx_isa": "8.4"
+              }
+            ]
+          }
+        },
+        {
+          "variant": "vulkan",
+          "asset": {
+            "name": "llama-b12244-bin-win-vulkan-x64.zip",
+            "sha256": "501d17fc5d29e69bf16b473c8bf714a8bbee32f52e634a531128313a9d135853",
+            "size": 37891837
+          }
+        },
+        {
+          "variant": "cpu",
+          "asset": {
+            "name": "llama-b12244-bin-win-cpu-x64.zip",
+            "sha256": "318f11fadcbc3a86541ec55d9930cc76646c6b8d2ff18798c8477e9ff0dc452a",
+            "size": 24930349
+          }
+        }
+      ]
+    },
+    "sdcpp": {
+      "repo": "leejet/stable-diffusion.cpp",
+      "tag": "master-1079-a3c49b1",
+      "published": "2026-11-09",
+      "builds": [
+        {
+          "variant": "cuda12",
+          "asset": {
+            "name": "sd-master-a3c49b1-bin-win-cuda12-x64.zip",
+            "sha256": "028ad2b901d53fa35da942e49d1e15e39bc782a3875c7fb2099b3479dcf533be",
+            "size": 366993184
+          },
+          "cudart": {
+            "name": "cudart-sd-bin-win-cu12-x64.zip",
+            "sha256": "fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d",
+            "size": 563452046
+          },
+          "cuda": {
+            "toolkit": "12.8",
+            "files": [
+              {
+                "file": "ggml-cuda.dll",
+                "sass": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "100",
+                  "120a"
+                ],
+                "ptx": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "100",
+                  "120a"
+                ],
+                "ptx_isa": "8.7"
+              },
+              {
+                "file": "stable-diffusion.dll",
+                "sass": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "100",
+                  "120"
+                ],
+                "ptx": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "100",
+                  "120"
+                ],
+                "ptx_isa": "8.7"
+              }
+            ]
+          }
+        },
+        {
+          "variant": "vulkan",
+          "asset": {
+            "name": "sd-master-a3c49b1-bin-win-vulkan-x64.zip",
+            "sha256": "60991b744e21add68625c27386e3a6dbcfc72929a3101880cb4863f5f1e6c013",
+            "size": 30001283
+          }
+        },
+        {
+          "variant": "cpu",
+          "asset": {
+            "name": "sd-master-a3c49b1-bin-win-cpu-x64.zip",
+            "sha256": "0810a923711e87ce4aac487b598aa1698ff38b20380b17f0b0a2ac23f34e6a72",
+            "size": 18230822
+          }
+        }
+      ]
+    },
+    "audio": {
+      "repo": "0xShug0/audio.cpp",
+      "tag": "v0.9.4",
+      "published": "2026-11-05",
+      "builds": [
+        {
+          "variant": "cuda13",
+          "asset": {
+            "name": "audio-v0.9.4-bin-windows-x64-cuda13.3.zip",
+            "sha256": "b05eceb8aa0a29e618b3af87e0c2fd0fb665034d181096eb868ed856bf656b8b",
+            "size": 279188412
+          },
+          "cudart": {
+            "name": "audio-v0.9.4-cudart-windows-x64-cuda13.3.zip",
+            "sha256": "b93fa9b9cb875ccea1aa81cb09fd6b02c9afda133de73bd119a73ff5d8db6d96",
+            "size": 575457454
+          },
+          "cuda": {
+            "toolkit": "13.3",
+            "files": [
+              {
+                "file": "audiocpp_cli.exe",
+                "sass": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx_isa": "9.3"
+              },
+              {
+                "file": "audiocpp_server.exe",
+                "sass": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx_isa": "9.3"
+              },
+              {
+                "file": "ggml-cuda.dll",
+                "sass": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx": [
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90",
+                  "120a"
+                ],
+                "ptx_isa": "9.3"
+              }
+            ]
+          }
+        },
+        {
+          "variant": "cuda12",
+          "asset": {
+            "name": "audio-v0.9.4-bin-windows-x64-cuda12.4.zip",
+            "sha256": "e85d829e121a424a960d9ad293536b7ada74ea845b1c12fcf2991ec09a224d1e",
+            "size": 467800419
+          },
+          "cudart": {
+            "name": "audio-v0.9.4-cudart-windows-x64-cuda12.4.zip",
+            "sha256": "efb58667b95bcb32e89ddf87811664e6ffdced3fe7015ddcc077599ed5f44bb2",
+            "size": 607273675
+          },
+          "cuda": {
+            "toolkit": "12.4",
+            "files": [
+              {
+                "file": "audiocpp_cli.exe",
+                "sass": [
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx_isa": "8.4"
+              },
+              {
+                "file": "audiocpp_server.exe",
+                "sass": [
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx_isa": "8.4"
+              },
+              {
+                "file": "ggml-cuda.dll",
+                "sass": [
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx": [
+                  "61",
+                  "70",
+                  "75",
+                  "80",
+                  "86",
+                  "89",
+                  "90"
+                ],
+                "ptx_isa": "8.4"
+              }
+            ]
+          }
+        },
+        {
+          "variant": "vulkan",
+          "asset": {
+            "name": "audio-v0.9.4-bin-windows-x64-vulkan.zip",
+            "sha256": "804f70cf47c7b8450ef37e76fc04ecee71728345061f6e749a412932dd7db7a7",
+            "size": 84083745
+          }
+        },
+        {
+          "variant": "cpu",
+          "asset": {
+            "name": "audio-v0.9.4-bin-windows-x64-cpu.zip",
+            "sha256": "596ef1d6ed5113f3a4f5194c8c00e02be5748d7dfb09e7f270168e6ec5c8e0cf",
+            "size": 32323805
+          }
+        }
+      ]
+    },
+    "espeak": {
+      "repo": "espeak-ng/espeak-ng",
+      "tag": "1.52.0",
+      "published": "2024-12-12",
+      "asset": {
+        "name": "espeak-ng.msi",
+        "sha256": "7f673c709ea5dd579d3b5ebb98688cc575328a6ab7438d2bc405b88cedaeafb9",
+        "size": 12765862
+      }
+    }
+  }
+}

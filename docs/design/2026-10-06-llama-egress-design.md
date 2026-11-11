@@ -102,7 +102,7 @@ tool-result images, which llama-server accepts and lmgw flattens to text today.
 | Tool-result flattening | `:26-46` | shared default; llama renderer (§8) |
 | `top_k`, `min_p`, `repeat_penalty` | `:332-342` | shared, unchanged |
 | Embeddings (llama-server ignores `dimensions`) | `:559-573`, `:615-641` | shared |
-| Rerank: Jina request, Jina/TEI response | `:643-704` | `openai_wire::aux`, both egresses (Q1) |
+| Rerank: Jina request, Jina/TEI response | `:643-704` | `openai_wire::aux_models`, both egresses (Q1) |
 | Usage, SSE decoder, finish reasons | `:707-726`, `:797-884`, `mod.rs:185-193` | shared |
 | `has_reasoning_object` (`web/chat_reasoning.rs:92`, `proxy/chat.rs:199`, `responses.rs:201`) | `:156-160` | shared |
 | Docs that name llama.cpp | `openai.rs:1-2`, `mod.rs:56-58`, `:77-85` | reworded |
@@ -170,7 +170,7 @@ children:
 - `messages.rs`: `messages_json`, `user_content_json`, the default tool-result rendering;
 - `body.rs`: `has_reasoning_object`, the OpenRouter object reconcile;
 - `decode.rs`: `OpenaiDecoder`, `reasoning_text`, `parse_usage`, `parse_timings`;
-- `aux.rs`: the embeddings and rerank builders and parsers, the generic error mapping.
+- `aux_models.rs`: the embeddings and rerank builders and parsers, the generic error mapping.
 
 Trait methods, `chat_body`, `apply_reasoning`, `reconcile_reasoning_passthrough` and the count plan
 stay in `openai.rs` and call them. `scripts/move-check.py <WP0> <WP1>` must show only `mod` and
@@ -586,7 +586,7 @@ corpora. "Re-blessed" means a §9.1/§9.2 fixture rewritten with `LMGW_BLESS=1`.
 *Answered 2026-10-06: both as recommended. Q1 keep; Q2 I2 and I3, not I1.*
 
 1. **Rerank on the OpenAI egress (recommended: keep).** Keep the Jina `/rerank` as one shared
-   builder in `openai_wire::aux`, documented as a de-facto extension on OpenAI-protocol rows. vLLM,
+   builder in `openai_wire::aux_models`, documented as a de-facto extension on OpenAI-protocol rows. vLLM,
    TEI, Infinity and Jina serve it on generic rows, and it is not a llama quirk. Confirm?
 2. **The intended changes (recommended: I2 and I3, not I1).** Take I2 (stop rewriting a client's
    `thinking_budget_tokens` on cloud routes) and I3 (send both budget names, the only way a budget

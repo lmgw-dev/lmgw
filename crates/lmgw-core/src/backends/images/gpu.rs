@@ -125,7 +125,7 @@ async fn read_files(state: &SharedState, id: &str) -> ImageGpu {
     // A listing needs neither: no network, and no GPU even where the image
     // asks the NVIDIA hook for one (`NVIDIA_VISIBLE_DEVICES=all`).
     let mut run_args = vec!["--network=none".to_string()];
-    run_args.extend(crate::runtime::aux::cpu_run_args(&[]));
+    run_args.extend(crate::runtime::aux_models::cpu_run_args(&[]));
     let args: Vec<String> = FIND_ARGS.iter().map(|a| a.to_string()).collect();
     let registry = state.runtime();
     let run = registry.run_throwaway(&prefix, &name, id, "find", &run_args, &args);

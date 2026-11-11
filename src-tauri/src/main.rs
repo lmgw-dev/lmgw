@@ -25,6 +25,9 @@ mod pairing;
 mod portal;
 #[cfg(target_os = "linux")]
 mod reveal;
+/// Links handed to the shell's `open` verb on Windows (Windows design §4.4).
+#[cfg(any(windows, test))]
+mod shell_open;
 mod updater;
 mod window_size;
 
@@ -239,12 +242,21 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 /// Hand a URL to the desktop. The browser it may start is not lmgw's audio,
 /// so it does not inherit lmgw's stream identity (chat-voice §12.3).
-fn xdg_open(url: &str) -> std::io::Result<std::process::Child> {
+#[cfg(not(windows))]
+fn xdg_open(url: &str) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(url);
     audio_out::scrub_identity_env(&mut cmd);
     portal::scrub(&mut cmd);
-    cmd.spawn()
+    cmd.spawn().map(drop)
+}
+
+/// Windows (Windows design §4.4): the URL handed to the shell's `open` verb,
+/// with `"`, whitespace and control characters percent-encoded first, since
+/// the handler's own command line gets it as it is (`shell_open`).
+#[cfg(windows)]
+fn xdg_open(url: &str) -> std::io::Result<()> {
+    shell_open::open(url)
 }
 
 /// The origin the window was opened with: scheme, host and port.
@@ -745,7 +757,7 @@ fn main() {
                                 // drive (§8) — no second lifecycle path for the
                                 // tray. `force`, because a tray click is the
                                 // owner deciding.
-                                match lmgw_core::ops::container(
+                                let done = lmgw_core::ops::container(
                                     &st,
                                     Some("all"),
                                     None,
@@ -753,8 +765,23 @@ fn main() {
                                     true,
                                     None,
                                 )
-                                .await
-                                {
+                                .await;
+                                // The audit log's entry while accounts are
+                                // on (headless server design §5.8).
+                                let target = serde_json::Map::from_iter([
+                                    ("model".to_string(), "all".into()),
+                                    ("action".to_string(), action.into()),
+                                ]);
+                                let status = if done.is_ok() { 200 } else { 400 };
+                                lmgw_core::audit::desktop(
+                                    &st,
+                                    lmgw_core::audit::Via::Tray,
+                                    "container",
+                                    target,
+                                    status,
+                                )
+                                .await;
+                                match done {
                                     Ok(v) => tracing::info!(
                                         "container {action}: {}",
                                         serde_json::to_string(&v).unwrap_or_default()
@@ -776,11 +803,23 @@ fn main() {
                             let app = app.clone();
                             let hold_item = hold_item_for_menu.clone();
                             tauri::async_runtime::spawn(async move {
-                                match lmgw_core::ops::backends::to_json(
-                                    lmgw_core::ops::hold_set(&st, next)
-                                        .await
-                                        .map_err(|r| r.message),
-                                ) {
+                                let done = lmgw_core::ops::hold_set(&st, next).await;
+                                let target = serde_json::Map::from_iter([(
+                                    "active".to_string(),
+                                    next.into(),
+                                )]);
+                                let status =
+                                    done.as_ref().map_or_else(|r| r.status.as_u16(), |_| 200);
+                                lmgw_core::audit::desktop(
+                                    &st,
+                                    lmgw_core::audit::Via::Tray,
+                                    "hold_set",
+                                    target,
+                                    status,
+                                )
+                                .await;
+                                match lmgw_core::ops::backends::to_json(done.map_err(|r| r.message))
+                                {
                                     Ok(v) => {
                                         tracing::info!("hold_set: {v}");
                                         sync_hold(&app, &hold_item, next);

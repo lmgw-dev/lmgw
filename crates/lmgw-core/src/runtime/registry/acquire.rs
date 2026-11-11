@@ -10,13 +10,13 @@ use tokio::sync::watch;
 use crate::gate::facts::GateFacts;
 
 use super::raii::StartClaim;
+use super::start_of::{EntryWatch, StartOf};
 use super::*;
-use crate::runtime::argv::{
-    never_pull, podman_run_argv, render_image_args, stamp_owner, EngineArgs,
-};
+use crate::runtime::argv::{render_image_args, EngineArgs};
 use crate::runtime::container_name;
 use crate::runtime::descriptor::ModelRuntime;
 use crate::runtime::image::ImageCapabilities;
+use crate::runtime::launcher::{Launch, Launcher, Podman, Prepare};
 
 impl Registry {
     pub fn new(runner: Arc<dyn CommandRunner>, http: reqwest::Client) -> Self {
@@ -30,7 +30,39 @@ impl Registry {
         http: reqwest::Client,
         port: PortAllocator,
     ) -> Self {
+        let cdi = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::runtime::cdi::OwnSpec::unmanaged("this registry is not wired to a gateway"),
+        ));
+        let launcher = Arc::new(Podman::new(Arc::clone(&runner), Arc::clone(&cdi)));
+        Self::assemble(launcher, runner, http, port, cdi)
+    }
+
+    /// A registry whose models' processes go through `launcher`
+    /// ([`crate::runtime::launcher`]) instead of the Podman launcher over
+    /// `runner`. `runner` still serves the verbs outside the launcher (the
+    /// engine vocabulary probes, the `ps` / `rm -f` lent to the agents, MCP
+    /// and builds).
+    pub fn with_launcher(
+        launcher: Arc<dyn Launcher>,
+        runner: Arc<dyn CommandRunner>,
+        http: reqwest::Client,
+        port: PortAllocator,
+    ) -> Self {
+        let cdi = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::runtime::cdi::OwnSpec::unmanaged("this registry is not wired to a gateway"),
+        ));
+        Self::assemble(launcher, runner, http, port, cdi)
+    }
+
+    fn assemble(
+        launcher: Arc<dyn Launcher>,
+        runner: Arc<dyn CommandRunner>,
+        http: reqwest::Client,
+        port: PortAllocator,
+        cdi: Arc<arc_swap::ArcSwap<crate::runtime::cdi::OwnSpec>>,
+    ) -> Self {
         Self {
+            launcher,
             runner,
             http,
             port,
@@ -43,9 +75,8 @@ impl Registry {
             on_started: std::sync::OnceLock::new(),
             pass: tokio::sync::Mutex::new(Default::default()),
             image_caps_seen: Mutex::new(HashMap::new()),
-            cdi: arc_swap::ArcSwap::from_pointee(crate::runtime::cdi::OwnSpec::unmanaged(
-                "this registry is not wired to a gateway",
-            )),
+            cdi,
+            staged: Mutex::new(HashMap::new()),
         }
     }
 
@@ -69,6 +100,12 @@ impl Registry {
     /// [`AppState::init_for_tests`]: crate::state::AppState::init_for_tests
     pub fn runner(&self) -> Arc<dyn CommandRunner> {
         self.runner.clone()
+    }
+
+    /// The launcher every model's process goes through
+    /// ([`crate::runtime::launcher`]).
+    pub fn launcher(&self) -> Arc<dyn Launcher> {
+        self.launcher.clone()
     }
 
     /// The map lock. Poisoning is recovered from rather than propagated: the
@@ -115,6 +152,7 @@ impl Registry {
                 match map.get_mut(&key) {
                     Some(e) if e.state == RuntimeState::Ready && e.climb.is_none() => {
                         e.in_flight += 1;
+                        e.claims += 1;
                         e.last_used = Instant::now();
                         ownership::claimed_by(e, origin);
                         Decision::Hit {
@@ -165,6 +203,7 @@ impl Registry {
                             container_name(spec.container_prefix, class, &spec.runtime.model_id);
                         let now = Instant::now();
                         let generation = next_generation();
+                        let staged = self.take_staged(&key);
                         map.insert(
                             key.clone(),
                             Entry {
@@ -174,6 +213,7 @@ impl Registry {
                                 state: RuntimeState::Starting,
                                 started_at: now,
                                 in_flight: 0,
+                                claims: 0,
                                 last_used: now,
                                 stop_timeout: spec.stop_timeout,
                                 phase: phase.clone(),
@@ -187,6 +227,11 @@ impl Registry {
                                 sends: watch::channel(0).0,
                                 climb: None,
                                 owner: origin,
+                                grant: staged.grant,
+                                admission_note: staged.note,
+                                served: false,
+                                adopted: false,
+                                engine_key: None,
                             },
                         );
                         Decision::Start(StartClaim {
@@ -215,6 +260,7 @@ impl Registry {
                         phase,
                         generation,
                         failed: AtomicBool::new(false),
+                        sent: AtomicBool::new(false),
                         gate,
                     })
                 }
@@ -292,11 +338,14 @@ impl Registry {
         }
     }
 
-    /// The start sequence (§3.5, §3.6, §10.4). Never runs under the map lock.
+    /// The start sequence (§3.5, §3.6, §10.4) for the entry `of` names.
+    /// Never runs under the map lock. An entry a stop took meanwhile ends it
+    /// `Aborted`, before a launch and right after one (`start_of.rs`).
     pub(super) async fn start_container(
         &self,
         spec: &AcquireSpec<'_>,
         name: &str,
+        of: StartOf<'_>,
     ) -> Result<Started, RuntimeError> {
         let class = spec.runtime.class;
         let model_id = spec.runtime.model_id.clone();
@@ -327,20 +376,34 @@ impl Registry {
         // cannot start.
         let (runtime, mut warnings) = self.with_sdcpp_caps(spec).await;
         let runtime: &ModelRuntime = runtime.as_ref().unwrap_or(spec.runtime);
-        // lmgw's own CDI spec, made true of this machine before a GPU start
-        // (machine-check design §3.6.2), and the option that points Podman at
-        // it. Once per start, before a port is taken, within the start's load
-        // timeout: a spec that cannot be written (a restart pending, a
-        // generation that hangs) is the start's answer.
-        let globals = self
-            .cdi()
-            .ready_globals(
-                spec.container_prefix,
-                &runtime.extra_run_args,
-                spec.load_timeout,
-            )
-            .await
-            .map_err(|e| fail(e.to_string(), Vec::new()))?;
+        // What admission gave a start that fits only partially: sd-server's
+        // `--max-vram` in every launch of this entry (`admission_grant.rs`).
+        let grant = self.grant_of(of);
+        // What the launcher readies for this start (Podman: lmgw's own CDI
+        // spec, made true of this machine before a GPU start, machine-check
+        // design §3.6.2). Once per start (again after a fallback to the
+        // engine's next build, below), before a port is taken, within the
+        // start's load timeout: a machine that cannot be readied (a restart
+        // pending, a spec generation that hangs) is the start's answer. A
+        // prepare that fails because a stop took the entry is that stop's.
+        let watch = EntryWatch { reg: self, of };
+        let prepare = Prepare {
+            container_prefix: spec.container_prefix,
+            class,
+            run_args: &runtime.extra_run_args,
+            placement: runtime.placement(),
+            budget: spec.load_timeout,
+            watch: &watch,
+        };
+        let aborted = || RuntimeError::Aborted {
+            class,
+            model_id: model_id.clone(),
+        };
+        let mut prepared = match self.launcher.prepare(prepare).await {
+            Ok(p) => p,
+            Err(_) if !self.still_starting(of) => return Err(aborted()),
+            Err(e) => return Err(fail(e, Vec::new())),
+        };
         // The gate's facts come from the descriptor this start renders its
         // argv from — the same value, so the ledger's pool is the pool this
         // container really has (second review, finding 1). Once per start,
@@ -361,13 +424,25 @@ impl Registry {
             }
         }
 
-        // At most two attempts, and the second only for a port conflict:
-        // this is not a general retry loop, it is the §10.4 window between
-        // releasing the probe listener and podman binding the port.
+        // At most two attempts for a port conflict: this is not a general
+        // retry loop, it is the §10.4 window between releasing the probe
+        // listener and podman binding the port. And at most one fallback to
+        // the engine's next build (a native CUDA build without a kernel for
+        // the card, Windows design §4.2), which prepares the start again —
+        // its download outside the load timeout — and gets a fresh budget
+        // and its own port retry.
         let mut retry = PortRetry::default();
+        let mut fell_back: Option<String> = None;
         loop {
-            let port = (self.port)()
-                .map_err(|e| fail(format!("no free host port could be allocated: {e}"), vec![]))?;
+            let port = (self.port)().map_err(|e| {
+                fail(
+                    after_fallback(
+                        format!("no free host port could be allocated: {e}"),
+                        &fell_back,
+                    ),
+                    vec![],
+                )
+            })?;
             let render = match spec.may_write_models_dir {
                 true => {
                     runtime.render_spec(spec.container_prefix, port, spec.models_dir, spec.data_dir)
@@ -381,41 +456,84 @@ impl Registry {
             };
             let mut render = render.map_err(|e| {
                 fail(
-                    format!("rendering the container spec failed: {e}"),
+                    after_fallback(
+                        format!("rendering the container spec failed: {e}"),
+                        &fell_back,
+                    ),
                     Vec::new(),
                 )
             })?;
-            // A GPU container pointed at lmgw's spec dir gets no restart
-            // policy (D27); the start says so.
-            let no_restart = render.set_globals(globals.clone());
-            let note = crate::runtime::cdi::restart_note(&no_restart);
-            if !no_restart.is_empty() && !warnings.contains(&note) {
-                warnings.push(note);
+            // A llama-server start lmgw fitted in `--fit`'s place: its
+            // placement over the row's, with `--fit off`, recorded on the
+            // container so boot adopts it (`argv::llama_fit`).
+            if let (
+                Some(PartialGrant {
+                    bytes,
+                    llama: Some(p),
+                    ..
+                }),
+                EngineArgs::Llama(crate::runtime::argv::LlamaArgs::Chat { .. }),
+            ) = (&grant, &render.engine)
+            {
+                if !p.is_whole() {
+                    render.fitted = Some(crate::runtime::argv::Fitted {
+                        bytes: *bytes,
+                        placement: *p,
+                    });
+                }
+            }
+            if let (Some(g), EngineArgs::Image(img)) = (&grant, &mut render.engine) {
+                img.held = Some(crate::runtime::argv::HeldTo {
+                    granted: g.bytes,
+                    max_vram: g.max_vram_bytes,
+                });
+                if let Some(note) = super::admission_grant::unheld_note(img, g) {
+                    if !warnings.contains(&note) {
+                        warnings.push(note);
+                    }
+                }
             }
             // The image renderer is the one that can refuse (a row naming
             // neither `model` nor `diffusion_model`, a key this image has no
-            // flag for). Asked here, before `podman run`, so the answer is the
-            // reason rather than a container that exits with a usage dump.
+            // flag for). Asked here, before the launch, so the answer is the
+            // reason rather than a process that exits with a usage dump.
             if matches!(render.engine, EngineArgs::Image(_)) {
                 if let Err(e) = render_image_args(&render) {
                     return Err(fail(
-                        format!("this row cannot be rendered: {e}"),
+                        after_fallback(format!("this row cannot be rendered: {e}"), &fell_back),
                         Vec::new(),
                     ));
                 }
             }
+            // A stop that took the entry while this start prepared (a
+            // fallback's download included) gets nothing launched.
+            if !self.still_starting(of) {
+                return Err(aborted());
+            }
 
-            // Never a pull here (machine-check design §5): admission
-            // downloaded a missing image before the gate (`vram::download`).
-            let argv = never_pull(match self.owner() {
-                Some(owner) => stamp_owner(podman_run_argv(&render), owner),
-                None => podman_run_argv(&render),
-            });
-            let outcome = self.podman_argv(&argv).await;
-            let (status, stderr) = match outcome {
-                Ok(out) if out.ok() => {
-                    // `podman run -d` returned; the model is still uploading.
-                    return match self
+            let launched = self
+                .launcher
+                .launch(Launch {
+                    render: &render,
+                    prepared: &prepared,
+                    owner: self.owner(),
+                    placement: runtime.placement(),
+                })
+                .await;
+            // And one that took it during the launch, after asking the
+            // launcher to stop what was not there yet (`start_of.rs`).
+            if !self.still_starting(of) {
+                return Err(self.abort_launched(of, name).await);
+            }
+            let failure = match launched {
+                Ok(launched) => {
+                    for note in launched.warnings {
+                        if !warnings.contains(&note) {
+                            warnings.push(note);
+                        }
+                    }
+                    // Launched; the model is still loading.
+                    match self
                         .await_ready(name, &render, port, spec.load_timeout)
                         .await
                     {
@@ -443,49 +561,84 @@ impl Registry {
                                     "{class} model '{model_id}' started with a warning: {w}"
                                 );
                             }
-                            Ok(Started {
+                            return Ok(Started {
                                 port,
                                 warnings,
                                 capabilities: ready.capabilities,
                                 llama,
                                 gate,
-                            })
+                                engine_key: runtime.engine_key(prepared.build()),
+                            });
                         }
-                        Err(message) => {
-                            // The container is still running — a stuck load, a
+                        // The process ended because its port was taken: a
+                        // native engine binds the port itself and reports the
+                        // §10.4 window only by exiting. The same one retry as
+                        // for a launch that says so, after collecting what
+                        // ended.
+                        Err(not_ready) if retry.again_when(not_ready.port_in_use) => {
+                            let _ = self.launcher.remove(name).await;
+                            continue;
+                        }
+                        // The launcher marked the build that ran and has the
+                        // engine's next one: prepared again (installing it if
+                        // need be), then launched on a fresh port with the
+                        // whole load budget. Once.
+                        Err(NotReady {
+                            message,
+                            fallback: Some(why),
+                            ..
+                        }) if fell_back.is_none() => {
+                            let note = format!("{message}: {why}");
+                            tracing::warn!(container = %name, "{class} model '{model_id}': {note}");
+                            // The ended attempt's log stays readable until
+                            // the next launch replaces it.
+                            self.launcher.stop_quietly(name).await;
+                            prepared = match self.launcher.prepare(prepare).await {
+                                Ok(p) => p,
+                                Err(_) if !self.still_starting(of) => return Err(aborted()),
+                                Err(e) => {
+                                    return Err(fail(
+                                        format!("{note}; preparing the next build failed: {e}"),
+                                        self.launcher.log_excerpt(name).await,
+                                    ))
+                                }
+                            };
+                            warnings.push(note.clone());
+                            fell_back = Some(note);
+                            retry = PortRetry::default();
+                            continue;
+                        }
+                        Err(not_ready) => {
+                            // The process is still running — a stuck load, a
                             // model that will never answer — and no entry will
                             // ever refer to it, so nothing else would stop it:
                             // it would hold VRAM until the next boot
                             // reconciliation. Stopped, not removed, because
-                            // the whole value of this failure is in
-                            // `podman logs`, which `--replace` collects at the
-                            // next start (§3.6).
-                            self.stop_quietly(name).await;
-                            Err(fail(message, self.log_excerpt(name).await))
+                            // the whole value of this failure is in its logs,
+                            // which the next start under the name collects
+                            // (`--replace`, §3.6).
+                            self.launcher.stop_quietly(name).await;
+                            return Err(fail(
+                                after_fallback(not_ready.message, &fell_back),
+                                self.launcher.log_excerpt(name).await,
+                            ));
                         }
-                    };
+                    }
                 }
-                Ok(out) => (out.status.to_string(), out.stderr),
-                // The runner could not even spawn podman (missing binary,
-                // fork failure). No container exists, so there is nothing to
-                // retry a port against.
-                Err(e) => (String::from("n/a"), format!("podman could not be run: {e}")),
+                Err(failure) => failure,
             };
 
-            if retry.again(&stderr) {
+            if retry.again_when(failure.port_in_use) {
                 // Measured (§10.4): the run fails synchronously but leaves
                 // the container object behind in `created`. Collect the husk
                 // before rerunning — `--replace` would too, but only if the
                 // retry gets that far, and leaving `created` husks around is
                 // exactly what makes reconciliation (§3.4) ambiguous later.
-                let _ = self.podman(&["rm", "-f", name]).await;
+                let _ = self.launcher.remove(name).await;
                 continue;
             }
-            let logs = self.log_excerpt(name).await;
-            return Err(fail(
-                format!("podman run failed (exit {status}): {}", stderr.trim()),
-                logs,
-            ));
+            let logs = self.launcher.log_excerpt(name).await;
+            return Err(fail(after_fallback(failure.message, &fell_back), logs));
         }
     }
 
@@ -500,8 +653,8 @@ impl Registry {
     /// a recv error rather than a refused connection. So every non-200
     /// outcome — refused, reset, timed out, 404, 502 — means the same thing
     /// here: still starting. Nothing is retried differently and nothing is
-    /// treated as fatal by the port; the one earlier verdict comes from podman,
-    /// when the container itself has exited ([`Self::exited`], every
+    /// treated as fatal by the port; the one earlier verdict comes from the
+    /// launcher, when the process itself has exited ([`Launcher::exited`], every
     /// [`CONTAINER_EXIT_POLL`]). Applied unchanged to the audio probe: a
     /// `GET /v1/models` that 200s is exactly as meaningful a readiness signal
     /// as `/health` is for llama.
@@ -511,17 +664,17 @@ impl Registry {
         port: u16,
         path: &str,
         load_timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), NotReady> {
         let url = format!("http://127.0.0.1:{port}{path}");
         let deadline = Instant::now() + load_timeout;
         let mut next_state_check = Instant::now() + CONTAINER_EXIT_POLL;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(format!(
+                return Err(NotReady::plain(format!(
                     "no HTTP 200 from {url} within the load timeout ({load_timeout:?}, {})",
                     crate::config::LOAD_TIMEOUT_LABEL
-                ));
+                )));
             }
             // One probe may take until the next look at the container's own
             // state is due — [`CONTAINER_EXIT_POLL`], the interval this poll
@@ -539,14 +692,14 @@ impl Registry {
                 }
             }
             if let Some(dead) = self.exited_since(name, &mut next_state_check).await {
-                return Err(format!("{dead}, before {url} answered 200"));
+                return Err(NotReady::exited(dead, format!("before {url} answered 200")));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(format!(
+                return Err(NotReady::plain(format!(
                     "no HTTP 200 from {url} within the load timeout ({load_timeout:?}, {})",
                     crate::config::LOAD_TIMEOUT_LABEL
-                ));
+                )));
             }
             tokio::time::sleep(HEALTH_POLL.min(left)).await;
         }
@@ -568,7 +721,7 @@ impl Registry {
         render: &crate::runtime::argv::RenderSpec,
         port: u16,
         load_timeout: Duration,
-    ) -> Result<Ready, String> {
+    ) -> Result<Ready, NotReady> {
         if !matches!(render.engine, EngineArgs::Image(_)) {
             let deadline = Instant::now() + load_timeout;
             self.await_health(name, port, render.health_path, load_timeout)
@@ -596,11 +749,11 @@ impl Registry {
         // What this poll is waiting for, said in full: for this engine a 5xx
         // is an answer too, so "no HTTP 200" would name the wrong condition.
         let timed_out = || {
-            format!(
+            NotReady::plain(format!(
                 "no HTTP 200 (ready) and no 5xx (ready, with a broken capabilities scan) from \
                  {url} within the load timeout ({load_timeout:?}, {})",
                 crate::config::LOAD_TIMEOUT_LABEL
-            )
+            ))
         };
         let deadline = Instant::now() + load_timeout;
         let mut next_state_check = Instant::now() + CONTAINER_EXIT_POLL;
@@ -666,7 +819,7 @@ impl Registry {
                 // 404 from something else on the port) is "not yet".
             }
             if let Some(dead) = self.exited_since(name, &mut next_state_check).await {
-                return Err(format!("{dead}, before {url} answered"));
+                return Err(NotReady::exited(dead, format!("before {url} answered")));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -689,6 +842,54 @@ pub(super) struct Started {
     /// advisory ([`LlamaEntry`]). `None` for every other engine.
     pub(super) llama: Option<LlamaEntry>,
     pub(super) gate: Option<Arc<GateFacts>>,
+    /// [`Entry::engine_key`]: the engine this start ran, its native build
+    /// included (after a fallback, the build it fell back to).
+    pub(super) engine_key: Option<String>,
+}
+
+/// Why a launched process never became ready: the sentence for the start's
+/// error, and whether it ended on a taken port ([`Exited::port_in_use`]),
+/// which the start retries once on a fresh port.
+///
+/// [`Exited::port_in_use`]: crate::runtime::launcher::Exited::port_in_use
+struct NotReady {
+    message: String,
+    port_in_use: bool,
+    /// The launcher's [`Exited::fallback`]: the start goes on with the
+    /// engine's next build, once.
+    ///
+    /// [`Exited::fallback`]: crate::runtime::launcher::Exited::fallback
+    fallback: Option<String>,
+}
+
+impl NotReady {
+    fn plain(message: String) -> Self {
+        Self {
+            message,
+            port_in_use: false,
+            fallback: None,
+        }
+    }
+
+    /// The launcher's exit report, said with when it came.
+    fn exited(dead: crate::runtime::launcher::Exited, when: String) -> Self {
+        Self {
+            message: format!("{}, {when}", dead.message),
+            port_in_use: dead.port_in_use,
+            fallback: dead.fallback,
+        }
+    }
+}
+
+/// A start's error after a fallback names the fallback too: what the
+/// first build said, then what the second one did.
+fn after_fallback(message: String, fell_back: &Option<String>) -> String {
+    match fell_back {
+        Some(first) => {
+            format!("{message} (after the fallback to the engine's next build: {first})")
+        }
+        None => message,
+    }
 }
 
 /// The readiness poll's verdict, for a probe that can succeed *with* something

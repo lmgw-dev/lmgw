@@ -20,7 +20,6 @@ use crate::config::Snapshot;
 use crate::state::SharedState;
 
 use super::ledger::Ledger;
-use super::scheduler::MIB;
 use super::{ResidentView, Target, VramScheduler};
 
 /// What a warm group is checked against.
@@ -72,7 +71,7 @@ impl VramScheduler {
         let capacity = l.capacity.as_ref().map(|c| c.total).filter(|t| *t > 0)?;
         Some(GroupCapacity {
             capacity,
-            headroom: snap.settings.vram.headroom_mb.saturating_mul(MIB),
+            headroom: self.headroom(snap).bytes,
             outside: outside_of(&l),
         })
     }
@@ -88,7 +87,7 @@ impl VramScheduler {
         let capacity = l.capacity.as_ref().map(|c| c.total).filter(|t| *t > 0)?;
         Some(OnCardNow {
             capacity,
-            headroom: snap.settings.vram.headroom_mb.saturating_mul(MIB),
+            headroom: self.headroom(snap).bytes,
             outside: outside_of(&l),
             residents: residents_now(&l.residents),
         })
@@ -122,9 +121,12 @@ impl VramScheduler {
         let fp = self.footprint(snap, target.class, &target.model_id).await?;
         let l = self.ledger(state, snap).await;
         let cap = l.capacity.as_ref()?;
-        let needs = fp
-            .total_bytes
-            .saturating_add(snap.settings.vram.headroom_mb.saturating_mul(MIB));
+        let needs = fp.total_bytes.saturating_add(self.start_headroom(
+            snap,
+            target.class,
+            &target.model_id,
+            &fp,
+        ));
         crowded(cap.free, &l.residents, target, kept, needs)
     }
 }

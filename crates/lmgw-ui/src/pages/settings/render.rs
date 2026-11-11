@@ -108,8 +108,14 @@ fn lay(d: &Def) -> Lay {
         | Ctl::SpeechStyle(_)
         | Ctl::TagHint
         | Ctl::Budget
+        | Ctl::Said(_)
+        | Ctl::HeadroomForget
         | Ctl::DeviceListener
-        | Ctl::WebRtc => Lay::Block,
+        | Ctl::WebRtc
+        | Ctl::TlsStatus
+        | Ctl::Accounts
+        | Ctl::AuditLog
+        | Ctl::About => Lay::Block,
         Ctl::Vad(_) => Lay::Vad,
         Ctl::Apply(_) | Ctl::CheckNow => Lay::Acts,
         Ctl::Theme | Ctl::Scale => Lay::Grid(Size::S),
@@ -258,6 +264,15 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                 .then(|| SWITCHED_UNDER.to_string())
         })
     });
+    // Set by the server's container (headless server design §2.2): every
+    // control drawn here is shown locked, and the hint says where the value
+    // is changed instead. The kinds drawn by a component of their own
+    // (ForgeTokens, Words, Voice, the panels) hold no pinned setting yet.
+    let pinned = Memo::new(move |_| page.pinned_why(k));
+    let locked = Signal::derive(move || pinned.with(Option::is_some));
+    let hint = move || pinned.get().unwrap_or_else(|| d.hint.to_string());
+    // "restart to apply" only where a restart is the tray's (§6.2).
+    let unit = move || page.unit_of(d);
     match d.ctl {
         Ctl::Text
         | Ctl::Mono
@@ -279,8 +294,8 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field
                     label=d.label
-                    unit=d.unit
-                    hint=d.hint
+                    unit=unit
+                    hint=hint
                     dirty=dirty
                     error=error
                     warn=warn
@@ -292,6 +307,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                         placeholder=d.ph
                         inputmode=if numeric { "decimal" } else { "text" }
                         spellcheck="false"
+                        disabled=locked
                         prop:value=move || form.text(k)
                         on:input=move |ev| {
                             let v = event_target_value(&ev);
@@ -312,8 +328,8 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     .collect::<Vec<_>>()
             });
             view! {
-                <Field label=d.label unit=d.unit hint=d.hint dirty=dirty id=id hidden=hidden>
-                    <Select value=value options=options/>
+                <Field label=d.label unit=unit hint=hint dirty=dirty id=id hidden=hidden>
+                    <Select value=value options=options disabled=locked/>
                 </Field>
             }
             .into_any()
@@ -322,8 +338,8 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             let value = bridge(form, k);
             let options = chat_profile::options();
             view! {
-                <Field label=d.label unit=d.unit hint=d.hint dirty=dirty id=id hidden=hidden>
-                    <Select value=value options=options placeholder="Default"/>
+                <Field label=d.label unit=unit hint=hint dirty=dirty id=id hidden=hidden>
+                    <Select value=value options=options placeholder="Default" disabled=locked/>
                 </Field>
             }
             .into_any()
@@ -349,15 +365,17 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field
                     label=d.label
-                    unit=d.unit
-                    hint=d.hint
+                    unit=unit
+                    hint=hint
                     dirty=dirty
                     error=error
                     warn=warn
                     id=id
                     hidden=hidden
                 >
-                    <ImagePicker value=value class=class backend=backend visible=visible/>
+                    <fieldset class="set-lock" disabled=locked>
+                        <ImagePicker value=value class=class backend=backend visible=visible/>
+                    </fieldset>
                 </Field>
             }
             .into_any()
@@ -378,8 +396,8 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field
                     label=d.label
-                    unit=d.unit
-                    hint=d.hint
+                    unit=unit
+                    hint=hint
                     dirty=dirty
                     error=error
                     warn=warn
@@ -390,6 +408,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                         class="input mono"
                         placeholder=effective
                         spellcheck="false"
+                        disabled=locked
                         prop:value=move || form.text(k)
                         on:input=move |ev| form.set_text(k, event_target_value(&ev))
                     />
@@ -425,14 +444,16 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field
                     label=d.label
-                    unit=d.unit
-                    hint=d.hint
+                    unit=unit
+                    hint=hint
                     dirty=dirty
                     error=Signal::derive(move || form.error(k))
                     id=id
                     hidden=hidden
                 >
-                    {picker}
+                    <fieldset class="set-lock" disabled=locked>
+                        {picker}
+                    </fieldset>
                 </Field>
             }
             .into_any()
@@ -444,7 +465,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                 <Field
                     label=d.label
                     unit=Signal::derive(move || if stored() { "stored" } else { "not set" })
-                    hint=d.hint
+                    hint=hint
                     dirty=either
                     error=Signal::derive(move || form.error(k))
                     id=id
@@ -455,6 +476,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                             class="input mono"
                             type="password"
                             autocomplete="off"
+                            disabled=locked
                             placeholder=move || if stored() { "type to replace" } else { "" }
                             prop:value=move || form.text(k)
                             on:input=move |ev| form.set_text(k, event_target_value(&ev))
@@ -463,6 +485,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                             <label class="check" title="Erased on Save">
                                 <input
                                     type="checkbox"
+                                    disabled=locked
                                     prop:checked=move || form.flag(clear)
                                     on:change=move |ev| form.set_flag(clear, event_target_checked(&ev))
                                 />
@@ -478,11 +501,15 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             <label class="check check-line" class:dirty=move || dirty.get() id=id hidden=move || hidden.get()>
                 <input
                     type="checkbox"
+                    disabled=locked
                     prop:checked=move || form.flag(k)
                     on:change=move |ev| form.set_flag(k, event_target_checked(&ev))
                 />
                 <span>{d.label}</span>
-                {(!d.hint.is_empty()).then(|| view! { <span class="check-hint">{d.hint}</span> })}
+                {move || {
+                    let t = hint();
+                    (!t.is_empty()).then(|| view! { <span class="check-hint">{t}</span> })
+                }}
             </label>
         }
         .into_any(),
@@ -490,11 +517,12 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             // As many rows as there are lines, and one to type into.
             let rows = move || (form.text(k).lines().count() + 1).max(2).to_string();
             view! {
-                <Field label=d.label unit=d.unit hint=d.hint dirty=dirty id=id hidden=hidden>
+                <Field label=d.label unit=unit hint=hint dirty=dirty id=id hidden=hidden>
                     <textarea
                         class="input mono ta set-ta"
                         rows=rows
                         spellcheck="false"
+                        disabled=locked
                         prop:value=move || form.text(k)
                         on:input=move |ev| form.set_text(k, event_target_value(&ev))
                     ></textarea>
@@ -530,7 +558,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                             "your own"
                         }
                     })
-                    hint=d.hint
+                    hint=hint
                     dirty=dirty
                     id=id
                     hidden=hidden
@@ -538,6 +566,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     <textarea
                         class="input ta set-ta set-prompt"
                         rows=if placeholders { "18" } else { "6" }
+                        disabled=locked
                         prop:value=move || form.text(k)
                         on:input=move |ev| form.set_text(k, event_target_value(&ev))
                     ></textarea>
@@ -563,7 +592,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                         }}
                         <button
                             class="btn ghost sm"
-                            disabled=is_builtin
+                            disabled=move || is_builtin() || locked.get()
                             title="Put the built-in prompt back in the box; Save to keep it"
                             on:click=move |_| form.set_text(k, builtin())
                         >
@@ -579,8 +608,8 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field
                     label=d.label
-                    unit=d.unit
-                    hint=d.hint
+                    unit=unit
+                    hint=hint
                     dirty=dirty
                     error=error
                     warn=warn
@@ -592,6 +621,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                         rows=rows
                         spellcheck="false"
                         placeholder=d.ph
+                        disabled=locked
                         prop:value=move || form.text(k)
                         on:input=move |ev| form.set_text(k, event_target_value(&ev))
                     ></textarea>
@@ -697,6 +727,32 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! { <devices::ListenerPanel page=page id=id hidden=hidden/> }.into_any()
         }
         Ctl::WebRtc => view! { <webrtc::WebRtcPanel page=page id=id hidden=hidden/> }.into_any(),
+        Ctl::TlsStatus => view! { <tls::TlsPanel page=page id=id hidden=hidden/> }.into_any(),
+        Ctl::Accounts => {
+            view! { <accounts::AccountsPanel page=page id=id hidden=hidden/> }.into_any()
+        }
+        Ctl::AuditLog => {
+            view! { <accounts::AuditPanel page=page id=id hidden=hidden/> }.into_any()
+        }
+        Ctl::About => view! { <about::AboutPanel page=page id=id hidden=hidden/> }.into_any(),
+        Ctl::Said(pointer) => {
+            let said = move || {
+                page.data.with(|d| {
+                    d.as_ref()
+                        .and_then(|v| v.pointer(pointer))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                })
+            };
+            view! {
+                <div class="field-hint" id=id hidden=hidden>{said}</div>
+            }
+            .into_any()
+        }
+        Ctl::HeadroomForget => {
+            view! { <headroom::ForgetGrowth page=page id=id hidden=hidden/> }.into_any()
+        }
         Ctl::Hold => view! {
             <div class="set-line" id=id hidden=move || hidden.get()>
                 <HoldSwitch page=page/>
@@ -745,7 +801,11 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <div class="set-line" id=id hidden=move || hidden.get()>
                     <span class="set-line-label">{said}</span>
-                    <a href=format!("/settings/gpu#{MACHINE_ANCHOR}")>"This computer"</a>
+                    <a href=format!("/settings/gpu#{MACHINE_ANCHOR}")>
+                        {move || {
+                            crate::widgets::machine_check::card_heading(page.container())
+                        }}
+                    </a>
                 </div>
             }
             .into_any()

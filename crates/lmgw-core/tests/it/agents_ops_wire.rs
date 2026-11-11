@@ -12,6 +12,10 @@
 //! reads an MCP stub that holds its first call, so nothing reaches past
 //! loopback and no run finishes before a test says so.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use lmgw_api_types as dto;
 use lmgw_core::config::Protocol;
 use lmgw_core::store;
@@ -37,6 +41,9 @@ async fn install(gw: &Gw, image: &str) {
 // agent_pull, agent_reimport
 // ---------------------------------------------------------------------------
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pull_says_whether_the_image_moved_and_how_its_manifest_compares() {
     let podman = Podman::default()
@@ -97,6 +104,9 @@ async fn a_pull_says_whether_the_image_moved_and_how_its_manifest_compares() {
     );
 }
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pull_of_an_image_that_was_not_here_has_no_old_digest_and_no_record() {
     let podman = Podman::default().pulls(IMAGE, Some("sha256:one"), Some(&board("1.0.0", "")));
@@ -139,6 +149,9 @@ async fn a_pull_after_which_podman_reports_no_digest_leaves_changed_absent() {
     assert_eq!(pulled.note, "", "nothing was compared");
 }
 
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_reimport_answers_the_report_the_image_and_whether_the_manifest_differed() {
     let podman = Podman::default()

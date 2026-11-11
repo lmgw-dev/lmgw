@@ -85,11 +85,7 @@ impl VramScheduler {
             let members: Vec<(u64, Result<Vec<u32>, String>)> = asked
                 .into_iter()
                 .map(|a| {
-                    let pids = a.root.map(|root| {
-                        std::iter::once(root)
-                            .chain(tree.descendants(root))
-                            .collect()
-                    });
+                    let pids = a.root.and_then(|root| tree.tree_of(root));
                     (a.generation, pids)
                 })
                 .collect();

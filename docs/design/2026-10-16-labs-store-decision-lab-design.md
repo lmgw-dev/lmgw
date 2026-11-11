@@ -66,7 +66,7 @@ recommendations on 2026-10-16 (Decisions 31 to 34) and left the drafts 13 to 30 
   (52, 255) are deliberately not coded: they live in llama.cpp's source, not the header
   (`modelinfo/decision.rs:6-10`, `capabilities/notes.rs:426-430`). A running container's `/props`
   gives `n_ctx_slot` and `vision` (`egress/llama_cpp/props.rs:43-58`). The engine defaults are
-  `LLAMA_DEFAULT_UBATCH` 512 and `LLAMA_DEFAULT_BATCH` 2048 (`runtime/aux.rs:103`, `:145`).
+  `LLAMA_DEFAULT_UBATCH` 512 and `LLAMA_DEFAULT_BATCH` 2048 (`runtime/aux_models.rs:103`, `:145`).
   Headers are read through `gguf_cache.summarize_cached` (`modelinfo/licence.rs:33-37`).
 - **Persistence.** Chat keeps attachments as BLOBs in `lmgw.sqlite`
   (`migrations/0038_chat_archive_attachments.sql:22-33`); knowledge-base originals are files

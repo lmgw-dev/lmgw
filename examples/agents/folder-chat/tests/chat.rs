@@ -1,6 +1,8 @@
 //! The prompt builder offline: a synced fixture index, quickdoc's retriever,
 //! and the budget edges that decide what the model is shown.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::collections::HashSet;

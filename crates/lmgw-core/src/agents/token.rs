@@ -395,27 +395,46 @@ pub fn mint_owner() -> String {
 /// one write, then a snapshot reload so the new value is live on the next
 /// request and the old one is dead.
 ///
-/// The primitive behind rotation and behind a test that wants a known owner
-/// credential. Returns the row id.
+/// The primitive behind a test that wants a known owner credential: a new
+/// row belongs to account 1 (headless server design §5.1), a rotated one
+/// keeps its account. Returns the row id.
 pub async fn set_owner_key(
     state: &SharedState,
     name: &str,
     plaintext: &str,
     enabled: bool,
 ) -> Result<i64, String> {
-    let id = write_owner_key(state, name, plaintext, enabled).await?;
+    let account = store::KeyAccount {
+        id: crate::accounts::ACCOUNT_ONE,
+        login: None,
+    };
+    set_owner_key_for(state, name, plaintext, enabled, Some(account)).await
+}
+
+/// [`set_owner_key`] for the account a new row belongs to: what
+/// `key_create kind=owner` calls with the caller's account.
+pub async fn set_owner_key_for(
+    state: &SharedState,
+    name: &str,
+    plaintext: &str,
+    enabled: bool,
+    account: Option<store::KeyAccount<'_>>,
+) -> Result<i64, String> {
+    let id = write_owner_key(state, name, plaintext, enabled, account).await?;
     state.reload_snapshot().await.map_err(|e| e.to_string())?;
     Ok(id)
 }
 
-/// [`set_owner_key`]'s write alone, for a caller that handles the reload
-/// itself (`key_rotate`, which revokes the old value whatever the reload
-/// did). Returns the row id.
+/// [`set_owner_key_for`]'s write alone, for a caller that handles the
+/// reload itself (`key_rotate`, which revokes the old value whatever the
+/// reload did). A rotated row keeps its account; `account` is a new row's.
+/// Returns the row id.
 pub async fn write_owner_key(
     state: &SharedState,
     name: &str,
     plaintext: &str,
     enabled: bool,
+    account: Option<store::KeyAccount<'_>>,
 ) -> Result<i64, String> {
     store::upsert_owner_key(
         &state.db,
@@ -423,6 +442,7 @@ pub async fn write_owner_key(
         &crate::config::hash_api_key(plaintext),
         plaintext,
         enabled,
+        account,
     )
     .await
     .map_err(|e| e.to_string())
@@ -448,6 +468,7 @@ pub async fn seed_owner_keys(state: &SharedState) -> anyhow::Result<()> {
         &crate::config::hash_api_key(&plain),
         &plain,
         true,
+        None,
     )
     .await?
     .is_some()
@@ -477,6 +498,7 @@ pub async fn seed_owner_keys(state: &SharedState) -> anyhow::Result<()> {
         &crate::config::hash_api_key(&plain),
         &plain,
         !carried.is_empty(),
+        None,
     )
     .await?
     .is_some();
@@ -497,6 +519,24 @@ pub async fn seed_owner_keys(state: &SharedState) -> anyhow::Result<()> {
              closed until it is enabled on Usage → Keys"
         );
     }
+
+    // Account 1 (headless server design §5.1): made here rather than by
+    // the migration, which ran while `api_keys` could still be empty, and
+    // every owner row without an account attached to it, in one
+    // transaction. On the desktop it runs whether accounts are on or off.
+    let door = sqlx::query_scalar::<_, i64>("SELECT id FROM api_keys WHERE name = ?1")
+        .bind(OWNER_DASHBOARD)
+        .fetch_one(&state.db)
+        .await?;
+    if store::seed_account_one(&state.db, door).await? {
+        tracing::info!(
+            "made account 1 ('{}'), the dashboard key's account",
+            crate::accounts::ACCOUNT_ONE_LOGIN
+        );
+    }
+    crate::accounts::sessions::load(state)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     state.reload_snapshot().await?;
     Ok(())

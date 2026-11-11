@@ -214,6 +214,8 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
                     device_name: row.get("waiting_device_name"),
                 }),
         },
+        account_id: row.try_get("account_id").ok().flatten(),
+        made_by_login: row.try_get("made_by_login").ok().flatten(),
     }
 }
 

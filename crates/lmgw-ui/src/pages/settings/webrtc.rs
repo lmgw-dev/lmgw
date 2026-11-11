@@ -25,7 +25,7 @@ use lmgw_api_types::realtime::{
 use lmgw_api_types::GatewayStatus;
 use serde_json::Value;
 
-use super::{f, Ctl, Def, Page};
+use super::{f, labels, Ctl, Def, Page};
 
 /// How often the live calls are read again while the group shows and the
 /// window is visible.
@@ -51,7 +51,7 @@ pub(super) const WEBRTC: &[Def] = &[
         "realtime",
         "rt-webrtc",
         "realtime.webrtc_enabled",
-        "WebRTC calls",
+        labels::WEBRTC_CALLS,
         Ctl::Bool,
     )
     .hint(
@@ -63,7 +63,7 @@ pub(super) const WEBRTC: &[Def] = &[
         "realtime",
         "rt-webrtc",
         "realtime.webrtc_port",
-        "UDP port",
+        labels::UDP_PORT,
         Ctl::OptIntRange(0, 65535),
     )
     .s()
@@ -73,6 +73,20 @@ pub(super) const WEBRTC: &[Def] = &[
          paired device's calls use the device listener's port. Applies at the next start",
     )
     .terms("webrtc udp port"),
+    f(
+        "realtime",
+        "rt-webrtc",
+        "realtime.webrtc_tls_port",
+        labels::TLS_UDP_PORT,
+        Ctl::OptIntRange(0, 65535),
+    )
+    .s()
+    .ph("TLS port")
+    .hint(
+        "the TLS listener's calls; empty = the TLS port's number, 0 = chosen by the OS. \
+         Applies at the next start",
+    )
+    .terms("webrtc udp port tls https"),
     f(
         "realtime",
         "rt-webrtc",
@@ -111,10 +125,28 @@ pub(super) const WEBRTC: &[Def] = &[
     .terms("webrtc opus bitrate quality"),
 ];
 
+/// What the panel says while the saved switch differs from the one the
+/// start read: when it applies — in the server image, by the service's
+/// restart on the host, which has no in-process restart yet (headless
+/// server design §6.2).
+fn pending_words(saved: bool, container: bool) -> String {
+    let state = if saved { "on" } else { "off" };
+    let line = format!(
+        "The {} switch is saved {state}: it applies at the next start of lmgw",
+        labels::WEBRTC_CALLS
+    );
+    if container {
+        format!("{line} ({} on the host)", lmgw_api_types::RESTART_COMMAND)
+    } else {
+        line
+    }
+}
+
 /// A socket group's line: its label, what it says, its chip's tone.
 fn group_line(g: &WebRtcGroupStatus) -> (&'static str, String, &'static str) {
     let label = match g.group {
         WebRtcGroup::Plain => "Plain listener",
+        WebRtcGroup::Tls => "TLS listener",
         WebRtcGroup::Devices => "Device listener",
     };
     let (line, tone) = match g.state {
@@ -126,6 +158,7 @@ fn group_line(g: &WebRtcGroupStatus) -> (&'static str, String, &'static str) {
         WebRtcGroupState::Down => (
             match g.group {
                 WebRtcGroup::Plain => "not bound".to_string(),
+                WebRtcGroup::Tls => "not bound: the TLS listener is not serving".to_string(),
                 WebRtcGroup::Devices => "not bound: the device listener is off or moving".into(),
             },
             "off",
@@ -203,7 +236,9 @@ fn call_cells(c: &WebRtcCallStatus) -> [String; 8] {
     }
     let by = match c.group {
         WebRtcGroup::Devices => format!("{} · device link", c.key.as_deref().unwrap_or("?")),
-        WebRtcGroup::Plain => c.key.clone().unwrap_or_else(|| "anonymous".into()),
+        WebRtcGroup::Plain | WebRtcGroup::Tls => {
+            c.key.clone().unwrap_or_else(|| "anonymous".into())
+        }
     };
     // A figure and how old the report it comes from is.
     let aged = |v: Option<String>, age: Option<u64>| match (v, age) {
@@ -282,12 +317,7 @@ pub(super) fn WebRtcPanel(page: Page, id: String, hidden: Signal<bool>) -> impl 
             .data
             .with(|d| d.as_ref()?["realtime"]["webrtc_enabled"].as_bool())?;
         let started = status.with(|s| s.as_ref().map(|s| s.enabled))?;
-        (saved != started).then(|| {
-            format!(
-                "realtime.webrtc_enabled is saved {}: it applies at the next start of lmgw",
-                if saved { "on" } else { "off" }
-            )
-        })
+        (saved != started).then(|| pending_words(saved, page.container()))
     };
     let hints = move || {
         page.data
@@ -418,6 +448,19 @@ mod tests {
         );
         let v6lo = json!({"bind_addr": "[::1]:8787", "realtime": {}, "devices": {}});
         assert_eq!(firewall(&v6lo).len(), 1);
+    }
+
+    #[test]
+    fn the_pending_switch_says_how_its_next_start_comes() {
+        assert_eq!(
+            pending_words(false, false),
+            "The WebRTC calls switch is saved off: it applies at the next start of lmgw"
+        );
+        assert_eq!(
+            pending_words(true, true),
+            "The WebRTC calls switch is saved on: it applies at the next start of lmgw \
+             (systemctl --user restart lmgw on the host)"
+        );
     }
 
     #[test]

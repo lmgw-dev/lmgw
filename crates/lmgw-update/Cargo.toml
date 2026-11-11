@@ -3,7 +3,7 @@ name = "lmgw-update"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Self-update from a release feed: the manifest, the version order, the sha256-checked RPM download and the dnf install step"
+description = "Self-update from a release feed: the manifest, the version order, the sha256-checked download, the dnf install step on Linux and the per-user NSIS installer on Windows"
 
 # Product-neutral: the feed URL, its token and every word shown to the user
 # are the caller's. lmgw-core builds lmgw's feed; a desktop client builds its
@@ -17,8 +17,26 @@ hex = "0.4.3"
 tokio = { version = "1.52.3", features = ["fs", "io-util"] }
 libc = "0.2.186"
 
+# The private download dir and the download file on Windows (Windows design
+# §4.4, WP6): owner and DACL checked, created with a private descriptor and
+# without following a link.
+[target.'cfg(windows)'.dependencies]
+lmgw-private = { path = "../lmgw-private" }
+# The installer's start (detached, out of the caller's job, its file held
+# against writes while it starts) and the per-user uninstall key's
+# InstallLocation (nsis.rs). The version already in the lock.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 serde_json = "1.0.150"
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros", "rt"] }
 wiremock = "0.6.5"
+
+[target.'cfg(windows)'.dev-dependencies]
+lmgw-private = { path = "../lmgw-private" }

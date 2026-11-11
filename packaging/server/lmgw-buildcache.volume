@@ -1,0 +1,5 @@
+# lmgw.container mounts it: buildah's scratch dirs and cache mounts and TMPDIR (/var/tmp), so they survive a recreate (D21).
+# TMPDIR puts lmgw's staging copies of user content here too (uploads, corpus exports and imports): protect it like /data.
+# VolumeName= gives it design §3.2's name instead of Quadlet's default, systemd-lmgw-buildcache.
+[Volume]
+VolumeName=lmgw-buildcache

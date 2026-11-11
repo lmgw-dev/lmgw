@@ -34,7 +34,9 @@
 //! Tauri ignores `prevent_exit` for a restart's exit code, so the exit
 //! events cannot hold a restart for the sequence. The updater calls
 //! [`quit_then`] with [`AfterQuit::Restart`], and the restart is asked for
-//! once the sequence has run. An exit that goes through while a quit runs
+//! once the sequence has run. On Windows it calls it with
+//! `AfterQuit::Install`: the installer starts once the sequence has run, and
+//! lmgw exits for it. An exit that goes through while a quit runs
 //! anyway waits for it in `RunEvent::Exit` ([`Gateway::wait_quit`]) rather
 //! than stopping the containers a second time beside it.
 //!
@@ -217,12 +219,18 @@ pub(crate) async fn quit<F: std::future::Future<Output = ()>>(gateway: &Gateway,
 }
 
 /// What ends the quit sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AfterQuit {
     /// The exit, with this code.
     Exit(i32),
-    /// The restart into the installed version (an update).
+    /// The restart: into the installed version (an update on Linux), or
+    /// into this one (an update whose installer did not start on Windows).
     Restart,
+    /// The downloaded installer started, once it is hashed again, then the
+    /// exit (an update on Windows, `updater::nsis`): the installer replaces
+    /// lmgw's files and starts it again.
+    #[cfg(windows)]
+    Install(crate::updater::Installer),
 }
 
 impl AfterQuit {
@@ -309,6 +317,10 @@ pub(crate) fn quit_then(app: &tauri::AppHandle, then: AfterQuit) -> QuitStep {
                     move |_| match then {
                         AfterQuit::Restart => ends.request_restart(),
                         AfterQuit::Exit(code) => ends.exit(code),
+                        #[cfg(windows)]
+                        AfterQuit::Install(installer) => {
+                            crate::updater::start_installer(&ends, &installer)
+                        }
                     },
                 )
                 .await;

@@ -10,6 +10,7 @@ use crate::state::SharedState;
 use super::attribution::{self, Container, Fill, Member, Reading};
 use super::nvml::{GpuMemory, ProcessMemory};
 use super::on_cpu::on_gpu;
+use super::plan::image::CONTEXT_STAND_IN;
 use super::residency;
 use super::scheduler::{Reservation, CONTROL_TIMEOUT, MIB};
 use super::view::{peak_note, KeptFree, ResidentView};
@@ -37,6 +38,15 @@ pub(super) struct Ledger {
     pub(super) estimated_resident: u64,
     pub(super) capacity: Option<Capacity>,
     pub(super) inactive_reason: Option<String>,
+}
+
+/// A llama-server adopted from an earlier lmgw that has served nothing in
+/// this one: its first-prompt margin stays unless what it holds is read.
+fn adopted_unserved(e: &RuntimeView) -> bool {
+    e.adopted
+        && !e.served
+        && e.state == RuntimeState::Ready
+        && matches!(e.class, Class::Chat | Class::Aux)
 }
 
 impl VramScheduler {
@@ -72,6 +82,13 @@ impl VramScheduler {
         // generation is one request away the whole time. Its sibling above is
         // memory that is *arriving*; this is memory that will be *taken back*.
         let mut reserved_peaks: u64 = 0;
+        // And what an image pipeline whose weights wait off the card may
+        // still put there: a partial start's grant, or the whole charge of a
+        // pipeline whose weights all wait in RAM or on disk, less what its
+        // processes hold now ([`super::partial`]). Like the audio loads below,
+        // only where the driver is the measurement: in the budget-only branch
+        // the estimate is that charge already.
+        let mut partial_kept: u64 = 0;
         // And the third (realtime design §9.4): what a ready audio container
         // will load on its first request — audio.cpp loads lazily, and its
         // readiness route answers before the weights are on the card. Like
@@ -120,6 +137,35 @@ impl VramScheduler {
                     .collect()
             }
         };
+        // What those image containers hold now, read the same way: only
+        // where per-process figures exist, from the PID cache, nothing
+        // waited for.
+        let mut asked = asked;
+        if entries.iter().any(|e| off_card_image(snap, e)) && self.probe().process_support().is_ok()
+        {
+            let pids = self.pids.lock().unwrap();
+            asked.extend(entries.iter().filter(|e| off_card_image(snap, e)).map(|e| {
+                residency::Ask {
+                    generation: e.generation,
+                    root: pids.root(e.generation),
+                }
+            }));
+        }
+        // And what each adopted llama-server that has served nothing in this
+        // lmgw holds now: a reading of it is a measurement of its footprint,
+        // so it keeps no first-prompt margin (`headroom`).
+        if entries.iter().any(adopted_unserved) && self.probe().process_support().is_ok() {
+            let pids = self.pids.lock().unwrap();
+            asked.extend(
+                entries
+                    .iter()
+                    .filter(|e| adopted_unserved(e))
+                    .map(|e| residency::Ask {
+                        generation: e.generation,
+                        root: pids.root(e.generation),
+                    }),
+            );
+        }
         let read = self.devices_and_held(asked).await;
         let held_now = read.held;
         let (devices, telemetry_error) = match read.devices {
@@ -129,14 +175,46 @@ impl VramScheduler {
         if !devices.is_empty() {
             self.device_total
                 .store(pooled(0, &devices).0, std::sync::atomic::Ordering::Relaxed);
+            self.device_count
+                .store(devices.len(), std::sync::atomic::Ordering::Relaxed);
         }
         for e in &entries {
             // The rung the container runs, `starting` included: a climb's new
             // rung is charged from its claim on (ladder design §5).
             let fp = self.footprint_of(snap, e).await;
-            let bytes = fp.as_ref().map(|f| f.total_bytes).unwrap_or(0);
+            // A partial start is charged what admission gave it
+            // (`registry::admission_grant`), from its claim on.
+            let bytes = match &e.grant {
+                Some(g) => g.bytes,
+                None => fp.as_ref().map(|f| f.total_bytes).unwrap_or(0),
+            };
+            // A start is not measured yet: with the learned headroom in
+            // use, its class's margin rides on its charge (`headroom`). A
+            // partial image start sets its context aside in its grant.
+            let margin = match (&e.grant, fp.as_ref()) {
+                (Some(_), _) if e.class == Class::Image => 0,
+                (_, Some(f)) => self.margin(snap, e.class, &e.model_id, f),
+                (_, None) => 0,
+            };
             if e.state == RuntimeState::Starting {
-                unmeasured = unmeasured.saturating_add(bytes);
+                unmeasured = unmeasured.saturating_add(bytes).saturating_add(margin);
+            }
+            // A llama-server that is ready but has served nothing yet: what
+            // its first prompt puts on the card (the CUDA pool's
+            // temporaries) is not in the driver's figure yet, so its margin
+            // stays until a request has run (`headroom`) — except on a
+            // container adopted from an earlier lmgw that the driver shows
+            // per process: what it holds is read, the measurement its
+            // margin stands in for, whatever it served before.
+            let measured_adopted =
+                e.adopted && matches!(held_now.get(&e.generation), Some(Ok(b)) if *b > 0);
+            let first_prompt = matches!(e.class, Class::Chat | Class::Aux)
+                && e.state == RuntimeState::Ready
+                && !e.served
+                && !measured_adopted
+                && margin > 0;
+            if first_prompt {
+                unmeasured = unmeasured.saturating_add(margin);
             }
             // Charged from `ready` on, in flight or not. While a generation is
             // actually running the driver's `used` already contains some or
@@ -149,11 +227,79 @@ impl VramScheduler {
                     .image_models
                     .iter()
                     .find(|m| m.model_id == e.model_id)
-                    .and_then(|m| m.peak_extra_bytes),
+                    .and_then(|m| {
+                        super::plan::image::learned_for(m, &self.entry_engine_key(snap, e, m)).peak
+                    }),
                 _ => None,
             };
-            if let Some(p) = peak {
-                reserved_peaks = reserved_peaks.saturating_add(p);
+            // A pipeline whose weights wait off the card holds little of its
+            // charge between generations, and the driver's `used` says so:
+            // the rest is what the next generation puts there, kept free
+            // (`partial`). What it holds now comes off: read per process,
+            // else its measured context, else nothing.
+            //
+            // - A partial start: its grant, or what sd-server can draw where
+            //   that is more — the budget it is held to (the row's own
+            //   `max_vram` wins) and its context outside it: measured, else
+            //   read at rest where its weights all wait off the card, else
+            //   the stand-in.
+            // - A whole start of a row whose weights all wait off the card,
+            //   with a learned peak: the peak and its context — measured,
+            //   else what its processes hold at rest; with neither, its files
+            //   and its peak, what admission charged it before it adapted.
+            //   Without a peak, its files.
+            let reading = match held_now.get(&e.generation) {
+                Some(Ok(b)) => Some(*b),
+                _ => None,
+            };
+            let partial = match (e.class, e.state, fp.as_ref()) {
+                (Class::Image, RuntimeState::Ready, Some(f)) => match (&e.grant, &f.partial) {
+                    (Some(g), p) => {
+                        let measured = p.as_ref().and_then(|p| p.context_bytes);
+                        // A reading is its context only at rest, and only
+                        // where no weights stay on the card between uses.
+                        let at_rest =
+                            e.in_flight == 0 && p.as_ref().is_some_and(|p| p.how.all_off());
+                        let context = measured
+                            .or(reading.filter(|_| at_rest))
+                            .unwrap_or(CONTEXT_STAND_IN);
+                        let row = snap.image_models.iter().find(|m| m.model_id == e.model_id);
+                        let budget = match row.and_then(|r| super::partial::own_budget(&r.args)) {
+                            Some(Some(own)) => own,
+                            // Unbounded: what the whole could put there.
+                            Some(None) => f.total_bytes,
+                            None => g.max_vram_bytes,
+                        };
+                        Some((g.bytes.max(budget.saturating_add(context)), measured))
+                    }
+                    (None, Some(p)) if p.how.all_off() => Some((
+                        // A reading is its context only at rest: one taken
+                        // while a generation runs holds the peak too.
+                        match (
+                            peak,
+                            p.context_bytes.or(reading.filter(|_| e.in_flight == 0)),
+                        ) {
+                            (Some(pk), Some(context)) => pk.saturating_add(context),
+                            (Some(pk), None) => f.total_bytes.saturating_add(pk),
+                            (None, _) => f.total_bytes,
+                        },
+                        p.context_bytes,
+                    )),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let bytes = partial.map_or(bytes, |(charge, _)| charge);
+            match partial {
+                Some((charge, context)) => {
+                    let holds = reading.or(context).unwrap_or(0);
+                    partial_kept = partial_kept.saturating_add(charge.saturating_sub(holds));
+                }
+                None => {
+                    if let Some(p) = peak {
+                        reserved_peaks = reserved_peaks.saturating_add(p);
+                    }
+                }
             }
             let audio = match (e.class, e.state, fp.as_ref()) {
                 (Class::Audio, RuntimeState::Ready, Some(fp)) => snap
@@ -186,9 +332,28 @@ impl VramScheduler {
                 }
                 None => None,
             };
-            let pending_bytes = pending.as_ref().map(|p| p.bytes);
+            // An audio row whose residency is not learned keeps its margin
+            // on the load still to come (`headroom`).
+            let pending_bytes = pending.as_ref().map(|p| match p.bytes {
+                0 => 0,
+                b => b.saturating_add(margin),
+            });
             pending_loads = pending_loads.saturating_add(pending_bytes.unwrap_or(0));
             let note = match (e.class, e.state, audio, &pending) {
+                (Class::Image, RuntimeState::Ready, _, _) if partial.is_some() => {
+                    Some(format!(
+                        "{}. Admission charges it {}{} and keeps free what of that it does not                          hold yet, while it is resident",
+                        fp.as_ref()
+                            .and_then(|f| f.note.as_deref())
+                            .unwrap_or_default(),
+                        crate::hf::fmt_bytes(bytes),
+                        if e.grant.is_some() {
+                            ", what it was given on the card and is held to (--max-vram),"
+                        } else {
+                            ""
+                        }
+                    ))
+                }
                 (Class::Image, RuntimeState::Ready, _, _) => {
                     Some(peak_note(fp.as_ref().and_then(|f| f.note.as_deref()), peak))
                 }
@@ -210,6 +375,20 @@ impl VramScheduler {
                 )),
                 _ => fp.as_ref().and_then(|f| f.note.clone()),
             };
+            let note = match first_prompt {
+                false => note,
+                true => {
+                    let kept = format!(
+                        "{} is kept free beside it until its first request has run (what \
+                         llama-server's first prompt adds: the CUDA pool's temporaries)",
+                        crate::hf::fmt_bytes(margin)
+                    );
+                    Some(match note {
+                        Some(n) => format!("{n}. {kept}"),
+                        None => kept,
+                    })
+                }
+            };
             residents.push(ResidentView {
                 container: e.class,
                 model: e.model_id.clone(),
@@ -217,7 +396,9 @@ impl VramScheduler {
                 estimated_bytes: bytes,
                 in_flight: e.in_flight as usize,
                 idle_seconds: Some(e.last_used_age_seconds),
-                peak_extra_bytes: peak,
+                // A pipeline whose weights wait off the card has its peak in
+                // its charge, not on top of it.
+                peak_extra_bytes: peak.filter(|_| partial.is_none()),
                 pending_bytes: pending_bytes.filter(|p| *p > 0),
                 note,
             });
@@ -232,7 +413,14 @@ impl VramScheduler {
             {
                 continue;
             }
-            unmeasured = unmeasured.saturating_add(r.bytes);
+            // Its class's margin too, as a start's (`headroom`); a partial
+            // image grant, less than its files, sets its context aside.
+            let margin = match self.footprint(snap, r.class, &r.model_id).await {
+                Some(f) if r.class == Class::Image && r.bytes < f.total_bytes => 0,
+                Some(f) => self.margin(snap, r.class, &r.model_id, &f),
+                None => 0,
+            };
+            unmeasured = unmeasured.saturating_add(r.bytes).saturating_add(margin);
             residents.push(ResidentView {
                 container: r.class,
                 model: r.model_id.clone(),
@@ -257,7 +445,7 @@ impl VramScheduler {
         // absent both there is nothing to admit against.
         let measured_kept = KeptFree {
             starting_bytes: unmeasured,
-            image_peak_bytes: reserved_peaks,
+            image_peak_bytes: reserved_peaks.saturating_add(partial_kept),
             pending_load_bytes: pending_loads,
         };
         let (capacity, inactive_reason) = match (budget, devices.is_empty()) {
@@ -279,6 +467,7 @@ impl VramScheduler {
                         free: free
                             .saturating_sub(unmeasured)
                             .saturating_sub(reserved_peaks)
+                            .saturating_sub(partial_kept)
                             .saturating_sub(pending_loads),
                         measured: true,
                         kept_free: measured_kept,
@@ -296,6 +485,9 @@ impl VramScheduler {
                     // the card*, the figure a surface compares against the
                     // driver's `used`, and a transient nobody has allocated
                     // yet does not belong in it.
+                    // A pipeline whose weights wait off the card has its
+                    // whole charge in the estimate (`partial_kept` is the
+                    // measured branches' only).
                     free: b
                         .saturating_sub(estimated_resident)
                         .saturating_sub(reserved_peaks),
@@ -315,6 +507,7 @@ impl VramScheduler {
                         free: raw_free
                             .saturating_sub(unmeasured)
                             .saturating_sub(reserved_peaks)
+                            .saturating_sub(partial_kept)
                             .saturating_sub(pending_loads),
                         measured: true,
                         kept_free: measured_kept,
@@ -443,25 +636,26 @@ impl VramScheduler {
         // its devices and its process list again — all blocking reads, on one
         // thread, with nothing in between that could wait.
         let tree = self.procs.read().unwrap().clone();
-        let tombstones = self.pids.lock().unwrap().tombstone_pids();
+        let tombstones = self.pids.lock().unwrap().tombstones();
         let read = tokio::task::spawn_blocking(move || {
             let members: Vec<Member> = roots
                 .into_iter()
-                .map(|(c, root)| Member {
-                    generation: c.generation,
-                    label: c.label,
-                    pids: std::iter::once(root)
-                        .chain(tree.descendants(root))
-                        .collect(),
-                })
-                .collect();
+                .map(|(c, root)| Member::measure(c.generation, c.label, root, tree.as_ref()))
+                .collect::<Result<_, _>>()?;
             let own: Vec<u32> = members
                 .iter()
                 .flat_map(|m| m.pids.iter().copied())
                 .collect();
+            // A tombstone whose PID runs a later process is not asked about.
+            let reused = attribution::reused(&tombstones, tree.as_ref());
+            let retired: Vec<u32> = tombstones
+                .iter()
+                .map(|t| t.pid)
+                .filter(|p| !reused.contains(p))
+                .collect();
             let list = || {
                 probe
-                    .processes(&own, &tombstones)
+                    .processes(&own, &retired)
                     .map_err(|e| format!("no per-process GPU memory right now: {e}"))
             };
             let first = list()?;
@@ -469,16 +663,19 @@ impl VramScheduler {
                 .devices()
                 .map_err(|e| format!("no GPU telemetry ({e})"))?;
             let second = list()?;
-            let asked: HashSet<u32> = own
-                .iter()
-                .copied()
-                .chain(tombstones.iter().copied())
-                .collect();
-            Ok::<_, String>((members, larger_per_pid(&first, &second), devices, asked))
+            let asked: HashSet<u32> = own.iter().chain(&retired).copied().collect();
+            Ok::<_, String>((
+                members,
+                larger_per_pid(&first, &second),
+                devices,
+                asked,
+                own,
+                reused,
+            ))
         })
         .await
         .map_err(|e| format!("GPU probe thread failed: {e}"))?;
-        let (members, listed, devices, asked) = read?;
+        let (members, listed, devices, asked, own_pids, reused) = read?;
         if devices.is_empty() {
             return Err("the GPU probe reports no device".into());
         }
@@ -488,14 +685,19 @@ impl VramScheduler {
             .and_bench(bench_on_card(state));
         let mut cache = self.pids.lock().unwrap();
         cache.remember(&members);
-        if after != before {
+        // `after` is read before this lock: a concurrent pass's plan may
+        // have retired a member in between, whose processes are tombstones
+        // now and would count twice, as a member and as a tombstone
+        // (`settle` keeps them, since a retired generation's PIDs no longer
+        // drop its own tombstones).
+        if after != before || !members.iter().all(|m| cache.is_known(m.generation)) {
             return Err(
                 "lmgw's containers changed while measuring — the next verdict measures again"
                     .into(),
             );
         }
         let own = attribution::members_share(&members, &listed)?;
-        let stopped = cache.settle(&listed, &asked)?;
+        let stopped = cache.settle(&listed, &asked, &own_pids, &reused)?;
         drop(cache);
         let lmgw = own.saturating_add(stopped);
         let used: u64 = devices.iter().map(|d| d.used_bytes).sum();
@@ -534,6 +736,9 @@ impl VramScheduler {
         // What a ready audio container holds at rest is read whatever the
         // trigger's switches say ([`residency`]'s at-rest reading).
         self.read_audio_at_rest(state);
+        // And what an image container of a row whose weights all wait off
+        // the card holds at rest: its context (`partial::floor`).
+        self.read_image_at_rest(state);
         if trigger_off(&state.snapshot()).is_some() || self.probe().process_support().is_err() {
             return;
         }
@@ -636,15 +841,15 @@ impl VramScheduler {
             if roots.is_empty() {
                 return;
             }
+            // A tree that cannot be read leaves that member's slot as it
+            // is: its tombstone then holds the root alone.
             let members = tokio::task::spawn_blocking(move || {
                 roots
                     .into_iter()
-                    .map(|(c, root)| Member {
-                        generation: c.generation,
-                        label: c.label,
-                        pids: std::iter::once(root)
-                            .chain(tree.descendants(root))
-                            .collect(),
+                    .filter_map(|(c, root)| {
+                        Member::measure(c.generation, c.label, root, tree.as_ref())
+                            .map_err(|e| tracing::warn!("vram: {e}"))
+                            .ok()
                     })
                     .collect::<Vec<_>>()
             })
@@ -654,6 +859,20 @@ impl VramScheduler {
             }
         });
     }
+}
+
+/// A ready image container whose charge is more than the driver shows of
+/// it (`partial`): a partial start's, or one of a row whose weights all wait
+/// off the card. What its processes hold is read beside the device read.
+fn off_card_image(snap: &Snapshot, e: &RuntimeView) -> bool {
+    e.class == Class::Image
+        && e.state == RuntimeState::Ready
+        && (e.grant.is_some()
+            || snap
+                .image_models
+                .iter()
+                .find(|m| m.model_id == e.model_id)
+                .is_some_and(|m| super::plan::image::placement(&m.args).is_ok_and(|a| a.all_off())))
 }
 
 /// Where the benchmark run's container is ([`OnCard::Off`] with no run).

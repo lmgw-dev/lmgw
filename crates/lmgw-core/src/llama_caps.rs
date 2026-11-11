@@ -87,6 +87,8 @@ pub const MANAGED_FLAGS: &[&str] = &[
     "predict",
     "n",
     "n-gpu-layers",
+    "n-cpu-moe",
+    "moe-cache-mib",
     "threads",
     "batch-size",
     "ubatch-size",
@@ -127,11 +129,21 @@ pub const MANAGED_FLAGS: &[&str] = &[
     "fit-ctx",
 ];
 
+/// Of [`MANAGED_FLAGS`], those newer than some llama-server build lmgw may
+/// run (`--moe-cache-mib` is not in llama.cpp 171e8846b nor in
+/// ik_llama.cpp). The field renders only when set, so an image without the
+/// flag still runs every row that leaves it unset; a row that sets it on
+/// such an image is warned about at save (`ops::local_model_checks`).
+pub const NEWER_MANAGED_FLAGS: &[&str] = &["moe-cache-mib"];
+
 /// True when `flag` is rendered from a dedicated field ([`MANAGED_FLAGS`]).
-/// Accepts the flag with or without leading dashes.
+/// Accepts the flag with or without leading dashes, under every spelling
+/// the renderer drops beside its field: a short alias (`-ncmoe`, `-c`) and
+/// underscores for dashes (`--n_cpu_moe`,
+/// [`crate::runtime::argv::canonical_key`]).
 pub fn is_managed(flag: &str) -> bool {
-    let name = strip_dashes(flag);
-    MANAGED_FLAGS.contains(&name)
+    let name = crate::runtime::argv::canonical_key(strip_dashes(flag));
+    MANAGED_FLAGS.contains(&&*name)
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +246,14 @@ impl LlamaCaps {
                 Some((n, v)) => (n, Some(v)),
                 None => (tok, None),
             };
-            let key = strip_dashes(name);
+            // llama-server reads every `_` of a `--` argument as `-`
+            // (`common/arg.cpp`): `--moe_cache_mib` is `--moe-cache-mib`.
+            let key = if name.starts_with("--") {
+                strip_dashes(name).replace('_', "-")
+            } else {
+                strip_dashes(name).to_string()
+            };
+            let key = key.as_str();
             if key.is_empty() {
                 problems.push(format!("stray token `{tok}` (not a flag)"));
                 continue;
@@ -1206,6 +1225,32 @@ mod tests {
         assert!(!is_managed("no-warmup"));
     }
 
+    /// A short alias and an underscore spelling are the field's flag too,
+    /// so they get the dedicated-field warning.
+    #[test]
+    fn managed_flags_resolve_aliases_and_underscores() {
+        assert!(is_managed("-ncmoe"));
+        assert!(is_managed("--n_cpu_moe"));
+        assert!(is_managed("--moe_cache_mib"));
+        assert!(is_managed("-c"));
+        assert!(!is_managed("--cpu-moe"));
+    }
+
+    /// llama-server reads `--moe_cache_mib` as `--moe-cache-mib`, so the
+    /// check does too; a single-dash flag keeps its spelling.
+    #[test]
+    fn validate_args_reads_underscores_in_long_flags() {
+        let caps = parse_help(
+            "--moe-cache-mib N                       GPU cache size in MiB\n\
+             -ngl,  --n-gpu-layers N                 layers on the GPU\n",
+        );
+        assert!(caps.supports("moe-cache-mib"), "{:?}", caps.flags);
+        assert!(caps
+            .validate_args(&v(&["--moe_cache_mib", "6144"]))
+            .is_empty());
+        assert_eq!(caps.validate_args(&v(&["-n_gl", "9"])).len(), 1);
+    }
+
     /// The parser is only as good as the help it was written against, so run
     /// it over a real image when there is one — the same throwaway container
     /// the runtime uses (§3.6), so this exercises the production invocation
@@ -1241,7 +1286,11 @@ mod tests {
         // Everything lmgw renders from a struct field must exist in the image;
         // if this trips, a managed field is writing a preset key llama-server
         // will not accept.
-        let missing: Vec<&&str> = MANAGED_FLAGS.iter().filter(|f| !caps.supports(f)).collect();
+        // A flag newer than some images may be missing from this one.
+        let missing: Vec<&&str> = MANAGED_FLAGS
+            .iter()
+            .filter(|f| !caps.supports(f) && !NEWER_MANAGED_FLAGS.contains(f))
+            .collect();
         assert!(
             missing.is_empty(),
             "managed flags unknown to the image: {missing:?}"

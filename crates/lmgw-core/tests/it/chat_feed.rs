@@ -38,6 +38,8 @@ const SLICE: Duration = Duration::from_secs(1);
 mod deleted_device;
 mod device;
 mod gaps;
+// Reads TCP_USER_TIMEOUT off its sockets.
+#[cfg(target_os = "linux")]
 mod hello;
 mod live;
 mod messages;

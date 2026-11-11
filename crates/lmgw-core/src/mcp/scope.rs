@@ -822,6 +822,7 @@ mod tests {
             hosts_label: None,
             self_admin: crate::config::DeviceAdmin::Off,
             link: Default::default(),
+            ..Default::default()
         });
         snap
     }
@@ -833,6 +834,8 @@ mod tests {
             kind,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         }
     }
 

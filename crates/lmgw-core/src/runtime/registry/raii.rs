@@ -50,6 +50,7 @@ impl StartClaim {
             capabilities,
             llama,
             gate,
+            engine_key,
         } = started;
         // Decided under the lock, acted on outside it — the map lock is never
         // held across an await, including on this path.
@@ -70,6 +71,7 @@ impl StartClaim {
                     e.started_at = Instant::now();
                     if claimed {
                         e.in_flight += 1;
+                        e.claims += 1;
                     }
                     e.last_used = Instant::now();
                     e.warnings = warnings.clone();
@@ -78,6 +80,7 @@ impl StartClaim {
                         .remember_image_caps(self.key.0, &self.key.1, capabilities.as_ref());
                     e.llama = llama.clone();
                     e.gate = gate.clone();
+                    e.engine_key = engine_key.clone();
                     (true, claimed)
                 }
                 _ => (false, false),
@@ -102,7 +105,7 @@ impl StartClaim {
                     model_id: self.key.1.clone(),
                 });
             }
-            if let Err(e) = self.reg.rm_force(&self.container_name).await {
+            if let Err(e) = self.reg.launcher.remove(&self.container_name).await {
                 tracing::warn!(
                     container = %self.container_name,
                     "removing the container of an aborted start: {e}"
@@ -121,6 +124,7 @@ impl StartClaim {
             phase: Arc::clone(&self.phase),
             generation: self.generation,
             failed: AtomicBool::new(false),
+            sent: AtomicBool::new(false),
             gate,
         }))
     }
@@ -195,6 +199,10 @@ pub struct AcquireGuard {
     /// Set by [`Self::mark_failed`] when the request holding this guard did
     /// not get served by the container (design §3.2's dead-endpoint path).
     pub(super) failed: AtomicBool,
+    /// Set by [`Self::mark_sent`] once a request went out on this claim and
+    /// was answered: its release marks the container as having served one
+    /// ([`Entry::served`]).
+    pub(super) sent: AtomicBool,
     /// The facts of the container this claim is on, as it was started — see
     /// [`Entry::gate`]. Copied at claim time: the entry cannot change them
     /// (a restart is a new entry, and a new claim).
@@ -266,6 +274,13 @@ impl AcquireGuard {
     pub fn mark_failed(&self) {
         self.failed.store(true, Ordering::Relaxed);
     }
+
+    /// A request went out on this claim and the container answered it
+    /// (`vram::send_local_marked`): once the claim is released, what the
+    /// request put on the card is in the driver's figure.
+    pub fn mark_sent(&self) {
+        self.sent.store(true, Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for AcquireGuard {
@@ -285,7 +300,11 @@ impl std::fmt::Debug for AcquireGuard {
 
 impl Drop for AcquireGuard {
     fn drop(&mut self) {
-        self.reg
-            .release(&self.key, &self.phase, !self.failed.load(Ordering::Relaxed));
+        self.reg.release(
+            &self.key,
+            &self.phase,
+            !self.failed.load(Ordering::Relaxed),
+            self.sent.load(Ordering::Relaxed),
+        );
     }
 }

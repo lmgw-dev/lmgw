@@ -10,6 +10,10 @@
 //! `tests/it/agents_service.rs` drives the same paths through the proxy, and its
 //! `the_real_thing_*` half against real podman.
 
+// The tests that start an agent are Unix's (agents are not on Windows,
+// Windows design §4.5), so there their helpers go unused.
+#![cfg_attr(windows, allow(dead_code))]
+
 use super::*;
 
 use std::sync::atomic::AtomicU32;
@@ -197,6 +201,8 @@ fn a_cancel_fired_before_anyone_listens_is_kept() {
 // The argv (§6.5)
 // ---------------------------------------------------------------------------
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_service_argv_is_detached_published_on_loopback_and_labelled_service() {
     let state = gateway().await;
@@ -306,6 +312,8 @@ fn mounted_json(argv: &[String], inside: &str) -> serde_json::Value {
 // One start, many waiters (§3.3)
 // ---------------------------------------------------------------------------
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn concurrent_first_requests_produce_exactly_one_podman_run() {
     let state = gateway().await;
@@ -331,6 +339,8 @@ async fn concurrent_first_requests_produce_exactly_one_podman_run() {
     stop(&state, "board", "test over").await;
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_second_request_finds_it_warm_and_does_not_start_again() {
     let state = gateway().await;
@@ -351,6 +361,8 @@ async fn a_second_request_finds_it_warm_and_does_not_start_again() {
 // Failure (§3.3)
 // ---------------------------------------------------------------------------
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_start_that_never_answers_fails_with_the_reason_and_the_log() {
     let state = gateway().await;
@@ -393,6 +405,8 @@ async fn a_disabled_agent_does_not_start() {
 // The idle stop and its in-flight guard (§3.3)
 // ---------------------------------------------------------------------------
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_idle_service_is_stopped_after_its_window() {
     let state = gateway().await;
@@ -423,6 +437,8 @@ async fn an_idle_service_is_stopped_after_its_window() {
     stop(&state, "board", "test over").await;
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn idle_seconds_zero_is_a_true_warm_keep() {
     let state = gateway().await;
@@ -440,6 +456,8 @@ async fn idle_seconds_zero_is_a_true_warm_keep() {
     stop(&state, "board", "test over").await;
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_request_in_flight_holds_off_the_idle_stop() {
     let state = gateway().await;
@@ -468,6 +486,8 @@ async fn a_request_in_flight_holds_off_the_idle_stop() {
 
 /// A request that arrives mid-stop waits for the stop rather than racing a
 /// `podman run --replace` against the `rm -f` that is still going.
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_request_arriving_mid_stop_waits_and_then_starts_a_clean_one() {
     let state = gateway().await;
@@ -688,6 +708,8 @@ fn a_dev_url_is_stored_without_its_trailing_slash_and_carries_no_path() {
     assert!(e.contains("--public-url"), "{e}");
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_row_with_a_dev_url_is_served_from_it_and_starts_no_container() {
     let state = gateway().await;
@@ -762,18 +784,21 @@ fn settings_with(suffix: &str, bind_addr: &str) -> Settings {
 fn the_origin_is_the_id_under_the_suffix_on_lmgws_own_port() {
     let s = settings_with("localhost", BIND);
     assert_eq!(origin_host(&s, "board"), "board.localhost");
-    assert_eq!(origin_authority(&s, "board"), "board.localhost:8787");
+    assert_eq!(origin_authority(&s, None, "board"), "board.localhost:8787");
     // Two forms, deliberately: the env var has no trailing slash (it is an
     // origin to concatenate onto), the DTO has one (it is an href).
     assert_eq!(
-        agent_origin_base(&s, "board"),
+        agent_origin_base(&s, None, "board"),
         "http://board.localhost:8787"
     );
-    assert_eq!(agent_origin(&s, "board"), "http://board.localhost:8787/");
+    assert_eq!(
+        agent_origin(&s, None, "board"),
+        "http://board.localhost:8787/"
+    );
     // The suffix is the only thing that moves; the label is the id itself.
     let lan = settings_with("lmgw.example", "198.51.100.10:8001");
     assert_eq!(
-        agent_origin(&lan, "board"),
+        agent_origin(&lan, None, "board"),
         "http://board.lmgw.example:8001/"
     );
 }
@@ -861,11 +886,11 @@ fn origin_label_reads_a_host_back_to_an_id() {
 /// answer for an arbitrary id, and the box already owns a name in it.
 #[test]
 fn the_mdns_zone_is_not_a_suffix_anyone_can_have() {
-    let e = origin_suffix_refusal("local", BIND).expect("'local' is mDNS");
+    let e = origin_suffix_refusal("local", &bound_at(BIND)).expect("'local' is mDNS");
     assert!(e.contains("mDNS"), "{e}");
     assert!(e.contains("<host>.local"), "{e}");
     // Whatever the box is called and however it is bound.
-    assert!(origin_suffix_refusal("LOCAL.", "0.0.0.0:8001").is_some());
+    assert!(origin_suffix_refusal("LOCAL.", &bound_at("0.0.0.0:8001")).is_some());
     // A zone of one's own under it is a different question and stays legal.
     assert_eq!(
         suffix_refusal_against("apps.local", &["127.0.0.1".into(), "myhost.local".into()]),
@@ -920,8 +945,8 @@ async fn origin_resolves_asks_the_resolver_and_a_name_that_is_not_there_is_false
     // name NSS answers on every box, with no zone and no hosts entry, so this
     // exercises `lookup_host` rather than this machine's configuration.
     let s = settings_with("0.0.1", BIND);
-    assert_eq!(origin_authority(&s, "127"), "127.0.0.1:8787");
-    assert!(origin_resolves(&s, "127").await);
+    assert_eq!(origin_authority(&s, None, "127"), "127.0.0.1:8787");
+    assert!(origin_resolves(&s, None, "127").await);
 
     // And a name no resolver may answer: `.invalid` is reserved for exactly
     // this (RFC 2606). A refusal and a timeout are the same verdict here, so
@@ -929,7 +954,7 @@ async fn origin_resolves_asks_the_resolver_and_a_name_that_is_not_there_is_false
     // the App tab is written around.
     let gone = settings_with("invalid", BIND);
     let started = Instant::now();
-    assert!(!origin_resolves(&gone, "no-such-agent-a7f3").await);
+    assert!(!origin_resolves(&gone, None, "no-such-agent-a7f3").await);
     assert!(
         started.elapsed() < ORIGIN_LOOKUP_TIMEOUT * 3,
         "the lookup outran its own bound: {:?}",
@@ -941,15 +966,93 @@ async fn origin_resolves_asks_the_resolver_and_a_name_that_is_not_there_is_false
 fn a_suffix_that_is_part_of_the_gateways_own_address_is_refused() {
     // The same rule from the other end: under `.example`, an agent with the id
     // `board` would be served at the gateway's own name.
-    let e = origin_suffix_refusal("example", "board.example:8001").expect("it shadows the gateway");
+    let e = origin_suffix_refusal("example", &bound_at("board.example:8001"))
+        .expect("it shadows the gateway");
     assert!(e.contains("board.example"), "{e}");
     // The shipped default is not a suffix of any loopback spelling.
-    assert_eq!(origin_suffix_refusal("localhost", BIND), None);
+    assert_eq!(origin_suffix_refusal("localhost", &bound_at(BIND)), None);
     assert_eq!(
-        origin_suffix_refusal("lmgw.example", "board.example:8001"),
+        origin_suffix_refusal("lmgw.example", &bound_at("board.example:8001")),
         None
     );
     // An IP literal is an address the gateway answers on too, and is compared
     // the same way rather than being explained away.
-    assert!(origin_suffix_refusal("1", "127.0.0.1:8787").is_some());
+    assert!(origin_suffix_refusal("1", &bound_at("127.0.0.1:8787")).is_some());
+}
+
+/// Settings bound at `bind`, everything else the default.
+fn bound_at(bind: &str) -> Settings {
+    Settings {
+        bind_addr: bind.into(),
+        ..Default::default()
+    }
+}
+
+/// Headless server design §4.3: the public URL's host is one of the
+/// gateway's own names, so a suffix under it is refused, and agent origins
+/// follow the public scheme and port unless the suffix is `localhost`.
+#[test]
+fn agent_origins_follow_the_public_origin() {
+    let mut s = bound_at("127.0.0.1:8787");
+    s.public_url = "https://lmgw.example:8443".into();
+    assert!(origin_suffix_refusal("apps.lmgw.example", &s).is_some());
+    assert!(origin_suffix_refusal("lmgw-apps.example", &s).is_none());
+    // `localhost`: the plain listener, which the app's window loads.
+    assert_eq!(
+        agent_origin(&s, None, "board"),
+        "http://board.localhost:8787/"
+    );
+    s.agent_origin_suffix = "lmgw-apps.example".into();
+    assert_eq!(
+        agent_origin(&s, None, "board"),
+        "https://board.lmgw-apps.example:8443/"
+    );
+    assert_eq!(
+        origin_authority(&s, None, "board"),
+        "board.lmgw-apps.example:8443"
+    );
+    s.public_url = "https://lmgw.example".into();
+    assert_eq!(
+        agent_origin_base(&s, None, "board"),
+        "https://board.lmgw-apps.example"
+    );
+    // Without a public URL, the port of the TLS listener that serves; one
+    // only configured (saved since the start) moves nothing yet.
+    s.public_url.clear();
+    s.tls.cert_path = "/c".into();
+    s.tls.key_path = "/k".into();
+    s.tls.listen = "0.0.0.0:9443".into();
+    assert_eq!(
+        agent_origin_base(&s, None, "board"),
+        "http://board.lmgw-apps.example:8787"
+    );
+    let up = crate::net::ServingTls {
+        addr: "0.0.0.0:9443".parse().unwrap(),
+        config: s.tls.listener().unwrap(),
+    };
+    assert_eq!(
+        agent_origin_base(&s, Some(&up), "board"),
+        "https://board.lmgw-apps.example:9443"
+    );
+}
+
+/// D27: other machines reach the dashboard, and the suffix is `localhost`.
+#[test]
+fn the_localhost_suffix_is_warned_about_where_others_reach_the_dashboard() {
+    let mut s = bound_at("127.0.0.1:8787");
+    assert_eq!(remote_suffix_warning(&s, false), None);
+    let w = remote_suffix_warning(&s, true).expect("container mode");
+    assert!(
+        w.starts_with("agent pages are unreachable from other machines"),
+        "{w}"
+    );
+    s.bind_addr = "0.0.0.0:8787".into();
+    assert!(remote_suffix_warning(&s, false).is_some(), "a wide bind");
+    s.bind_addr = "127.0.0.1:8787".into();
+    s.tls.cert_path = "/c".into();
+    s.tls.key_path = "/k".into();
+    s.tls.listen = "0.0.0.0:8443".into();
+    assert!(remote_suffix_warning(&s, false).is_some(), "a TLS listener");
+    s.agent_origin_suffix = "lmgw-apps.example".into();
+    assert_eq!(remote_suffix_warning(&s, true), None);
 }

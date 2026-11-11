@@ -36,7 +36,9 @@
 //!
 //! Every sentence is plain: no "container", "CDI" or "Podman" (a test holds
 //! every sentence of every stated machine to that); the technical names are
-//! in each item's detail.
+//! in each item's detail. In the server image ([`container`]) the sentences
+//! name the lmgw container, the host and its service where that is what to
+//! act on.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,20 +58,32 @@ use crate::vram::GpuMemory;
 mod blame;
 mod blank;
 mod card;
+// Windows reads its machine through `windows_check`; the Linux reads stay
+// compiled there, partly unused.
+#[cfg_attr(windows, allow(dead_code))]
+mod container;
 mod fit;
 mod fixed;
+// Windows reads its machine through `windows_check`; the Linux reads stay
+// compiled there, partly unused.
+#[cfg_attr(windows, allow(dead_code))]
 mod gather;
 mod key;
 mod netwatch;
 mod prefetch;
 pub mod probe;
+// Windows reads its machine through `windows_check`; the Linux reads stay
+// compiled there, partly unused.
+#[cfg_attr(windows, allow(dead_code))]
 mod running;
 mod settings_fit;
 mod setup;
 mod toolkit;
+mod windows_check;
 mod words;
 
 pub use blame::Blamed;
+pub use container::METERED_NOT_CHECKED;
 pub use fixed::{after_fix, DetectProbe, Fixed};
 pub use netwatch::{NetChanges, NetWatch};
 pub use prefetch::{connection_metered, Metered, Prefetched};
@@ -111,6 +125,8 @@ struct Basis {
     toolkit: Option<toolkit::Toolkit12>,
     podman_problem: bool,
     present: fit::present::Present,
+    /// The server image's words (headless server design §7).
+    container: bool,
 }
 
 /// `l`'s §1.4 item and its verdict judged again against `snap`, the
@@ -133,7 +149,7 @@ fn rejudge(l: &mut Last, snap: &crate::config::Snapshot) -> bool {
     }
     let mut check = MachineCheck::clone(&l.check);
     check.items[at] = item;
-    let (verdict, headline) = verdict(&check.items, b.card, b.toolkit, b.podman_problem, outcome);
+    let (verdict, headline) = verdict(&check.items, &b, outcome);
     check.verdict = verdict;
     check.headline = headline;
     l.check = Arc::new(check);
@@ -185,6 +201,9 @@ pub struct MachineChecks {
     failed: Mutex<Option<MachineFailedStart>>,
     /// How a watch on the connection begins ([`Self::watch_network`]).
     net_watch: Mutex<NetWatch>,
+    /// In the server image: whether the pre-fetch said that the metered
+    /// probe is not run there; it says so once ([`prefetch`]).
+    metered_said: AtomicBool,
 }
 
 impl MachineChecks {
@@ -204,6 +223,7 @@ impl MachineChecks {
             read_differently: Mutex::new(Vec::new()),
             failed: Mutex::new(None),
             net_watch: Mutex::new(netwatch::none("this machine has no NetworkManager watch")),
+            metered_said: AtomicBool::new(false),
         }
     }
 
@@ -428,6 +448,7 @@ impl MachineChecks {
 
     /// The recorded containers that still run (each the same container),
     /// the others forgotten.
+    #[cfg_attr(windows, allow(dead_code))]
     fn kept_among(&self, running: &[fit::present::Running]) -> Vec<fit::present::Running> {
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
         kept.retain(|k| running.contains(k));
@@ -513,7 +534,29 @@ async fn run(state: &SharedState) -> Ran {
     // then reads as changed at resolve, never as the run found it.
     let read = Arc::new(Current::read(&*facts));
     let spec_err = spec_err(state);
-    let (c, card, blame, basis) = match gather::gather(state, facts, amd).await {
+    let (c, card, blame, basis) = read_and_judge(state, facts, amd).await;
+    Ran {
+        check: Arc::new(c),
+        card,
+        index,
+        read,
+        spec_err,
+        blame: Arc::new(blame),
+        basis,
+    }
+}
+
+/// What [`run`] judged: the check, §1.1's conclusion, the blame, and the
+/// basis §1.4 is judged again from.
+type Judged = (MachineCheck, card::Card, blame::Blame, Option<Arc<Basis>>);
+
+#[cfg(not(windows))]
+async fn read_and_judge(
+    state: &SharedState,
+    facts: Arc<dyn lmgw_machine::Facts>,
+    amd: AmdReader,
+) -> Judged {
+    match gather::gather(state, facts, amd).await {
         Ok(g) => {
             let render_nodes = !g.card.render_nodes.is_empty();
             let (c, basis) = judge(g);
@@ -529,21 +572,27 @@ async fn run(state: &SharedState) -> Ran {
                 None,
             )
         }
-    };
-    Ran {
-        check: Arc::new(c),
-        card,
-        index,
-        read,
-        spec_err,
-        blame: Arc::new(blame),
-        basis,
     }
+}
+
+/// Windows reads its own machine (Windows design §4.4, WP6). Its §1.4 is
+/// not judged, so there is no basis to judge it again from.
+#[cfg(windows)]
+async fn read_and_judge(
+    state: &SharedState,
+    facts: Arc<dyn lmgw_machine::Facts>,
+    _amd: AmdReader,
+) -> Judged {
+    let w = windows_check::gather(state, facts).await;
+    let (c, card) = windows_check::check(&w);
+    let blame = blame::Blame::of(&c, false);
+    (c, card, blame, None)
 }
 
 /// A run whose reads stopped (the blocking thread they run on ended
 /// without an answer): a result that says so in its own words, which blames
 /// no start on the machine, rather than a guess at it.
+#[cfg_attr(windows, allow(dead_code))]
 fn unfinished(why: &str) -> MachineCheck {
     let sentence = "lmgw couldn't finish checking this computer. The details say why.";
     let mut items = vec![words::item(
@@ -708,7 +757,9 @@ pub async fn boot(state: &SharedState) {
     let m = &state.machine;
     let _one = m.one.lock().await;
     let mut ran = run(state).await;
-    if ran.card == card::Card::NvidiaOk {
+    // Windows starts engines as programs, not containers: there is no CDI
+    // spec to write (Windows design §4.1).
+    if cfg!(not(windows)) && ran.card == card::Card::NvidiaOk {
         let prefix = state.snapshot().settings.container_prefix.clone();
         let outcome = state
             .cdi()
@@ -733,11 +784,13 @@ pub async fn boot(state: &SharedState) {
 
 /// The items and the verdict from what was read, and what §1.4 and the
 /// verdict are judged from again when the settings change.
+#[cfg_attr(windows, allow(dead_code))]
 fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
-    let (card_item, card) = card::judge(&g.card);
+    let container = g.deployment.is_container();
+    let (card_item, card) = container::judge_card(&g.card, g.deployment);
     let (toolkit_item, plan, toolkit) = match (&g.toolkit, card) {
         (Some(t), card::Card::NvidiaOk) => {
-            let (i, p, o) = toolkit::judge(t);
+            let (i, p, o) = container::judge_toolkit(t, g.deployment);
             (i, p, Some(o))
         }
         (_, card::Card::AmdOk) => (
@@ -774,13 +827,9 @@ fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
             None,
             None,
         ),
-        _ => (
-            words::not_checked(MachineItemId::CardForModels, "the driver comes first"),
-            None,
-            None,
-        ),
+        _ => (container::card_first(&card_item, container), None, None),
     };
-    let (podman_item, podman_problem) = running::podman(&g.podman);
+    let (podman_item, podman_problem) = running::podman(&g.podman, container);
     // The switch to this card's settings needs no password (D18): a button
     // here, like the helper's, when it makes the settings fit (D110).
     let (fit_item, fit) = fit::judge(card, &g.present, &g.snap);
@@ -792,7 +841,7 @@ fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
     } else {
         running::download(&g.images)
     };
-    let room = running::room(&g.rooms, download.remaining);
+    let room = running::room(&g.rooms, download.remaining, g.mounts.as_ref());
     let items = vec![
         card_item,
         toolkit_item,
@@ -801,7 +850,14 @@ fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
         room,
         download.item,
     ];
-    let (verdict, headline) = verdict(&items, card, toolkit, podman_problem, fit);
+    let basis = Basis {
+        card,
+        toolkit,
+        podman_problem,
+        present: g.present,
+        container,
+    };
+    let (verdict, headline) = verdict(&items, &basis, fit);
     (
         MachineCheck {
             checked_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -812,12 +868,7 @@ fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
             // The stamp is the publish's to add (D182).
             failed_start: None,
         },
-        Basis {
-            card,
-            toolkit,
-            podman_problem,
-            present: g.present,
-        },
+        basis,
     )
 }
 
@@ -829,15 +880,10 @@ fn judge(g: gather::Gathered) -> (MachineCheck, Basis) {
 /// comes before steps: what is wrong after it may be gone. Of the two
 /// buttons, the helper's (§1.2) comes before the settings switch (§1.4), in
 /// the items' order.
-fn verdict(
-    items: &[MachineItem],
-    card: card::Card,
-    toolkit: Option<toolkit::Toolkit12>,
-    podman_problem: bool,
-    fit: fit::Outcome,
-) -> (MachineVerdict, String) {
+fn verdict(items: &[MachineItem], b: &Basis, fit: fit::Outcome) -> (MachineVerdict, String) {
     use card::Card;
     use toolkit::Toolkit12;
+    let (card, toolkit, podman_problem) = (b.card, b.toolkit, b.podman_problem);
     let sentence = |id: MachineItemId| {
         items
             .iter()
@@ -894,10 +940,7 @@ fn verdict(
                     sentence(MachineItemId::SettingsFit),
                 )
             } else {
-                (
-                    MachineVerdict::Ready,
-                    "This computer is ready for local models.".into(),
-                )
+                (MachineVerdict::Ready, container::ready(b.container))
             }
         }
     }

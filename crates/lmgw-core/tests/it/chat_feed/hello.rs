@@ -1,6 +1,7 @@
 //! What `hello` tells a device about itself, and what the feed does to its
 //! own connection (device link design §7.1, §7.2, WP5): the URL list and the
-//! certificate's dates from the row, `dashboard_url` from `bind_addr`,
+//! certificate's dates from the row, `dashboard_url` from `bind_addr`, the
+//! public URL or the TLS listener that serves,
 //! `TCP_USER_TIMEOUT` on the connection's socket, and the details `Links`
 //! keeps for the card.
 
@@ -100,6 +101,50 @@ async fn hello_names_the_dashboard_to_this_computer_and_to_others_off_loopback()
     assert_eq!(dashboard(&f), json!("http://127.0.0.1:8001/"));
     let f = Feed::open(&w, &there.client, "", None).await;
     assert_eq!(dashboard(&f), Value::Null);
+}
+
+/// Headless server design §4.3, D42: a device that is not "this computer" is
+/// told the public URL when one is set, else the TLS listener's address
+/// while one serves; one only configured (saved since the start) changes
+/// nothing yet. "This computer" keeps the plain loopback its window loads.
+#[tokio::test]
+async fn hello_names_the_public_url_or_the_serving_tls_listener_to_other_devices() {
+    let w = world(|s| s.bind_addr = "127.0.0.1:8001".into()).await;
+    let here = pair(&w, "desktop", json!({})).await;
+    let there = remote(&w, "phone", vec![loopback_url(&w).await]).await;
+    let dashboard = |f: &Feed| f.hello()["dashboard_url"].clone();
+
+    // Configured on a concrete address, not serving: the plain rule.
+    settings(&w.state, |s| {
+        s.tls.cert_path = "/etc/lmgw/tls/tls.crt".into();
+        s.tls.key_path = "/etc/lmgw/tls/tls.key".into();
+        s.tls.listen = "192.0.2.5:8443".into();
+    })
+    .await;
+    let f = Feed::open(&w, &there.client, "", None).await;
+    assert_eq!(dashboard(&f), Value::Null, "nothing serves TLS yet");
+
+    // Serving: its address, in https.
+    let config = w.state.snapshot().settings.tls.listener().unwrap();
+    w.state.set_serving_tls(Some(lmgw_core::net::ServingTls {
+        addr: config.addr,
+        config,
+    }));
+    let f = Feed::open(&w, &there.client, "", None).await;
+    assert_eq!(dashboard(&f), json!("https://192.0.2.5:8443/"));
+    let f = Feed::open(&w, &here.client, "", None).await;
+    assert_eq!(dashboard(&f), json!("http://127.0.0.1:8001/"));
+
+    // The public URL wins for every other device.
+    settings(&w.state, |s| {
+        s.public_url = "https://lmgw.example:9443".into()
+    })
+    .await;
+    let f = Feed::open(&w, &there.client, "", None).await;
+    assert_eq!(dashboard(&f), json!("https://lmgw.example:9443/"));
+    let f = Feed::open(&w, &here.client, "", None).await;
+    assert_eq!(dashboard(&f), json!("http://127.0.0.1:8001/"));
+    w.state.set_serving_tls(None);
 }
 
 /// The server-side sockets of this process whose `TCP_USER_TIMEOUT` is

@@ -221,6 +221,7 @@ impl Registry {
                 claimed_by(e, origin);
                 if e.state == RuntimeState::Ready && e.climb.is_none() {
                     e.in_flight += 1;
+                    e.claims += 1;
                     e.last_used = Instant::now();
                     Step::Claimed(AcquireGuard {
                         reg: Arc::clone(self),
@@ -229,6 +230,7 @@ impl Registry {
                         phase: e.phase.clone(),
                         generation: e.generation,
                         failed: std::sync::atomic::AtomicBool::new(false),
+                        sent: std::sync::atomic::AtomicBool::new(false),
                         gate: e.gate.clone(),
                     })
                 } else {

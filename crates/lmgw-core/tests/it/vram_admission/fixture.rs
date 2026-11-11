@@ -18,7 +18,7 @@ pub(super) struct Fixture {
     pub(super) _third: MockServer,
     /// More, handed out after the first three — the ladder tests', where
     /// every climb is a start on a port of its own.
-    more: Vec<MockServer>,
+    pub(super) more: Vec<MockServer>,
     pub(super) _models_dir: tempfile::TempDir,
 }
 
@@ -145,8 +145,7 @@ pub(super) async fn fixture_n(
         ("embed-model.gguf", embed_bytes),
     ] {
         // Sparse: the size is metadata, no disk is spent on it.
-        let f = std::fs::File::create(dir.path().join(name)).unwrap();
-        f.set_len(bytes).unwrap();
+        crate::support::sparse::create(dir.path().join(name), bytes);
     }
 
     let first = container(world.clone()).await;

@@ -3,6 +3,8 @@
 //! own, and stopping on SIGTERM mid-sync well inside `stop_grace_seconds` —
 //! the sync first, then the request drain — with the index consistent.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::process::Stdio;

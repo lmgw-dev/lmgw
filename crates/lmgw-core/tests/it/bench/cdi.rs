@@ -12,9 +12,11 @@ async fn a_gpu_rows_bench_container_and_its_command_lines_carry_lmgws_spec_dir()
     let w = World::new(quick()).await;
     let m = CdiMachine::new();
     w.state().set_cdi_for_tests(m.own_spec(&w.state().data_dir));
+    // Shell-quoted as the command line quotes it: a Windows path's `\` is.
+    let dir = m.spec_dir(&w.prefix()).display().to_string();
     let want = format!(
         "podman --cdi-spec-dir {} run -d --replace",
-        m.spec_dir(&w.prefix()).display()
+        shlex::try_quote(&dir).unwrap()
     );
 
     let plan = w.ok("bench_plan", json!({"model_id": "qwen"})).await;

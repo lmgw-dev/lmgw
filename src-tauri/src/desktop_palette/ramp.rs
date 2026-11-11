@@ -42,8 +42,46 @@ pub(super) fn hex([r, g, b]: Rgb) -> String {
 
 /// Dark when white text would read better on it than black: relative
 /// luminance below 0.179, where the two contrasts are equal.
-pub(super) fn is_dark([r, g, b]: Rgb) -> bool {
-    0.2126 * to_linear(r) + 0.7152 * to_linear(g) + 0.0722 * to_linear(b) < 0.179
+pub(super) fn is_dark(c: Rgb) -> bool {
+    luminance(c) < 0.179
+}
+
+/// WCAG 2's relative luminance.
+fn luminance([r, g, b]: Rgb) -> f64 {
+    0.2126 * to_linear(r) + 0.7152 * to_linear(g) + 0.0722 * to_linear(b)
+}
+
+/// WCAG 2's contrast ratio of two colours, 1 to 21.
+#[cfg_attr(not(windows), allow(dead_code))] // the Windows palette's (win.rs)
+pub(super) fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The colour `step` lighter (negative: darker) in OKLCH lightness, its hue
+/// and chroma kept: how the steps above move.
+#[cfg_attr(not(windows), allow(dead_code))] // the Windows palette's (win.rs)
+pub(super) fn shift(c: Rgb, step: f64) -> Rgb {
+    let [l, c, h] = to_oklch(c);
+    from_oklch([l + step, c, h])
+}
+
+/// OKLCH lightness, 0 to 1.
+#[cfg(test)]
+pub(super) fn lightness(c: Rgb) -> f64 {
+    to_oklch(c)[0]
+}
+
+/// The base whose `bg1` step lands on `bg1`: for a palette anchored on its
+/// content background rather than on the sidebar.
+#[cfg_attr(not(windows), allow(dead_code))] // the Windows palette's (win.rs)
+pub(super) fn base_under(bg1: Rgb, dark: bool) -> Rgb {
+    let (_, on_dark, on_light) = STEPS
+        .iter()
+        .find(|s| s.0 == "bg1")
+        .copied()
+        .expect("bg1 is a step");
+    shift(bg1, -(if dark { on_dark } else { on_light }))
 }
 
 fn to_linear(c: u8) -> f64 {

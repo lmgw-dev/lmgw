@@ -17,6 +17,10 @@
 //! because the run log prints every bound mount for the owner (principle 4)
 //! and a use-time refusal names the folder it refused.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use crate::common;
 
 use std::sync::Arc;
@@ -623,6 +627,9 @@ async fn the_runs_routes_read_the_same_for_the_agent_and_for_the_owner() {
 ///
 /// So the agent gets the field and the code and nothing else. The owner, who
 /// has to go and find the folder, gets the whole thing.
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_start_refused_by_a_mount_rule_reads_as_the_code_alone_to_the_agent() {
     let state = AppState::init_for_tests().await.unwrap();
@@ -694,6 +701,9 @@ async fn a_start_refused_by_a_mount_rule_reads_as_the_code_alone_to_the_agent() 
 /// owner chose the folder and has to be able to see what was bound (principle
 /// 4). The container did not choose it and has no use for it: its copy of the
 /// same line reads in the container's own coordinates (mounts §5.6).
+// Reads or starts an agent, which is not on Windows (Windows design §4.5):
+// its private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_run_logs_mount_line_reads_in_container_paths_for_the_agent() {
     let state = AppState::init_for_tests().await.unwrap();

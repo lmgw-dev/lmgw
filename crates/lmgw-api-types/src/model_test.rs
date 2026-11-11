@@ -215,6 +215,12 @@ pub struct ImageTestPassed {
     /// The first image's size in bytes.
     pub bytes: usize,
     pub note: String,
+    /// The pipeline's container's warnings, as its runtime entry carries
+    /// them — what its start found, and a start that fits only partially on
+    /// the GPU ("It will work but only fits partially on the GPU, expect
+    /// slowdowns: …"). Empty for a clean start.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// A ladder row's test: every rung loaded and probed in turn, then the

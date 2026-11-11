@@ -136,28 +136,44 @@ pub(super) fn CheckNowButton() -> impl IntoView {
 }
 
 /// Theme: this window's own, stored where index.html reads it before paint.
+/// In the Windows app window, whose shell marks the system's mode on the page
+/// (`data-system-theme`, src-tauri's desktop_palette/win.rs), "system" is
+/// offered too and is the default: the page follows Windows' dark or light.
 #[component]
 pub(super) fn ThemeField(id: String, hidden: Signal<bool>) -> impl IntoView {
+    let system = || {
+        document()
+            .document_element()
+            .and_then(|el| el.get_attribute("data-system-theme"))
+    };
+    let follows = system().is_some();
     let theme = RwSignal::new(
         window()
             .local_storage()
             .ok()
             .flatten()
             .and_then(|s| s.get_item("lmgw-theme").ok().flatten())
-            .unwrap_or_else(|| "dark".into()),
+            .filter(|t| follows || t != "system")
+            .unwrap_or_else(|| if follows { "system" } else { "dark" }.into()),
     );
     Effect::new(move |_| {
         let t = theme.get();
+        let shown = match t.as_str() {
+            "system" => system().unwrap_or_else(|| "dark".into()),
+            _ => t.clone(),
+        };
         let _ = document()
             .document_element()
-            .map(|el| el.set_attribute("data-theme", &t));
+            .map(|el| el.set_attribute("data-theme", &shown));
         if let Ok(Some(storage)) = window().local_storage() {
             let _ = storage.set_item("lmgw-theme", &t);
         }
     });
-    let opts = Signal::derive(|| {
-        [("dark", "dark"), ("light", "light")]
+    let opts = Signal::derive(move || {
+        let system = follows.then_some(("system", "system"));
+        system
             .into_iter()
+            .chain([("dark", "dark"), ("light", "light")])
             .map(|(v, l)| (v.to_string(), l.to_string()))
             .collect::<Vec<_>>()
     });

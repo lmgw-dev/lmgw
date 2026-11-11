@@ -103,7 +103,27 @@ pub(super) async fn run(
         guard.submitted(&root, &id);
         poll(state, &r, (&root, &id), (guard, call.alias), hooks).await
     })
-    .await?;
+    .await;
+    // A generation that completed under a partial grant teaches the row the
+    // budget it works with, and one the image server failed that it was not
+    // enough (`vram::partial::work`).
+    let ended = match ended {
+        Ok(ended) => {
+            crate::vram::partial::work::learned(state, model_id).await;
+            ended
+        }
+        Err(e) => {
+            if let GatewayError::Upstream {
+                status, message, ..
+            } = &e
+            {
+                if *status >= 500 {
+                    crate::vram::partial::work::failed(state, model_id, message).await;
+                }
+            }
+            return Err(e);
+        }
+    };
     // What the server used for what the call left unset: its probed request
     // defaults, read from the container that answered.
     let defaults = probed_defaults(state, model_id);

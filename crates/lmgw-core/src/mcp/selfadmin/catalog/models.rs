@@ -90,6 +90,25 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "n_gpu_layers",
                     int_p("Layers to offload to the GPU (--n-gpu-layers). 999 = all."),
                 ),
+                (
+                    "n_cpu_moe",
+                    int_p(
+                        "Mixture-of-experts models only: keep the routed experts of the first N \
+                         layers in host memory, the rest of the weights on the card \
+                         (--n-cpu-moe). Lets a MoE model larger than the card run, slower; the \
+                         VRAM footprint and admission count it. 0 or more; omit to keep every \
+                         expert on the card.",
+                    ),
+                ),
+                (
+                    "moe_cache_mib",
+                    int_p(
+                        "A cache on the GPU, in MiB, that keeps the most used of the experts \
+                         held in host memory (n_cpu_moe, --cpu-moe) on the card \
+                         (--moe-cache-mib). The footprint charges it in full while experts are \
+                         kept in host memory. 0 or omitted = no cache.",
+                    ),
+                ),
                 ("threads", int_p("CPU threads (--threads).")),
                 ("batch_size", int_p("Logical batch size (--batch-size).")),
                 ("ubatch_size", int_p("Physical batch size (--ubatch-size).")),

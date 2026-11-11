@@ -2,6 +2,8 @@
 //! `initialize` → `tools/list` → `tools/call search` → `tools/call read`, and
 //! every refusal of `read` naming its rule.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use common::fake::{models, Fake};

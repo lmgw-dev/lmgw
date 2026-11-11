@@ -563,6 +563,46 @@ cross-class path.
   rather than inventing a multiplier. `--offload-to-cpu` is
   the knob for a shared card: idle 1.0 GiB, peak 7.7 GiB, +0.4 s per image
   (§12.4); the editor shows those numbers beside the switch.
+- **A row that can run with less than all of it on the card**
+  (`offload_to_cpu`, a `params_backend` naming `cpu` or `disk`, or sd.cpp's
+  `--auto-fit`, on by default) is charged its files wherever they fit, as
+  every row is. Since 2026-11-11, where they do not, it is never too large
+  for a card: it gets its on-card part (for a row whose weights all wait off
+  the card its context plus its learned peak, before the peak its largest
+  file plus its context; all of it for any other), else what is free beyond
+  the headroom when the budget that leaves is at least the smallest one a
+  generation of the row has completed under (`work_bytes`, migration 0104),
+  else what is free only when nothing else of lmgw's could be waited for and
+  no fallback would answer. The context is the learned idle residency
+  (`idle_bytes`, read per process at rest for a row whose weights all wait
+  off the card), else 1.0 GiB set aside for it (the CUDA figure of §12.4,
+  the most measured); it is no working budget — 5 MiB at rest under Vulkan
+  on a GTX 970 test card, where Z-Image-Turbo fails at `--max-vram 0.5` and
+  renders at 1. It is held to what it was given with `--max-vram` (sd.cpp
+  parses a float GiB budget per device and checks every runner against it,
+  `offload_to_cpu` included: 1010 MiB drawn at `--max-vram 1`, 2038 MiB at
+  2, 3110 MiB without it, measured 2026-11-11 at `master-1079-a3c49b1`). A
+  `max_vram` in its args wins at render, so such a row is given that budget
+  plus its context or takes the normal path, and one of 0 or less (the
+  driver's free memory, unbounded) needs the whole. Less than the whole is
+  given only where its engine sees exactly one card (`--max-vram` is per
+  device and the ledger pools them; several cards are not done yet). A
+  generation that fails under a budget at least the working one raises the
+  working budget to what sd.cpp names, or clears it. The peak, context and
+  working budget are keyed by the resolved engine image, run args and
+  native build (migration 0105), so figures learned under another engine
+  count as not measured. The container records the grant (`lmgw.grant`),
+  so boot adopts it and says what holds it; the ledger charges the grant,
+  or the budget and the context where that is more; a whole start of a row
+  whose weights all wait off the card is charged its peak plus its context
+  (measured, else read at rest), or its files plus its peak while neither
+  is known. The start
+  says "It will work but only fits partially on the GPU, expect slowdowns:
+  …". A row with `auto_fit off` or a GPU-only `params_backend` pins its
+  weights and is refused when larger than the card, naming the settings that
+  would let it run with less. The table, how to reproduce it and what is
+  not done yet are in per-model containers design §4; Windows design §7
+  WP8 has the live round.
 - **GPU hold**: per-model fallback only (`hold_fallback_mode`), like
   aux/audio — the global chat fallback does not apply. A cloud image alias
   is the fallback target; the `x-lmgw-fallback` header tells the client.

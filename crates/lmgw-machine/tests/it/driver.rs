@@ -1,6 +1,8 @@
 //! The driver facts (machine-check design §6, "Driver facts"): the module's
 //! `/proc` line, the libraries' link, the two compared, and Secure Boot.
 
+use std::path::Path;
+
 use lmgw_machine::driver::{
     kernel_module, parse_nvrm, secure_boot, userspace, version_of_library, DriverState,
     ModuleFlavor, Read, SecureBoot, SECURE_BOOT_VAR,
@@ -38,11 +40,9 @@ fn the_library_link_gives_the_userspace_version() {
         panic!("{:?}", userspace(&f))
     };
     assert_eq!(u.version, "600.20.03");
-    assert_eq!(u.link.to_str(), Some("/usr/lib64/libnvidia-ml.so.1"));
-    assert_eq!(
-        u.target.to_str(),
-        Some("/usr/lib64/libnvidia-ml.so.600.20.03")
-    );
+    // As paths: on Windows the fake's joins write `\`.
+    assert_eq!(u.link, Path::new("/usr/lib64/libnvidia-ml.so.1"));
+    assert_eq!(u.target, Path::new("/usr/lib64/libnvidia-ml.so.600.20.03"));
     assert_eq!(
         version_of_library(std::path::Path::new("libnvidia-ml.so.1")),
         None,

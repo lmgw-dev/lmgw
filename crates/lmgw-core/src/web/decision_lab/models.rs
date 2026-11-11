@@ -22,7 +22,7 @@ use crate::config::{AuxBackend, AuxKind, AuxModel, FallbackRoute, Snapshot};
 use crate::modelinfo::decision::limits::{self, LocalFacts};
 use crate::modelinfo::decision::Shape;
 use crate::ops::price_row_view;
-use crate::runtime::aux::{
+use crate::runtime::aux_models::{
     batch_in_effect, threads_in_effect, ubatch_in_effect, CountFrom, LLAMA_DEFAULT_BATCH,
     LLAMA_DEFAULT_UBATCH,
 };

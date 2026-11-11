@@ -44,7 +44,14 @@ pub(crate) fn gather(models_dir: &str, rows: &[AudioModel]) -> Vec<RowWeights> {
         .filter(|m| m.enabled)
         .map(|m| {
             let root = files::row_root(models_dir, m);
-            let rel = |p: &Path| p.strip_prefix(base).unwrap_or(p).display().to_string();
+            // `/`-separated on every system, as the downloads' paths are.
+            let rel = |p: &Path| {
+                let rel = p.strip_prefix(base).unwrap_or(p);
+                rel.iter()
+                    .map(|c| c.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
             let mut candidates: Vec<String> =
                 files::row_ggufs(base, &root, m.weight_id.as_deref(), &m.family)
                     .iter()

@@ -10,11 +10,17 @@
 //! link, another user's, or writable by group or others is refused too.
 //! Every refusal names the file relative to the data directory
 //! (`tls/ca.key`), which is what the status shows to its callers.
+//!
+//! On Windows mode and uid are the owner SID and the DACL (`files/windows.rs`,
+//! `lmgw_private`).
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use secrecy::zeroize::Zeroizing;
 
 use super::trust::TrustError;
@@ -33,10 +39,13 @@ pub const CERT_NAME: &str = "tls/ca.crt";
 const DIR_NAME: &str = "tls/";
 
 /// The key file's mode.
+#[cfg(unix)]
 const KEY_MODE: u32 = 0o600;
 /// The certificate's mode: public data, what `curl --cacert` reads.
+#[cfg(unix)]
 const CERT_MODE: u32 = 0o644;
 /// The directory's mode.
+#[cfg(unix)]
 const DIR_MODE: u32 = 0o700;
 
 /// Where one data directory keeps its CA.
@@ -47,6 +56,7 @@ pub struct TrustFiles {
     pub cert: PathBuf,
 }
 
+#[cfg(unix)]
 fn my_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
@@ -62,17 +72,42 @@ impl TrustFiles {
         }
     }
 
+    /// Whether each file exists (a symbolic link counts, and is refused when
+    /// read).
+    pub fn present(&self) -> (bool, bool) {
+        (
+            self.key.symlink_metadata().is_ok(),
+            self.cert.symlink_metadata().is_ok(),
+        )
+    }
+
+    /// The certificate's bytes.
+    pub fn read_cert(&self) -> Result<Vec<u8>, TrustError> {
+        std::fs::read(&self.cert)
+            .map_err(|e| TrustError::Unreadable(format!("cannot read {CERT_NAME}: {e}")))
+    }
+}
+
+// On Windows the same checks by owner and DACL (Windows design §4.4, WP6):
+// see the module's own doc.
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+impl TrustFiles {
     /// The directory, created `0700` when it is missing, and checked
-    /// ([`Self::check_dir`]) when it is not.
+    /// ([`Self::check_dir`]) either way: a recursive create succeeds on a
+    /// directory that is already there, which may be another's, made in the
+    /// moment between the look and the create.
     pub fn ensure_dir(&self) -> Result<(), TrustError> {
-        if self.dir.symlink_metadata().is_ok() {
-            return self.check_dir();
+        if self.dir.symlink_metadata().is_err() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(DIR_MODE)
+                .create(&self.dir)
+                .map_err(|e| TrustError::Unreadable(format!("cannot create {DIR_NAME}: {e}")))?;
         }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(DIR_MODE)
-            .create(&self.dir)
-            .map_err(|e| TrustError::Unreadable(format!("cannot create {DIR_NAME}: {e}")))
+        self.check_dir()
     }
 
     /// `tls/` as §2.1 needs it: a directory, not a symbolic link, lmgw's
@@ -104,15 +139,6 @@ impl TrustFiles {
             )));
         }
         Ok(())
-    }
-
-    /// Whether each file exists (a symbolic link counts, and is refused when
-    /// read).
-    pub fn present(&self) -> (bool, bool) {
-        (
-            self.key.symlink_metadata().is_ok(),
-            self.cert.symlink_metadata().is_ok(),
-        )
     }
 
     /// The key file's bytes, read from the descriptor its mode and owner
@@ -159,12 +185,6 @@ impl TrustFiles {
         Ok(bytes)
     }
 
-    /// The certificate's bytes.
-    pub fn read_cert(&self) -> Result<Vec<u8>, TrustError> {
-        std::fs::read(&self.cert)
-            .map_err(|e| TrustError::Unreadable(format!("cannot read {CERT_NAME}: {e}")))
-    }
-
     /// Replace the key file with `bytes`, `0600` from its creation.
     pub fn write_key(&self, bytes: &[u8]) -> Result<(), TrustError> {
         write_atomic(&self.key, KEY_NAME, bytes, KEY_MODE)
@@ -181,6 +201,7 @@ impl TrustFiles {
 /// exactly before anything is written), synced, then renamed over `path`
 /// and the directory synced: a reader sees the old file or the new one,
 /// never half of either. On a failure `path` is as it was.
+#[cfg(unix)]
 fn write_atomic(path: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), TrustError> {
     let fail = |what: &str, e: std::io::Error| {
         TrustError::Unreadable(format!("cannot {what} {name}: {e}"))

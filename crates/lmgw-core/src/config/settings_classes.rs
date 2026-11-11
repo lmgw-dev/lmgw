@@ -35,12 +35,16 @@ pub const FALLBACK_ON_EXTERNAL_LABEL: SettingPath = labels::FALLBACK_ON_EXTERNAL
 /// holds three. Every number here is a *policy* choice rather than a
 /// measurement, which is why each is a field the owner can see and change —
 /// nothing in this file is compiled in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VramSettings {
     /// Master switch. When off, requests are forwarded exactly as they were
     /// before this existed and the ledger is reporting only.
     pub enabled: bool,
+    /// How the headroom is set: `auto` (the default) learns it from this
+    /// machine (`vram::headroom`), `fixed` uses `headroom_mb` as written.
+    /// Auto uses `headroom_mb` too until it has learned enough.
+    pub headroom_mode: lmgw_api_types::HeadroomMode,
     /// Memory kept free above the GGUF-derived estimate, in MiB.
     ///
     /// The estimate is weights + KV cache + compute buffers, read from the
@@ -50,6 +54,10 @@ pub struct VramSettings {
     /// here as one visible number instead of being smuggled into the
     /// estimate as a fudge factor. Raise it if loads still OOM; the status
     /// surface shows both figures side by side.
+    ///
+    /// In `auto` mode this is the value until lmgw has learned enough; then
+    /// the headroom is the learned growth of other programs' use plus a
+    /// margin per model still starting or not measured (`vram::headroom`).
     pub headroom_mb: u64,
     /// GPU memory lmgw may plan against, in MiB. `0` = the device's real
     /// total, read from the driver (NVML on NVIDIA, amdgpu's sysfs counters on
@@ -92,7 +100,7 @@ pub struct VramSettings {
 /// [`Settings::hold`](crate::config::Settings::hold) so a blob written before this field existed loads as
 /// `active: false` — hold off. A held model answers with its own fallback
 /// (openai egress design §14.2): there is no global one any more.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HoldSettings {
     /// The switch. Persisted, so a restart mid-game does not lift it.
@@ -103,6 +111,7 @@ impl Default for VramSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            headroom_mode: lmgw_api_types::HeadroomMode::Auto,
             headroom_mb: 1024,
             budget_mb: 0,
             queue_timeout_seconds: 300,
@@ -119,7 +128,7 @@ impl Default for VramSettings {
 /// it is where a request that says nothing starts. The values match
 /// `quickdoc_core::retrieve::SearchParams::default()`, which documents why each
 /// one is what it is.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DocsSearchSettings {
     /// `K_f` — BM25 candidates.
@@ -131,6 +140,8 @@ pub struct DocsSearchSettings {
     /// BM25 column weights. Stored rather than fixed because the playground
     /// exposes them: a knob somebody can tune and then "save as defaults" has
     /// to survive the save, or the page is lying about what it did.
+    /// quickdoc-core's, which has no schema: its numbers by name.
+    #[schemars(with = "std::collections::BTreeMap<String, f32>")]
     pub fts_weights: quickdoc_core::retrieve::FtsWeights,
     /// `K_r` — how deep into the fused list the cross-encoder looks. `0`
     /// disables the rerank stage.
@@ -205,7 +216,7 @@ pub(super) fn default_agent_script_image() -> String {
 /// with router mode (§6/§7): the name is derived (§3.3), the port is dynamic
 /// (§3.5), the router's own count-based cap has nothing left to cap, and
 /// auto-start is a per-model `warm_start` flag.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RouterSettings {
     /// Container image for llama-server (entrypoint `/app/llama-server`).
@@ -287,7 +298,7 @@ impl RouterSettings {
 /// chat's too, and chat has no decision rows. `base` is flattened, so the
 /// stored blob and the settings wire stay one flat object, and the wrapper
 /// dereferences to it, so `aux_router.models_dir` reads as it always did.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuxRouterSettings {
     #[serde(flatten)]
@@ -327,7 +338,7 @@ impl std::ops::DerefMut for AuxRouterSettings {
 /// another [`RouterSettings`] because the engine takes no CLI flags: every
 /// per-model knob goes into a mounted `server.json`, and the four engine
 /// fields below are what flows into it (§3.6).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AudioSettings {
     /// Container image; the entrypoint's first arg selects the tool
@@ -426,7 +437,9 @@ pub struct AudioSettings {
 
 /// `audio.catalog_revision`: what an audio catalog download takes when the
 /// spec pins a package to a commit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum CatalogRevision {
     /// The spec's pinned commit, where it pins one; `main` otherwise.
@@ -513,7 +526,7 @@ fn default_audio_voice_dir() -> String {
 /// anything a *model* needs lives in that row's `args`. So unlike
 /// [`AudioSettings`] there is nothing here but image, dir, run args and
 /// prefix.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ImageSettings {
     /// Container image. The entrypoint is `/sd-cli`, so the rendered
@@ -625,7 +638,9 @@ pub const DEFAULT_VOICE_INSTRUCTIONS: &str = concat!(
 
 /// What decides a barge-in once the evidence gate passed (realtime design
 /// §6.4): `realtime.barge_in_check`, and `session.lmgw.barge_in_check`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum BargeInCheck {
     /// The words: the evidence is transcribed, and a backchannel or nothing
@@ -707,7 +722,7 @@ pub const DEFAULT_BARGE_IN_CHECK_SCRIPTS: &[&str] = &["Latin"];
 /// which refuses what no session could run; read back as
 /// `ops::realtime_view`. A blob written another way still loads with these
 /// defaults, and the session start falls back from what cannot run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RealtimeSettings {
     /// The chat alias a session starts on when the client names no model, or

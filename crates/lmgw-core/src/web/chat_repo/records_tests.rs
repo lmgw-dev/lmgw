@@ -312,6 +312,8 @@ fn phone() -> Caller {
             kind: crate::config::ApiKeyKind::Device,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         },
         ..Default::default()
     })

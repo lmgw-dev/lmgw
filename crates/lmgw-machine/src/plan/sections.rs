@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::facts::{Facts, Kind};
+use crate::facts::{Facts, Kind, Posix};
 use crate::os::OsRelease;
 use crate::repos::{glob_match, RepoSection, Repos};
 
@@ -75,10 +75,13 @@ fn own_file(
     if meta.kind != Kind::File {
         return OwnFile::NotOwn(format!("{path} is not a regular file"));
     }
-    if meta.uid != 0 {
-        return OwnFile::NotOwn(format!("{path} belongs to user {}, not to root", meta.uid));
+    let Some(Posix { mode, uid }) = meta.posix else {
+        return OwnFile::NotOwn(format!("{path} has no POSIX owner and mode on this system"));
+    };
+    if uid != 0 {
+        return OwnFile::NotOwn(format!("{path} belongs to user {uid}, not to root"));
     }
-    if meta.mode & 0o004 == 0 {
+    if mode & 0o004 == 0 {
         return OwnFile::NotOwn(format!("{path} is not readable by every user"));
     }
     let text = match f.read(Path::new(path)) {

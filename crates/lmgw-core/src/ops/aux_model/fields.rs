@@ -7,7 +7,7 @@ use crate::config::{AuxBackend, AuxKind, AuxModel};
 use crate::gguf::ModelSummary;
 use crate::host::HostCpu;
 use crate::runtime::argv::canonical_key;
-use crate::runtime::aux::{self as aux_rt, CountFrom};
+use crate::runtime::aux_models::{self as aux_rt, CountFrom};
 
 use super::super::{check_rel_path, clear_has, strip_models_prefix};
 use super::AuxModelPatch;
@@ -192,7 +192,7 @@ pub(super) fn arg_warnings(m: &AuxModel) -> Vec<String> {
     for tok in m.args.iter().filter(|t| t.starts_with('-')) {
         let flag = tok.split('=').next().unwrap_or(tok);
         let key = canonical_key(flag.trim_start_matches('-'));
-        let Some((_, field)) = FIELD_FLAGS.iter().find(|(long, _)| *long == key) else {
+        let Some((_, field)) = FIELD_FLAGS.iter().find(|(long, _)| key == *long) else {
             continue;
         };
         out.push(if field_set(m, field) {

@@ -178,7 +178,7 @@ pub struct AuxModel {
     pub ctx_size: Option<i64>,
     /// `--ubatch-size` (decision-models design §3.3); `None` = llama-server's
     /// default. An encoder whose input llama-server cannot split
-    /// ([`crate::runtime::aux::splits_input`]) evaluates a whole input in one
+    /// ([`crate::runtime::aux_models::splits_input`]) evaluates a whole input in one
     /// ubatch, so this bounds every input it answers.
     pub ubatch_size: Option<i64>,
     /// `--batch-size`; `None` = llama-server's default. llama.cpp lowers the
@@ -196,7 +196,7 @@ pub struct AuxModel {
     /// machine's physical cores (the logical CPU count where the core
     /// topology cannot be read), as an audio row switched to the CPU does —
     /// unless the row's freeform args name a count, which then renders
-    /// ([`crate::runtime::aux::threads_in_effect`]).
+    /// ([`crate::runtime::aux_models::threads_in_effect`]).
     pub threads: Option<i64>,
     /// Freeform extra llama-server flags without a dedicated field.
     pub args: Vec<String>,
@@ -225,7 +225,7 @@ pub struct AuxModel {
 /// go through a managed upstream row (see [`Settings::audio`]), the same
 /// pattern as the aux router: enabled = in the config = in the upstream's
 /// catalog = routable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioModel {
     pub id: i64,
     /// Server id / client-facing id (under the audio upstream prefix).
@@ -431,6 +431,29 @@ pub struct ImageModel {
     /// surface can say how old the figure is. `None` whenever the peak is.
     #[serde(default)]
     pub peak_learned_at: Option<String>,
+    /// The learned idle residency (migration 0103): what the container of
+    /// a row whose weights all wait off the card (`offload_to_cpu`, a whole
+    /// `params_backend cpu|disk`) was read holding per process while it was
+    /// up and idle — sd-server's own context, outside the budget admission's
+    /// partial fit holds it to ([`crate::vram::partial`]); no working budget
+    /// (that is [`Self::work_bytes`]). `None` is "not measured yet"; written
+    /// by lmgw only, reset with the peak.
+    #[serde(default)]
+    pub idle_bytes: Option<u64>,
+    /// The smallest `--max-vram` budget a generation of this row completed
+    /// under (migration 0104): what VRAM admission knows it renders with
+    /// when the whole does not fit ([`crate::vram::partial`]). `None` is
+    /// "not measured yet"; written by lmgw only, lowered by each smaller
+    /// budget that works, reset with the peak.
+    #[serde(default)]
+    pub work_bytes: Option<u64>,
+    /// The engine [`Self::peak_extra_bytes`], [`Self::idle_bytes`] and
+    /// [`Self::work_bytes`] were learned under
+    /// ([`crate::vram::plan::image::engine_key`], migration 0105): figures
+    /// under another key than the row resolves to now count as not measured.
+    /// `None`: learned before the key existed, so none of them count.
+    #[serde(default)]
+    pub learned_key: Option<String>,
     /// How the chat model writes this row's prompts (chat-media-tools design
     /// §3.4). `None` derives it from the recipe
     /// [`crate::image_recipes::match_path`] finds for the row's weights.

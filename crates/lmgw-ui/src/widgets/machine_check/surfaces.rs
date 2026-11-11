@@ -33,20 +33,33 @@ pub(crate) fn here(app: bool) -> bool {
 /// a helper plan in the app's window, no setup out); a restart says so and
 /// links to why; everything else is "See what to do". `here`: the page is
 /// on the computer lmgw runs on; elsewhere the sentence names that
-/// computer, not the one the browser is on (D163).
+/// computer, not the one the browser is on (D163). `server`: lmgw runs in
+/// the server image (headless server design §7), whose card and restart
+/// are the server's wherever the browser is.
 pub(crate) fn banner_words(
     v: MachineVerdict,
     button: bool,
     here: bool,
+    server: bool,
 ) -> (&'static str, &'static str) {
     let restart = v == MachineVerdict::NeedsRestart;
-    let sentence = match (restart, here) {
-        (true, true) => "Your computer needs a restart before local models can use the graphics card",
-        (true, false) => {
+    let sentence = match (restart, here, server) {
+        (true, _, true) => {
+            "The server lmgw runs on needs a restart before local models can use its graphics card"
+        }
+        (false, _, true) => {
+            "The graphics card of the server lmgw runs on isn't ready for local models yet"
+        }
+        (true, true, false) => {
+            "Your computer needs a restart before local models can use the graphics card"
+        }
+        (true, false, false) => {
             "The computer lmgw runs on needs a restart before local models can use its graphics card"
         }
-        (false, true) => "Your graphics card isn't ready for local models yet",
-        (false, false) => "The graphics card of the computer lmgw runs on isn't ready for local models yet",
+        (false, true, false) => "Your graphics card isn't ready for local models yet",
+        (false, false, false) => {
+            "The graphics card of the computer lmgw runs on isn't ready for local models yet"
+        }
     };
     let link = if button {
         "Set it up"
@@ -56,6 +69,24 @@ pub(crate) fn banner_words(
         "See what to do"
     };
     (sentence, link)
+}
+
+/// Whether lmgw runs in the server image, as far as the page knows yet.
+fn on_server() -> Signal<bool> {
+    let d = crate::deployment::deployment();
+    Signal::derive(move || {
+        d.get()
+            .is_some_and(lmgw_api_types::Deployment::is_container)
+    })
+}
+
+/// The check card's heading: the computer, or the server in the image.
+pub(crate) fn card_heading(server: bool) -> &'static str {
+    if server {
+        "This server"
+    } else {
+        "This computer"
+    }
 }
 
 /// The plan has the button: a helper plan with steps in the app's window,
@@ -73,12 +104,14 @@ fn has_button(st: MachineState, app: bool) -> bool {
 #[component]
 fn BannerWords(st: MachineState, app: bool) -> impl IntoView {
     let here = here(app);
+    let server = on_server();
     let words = Memo::new(move |_| {
         let v = st.check.with(|c| c.as_ref().map(|c| c.verdict));
         banner_words(
             v.unwrap_or(MachineVerdict::NeedsFix),
             has_button(st, app),
             here,
+            server.get(),
         )
     });
     // One run of text, so it wraps as a sentence beside the mark, never
@@ -145,7 +178,8 @@ pub fn MachineInCard() -> impl IntoView {
 /// column (§2.1, D172) and above the Chat's empty state (§2.1, D173).
 /// Shown while the check reaches out, and for the rest of the visit once a
 /// setup ran while it was shown, so its answer is read. "Not now" is in the
-/// card's head, beside "This computer", except while a setup runs, whose
+/// card's head, beside "This computer" ("This server" in the server
+/// image), except while a setup runs, whose
 /// progress it would hide (D175); the component is compact (D186).
 #[component]
 pub fn MachineCard(
@@ -171,11 +205,13 @@ pub fn MachineCard(
         nudge.not_now();
         gone.set(true);
     };
+    let server = on_server();
+    let heading = move || card_heading(server.get());
     view! {
         <Show when=move || shown.get()>
-            <section class=format!("card mc-card {class}") aria-label="This computer">
+            <section class=format!("card mc-card {class}") aria-label=heading>
                 <div class="mc-card-head">
-                    <h3>"This computer"</h3>
+                    <h3>{heading}</h3>
                     <Show when=move || !st.busy.get()>
                         <button class="btn ghost sm mc-not-now" on:click=not_now>
                             "Not now"
@@ -224,9 +260,9 @@ mod tests {
     #[test]
     fn the_banner_says_set_it_up_only_where_the_button_is() {
         for v in ALL {
-            let (_, link) = banner_words(v, true, true);
+            let (_, link) = banner_words(v, true, true, false);
             assert_eq!(link, "Set it up", "{v:?}");
-            let (sentence, link) = banner_words(v, false, true);
+            let (sentence, link) = banner_words(v, false, true, false);
             if v == MachineVerdict::NeedsRestart {
                 assert_eq!(link, "See why");
                 assert!(sentence.contains("needs a restart"), "{sentence}");
@@ -243,21 +279,42 @@ mod tests {
     /// L2: a browser on another computer is told whose graphics card.
     #[test]
     fn a_browser_elsewhere_is_told_whose_graphics_card() {
-        let (s, _) = banner_words(MachineVerdict::NeedsFix, false, false);
+        let (s, _) = banner_words(MachineVerdict::NeedsFix, false, false, false);
         assert_eq!(
             s,
             "The graphics card of the computer lmgw runs on isn't ready for local models yet"
         );
-        let (s, _) = banner_words(MachineVerdict::NeedsRestart, false, false);
+        let (s, _) = banner_words(MachineVerdict::NeedsRestart, false, false, false);
         assert!(
             s.starts_with("The computer lmgw runs on needs a restart"),
             "{s}"
         );
         for v in ALL {
             for button in [false, true] {
-                let (s, _) = banner_words(v, button, false);
+                let (s, _) = banner_words(v, button, false, false);
                 assert!(!s.starts_with("Your"), "{v:?}: {s}");
             }
         }
+    }
+
+    /// The server image: the server's card and restart, wherever the
+    /// browser is, and the card headed by the server.
+    #[test]
+    fn the_server_image_names_the_server() {
+        for here in [false, true] {
+            let (s, _) = banner_words(MachineVerdict::NeedsRestart, false, here, true);
+            assert_eq!(
+                s,
+                "The server lmgw runs on needs a restart before local models can use its \
+                 graphics card"
+            );
+            let (s, _) = banner_words(MachineVerdict::NeedsSteps, false, here, true);
+            assert_eq!(
+                s,
+                "The graphics card of the server lmgw runs on isn't ready for local models yet"
+            );
+        }
+        assert_eq!(card_heading(true), "This server");
+        assert_eq!(card_heading(false), "This computer");
     }
 }

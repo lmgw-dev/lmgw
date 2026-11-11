@@ -122,6 +122,7 @@ impl ServicePull {
         }
     }
 
+    #[cfg(unix)]
     fn client(socket: &Path) -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .unix_socket(socket.to_path_buf())
@@ -129,6 +130,18 @@ impl ServicePull {
             .no_gzip()
             .build()
             .map_err(|e| format!("building the client for Podman's API: {e}"))
+    }
+
+    /// Podman's API is reached over a Unix socket, which lmgw does not use on
+    /// Windows yet (Windows design §4.5): a pull there takes the podman
+    /// command.
+    #[cfg(not(unix))]
+    fn client(_socket: &Path) -> Result<reqwest::Client, String> {
+        Err(
+            "Podman's API over its Unix socket is not supported on Windows yet, so podman \
+             pull reports no byte counts"
+                .to_string(),
+        )
     }
 
     /// Whether a service answers on the client's socket, waiting `within`
@@ -178,14 +191,7 @@ impl ServicePull {
         let dir = socket
             .parent()
             .ok_or_else(|| format!("{} has no directory", socket.display()))?;
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        }
+        private_dir(dir)?;
         // A socket a service that is gone left behind: nothing listens on
         // it (the ping above).
         let _ = std::fs::remove_file(socket);
@@ -349,6 +355,25 @@ fn refusal(status: u16, body: &str) -> String {
     }
 }
 
+/// `dir` and its missing parents, made 0700.
+#[cfg(unix)]
+fn private_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| format!("creating {}: {e}", dir.display()))
+}
+
+#[cfg(not(unix))]
+fn private_dir(dir: &Path) -> Result<(), String> {
+    Err(format!(
+        "a private directory for Podman's API socket ({}) is not supported on Windows yet",
+        dir.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +394,7 @@ mod tests {
     /// No socket is "nothing listens" — a service is started in its place —
     /// while a listener that takes the connection and says nothing is a
     /// running service that does not answer, whose socket is left alone.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_ping_tells_no_service_from_a_silent_one() {
         let dir = tempfile::tempdir().unwrap();

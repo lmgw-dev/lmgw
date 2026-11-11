@@ -27,6 +27,20 @@ libc = "0.2.186"
 # version lmgw-core already uses.
 sha2 = "0.11.0"
 
+# Windows' file facts (Windows design §4.4, WP6): the handle's attributes,
+# file ID and times, a volume's free space and serial number, and the
+# display adapters' driver keys in the registry and which of them are
+# present (SetupAPI), and the logical processors of every processor group.
+# The version already in the lock through tokio and Tauri.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
+
 # `fake`: `fake::FakeFacts`, a machine a test states in memory. For tests
 # only: this crate's own (the dev-dependency on itself below) and lmgw-core's
 # (its dev-dependency), never a release build.

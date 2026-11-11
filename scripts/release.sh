@@ -8,10 +8,13 @@
 # the GitHub release notes, Markdown with wrapped lines joined (ci/unwrap-notes.awk): the
 # notes file when given, else git opens your editor. When the tree already carries the
 # version (the first release), it only tags. Then publish:
-#   git push origin main vX.Y.Z    GitLab: a private build X.Y.Z+<pipeline> of main
+#   git push origin main vX.Y.Z    GitLab: a private build X.Y.Z+<pipeline> of main, the RPM
+#                                  and the Windows installer in its feed
 #   scripts/publish-github.sh --ref vX.Y.Z -F <message> --tag vX.Y.Z
 #                                  GitHub: one squashed commit with the tag's tree, and the tag
-#                                  on it (.github/workflows/release.yml builds the release)
+#                                  on it (.github/workflows/release.yml builds the release: the
+#                                  RPM and latest.json, then the Windows installer, which its
+#                                  publish-windows job adds to the release and to latest.json)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

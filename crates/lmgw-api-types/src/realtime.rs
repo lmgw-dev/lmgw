@@ -412,6 +412,10 @@ pub struct RealtimeSettings {
     /// device's listener use that listener's port instead. Applies at the
     /// next start.
     pub webrtc_port: Option<u16>,
+    /// The UDP port WebRTC calls use beside the TLS listener: `null` = the
+    /// TLS port's number, `0` = chosen by the OS. Applies at the next
+    /// start.
+    pub webrtc_tls_port: Option<u16>,
     /// How long a WebRTC call's frame waits for a missing earlier one, in
     /// ms; `0` = no wait. Applies to the next call.
     pub webrtc_reorder_ms: u32,

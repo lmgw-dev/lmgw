@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+mod harmless;
+pub use harmless::without_harmless;
+
 use crate::erased::Erased;
 
 #[derive(Debug, Clone)]
@@ -17,7 +20,9 @@ impl CmdOutput {
     }
 }
 
-/// How the registry reaches `podman`.
+/// How the registry reaches `podman`: through its Podman launcher
+/// ([`crate::runtime::launcher::Podman`]) for a model's container, directly
+/// for the verbs outside the launcher.
 ///
 /// Introduced as a deliberate duplicate of the shared-router manager's trait
 /// of the same name, so the per-model path would not be left pointing at a
@@ -40,6 +45,10 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// The real runner: `podman` as a child process, a [`crate::child::system_tool`].
+/// Its stderr comes back without the lines known to say nothing
+/// ([`without_harmless`]), so every text that quotes it — a failed start's
+/// above all — quotes what Podman said about the call; `podman logs`'s
+/// stderr, the container's own, comes back as it is.
 pub struct TokioRunner;
 
 impl CommandRunner for TokioRunner {
@@ -57,7 +66,7 @@ impl CommandRunner for TokioRunner {
             Ok(CmdOutput {
                 status: out.status.code().unwrap_or(-1),
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                stderr: without_harmless(program, args, &String::from_utf8_lossy(&out.stderr)),
             })
         })
     }
@@ -128,7 +137,15 @@ impl PortRetry {
     /// Whether a `podman run` that failed with `stderr` gets its one more
     /// go on a fresh port. True at most once.
     pub fn again(&mut self, stderr: &str) -> bool {
-        let again = !self.used && is_address_in_use(stderr);
+        self.again_when(is_address_in_use(stderr))
+    }
+
+    /// [`Self::again`] for a caller that already knows whether the port was
+    /// taken (a launcher's [`LaunchFailure::port_in_use`]).
+    ///
+    /// [`LaunchFailure::port_in_use`]: crate::runtime::launcher::LaunchFailure::port_in_use
+    pub fn again_when(&mut self, port_in_use: bool) -> bool {
+        let again = !self.used && port_in_use;
         self.used |= again;
         again
     }
@@ -139,7 +156,7 @@ impl PortRetry {
 /// started, and `podman run` itself exits 126 for reasons other than a port
 /// clash. Several spellings because the message comes from whichever network
 /// backend is in play (pasta, slirp4netns, rootful CNI).
-fn is_address_in_use(stderr: &str) -> bool {
+pub(crate) fn is_address_in_use(stderr: &str) -> bool {
     let low = stderr.to_ascii_lowercase();
     [
         "address already in use",

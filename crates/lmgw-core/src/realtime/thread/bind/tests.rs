@@ -19,6 +19,8 @@ fn owner() -> RequestCtx {
             kind: ApiKeyKind::Owner,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         },
         ..Default::default()
     }

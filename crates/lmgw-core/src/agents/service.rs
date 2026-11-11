@@ -50,6 +50,7 @@ use crate::agents::container::{self, Mount, Published, RunDir, RunSpecArgs};
 use crate::agents::manifest::{Manifest, RunSpec, Service};
 use crate::agents::{mounts, token, Agent};
 use crate::config::{McpServer, McpTransport, Settings};
+use crate::net::ServingTls;
 use crate::runtime::registry::{ephemeral_port, PortRetry};
 use crate::runtime::slug;
 use crate::state::SharedState;
@@ -168,19 +169,30 @@ pub fn origin_label(settings: &Settings, host: &str) -> Option<String> {
     (!label.is_empty()).then(|| label.to_string())
 }
 
-/// `<id>.<suffix>:<bind port>` — the authority, for a `Host` header or a
+/// Whether the agent origin suffix is `localhost`.
+pub fn is_localhost_suffix(settings: &Settings) -> bool {
+    settings
+        .agent_origin_suffix
+        .trim()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case("localhost")
+}
+
+/// `<id>.<suffix>:<port>` — the authority, for a `Host` header or a
 /// resolver call.
 ///
-/// The port is `bind_addr`'s: the agent origin answers on the same socket the
-/// dashboard does and only the `Host` header differs (§4.1). A `bind_addr`
-/// that names no port at all cannot happen through the settings plane (it is
-/// parsed as a `SocketAddr` on the way in) and renders without one here rather
-/// than having a number invented for it.
-pub fn origin_authority(settings: &Settings, agent_id: &str) -> String {
+/// The port is the one the origin is published on ([`origin_scheme_port`]):
+/// the agent origin answers on the same socket the dashboard does and only
+/// the `Host` header differs (§4.1), and the scheme's default port is not
+/// spelled, as a browser's `Host` does not spell it. A `bind_addr` that
+/// names no port at all cannot happen through the settings plane (it is
+/// parsed as a `SocketAddr` on the way in) and renders without one here
+/// rather than having a number invented for it.
+pub fn origin_authority(settings: &Settings, tls: Option<&ServingTls>, agent_id: &str) -> String {
     let host = origin_host(settings, agent_id);
-    match own_port(&settings.bind_addr) {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
+    match origin_scheme_port(settings, tls) {
+        (scheme, Some(port)) if port != scheme.default_port() => format!("{host}:{port}"),
+        _ => host,
     }
 }
 
@@ -191,14 +203,18 @@ pub fn origin_authority(settings: &Settings, agent_id: &str) -> String {
 /// a path onto. [`agent_origin`] is the same origin as a *URL*, with the
 /// slash, and the two forms are deliberately not interchangeable — the design
 /// table prints both.
-pub fn agent_origin_base(settings: &Settings, agent_id: &str) -> String {
-    format!("http://{}", origin_authority(settings, agent_id))
+pub fn agent_origin_base(settings: &Settings, tls: Option<&ServingTls>, agent_id: &str) -> String {
+    format!(
+        "{}://{}",
+        origin_scheme_port(settings, tls).0,
+        origin_authority(settings, tls, agent_id)
+    )
 }
 
 /// `http://board.localhost:8001/` — the origin as a URL to put in an `href` or
 /// an iframe `src`, which is what `dto::AgentService.origin` is (§4.9).
-pub fn agent_origin(settings: &Settings, agent_id: &str) -> String {
-    format!("{}/", agent_origin_base(settings, agent_id))
+pub fn agent_origin(settings: &Settings, tls: Option<&ServingTls>, agent_id: &str) -> String {
+    format!("{}/", agent_origin_base(settings, tls, agent_id))
 }
 
 /// How long the App tab's `origin_resolves` probe waits for the resolver.
@@ -219,8 +235,12 @@ pub const ORIGIN_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
 /// this answers for the shell and for `curl`. A resolver error is `false`, and
 /// so is a timeout — never an error on the detail route, which has a dozen
 /// other things to report.
-pub async fn origin_resolves(settings: &Settings, agent_id: &str) -> bool {
-    let authority = origin_authority(settings, agent_id);
+pub async fn origin_resolves(
+    settings: &Settings,
+    tls: Option<&ServingTls>,
+    agent_id: &str,
+) -> bool {
+    let authority = origin_authority(settings, tls, agent_id);
     match tokio::time::timeout(ORIGIN_LOOKUP_TIMEOUT, tokio::net::lookup_host(authority)).await {
         Ok(Ok(mut addrs)) => addrs.next().is_some(),
         _ => false,
@@ -278,7 +298,7 @@ pub fn origin_label_refusal(m: &Manifest) -> Option<String> {
 pub fn origin_shadows_refusal(settings: &Settings, m: &Manifest) -> Option<String> {
     service_in(m)?;
     let host = origin_host(settings, &m.id);
-    let own = crate::net::own_host_names(&settings.bind_addr);
+    let own = crate::net::own_host_names_for(settings);
     own.iter().find(|h| **h == host).map(|h| {
         format!(
             "'{}' declares run.service, so its UI would be served at http://{host}/ — and \
@@ -297,8 +317,8 @@ pub fn origin_shadows_refusal(settings: &Settings, m: &Manifest) -> Option<Strin
 ///
 /// Shape is checked where the setting is written (`api_settings`); this is the
 /// rule that earns the `origin_suffix_shadows_gateway` code.
-pub fn origin_suffix_refusal(suffix: &str, bind_addr: &str) -> Option<String> {
-    suffix_refusal_against(suffix, &crate::net::own_host_names(bind_addr))
+pub fn origin_suffix_refusal(suffix: &str, settings: &Settings) -> Option<String> {
+    suffix_refusal_against(suffix, &crate::net::own_host_names_for(settings))
 }
 
 /// The stored suffix re-asked at boot and at every read of the settings page
@@ -310,7 +330,7 @@ pub fn origin_suffix_refusal(suffix: &str, bind_addr: &str) -> Option<String> {
 /// silently renamed every agent's origin at boot would be a worse surprise than
 /// the one it is reporting.
 pub fn origin_suffix_warning(settings: &Settings) -> Option<String> {
-    origin_suffix_refusal(&settings.agent_origin_suffix, &settings.bind_addr)
+    origin_suffix_refusal(&settings.agent_origin_suffix, settings)
 }
 
 /// [`origin_suffix_refusal`] against an explicit list of own host names — the
@@ -1169,7 +1189,7 @@ async fn start_once(state: &SharedState, agent: &Agent, cancel: &Cancel) -> Outc
             "port": service.port,
             // The public origin, byte for byte the `LMGW_APP_ORIGIN` below
             // (§4.6): an image reads it whichever way it looks.
-            "origin": agent_origin_base(&snap.settings, &id),
+            "origin": agent_origin_base(&snap.settings, snap.serving_tls.as_ref(), &id),
             "health_path": service.health_path,
         },
     });
@@ -1194,7 +1214,7 @@ async fn start_once(state: &SharedState, agent: &Agent, cancel: &Cancel) -> Outc
     // derived from the other here.
     env.push((
         "LMGW_APP_ORIGIN".to_string(),
-        agent_origin_base(&snap.settings, &id),
+        agent_origin_base(&snap.settings, snap.serving_tls.as_ref(), &id),
     ));
     // The port the image is expected to listen on, so it does not have to
     // hardcode what the manifest already says.
@@ -1959,6 +1979,10 @@ async fn reload(state: &SharedState) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+
+/// The scheme and port an origin is published on, and the D27 warning.
+mod origin;
+pub use origin::{origin_scheme_port, remote_suffix_warning};
 
 #[cfg(test)]
 mod tests;

@@ -377,13 +377,14 @@ pub fn device_level_refusal(name: &str, level: crate::config::DeviceAdmin) -> St
 }
 
 /// Invoke a built-in tool as the owner: [`call_capped`] at the gateway's
-/// own level.
+/// own level, with no caller for the audit log to name (an in-process
+/// call's).
 pub async fn call(
     state: &SharedState,
     name: &str,
     args: Option<Map<String, Value>>,
 ) -> Result<Value, CallError> {
-    call_capped(state, name, args, Caller::OWNER).await
+    call_capped(state, name, args, Caller::OWNER, None).await
 }
 
 /// Who makes a built-in tool call, as far as [`call_capped`]'s gate asks.
@@ -446,19 +447,31 @@ pub async fn call_capped(
     name: &str,
     args: Option<Map<String, Value>>,
     caller: Caller,
+    actor: Option<&crate::audit::Actor>,
 ) -> Result<Value, CallError> {
     let Some(def) = catalog().into_iter().find(|t| t.name == name) else {
         return Err(CallError::ToolNotFound(name.to_string()));
     };
 
+    // The audit log's entry for a writing call (headless server design
+    // §5.8), by whoever the caller named: begun before the gate below, so a
+    // call it refuses is an entry too.
+    let audit = crate::audit::ToolCall::begin(state, actor, name, def.writes, args.as_ref());
+    let refused = |audit: Option<crate::audit::ToolCall>, outcome: u16, e: String| async move {
+        if let Some(audit) = audit {
+            audit.refused(state, outcome).await;
+        }
+        Ok(err_result(&e))
+    };
     let (cap, global) = match caller.device {
         Some(device) => match stored_levels(state, device).await {
             Ok(levels) => levels,
             Err(e) => {
-                return Ok(err_result(&format!(
+                let e = format!(
                     "{name} — whether this device may use lmgw's admin tools could not be read \
                      ({e}), so the call was not made"
-                )))
+                );
+                return refused(audit, 503, e).await;
             }
         },
         None => (SelfAdmin::Full, state.snapshot().settings.self_admin),
@@ -477,14 +490,14 @@ pub async fn call_capped(
         } else {
             e
         };
-        return Ok(err_result(&e));
+        return refused(audit, crate::audit::tool_call::REFUSED, e).await;
     }
     if let Some(e) = guards::access_refusal(name, args.as_ref()) {
-        return Ok(err_result(&e));
+        return refused(audit, crate::audit::tool_call::REFUSED, e).await;
     }
     if CLOSED_ARG_TOOLS.contains(&def.name) {
         if let Some(e) = unknown_arg(&def, args.as_ref()) {
-            return Ok(err_result(&e));
+            return refused(audit, 400, e).await;
         }
     }
 
@@ -493,7 +506,11 @@ pub async fn call_capped(
     // `Send` through.
     let dispatched: crate::erased::Erased<'_, _> =
         futures::FutureExt::boxed(run(state, name, args, caller));
-    Ok(match dispatched.await {
+    let answered = dispatched.await;
+    if let Some(audit) = audit {
+        audit.done(state, answered.is_ok()).await;
+    }
+    Ok(match answered {
         Ok(v) => ok_result(&v),
         Err(e) => err_result(&e),
     })
@@ -786,7 +803,13 @@ async fn run(
             let mut a = args.unwrap_or_default();
             hoist_json_arg(&mut a, "realtime")?;
             hoist_json_arg(&mut a, "chat_media_defaults")?;
-            ops::backends::to_json(ops::settings_set(state, ops::patch_from_args(Some(a))?).await)
+            // The plane's answer is the refusal's sentence; `setting_pinned`
+            // is the code the HTTP paths carry beside the same sentence.
+            ops::backends::to_json(
+                ops::settings_set(state, ops::patch_from_args(Some(a))?)
+                    .await
+                    .map_err(|r| r.message),
+            )
         }
         "lmgw__prices_sync" => {
             ops::backends::to_json(ops::prices_sync(state).await.map_err(|r| r.message))

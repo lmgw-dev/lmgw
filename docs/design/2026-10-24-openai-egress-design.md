@@ -3111,7 +3111,7 @@ removed; `ops/hold.rs:159`, `:176` (`HoldSet.fallback_alias` removed); `ops/read
 `gate/open.rs`, `gate/guest.rs`, `gate/candidate/{mod,walk}.rs`, `gate/send.rs`, a new
 `gate/chain.rs`), `vram/climb.rs`, `vram/on_cpu.rs`; the six display readers (14.1); the test
 constructors that spell the fields (`gate/ladder.rs:240`, `ladder.rs:160`, `gate/count.rs:600`,
-`bench/plan.rs:531`, `web/aux.rs:55`, `web/audio.rs:645`, `web/wiring.rs:150`).
+`bench/plan.rs:531`, `web/aux_models.rs:55`, `web/audio.rs:645`, `web/wiring.rs:150`).
 
 **API types** (`lmgw-api-types`): `models.rs` (`LocalModel` :160-165, `AuxModel` :321-326,
 `AudioModel` :428-433, `ImageModel` :510-513 take `fallback`; `default_hold_fallback_mode`
@@ -3147,7 +3147,7 @@ rows of `upstream_quota_clear`; the API-docs page's header and op rows.
 
 **UI** (`lmgw-ui`, 14.12): `pages/model_editors.rs:62-120` (`HoldFallback`, `hold_signals`,
 `hold_body`) → one `Fallback` control, used at :1043 and :2072 (audio, image) and by
-`model_editors/aux.rs`, `aux_fields.rs`, `aux_save.rs`, `pages/local_edit.rs:1660-1680`,
+`model_editors/aux_models.rs`, `aux_fields.rs`, `aux_save.rs`, `pages/local_edit.rs:1660-1680`,
 `pages/candidate_alias_editor.rs:194`, `:244`, `:411`, `:621`, `:637`; `pages/models.rs:94`,
 `:119`, `:156` and the plain alias editor (new control); `pages/settings/rows.rs:277` (the
 `hold.fallback_alias` row goes) and `pages/settings/tests.rs:10`, `:38`; `shell.rs:263`,

@@ -4,6 +4,8 @@
 //! sync event replay for a late subscriber, the chat stream's order and
 //! errors, and the chat body limit derived from the model's context.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use common::fake::{models, Fake, Gate};

@@ -142,6 +142,8 @@ fn verbs(calls: &Arc<Mutex<Vec<Vec<String>>>>) -> Vec<String> {
 // create → cp → rm (§3.4)
 // ---------------------------------------------------------------------------
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_manifest_is_read_with_create_cp_rm_and_nothing_is_started() {
     let state = gateway().await;
@@ -189,6 +191,8 @@ async fn the_manifest_is_read_with_create_cp_rm_and_nothing_is_started() {
     );
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_image_without_the_manifest_says_where_it_looked_and_still_removes_the_container() {
     let state = gateway().await;
@@ -237,6 +241,8 @@ async fn a_create_that_fails_is_reported_and_nothing_is_left_to_remove() {
     );
 }
 
+// Agents are not on Windows (Windows design §4.5): their private run dir is Unix's.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_run_directory_the_read_used_is_gone_afterwards() {
     let state = gateway().await;

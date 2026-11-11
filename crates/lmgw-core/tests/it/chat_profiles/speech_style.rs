@@ -15,6 +15,7 @@ async fn set(w: &World, args: Value) -> Value {
         "lmgw__profile_set",
         args.as_object().cloned(),
         Caller::OWNER,
+        None,
     )
     .await
     .unwrap()

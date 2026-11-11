@@ -20,8 +20,12 @@ fn tilde(path: &str) -> String {
     }
 }
 
-/// §1.3's item, and whether it is a problem.
-pub(super) fn podman(p: &PodmanFacts) -> (MachineItem, bool) {
+/// §1.3's item, and whether it is a problem. `container`: the server
+/// image's words ([`podman`](super::container::podman)): Podman inside the
+/// lmgw container as it runs on the host, the image's steps, and a uid map
+/// without a range.
+pub(super) fn podman(p: &PodmanFacts, container: bool) -> (MachineItem, bool) {
+    use super::container::podman as image;
     let id = MachineItemId::RunningModels;
     let version = match &p.version {
         Err(None) => {
@@ -30,30 +34,38 @@ pub(super) fn podman(p: &PodmanFacts) -> (MachineItem, bool) {
                     id,
                     ItemState::Problem,
                     "lmgw needs one more program to run models.",
-                    vec![
-                        "Podman is not installed (`podman` is not in PATH). On Fedora: sudo dnf \
-                         install podman"
-                            .into(),
-                    ],
+                    if container {
+                        image::missing()
+                    } else {
+                        vec![
+                            "Podman is not installed (`podman` is not in PATH). On Fedora: sudo \
+                              dnf install podman"
+                                .into(),
+                        ]
+                    },
                     Some(MachineCause::PodmanMissing),
                 ),
                 true,
             )
         }
         Err(Some(e)) => {
-            return (broken(e, p), true);
+            return (broken(e, p, container), true);
         }
         Ok(v) => v.clone(),
     };
     let info = match &p.info {
         Ok(i) => i,
-        Err(e) => return (broken(e, p), true),
+        Err(e) => return (broken(e, p, container), true),
     };
     let mut parts = vec![version.clone()];
-    match info.rootless {
-        Some(true) => parts.push("rootless".into()),
-        Some(false) => parts.push("as root".into()),
-        None => {}
+    if container {
+        parts.extend(image::whereabouts(p));
+    } else {
+        match info.rootless {
+            Some(true) => parts.push("rootless".into()),
+            Some(false) => parts.push("as root".into()),
+            None => {}
+        }
     }
     if let Some(r) = &info.oci_runtime {
         parts.push(r.clone());
@@ -65,12 +77,18 @@ pub(super) fn podman(p: &PodmanFacts) -> (MachineItem, bool) {
         parts.push(format!("storage {}", tilde(g)));
     }
     let mut detail = vec![parts.join(", ")];
+    if container {
+        detail.extend(image::maps_line(p));
+    }
     if p.has_option == Some(false) {
         detail.push(format!(
             "`podman --help` lists no {}, so lmgw's models read the system's description of the \
              graphics card instead of lmgw's own",
             crate::runtime::cdi::SPEC_DIR_OPTION
         ));
+        if container {
+            detail.push(image::too_old_step());
+        }
         return (
             item(
                 id,
@@ -85,19 +103,23 @@ pub(super) fn podman(p: &PodmanFacts) -> (MachineItem, bool) {
     if p.has_option.is_none() {
         detail.push("`podman --help` did not answer".into());
     }
-    (
-        item(
-            id,
-            ItemState::Ok,
-            "lmgw can run models on this computer.",
-            detail,
-            None,
-        ),
-        false,
-    )
+    if container {
+        if let Some(it) = image::without_range(p, detail.clone()) {
+            return (it, true);
+        }
+    }
+    let sentence = if container {
+        "lmgw can run models on this server."
+    } else {
+        "lmgw can run models on this computer."
+    };
+    (item(id, ItemState::Ok, sentence, detail, None), false)
 }
 
-fn broken(error: &str, p: &PodmanFacts) -> MachineItem {
+fn broken(error: &str, p: &PodmanFacts, container: bool) -> MachineItem {
+    if container {
+        return super::container::podman::broken(error, p);
+    }
     let mut detail = vec![format!("Podman: {error}")];
     if let Some((uid, gid)) = p.subids {
         for (file, has) in [("/etc/subuid", uid), ("/etc/subgid", gid)] {
@@ -121,7 +143,8 @@ fn broken(error: &str, p: &PodmanFacts) -> MachineItem {
     )
 }
 
-/// What [`super::gather`] calls Podman's image store in a [`Room`].
+/// What [`super::gather`] calls Podman's image store in a [`Room`], and the
+/// Windows check the native engines' dir (`windows_check::gather`).
 pub(super) const SOFTWARE: &str = "the software that runs models";
 
 /// §1.5's item: free space where models and their software are kept, one
@@ -129,26 +152,42 @@ pub(super) const SOFTWARE: &str = "the software that runs models";
 /// made up: a low figure is named only against a size lmgw knows — what the
 /// download for the card still fetches ([`Download::remaining`]), against
 /// the file system of the store it goes into.
-pub(super) fn room(rooms: &[Room], download: Option<u64>) -> MachineItem {
+///
+/// `mounts`, in the server image only: each place is named with the volume
+/// it lies on (headless server design §7), and the scratch volume
+/// ([`super::container::SCRATCH`]) is a detail line of its own, never part
+/// of the sentence.
+pub(super) fn room(
+    rooms: &[Room],
+    download: Option<u64>,
+    mounts: Option<&super::container::Mounts>,
+) -> MachineItem {
     let id = MachineItemId::Room;
     let mut detail = Vec::new();
     let mut seen: Vec<(u64, u64, Vec<&'static str>)> = Vec::new();
     for r in rooms {
+        let place = match mounts {
+            Some(m) => super::container::on_volume(&r.path, m),
+            None => tilde(&r.path),
+        };
         match &r.space {
             Ok(s) => {
                 detail.push(format!(
                     "{}: {} · {} free of {}",
                     r.what,
-                    tilde(&r.path),
+                    place,
                     fmt_bytes(s.free_bytes),
                     fmt_bytes(s.total_bytes)
                 ));
+                if r.what == super::container::SCRATCH {
+                    continue;
+                }
                 match seen.iter_mut().find(|(fs, ..)| *fs == s.fs_id) {
                     Some((_, _, whats)) => whats.push(r.what),
                     None => seen.push((s.fs_id, s.free_bytes, vec![r.what])),
                 }
             }
-            Err(e) => detail.push(format!("{}: {} · {e}", r.what, tilde(&r.path))),
+            Err(e) => detail.push(format!("{}: {} · {e}", r.what, place)),
         }
     }
     if let (Some(needs), Some(free)) = (
@@ -486,14 +525,14 @@ mod tests {
             path: "/srv/models".into(),
             space: Err("Permission denied (os error 13)".into()),
         }];
-        let r = room(&rooms, None);
+        let r = room(&rooms, None, None);
         assert_eq!(
             r.sentence,
             "lmgw couldn't read how much room is left. The details say why."
         );
         assert!(r.detail[0].contains("Permission denied"));
         assert_eq!(
-            room(&[], None).sentence,
+            room(&[], None, None).sentence,
             "Not checked yet: no folder for models is set."
         );
     }

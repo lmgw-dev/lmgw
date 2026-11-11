@@ -13,7 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// What serves `turn_detection: {type: "semantic_vad"}`:
 /// `realtime.semantic_vad_engine`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticVadEngine {
     /// Smart Turn decides when a pause ends the turn (§6.3).
@@ -27,7 +29,7 @@ pub enum SemanticVadEngine {
 }
 
 /// One eagerness's row of `realtime.semantic_vad`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SemanticVadRow {
     /// A Smart Turn score at or above this commits the turn 200 ms into the
     /// pause, `0.0..=1.0`.
@@ -47,7 +49,7 @@ pub struct SemanticVadRow {
 
 /// `realtime.semantic_vad`: the rows by eagerness. OpenAI's `auto` is
 /// `medium`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SemanticVadTable {
     pub high: SemanticVadRow,
     pub medium: SemanticVadRow,

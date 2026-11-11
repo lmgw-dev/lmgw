@@ -127,11 +127,13 @@ const SITES: &[Site] = &[
         why: "podman --help, which asks whether this Podman takes --cdi-spec-dir",
     },
     Site {
-        file: "crates/lmgw-core/src/runtime/registry/podman_ops.rs",
+        file: "crates/lmgw-core/src/runtime/launcher/podman.rs",
         pattern: ".run(\"podman\"",
         count: 1,
-        why: "Registry::podman_argv, the registry's one runner call: model starts and throwaway \
-              probes take cdi::ready_globals, and refuse_unpointed checks every argv first",
+        why: "launcher::podman::run, the model runtime's one runner call (the Podman launcher's \
+              and Registry::podman_argv's): model starts take the launcher's prepare \
+              (cdi::ready_globals), throwaway probes take it themselves, and refuse_unpointed \
+              checks every argv first",
     },
 ];
 

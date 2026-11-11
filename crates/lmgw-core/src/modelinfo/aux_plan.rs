@@ -45,7 +45,7 @@ fn ctx_rationale(c: u64, kind: AuxKind, split: &aux_batch::Split) -> String {
              are kept. That split arrived in llama.cpp b{} (2026-09-27); an older image \
              evaluates a rerank input in one ubatch, so there set ubatch_size and batch_size \
              to ctx_size; {refuses}",
-            crate::runtime::aux::CAUSAL_RERANK_SPLIT_BUILD
+            crate::runtime::aux_models::CAUSAL_RERANK_SPLIT_BUILD
         ),
         aux_batch::Split::Splits => format!(
             "the model's trained context ({c}) — its real ceiling, since llama-server splits a \
@@ -367,7 +367,7 @@ pub(super) async fn aux_plan(
 /// `one_ubatch` says the plan's ubatch and batch are [`aux_batch`]'s (the
 /// context, for an input in one ubatch). They are no difference for an
 /// embed or rerank row that splits its input after all, by its own pooling
-/// or else the header's ([`crate::runtime::aux::splits_input`]): a row set
+/// or else the header's ([`crate::runtime::aux_models::splits_input`]): a row set
 /// to `last` on a header without a pooling would otherwise be offered a
 /// ubatch the size of its context, and charged its logits at that size
 /// (review finding 1).
@@ -385,7 +385,11 @@ fn aux_plan_diff(
             .as_deref()
             .filter(|p| !p.is_empty())
             .or_else(|| s.pooling_type.and_then(gguf::pooling_name));
-        crate::runtime::aux::splits_input(row.kind, pooling, s.attention_causal != Some(false))
+        crate::runtime::aux_models::splits_input(
+            row.kind,
+            pooling,
+            s.attention_causal != Some(false),
+        )
     };
     let current = |field: &str| -> Value {
         match field {

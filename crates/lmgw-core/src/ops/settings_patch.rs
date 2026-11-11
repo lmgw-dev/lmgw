@@ -4,6 +4,7 @@ use lmgw_api_types as dto;
 use serde::Deserialize;
 
 use crate::config::Settings;
+use crate::principal::Refusal;
 use crate::state::SharedState;
 use crate::store::{self};
 
@@ -122,6 +123,12 @@ pub struct SettingsPatch {
     /// control is short, instead of queueing. On by default; turn off on
     /// shared-memory systems (APUs).
     pub fallback_on_external: Option<bool>,
+    /// `vram.headroom_mode`: `auto` (learned from this machine, the default)
+    /// or `fixed` (`headroom_mb` as written).
+    pub headroom_mode: Option<lmgw_api_types::HeadroomMode>,
+    /// `vram.headroom_mb`: the fixed headroom in MiB, used in `fixed` mode
+    /// and by `auto` until it has learned enough.
+    pub headroom_mb: Option<u64>,
     /// How often the build update check runs, in hours; `0` turns it off.
     /// At most 8760.
     pub build_update_check_hours: Option<u32>,
@@ -140,6 +147,11 @@ pub struct SettingsPatch {
     /// name outside its range. Taken by this op only: like `bind_addr`, an
     /// access setting the lmgw__settings_set tool refuses.
     pub devices: Option<super::DevicesSettingsPatch>,
+    /// Settings → Network & access → Accounts: `session_days`, a session's
+    /// lifetime (1 to 3650 days). `enabled` is refused by every save path:
+    /// the accounts_switch op changes it. Taken by this op only: like
+    /// `bind_addr`, an access setting the lmgw__settings_set tool refuses.
+    pub accounts: Option<crate::config::AccountsSettingsPatch>,
 }
 
 /// `chat_pdf_mode` must be one of [`crate::config::CHAT_PDF_MODES`].
@@ -195,14 +207,16 @@ pub async fn validate_stt_alias(state: &SharedState, alias: &str) -> Result<(), 
 /// settings lock from its read to its write, so the task starts at the lock,
 /// and a dropped request can no longer skip the publish, the MCP reconcile,
 /// the tools' nudge or the device listener's move after the write.
+///
+/// Answers a [`Refusal`]: a pinned field (headless server design §2.2) is
+/// refused with `400 setting_pinned`, as the dashboard's full save refuses
+/// it; every other refusal is the flat `400 op_failed`.
 pub async fn settings_set(
     state: &SharedState,
     p: SettingsPatch,
-) -> Result<dto::SettingsSaved, String> {
+) -> Result<dto::SettingsSaved, Refusal> {
     let st = state.clone();
-    crate::detached::detached("saving the settings", async move { save(&st, p).await })
-        .await
-        .map_err(|r| r.message)?
+    crate::detached::detached("saving the settings", async move { save(&st, p).await }).await?
 }
 
 /// [`settings_set`]'s save.
@@ -219,7 +233,7 @@ pub fn validate_quota_recheck_seconds(v: u64) -> Result<u64, String> {
     Ok(v)
 }
 
-async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSaved, String> {
+async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSaved, Refusal> {
     // Held across the whole read-modify-write: see `AppState::settings_write`.
     let guard = state.settings_write.lock().await;
     let snap = state.snapshot();
@@ -328,6 +342,14 @@ async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSave
         s.vram.fallback_on_external = v;
         changed.push("fallback_on_external");
     }
+    if let Some(v) = p.headroom_mode {
+        s.vram.headroom_mode = v;
+        changed.push("headroom_mode");
+    }
+    if let Some(v) = p.headroom_mb {
+        s.vram.headroom_mb = v;
+        changed.push("headroom_mb");
+    }
     if let Some(v) = p.build_update_check_hours {
         s.build_update_check_hours = crate::backends::updates::validate_check_hours(v)?;
         changed.push("build_update_check_hours");
@@ -344,7 +366,7 @@ async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSave
     let mut changed: Vec<String> = changed.into_iter().map(String::from).collect();
     // When each device-link setting applies, said in the answer (§9.1), and
     // each WebRTC listener setting (calls design §9).
-    let mut applies: Vec<String> = crate::config::webrtc_applies(&changed);
+    let mut applies: Vec<String> = crate::config::webrtc_applies(state.deployment(), &changed);
     let mut listener_moved = false;
     if let Some(d) = p.devices {
         listener_moved = super::touches_listener(&d);
@@ -354,14 +376,24 @@ async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSave
         }
     }
 
+    if let Some(a) = p.accounts {
+        changed.extend(a.apply(&mut s.accounts)?.into_iter().map(String::from));
+    }
+
     if changed.is_empty() {
         return Err("no settings supplied — nothing to change".into());
     }
+    // The shared settings write's check (headless server design §2.2): a
+    // setting the server's container pins is not changed here.
+    crate::config::deployment::refuse_pinned(state.start_facts(), &snap.settings, &s)?;
     if changed
         .iter()
         .any(|k| k.starts_with("devices.") || crate::config::WEBRTC_KEYS.contains(&k.as_str()))
     {
         crate::config::webrtc_port_collision(&s)?;
+    }
+    if changed.iter().any(|k| k.starts_with("devices.")) {
+        crate::config::tcp_port_collision(&s, state.deployment().is_container())?;
     }
     store::save_settings(&state.db, &s)
         .await

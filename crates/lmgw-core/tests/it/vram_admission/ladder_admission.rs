@@ -22,10 +22,7 @@ pub(super) async fn ladder_fixture(total_vram: u64, idle_seconds: i64) -> Fixtur
             ("ladder-mid.gguf", 4 * GIB),
             ("ladder-top.gguf", 8 * GIB),
         ] {
-            std::fs::File::create(std::path::Path::new(&dir).join(file))
-                .unwrap()
-                .set_len(bytes)
-                .unwrap();
+            crate::support::sparse::create(std::path::Path::new(&dir).join(file), bytes);
             w.files.insert(file.into(), bytes);
         }
         w.size.insert(LADDER.into(), 2 * GIB);

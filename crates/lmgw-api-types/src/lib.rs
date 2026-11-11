@@ -109,6 +109,9 @@ pub mod decision_lab;
 /// `POST /devices/enrol`'s body and answer, the device listener's refusal
 /// codes and the confirmation code's form.
 pub mod device_link;
+/// The Engines page's Windows column: the pinned release builds, the one
+/// this machine runs, and the upstream release check (Windows design §4.2).
+pub mod engine_releases;
 pub mod image_lab;
 // The labs-store design record, §1.
 /// The Knowledge bases API: bases, files, uploads, jobs' answers, the source
@@ -202,6 +205,12 @@ mod responses;
 pub use responses::*;
 mod settings;
 pub use settings::*;
+mod accounts;
+pub use accounts::*;
+mod deployment;
+pub use deployment::*;
+mod tls;
+pub use tls::{ProxyStatus, TlsCertificate, TlsListenerState, TlsSettings, TlsStatus};
 mod mcp;
 pub use mcp::*;
 mod tools;

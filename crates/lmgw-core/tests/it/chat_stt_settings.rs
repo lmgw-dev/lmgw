@@ -174,23 +174,28 @@ async fn the_chat_settings_have_defaults_and_validate() {
     // Refusals, each naming the reason; nothing changes.
     let e = settings_set(&state, patch(json!({ "chat_pdf_mode": "both" })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("text, images, ask"), "{e}");
     let e = settings_set(&state, patch(json!({ "chat_kb_budget_tokens": 0 })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("above 0"), "{e}");
     let e = settings_set(&state, patch(json!({ "chat_kb_budget_tokens": -5 })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("above 0"), "{e}");
     let e = settings_set(&state, patch(json!({ "chat_stt_alias": "my-chat" })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("asr"), "{e}");
     let e = settings_set(&state, patch(json!({ "chat_stt_alias": "nope" })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("does not resolve"), "{e}");
     assert_eq!(state.snapshot().settings.chat_stt_alias, "my-asr");
 

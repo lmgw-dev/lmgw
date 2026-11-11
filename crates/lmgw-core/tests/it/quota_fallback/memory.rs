@@ -175,7 +175,8 @@ async fn check_now_an_edit_and_the_views() {
         serde_json::from_value(json!({"quota_recheck_seconds": 0})).unwrap(),
     )
     .await
-    .unwrap_err();
+    .unwrap_err()
+    .message;
     assert!(refused.contains("at least 1"), "{refused}");
     lmgw_core::ops::settings_set(
         &g.state,

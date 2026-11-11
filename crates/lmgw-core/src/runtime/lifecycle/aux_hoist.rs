@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{AuxModel, HoistedContainer, ImageGpu, Snapshot};
 use crate::runtime::argv::{render_engine_args, run_args_digest};
-use crate::runtime::aux as aux_rt;
+use crate::runtime::aux_models as aux_rt;
 use crate::runtime::descriptor::aux_runtime;
 use crate::state::SharedState;
 use crate::store;

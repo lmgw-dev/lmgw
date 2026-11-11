@@ -8,7 +8,7 @@
 //! [`super::llama_cpp`] are composed this way: a second egress speaking the
 //! same wire composes the same pieces rather than forking them.
 
-mod aux;
+mod aux_models;
 mod body;
 mod decode;
 mod messages;
@@ -17,7 +17,7 @@ pub mod responses_items;
 pub mod structured;
 mod systemone;
 
-pub use aux::{
+pub use aux_models::{
     build_embeddings, build_rerank, context_refusal, map_error, parse_embeddings,
     parse_exceed_context, parse_rerank, parse_tokenize_count, upstream_error, ExceedContext,
 };

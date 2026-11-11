@@ -123,7 +123,7 @@ impl Snapshot {
                 .iter()
                 .find(|m| m.model_id == model_id)
                 .map_or(Placement::Gpu, |m| {
-                    crate::runtime::aux::placement(m.backend)
+                    crate::runtime::aux_models::placement(m.backend)
                 }),
             Class::Chat | Class::Image => Placement::Gpu,
         }

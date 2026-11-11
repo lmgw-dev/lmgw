@@ -56,6 +56,8 @@ impl Concerns {
         match cause {
             Some(MachineCause::NoCard { .. }) => Self::Every,
             Some(MachineCause::AmdNoComputeNode) => Self::Amd,
+            // The server image's container without the NVIDIA card falls
+            // under `_`: rows given the NVIDIA card.
             Some(_) => Self::Nvidia,
             None => Self::Nobody,
         }
@@ -186,6 +188,7 @@ impl Blamed {
                     | C::DriverMismatch { .. }
                     | C::DriverNotRunning { .. }
                     | C::DriverLibrariesMissing
+                    | C::CardNotPassedIn
                     | C::DriverUnreadable { .. }
                     | C::NvmlFailed { .. }
                     | C::ToolkitMissing
@@ -205,7 +208,7 @@ impl Blamed {
 fn see_there(cause: Option<&MachineCause>, plan: bool) -> bool {
     use MachineCause as C;
     match cause {
-        Some(C::NoNvidiaDriver { .. } | C::DriverLibrariesMissing) => true,
+        Some(C::NoNvidiaDriver { .. } | C::DriverLibrariesMissing | C::CardNotPassedIn) => true,
         Some(C::DriverNotRunning { secure_boot }) => *secure_boot,
         Some(
             C::ToolkitMissing
@@ -309,9 +312,9 @@ async fn now(state: &SharedState) -> Option<Blame> {
         );
         None
     } else {
-        Some(super::card::judge(&card).0)
+        Some(super::container::judge_card(&card, state.deployment()).0)
     };
-    let toolkit = toolkit.map(|t| super::toolkit::judge(&t));
+    let toolkit = toolkit.map(|t| super::container::judge_toolkit(&t, state.deployment()));
     Some(Blame::from_parts(
         card_item.as_ref(),
         toolkit.as_ref().map(|(i, ..)| i),

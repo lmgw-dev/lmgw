@@ -10,12 +10,16 @@
 //! per-process figures ([`GpuProbe::processes`](super::GpuProbe::processes))
 //! for the processes of lmgw's own containers.
 //!
-//! **Container → processes.** A container's init process on the host is
+//! **Container → processes.** A container's root process on the host is what
+//! the registry's launcher answers (`Registry::host_pids`, through
+//! [`crate::runtime::launcher::Launcher::host_pids`]): for the Podman launcher
 //! `podman inspect`'s `State.Pid` (measured 2026-09-27 under rootless podman:
 //! for a chat container that *is* llama-server, and it is the PID NVML lists).
 //! The image class runs with `--init`, so there `State.Pid` is catatonit and
 //! the process on the GPU is its child — hence every descendant counts too,
-//! read from `/proc` ([`ProcTree`]).
+//! read from `/proc` ([`ProcTree`]). A launcher that starts the engine as
+//! its own child answers the child's PID, and the walk finds whatever that
+//! engine spawned, if anything.
 //!
 //! **Asked once per container generation.** A `podman inspect` is a process
 //! spawn, so its answer is cached against the registry entry's generation
@@ -55,8 +59,25 @@ use super::nvml::ProcessMemory;
 /// Where attribution reads the host's process tree.
 pub trait ProcTree: Send + Sync + 'static {
     /// Every descendant of `pid` — children, grandchildren, … — not `pid`
-    /// itself. Empty when it has none, or is gone.
-    fn descendants(&self, pid: u32) -> Vec<u32>;
+    /// itself. Empty when it has none, or is gone. `Err` when the tree could
+    /// not be read at all (Windows: no Toolhelp snapshot): an engine's
+    /// children would read as nobody's.
+    fn descendants(&self, pid: u32) -> Result<Vec<u32>, String>;
+
+    /// When the process `pid` was started, where that is what tells it from
+    /// a later process handed the same PID (Windows' creation time,
+    /// [`super::wddm::toolhelp`]); `None` when it cannot be read. `/proc`
+    /// answers `None`: on Linux a tombstone has no start time yet, and only
+    /// the PID rules in [`PidCache`] apply.
+    fn started(&self, pid: u32) -> Option<u64> {
+        let _ = pid;
+        None
+    }
+
+    /// `pid` and then every descendant: a member's processes.
+    fn tree_of(&self, pid: u32) -> Result<Vec<u32>, String> {
+        Ok(std::iter::once(pid).chain(self.descendants(pid)?).collect())
+    }
 }
 
 /// The real process tree, from `/proc`.
@@ -138,7 +159,8 @@ fn stat_ppid(stat: &str) -> Option<u32> {
 }
 
 impl ProcTree for ProcFs {
-    fn descendants(&self, pid: u32) -> Vec<u32> {
+    /// Never `Err`: a process that cannot be read is one that is gone.
+    fn descendants(&self, pid: u32) -> Result<Vec<u32>, String> {
         let mut out: Vec<u32> = Vec::new();
         let mut seen: HashSet<u32> = HashSet::from([pid]);
         let mut todo = vec![pid];
@@ -167,7 +189,7 @@ impl ProcTree for ProcFs {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -211,6 +233,34 @@ pub struct Member {
     pub label: String,
     /// The init PID first, then its descendants.
     pub pids: Vec<u32>,
+    /// When each of them was started, where the tree can say
+    /// ([`ProcTree::started`]): the identity its tombstone keeps.
+    pub started: HashMap<u32, u64>,
+}
+
+impl Member {
+    /// The processes under `root` as `tree` reads them now, with their start
+    /// times. Blocking: on a blocking thread.
+    pub fn measure(
+        generation: u64,
+        label: String,
+        root: u32,
+        tree: &dyn ProcTree,
+    ) -> Result<Self, String> {
+        let pids = tree
+            .tree_of(root)
+            .map_err(|e| format!("{label}: its processes could not be read: {e}"))?;
+        let started = pids
+            .iter()
+            .filter_map(|&p| tree.started(p).map(|t| (p, t)))
+            .collect();
+        Ok(Self {
+            generation,
+            label,
+            pids,
+            started,
+        })
+    }
 }
 
 /// A `podman inspect` in flight (review finding 4): done once its answer is
@@ -238,12 +288,14 @@ pub struct ReadDone(#[allow(dead_code)] tokio::sync::watch::Sender<()>);
 enum Slot {
     /// A `podman inspect` for it is running.
     Pending(Reading),
-    /// `State.Pid`, and the process tree last measured under it — what a
-    /// tombstone is made of once the generation leaves the registry.
+    /// `State.Pid`, and the process tree last measured under it with each
+    /// process's start time where the tree has one — what a tombstone is
+    /// made of once the generation leaves the registry.
     Known {
         label: String,
         root: u32,
         tree: Vec<u32>,
+        started: HashMap<u32, u64>,
     },
     /// podman answered without a running PID, or could not be asked: why.
     Failed(String),
@@ -251,10 +303,18 @@ enum Slot {
 
 /// A process of a container that has left the registry, still counted as
 /// lmgw's while the driver lists it.
+///
+/// A PID is reused once its process is gone, so a tombstone is dropped as
+/// soon as its PID is a registered container's process ([`PidCache::plan`]
+/// for the roots, [`PidCache::settle`] for every process a pass measured) or, where the tree reports start times, runs with
+/// another start time than the one it was measured with ([`reused`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tombstone {
     pub pid: u32,
     pub label: String,
+    /// The process's start time when it was last measured
+    /// ([`ProcTree::started`]); `None` where the tree has none.
+    pub started: Option<u64>,
 }
 
 /// What a pass does before it can attribute anything.
@@ -287,7 +347,9 @@ pub struct PidCache {
 
 impl PidCache {
     /// Retire every generation that is no longer in `current` into
-    /// tombstones, then sort `current` into known PIDs and PIDs to ask for.
+    /// tombstones, drop the tombstones whose PID is a registered generation's
+    /// root process now (the PID was reused, so the tombstone's process is
+    /// gone), then sort `current` into known PIDs and PIDs to ask for.
     pub fn plan(&mut self, current: &[Container], fill: Fill) -> Plan {
         let live: HashSet<u64> = current.iter().map(|c| c.generation).collect();
         let gone: Vec<u64> = self
@@ -297,17 +359,52 @@ impl PidCache {
             .copied()
             .collect();
         for g in gone {
-            if let Some(Slot::Known { label, root, tree }) = self.slots.remove(&g) {
+            if let Some(Slot::Known {
+                label,
+                root,
+                tree,
+                started,
+            }) = self.slots.remove(&g)
+            {
                 for pid in std::iter::once(root).chain(tree) {
-                    if !self.tombstones.iter().any(|t| t.pid == pid) {
-                        self.tombstones.push(Tombstone {
-                            pid,
-                            label: label.clone(),
-                        });
+                    let started = started.get(&pid).copied();
+                    // Of two processes measured with one PID, the one created
+                    // later is the one that may still run: a PID is handed
+                    // out again only once its process is gone. So a tombstone
+                    // measured with a later start time stays, and one
+                    // retired now from an older measurement (a tree
+                    // remembered before its child exited and the PID went to
+                    // another container's process) does not replace it.
+                    // Without both start times (Linux) the one retired now
+                    // replaces the older tombstone.
+                    let newer_kept = self.tombstones.iter().any(|t| {
+                        t.pid == pid
+                            && matches!((t.started, started), (Some(kept), Some(now)) if now < kept)
+                    });
+                    if newer_kept {
+                        continue;
                     }
+                    self.tombstones.retain(|t| t.pid != pid);
+                    self.tombstones.push(Tombstone {
+                        pid,
+                        label: label.clone(),
+                        started,
+                    });
                 }
             }
         }
+        // Roots only: a registered generation's root lives as long as it is
+        // registered, while the tree it was last measured with may name a
+        // child that has exited since. Its current tree is `settle`'s.
+        let registered: HashSet<u32> = self
+            .slots
+            .values()
+            .filter_map(|s| match s {
+                Slot::Known { root, .. } => Some(*root),
+                _ => None,
+            })
+            .collect();
+        self.tombstones.retain(|t| !registered.contains(&t.pid));
 
         let mut plan = Plan::default();
         let mut read: Option<Reading> = None;
@@ -389,6 +486,7 @@ impl PidCache {
                         label: c.label.clone(),
                         root: pid,
                         tree: Vec::new(),
+                        started: HashMap::new(),
                     },
                     _ => Slot::Failed(format!(
                         "{}: podman reports no running process for container '{}'",
@@ -417,15 +515,43 @@ impl PidCache {
     /// leaves takes its current processes into its tombstones.
     pub fn remember(&mut self, members: &[Member]) {
         for m in members {
-            if let Some(Slot::Known { tree, .. }) = self.slots.get_mut(&m.generation) {
+            if let Some(Slot::Known { tree, started, .. }) = self.slots.get_mut(&m.generation) {
                 *tree = m.pids.iter().skip(1).copied().collect();
+                started.clone_from(&m.started);
             }
         }
     }
 
-    /// Every tombstoned PID, for the probe to be asked about.
+    /// Whether `generation` is still registered with its PID known: not
+    /// retired since a pass measured it.
+    pub fn is_known(&self, generation: u64) -> bool {
+        matches!(self.slots.get(&generation), Some(Slot::Known { .. }))
+    }
+
+    /// Every PID a registered generation has: its root and the tree it was
+    /// last measured with.
+    fn registered_pids(&self) -> HashSet<u32> {
+        self.slots
+            .values()
+            .filter_map(|s| match s {
+                Slot::Known { root, tree, .. } => {
+                    Some(std::iter::once(*root).chain(tree.iter().copied()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Every tombstoned PID.
     pub fn tombstone_pids(&self) -> Vec<u32> {
         self.tombstones.iter().map(|t| t.pid).collect()
+    }
+
+    /// Every tombstone, for a pass to check with [`reused`] and ask the probe
+    /// about.
+    pub fn tombstones(&self) -> Vec<Tombstone> {
+        self.tombstones.clone()
     }
 
     /// What the tombstones still hold, by the driver's answer. `asked` is
@@ -434,15 +560,40 @@ impl PidCache {
     /// asked about — retired by a concurrent pass after this one read the
     /// tombstone list — is left alone: a probe that answers only for the PIDs
     /// it is given (amdgpu) says nothing about it (review finding 3).
+    ///
+    /// Dropped as well, before anything is counted: a tombstone whose PID is
+    /// among `current` (the PIDs this pass measured under registered
+    /// containers, which [`members_share`] counts already: counting it here
+    /// too would count one process twice), and one in `reused` (its PID runs
+    /// another process now, [`reused`]).
+    ///
+    /// `current` was measured before this call, and the generation it was
+    /// measured under may have retired since — its processes are then these
+    /// very tombstones, still in podman's stop grace and on the card. So a
+    /// PID of `current` drops a tombstone only while a generation still
+    /// registered here has it, as its root or in its remembered tree
+    /// ([`Self::remember`]); a retired generation's PIDs never protect
+    /// against their own tombstones.
     pub fn settle(
         &mut self,
         processes: &[ProcessMemory],
         asked: &HashSet<u32>,
+        current: &[u32],
+        reused: &HashSet<u32>,
     ) -> Result<u64, String> {
         let listed: HashMap<u32, Option<u64>> =
             processes.iter().map(|p| (p.pid, p.bytes)).collect();
-        self.tombstones
-            .retain(|t| listed.contains_key(&t.pid) || !asked.contains(&t.pid));
+        let registered = self.registered_pids();
+        let current: HashSet<u32> = current
+            .iter()
+            .copied()
+            .filter(|p| registered.contains(p))
+            .collect();
+        self.tombstones.retain(|t| {
+            !current.contains(&t.pid)
+                && !reused.contains(&t.pid)
+                && (listed.contains_key(&t.pid) || !asked.contains(&t.pid))
+        });
         let mut total: u64 = 0;
         for t in &self.tombstones {
             match listed.get(&t.pid) {
@@ -460,6 +611,22 @@ impl PidCache {
         }
         Ok(total)
     }
+}
+
+/// The tombstones whose PID runs a process with another start time than the
+/// one they were measured with: the PID was handed to a later process, which
+/// is not lmgw's stopped one. A tombstone without a start time, or whose PID
+/// cannot be read now (gone, or not this user's), is not among them: the
+/// probe's answer decides those. Blocking: on a blocking thread.
+pub fn reused(tombstones: &[Tombstone], tree: &dyn ProcTree) -> HashSet<u32> {
+    tombstones
+        .iter()
+        .filter(|t| {
+            t.started
+                .is_some_and(|then| tree.started(t.pid).is_some_and(|now| now != then))
+        })
+        .map(|t| t.pid)
+        .collect()
 }
 
 /// lmgw's share held by its registered containers: every member's processes
@@ -532,7 +699,13 @@ mod tests {
             generation,
             label: format!("chat/{model}"),
             pids: pids.to_vec(),
+            started: HashMap::new(),
         }
+    }
+
+    /// No start times, as on Linux.
+    fn none() -> HashSet<u32> {
+        HashSet::new()
     }
 
     // --- the process tree --------------------------------------------------
@@ -554,10 +727,13 @@ mod tests {
         write(&p.join("101/task/105/children"), "102");
         write(&p.join("102/task/102/children"), "");
         let tree = ProcFs::at(p);
-        let mut d = tree.descendants(100);
+        let mut d = tree.descendants(100).unwrap();
         d.sort();
         assert_eq!(d, vec![101, 102]);
-        assert!(tree.descendants(999).is_empty(), "a gone process has none");
+        assert!(
+            tree.descendants(999).unwrap().is_empty(),
+            "a gone process has none"
+        );
     }
 
     /// A kernel without `CONFIG_PROC_CHILDREN`: the parent map from `stat`,
@@ -576,7 +752,7 @@ mod tests {
         );
         write(&p.join("102/stat"), "102 (worker) S 101 100 100 0 -1");
         write(&p.join("200/stat"), "200 (other) S 1 200 200 0 -1");
-        let mut d = ProcFs::at(p).descendants(100);
+        let mut d = ProcFs::at(p).descendants(100).unwrap();
         d.sort();
         assert_eq!(d, vec![101, 102]);
         assert_eq!(stat_ppid("7 (a) b) S 3 7"), Some(3));
@@ -684,7 +860,7 @@ mod tests {
         // The driver still lists its child: still lmgw's.
         let all = HashSet::from([11, 12, 22]);
         let listed = [pm(12, Some(500)), pm(22, Some(100)), pm(900, Some(7))];
-        assert_eq!(cache.settle(&listed, &all), Ok(500));
+        assert_eq!(cache.settle(&listed, &all, &[], &none()), Ok(500));
         assert_eq!(
             cache.tombstone_pids(),
             vec![12],
@@ -692,9 +868,15 @@ mod tests {
         );
 
         // Gone from the list: dropped for good, even if the PID came back.
-        assert_eq!(cache.settle(&[pm(22, Some(100))], &all), Ok(0));
+        assert_eq!(
+            cache.settle(&[pm(22, Some(100))], &all, &[], &none()),
+            Ok(0)
+        );
         assert!(cache.tombstone_pids().is_empty());
-        assert_eq!(cache.settle(&[pm(12, Some(500))], &all), Ok(0));
+        assert_eq!(
+            cache.settle(&[pm(12, Some(500))], &all, &[], &none()),
+            Ok(0)
+        );
 
         // A tombstone the driver cannot size is unknown, not zero.
         let mut cache = PidCache::default();
@@ -706,9 +888,215 @@ mod tests {
         );
         cache.plan(&[], Fill::Verdict);
         assert!(cache
-            .settle(&[pm(33, None)], &HashSet::from([33]))
+            .settle(&[pm(33, None)], &HashSet::from([33]), &[], &none())
             .unwrap_err()
             .contains("chat/x"));
+    }
+
+    /// A stopped container's PID handed to the next one (Windows reuses PIDs
+    /// at once): the tombstone is not counted beside the member that now has
+    /// the PID. A registered root drops it at the next plan; a child the
+    /// pass measured drops it at the settle.
+    #[test]
+    fn a_tombstone_whose_pid_is_a_registered_containers_is_dropped() {
+        let mut cache = PidCache::default();
+        let plan = cache.plan(&[c(1, "a")], Fill::Verdict);
+        cache.record(
+            &plan.inspect,
+            &Ok(HashMap::from([("lmgw-chat-a".into(), 11)])),
+            &live(&[1]),
+        );
+        cache.remember(&[member(1, "a", &[11, 12])]);
+        // `a` stops; `b` starts and gets `a`'s PIDs, root and child.
+        let plan = cache.plan(&[c(2, "b")], Fill::Verdict);
+        let mut pids = cache.tombstone_pids();
+        pids.sort();
+        assert_eq!(pids, vec![11, 12]);
+        cache.record(
+            &plan.inspect,
+            &Ok(HashMap::from([("lmgw-chat-b".into(), 11)])),
+            &live(&[2]),
+        );
+        cache.plan(&[c(2, "b")], Fill::Verdict);
+        assert_eq!(cache.tombstone_pids(), vec![12], "b's root is not a's");
+
+        let members = [member(2, "b", &[11, 12])];
+        let listed = [pm(11, Some(300)), pm(12, Some(500))];
+        let asked = HashSet::from([11, 12]);
+        cache.remember(&members);
+        assert_eq!(members_share(&members, &listed), Ok(800));
+        assert_eq!(
+            cache.settle(&listed, &asked, &[11, 12], &none()),
+            Ok(0),
+            "12 is b's now: counted once, as b's"
+        );
+        assert!(cache.tombstone_pids().is_empty());
+    }
+
+    /// A reading measures `a`'s processes, then admission evicts `a` before
+    /// the reading settles. The PIDs it measured are `a`'s tombstones by
+    /// then, its process still on the card in podman's stop grace: they
+    /// survive the settle and count as lmgw's, and `a` no longer reads as
+    /// known, which the ledger's pass checks before it counts its members.
+    #[test]
+    fn a_retired_generations_measured_pids_do_not_drop_its_tombstones() {
+        let mut cache = PidCache::default();
+        let plan = cache.plan(&[c(1, "a"), c(2, "b")], Fill::Verdict);
+        cache.record(
+            &plan.inspect,
+            &Ok(HashMap::from([
+                ("lmgw-chat-a".into(), 11),
+                ("lmgw-chat-b".into(), 22),
+            ])),
+            &live(&[1, 2]),
+        );
+        // The reading measures `a`.
+        let measured = member(1, "a", &[11, 12]);
+        cache.remember(&[measured.clone(), member(2, "b", &[22])]);
+        assert!(cache.is_known(1));
+        // Admission evicts `a`.
+        cache.plan(&[c(2, "b")], Fill::Verdict);
+        assert!(!cache.is_known(1) && cache.is_known(2));
+        let mut pids = cache.tombstone_pids();
+        pids.sort();
+        assert_eq!(pids, vec![11, 12]);
+
+        let listed = [pm(11, Some(300)), pm(12, Some(500)), pm(22, Some(100))];
+        let asked = HashSet::from([11, 12, 22]);
+        assert_eq!(
+            cache.settle(&listed, &asked, &measured.pids, &none()),
+            Ok(800),
+            "a's processes are still lmgw's"
+        );
+        let mut pids = cache.tombstone_pids();
+        pids.sort();
+        assert_eq!(pids, vec![11, 12], "the stale measurement dropped none");
+        // `b`'s own PID among `current` is no tombstone and drops none.
+        assert_eq!(cache.settle(&listed, &asked, &[22], &none()), Ok(800));
+    }
+
+    /// Two retired generations measured one PID at different start times
+    /// (Windows): `a`'s remembered tree still names its child 12, which
+    /// exited, and the PID went to `b`'s child, created later. Whichever
+    /// retires first, the tombstone kept is `b`'s, the process that may
+    /// still run, so [`reused`] does not drop it.
+    #[test]
+    fn a_stale_tombstone_never_replaces_a_newer_one() {
+        struct Starts(HashMap<u32, u64>);
+        impl ProcTree for Starts {
+            fn descendants(&self, _: u32) -> Result<Vec<u32>, String> {
+                Ok(Vec::new())
+            }
+            fn started(&self, pid: u32) -> Option<u64> {
+                self.0.get(&pid).copied()
+            }
+        }
+        let now = Starts(HashMap::from([(12, 200)]));
+        for b_first in [true, false] {
+            let mut cache = PidCache::default();
+            let plan = cache.plan(&[c(1, "a"), c(2, "b")], Fill::Verdict);
+            cache.record(
+                &plan.inspect,
+                &Ok(HashMap::from([
+                    ("lmgw-chat-a".into(), 11),
+                    ("lmgw-chat-b".into(), 21),
+                ])),
+                &live(&[1, 2]),
+            );
+            cache.remember(&[
+                Member {
+                    generation: 1,
+                    label: "chat/a".into(),
+                    pids: vec![11, 12],
+                    started: HashMap::from([(11, 50), (12, 100)]),
+                },
+                Member {
+                    generation: 2,
+                    label: "chat/b".into(),
+                    pids: vec![21, 12],
+                    started: HashMap::from([(21, 150), (12, 200)]),
+                },
+            ]);
+            if b_first {
+                cache.plan(&[c(1, "a")], Fill::Verdict);
+            } else {
+                cache.plan(&[c(2, "b")], Fill::Verdict);
+            }
+            cache.plan(&[], Fill::Verdict);
+            let twelve: Vec<Tombstone> = cache
+                .tombstones()
+                .into_iter()
+                .filter(|t| t.pid == 12)
+                .collect();
+            assert_eq!(
+                twelve,
+                vec![Tombstone {
+                    pid: 12,
+                    label: "chat/b".into(),
+                    started: Some(200),
+                }],
+                "b retired first: {b_first}"
+            );
+            assert!(reused(&cache.tombstones(), &now).is_empty());
+        }
+    }
+
+    /// Where the tree reports start times (Windows), a tombstone whose PID
+    /// runs a process started at another time is someone else's: dropped,
+    /// not counted. One with the same start time is the stopped process
+    /// still on the card; one with no recorded start time, or whose PID
+    /// cannot be read now, is left to the probe.
+    #[test]
+    fn a_tombstone_whose_pid_was_reused_is_dropped() {
+        struct Starts(HashMap<u32, u64>);
+        impl ProcTree for Starts {
+            fn descendants(&self, _: u32) -> Result<Vec<u32>, String> {
+                Ok(Vec::new())
+            }
+            fn started(&self, pid: u32) -> Option<u64> {
+                self.0.get(&pid).copied()
+            }
+        }
+
+        let mut cache = PidCache::default();
+        let current = [c(1, "a"), c(2, "b"), c(3, "c"), c(4, "d")];
+        let plan = cache.plan(&current, Fill::Verdict);
+        cache.record(
+            &plan.inspect,
+            &Ok(HashMap::from([
+                ("lmgw-chat-a".into(), 11),
+                ("lmgw-chat-b".into(), 22),
+                ("lmgw-chat-c".into(), 33),
+                ("lmgw-chat-d".into(), 44),
+            ])),
+            &live(&[1, 2, 3, 4]),
+        );
+        // 33 could not be opened when measured: no start time.
+        let then = Starts(HashMap::from([(11, 100), (22, 200), (44, 400)]));
+        let members: Vec<Member> = [
+            (1, "chat/a", 11),
+            (2, "chat/b", 22),
+            (3, "chat/c", 33),
+            (4, "chat/d", 44),
+        ]
+        .into_iter()
+        .map(|(g, l, root)| Member::measure(g, l.into(), root, &then).unwrap())
+        .collect();
+        assert_eq!(members[0].started, HashMap::from([(11, 100)]));
+        assert!(members[2].started.is_empty());
+        cache.remember(&members);
+        cache.plan(&[], Fill::Verdict);
+
+        // 11 is a later process now, 22 the same, 33 unknowable, 44 gone.
+        let now = Starts(HashMap::from([(11, 150), (22, 200), (33, 999)]));
+        let reused = reused(&cache.tombstones(), &now);
+        assert_eq!(reused, HashSet::from([11]));
+        let listed = [pm(11, Some(7)), pm(22, Some(500)), pm(33, Some(40))];
+        let asked = HashSet::from([11, 22, 33, 44]);
+        assert_eq!(cache.settle(&listed, &asked, &[], &reused), Ok(540));
+        let mut pids = cache.tombstone_pids();
+        pids.sort();
+        assert_eq!(pids, vec![22, 33]);
     }
 
     /// Review finding 3: a probe that answers only for the PIDs it is asked
@@ -733,7 +1121,10 @@ mod tests {
         cache.plan(&[c(1, "a")], Fill::Verdict);
         assert_eq!(cache.tombstone_pids(), vec![22]);
         // amdgpu's answer for what this pass asked: `b`'s process is gone.
-        assert_eq!(cache.settle(&[pm(11, Some(10))], &asked), Ok(0));
+        assert_eq!(
+            cache.settle(&[pm(11, Some(10))], &asked, &[], &none()),
+            Ok(0)
+        );
         assert!(cache.tombstone_pids().is_empty(), "asked and not listed");
 
         // A tombstone this pass never asked about survives its settle.
@@ -744,10 +1135,10 @@ mod tests {
             &live(&[3]),
         );
         cache.plan(&[], Fill::Verdict);
-        assert_eq!(cache.settle(&[], &HashSet::from([11])), Ok(0));
+        assert_eq!(cache.settle(&[], &HashSet::from([11]), &[], &none()), Ok(0));
         assert_eq!(cache.tombstone_pids(), vec![33], "not asked: kept");
         assert_eq!(
-            cache.settle(&[pm(33, Some(500))], &HashSet::from([33])),
+            cache.settle(&[pm(33, Some(500))], &HashSet::from([33]), &[], &none()),
             Ok(500)
         );
     }

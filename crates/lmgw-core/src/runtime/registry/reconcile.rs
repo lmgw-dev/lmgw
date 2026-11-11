@@ -4,43 +4,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use tokio::sync::watch;
 
 use crate::gate::facts::GateFacts;
 
 use super::*;
-use crate::runtime::argv::{render_engine_args, run_args_digest, EngineArgs, RUN_ARGS_LABEL};
+use crate::runtime::argv::EngineArgs;
 use crate::runtime::descriptor::ModelRuntime;
 use crate::runtime::image::ImageCapabilities;
+use crate::runtime::launcher::podman::decode_ps;
+use crate::runtime::launcher::{Found, Listed, Listing};
 use crate::runtime::{container_name, Class};
-
-/// The subset of `podman ps --format json` reconciliation reads.
-///
-/// Only these three fields: the enumeration answers *which* containers carry
-/// our instance label and what they claim to be; everything a decision
-/// actually turns on (the command, the published port) comes from `podman
-/// inspect`, which is the authoritative record for both.
-#[derive(Debug, Deserialize)]
-pub(super) struct PsRow {
-    #[serde(default, rename = "Names")]
-    pub(super) names: Vec<String>,
-    #[serde(default, rename = "Labels")]
-    pub(super) labels: HashMap<String, String>,
-    #[serde(default, rename = "State")]
-    pub(super) state: String,
-    /// Unix seconds, podman's own `Created` (not `CreatedAt`, which is the
-    /// human "6 minutes ago"). `0` when the field is absent, which reads as
-    /// "long ago" everywhere it is compared — the safe direction for a
-    /// reconciliation that removes things.
-    #[serde(default, rename = "Created")]
-    pub(super) created: i64,
-}
 
 /// One `podman ps` row, for a caller outside this module.
 ///
-/// [`PsRow`]'s fields stay private — reconciliation's reading of them is this
-/// module's business — but the *enumeration* is not: the agent container
+/// The launcher's [`Listed`] is reconciliation's reading of a model's
+/// containers; this is the same enumeration for the containers outside the
+/// launcher: the agent container
 /// runtime sweeps its own leftovers by label (container-runtime §6.4) and
 /// re-deriving `podman ps --format json` next door would be a second place to
 /// get the flags and the JSON casing wrong.
@@ -56,7 +36,6 @@ pub struct PsEntry {
     pub created: i64,
 }
 
-/// The subset of `podman inspect <name>` reconciliation reads.
 /// What one adoption probe learned: whether the container answered at all,
 /// and — for an image container, whose readiness route is its capabilities
 /// route — the document it answered with.
@@ -67,68 +46,6 @@ pub struct PsEntry {
 struct ProbeAnswer {
     answered: bool,
     capabilities: Option<ImageCapabilities>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InspectRow {
-    #[serde(default, rename = "Config")]
-    config: InspectConfig,
-    #[serde(default, rename = "NetworkSettings")]
-    network_settings: InspectNetwork,
-}
-
-/// The part of `podman inspect <name>` [`Registry::exited`] reads: the
-/// container's run state. Its own row type rather than a field on
-/// [`InspectRow`], so adoption's decoding does not change.
-#[derive(Debug, Deserialize)]
-pub(super) struct InspectStateRow {
-    #[serde(default, rename = "State")]
-    pub(super) state: Option<InspectState>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct InspectState {
-    #[serde(default, rename = "Status")]
-    status: String,
-    #[serde(default, rename = "Running")]
-    pub(super) running: bool,
-    #[serde(default, rename = "ExitCode")]
-    exit_code: i64,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct InspectConfig {
-    /// The container command — everything after the image name in `podman
-    /// run` (the image's own `ENTRYPOINT` is *not* part of it). For a managed
-    /// container that is exactly [`render_engine_args`]'s output, which is
-    /// what makes the two comparable at all.
-    #[serde(default, rename = "Cmd")]
-    cmd: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct InspectNetwork {
-    /// `{"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "39311"}]}`. The
-    /// value is nullable for an unpublished port.
-    #[serde(default, rename = "Ports")]
-    ports: HashMap<String, Option<Vec<PortBinding>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PortBinding {
-    #[serde(default, rename = "HostPort")]
-    host_port: String,
-}
-
-/// What [`Registry::container_exists`] could establish about one name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Presence {
-    /// podman answered, and the container is there.
-    Present,
-    /// podman answered "no such container".
-    Absent,
-    /// podman did not answer at all — carries the rendered reason.
-    Unknown(String),
 }
 
 /// Why [`Registry::adopt`] would not adopt a container.
@@ -187,14 +104,23 @@ impl Registry {
                 port: e.host_port,
                 state: e.state,
                 in_flight: e.in_flight,
+                claims: e.claims,
                 started_at_age_seconds: now.saturating_duration_since(e.started_at).as_secs(),
                 last_used_age_seconds: now.saturating_duration_since(e.last_used).as_secs(),
                 // A `/props` read that failed is one of the entry's
                 // warnings, kept apart so a refresh can replace it
-                // (`llama_props.rs`).
+                // (`llama_props.rs`); so is a partial start's, and what
+                // admission said of a whole one, which the entry carries
+                // from its claim on, whatever its start sets
+                // (`admission_grant.rs`).
                 warnings: e
-                    .warnings
-                    .iter()
+                    .grant
+                    .as_ref()
+                    .map(|g| &g.warning)
+                    .filter(|w| !w.is_empty())
+                    .into_iter()
+                    .chain(e.admission_note.iter())
+                    .chain(e.warnings.iter())
                     .chain(e.llama.as_ref().and_then(|l| l.props.as_ref().err()))
                     .chain(
                         e.llama
@@ -214,13 +140,19 @@ impl Registry {
                 placement: e.placement,
                 owner: e.owner,
                 draining_for_owner: draining && e.state != RuntimeState::Stopping,
+                grant: e.grant.clone(),
+                served: e.served,
+                adopted: e.adopted,
+                engine_key: e.engine_key.clone(),
             })
             .collect();
         out.sort_by(|a, b| (a.class, &a.model_id).cmp(&(b.class, &b.model_id)));
         out
     }
 
-    /// Rebuild the map from what podman is actually running (§3.4).
+    /// Rebuild the map from what the launcher lists as actually there (§3.4;
+    /// Podman: `podman ps -a` under this instance's label). A launcher whose
+    /// processes never outlive lmgw lists nothing, and this adopts nothing.
     ///
     /// Runs once at boot, before anything else touches the runtime, and is the
     /// crash-recovery path: an lmgw that died leaves its containers behind, and
@@ -244,14 +176,14 @@ impl Registry {
     /// **What is compared, and what deliberately is not.** The test is the
     /// *container command* — `Config.Cmd`, everything after the image name in
     /// `podman run`, which for a managed container is exactly
-    /// [`render_engine_args`]'s output: the llama-server flag list for
+    /// [`crate::runtime::argv::render_engine_args`]'s output: the llama-server flag list for
     /// chat/aux, the fixed `server --config …` for audio. For audio that argv
     /// says nothing about *which* model is loaded (the selection is in the
     /// mounted `server.json`), so audio additionally compares the config last
     /// written for this model against what would be written now.
     ///
     /// `extra_run_args` are compared through the label a start records them
-    /// in ([`RUN_ARGS_LABEL`], a digest): a container whose flags are not the
+    /// in ([`crate::runtime::argv::RUN_ARGS_LABEL`], a digest): a container whose flags are not the
     /// ones its row renders now — the GPU passthrough and `label=disable` an
     /// empty override used to drop, or a row switched to the CPU — is
     /// removed, and so is one from an lmgw that did not record them yet (it
@@ -270,46 +202,17 @@ impl Registry {
         candidates: &[AcquireSpec<'_>],
     ) -> ReconcileReport {
         let mut report = ReconcileReport::default();
-        let filter = format!("label=lmgw.instance={container_prefix}");
-        let out = self
-            .podman(&["ps", "-a", "--format", "json", "--filter", &filter])
-            .await;
-        let stdout = match out {
-            Ok(o) if o.ok() => o.stdout,
-            Ok(o) => {
-                report.errors.push(format!(
-                    "podman ps failed (exit {}): {}",
-                    o.status,
-                    o.stderr.trim()
-                ));
-                return report;
-            }
+        let rows = match self.launcher.list(container_prefix, Listing::All).await {
+            Ok(rows) => rows,
             Err(e) => {
-                report
-                    .errors
-                    .push(format!("podman ps could not be run: {e}"));
+                report.errors.push(e);
                 return report;
-            }
-        };
-        // An empty stdout is podman's answer for "no containers match", not a
-        // malformed one.
-        let rows: Vec<PsRow> = if stdout.trim().is_empty() {
-            Vec::new()
-        } else {
-            match serde_json::from_str(&stdout) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    report
-                        .errors
-                        .push(format!("podman ps returned unreadable JSON: {e}"));
-                    return report;
-                }
             }
         };
         report.listed = true;
 
         for row in rows {
-            let Some(name) = row.names.first().cloned() else {
+            let Some(name) = row.name().map(str::to_string) else {
                 report
                     .errors
                     .push("podman ps returned a container with no name".into());
@@ -344,7 +247,7 @@ impl Registry {
                     report.adopted.push(name);
                 }
                 Err(Refused { why: reason, .. }) => {
-                    let removed = self.rm_force(&name).await;
+                    let removed = self.launcher.remove(&name).await;
                     match removed {
                         Ok(()) => tracing::info!(container = %name, "removed container: {reason}"),
                         Err(e) => {
@@ -369,7 +272,7 @@ impl Registry {
         &self,
         container_prefix: &str,
         candidates: &[AcquireSpec<'_>],
-        row: &PsRow,
+        row: &Listed,
         name: &str,
     ) -> Result<bool, Refused> {
         if row.state != "running" {
@@ -415,8 +318,9 @@ impl Registry {
             return Ok(false);
         }
 
-        let inspected = self.inspect(name).await?;
-        let port = host_port(&inspected)
+        let inspected = self.launcher.inspect(name).await?;
+        let port = inspected
+            .host_port
             .ok_or_else(|| "no published host port for the container's 8080/tcp".to_string())?;
 
         let mut refusal = None;
@@ -530,6 +434,9 @@ impl Registry {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let (tx, _rx) = watch::channel(Phase::Ready);
                 self.remember_image_caps(class, &model_id, probe.capabilities.as_ref());
+                // What admission gave its start, from the label it carries,
+                // and the note that it is not held to it where it is not.
+                let (grant, unheld) = adopted_grant(&render, class, &model_id).unzip();
                 slot.insert(Entry {
                     generation: next_generation(),
                     container_name: name.to_string(),
@@ -537,6 +444,7 @@ impl Registry {
                     state: RuntimeState::Ready,
                     started_at: now,
                     in_flight: 0,
+                    claims: 0,
                     // An adopted container has been up for an unknown time and
                     // has served an unknown number of requests. Stamping "now"
                     // gives it one full idle period before the reaper (§3.7)
@@ -552,8 +460,10 @@ impl Registry {
                     // and the next start fills them. Its capabilities are not
                     // lost the same way: the probe that just verified the
                     // container *is* the capabilities request for this class,
-                    // so what it read is kept.
-                    warnings: Vec::new(),
+                    // so what it read is kept. One warning is restored from
+                    // its label and the row: that it is not held to its
+                    // grant, which keeps it from teaching a working budget.
+                    warnings: unheld.flatten().into_iter().collect(),
                     capabilities: probe.capabilities,
                     llama,
                     gate,
@@ -568,6 +478,17 @@ impl Registry {
                     // owner (candidate-aliases §12 entry 48): a guest's claim
                     // on it did not survive that lmgw.
                     owner: Origin::Owner,
+                    // Charged what admission gave its start, as before.
+                    grant,
+                    admission_note: None,
+                    // A container is adopted from Podman only, whose image
+                    // names the build.
+                    engine_key: runtime.engine_key(None),
+                    // What it served under an earlier lmgw is not known:
+                    // the ledger keeps the first-prompt margin only where
+                    // nothing of it was measured either (`vram::headroom`).
+                    served: false,
+                    adopted: true,
                 });
                 Ok(true)
             }
@@ -578,13 +499,15 @@ impl Registry {
     /// it was compared with (the image class's probed copy, when there is
     /// one) and the render; `Err` says why not.
     ///
-    /// **What is compared** is [`Self::reconcile`]'s: the container command,
-    /// its run args' label, and for audio the mounted `server.json`.
+    /// **What is compared** is [`Self::reconcile`]'s: for audio the mounted
+    /// `server.json`, here, and the launcher's own test of the instance
+    /// (`Launcher::same_start` — Podman: the container command and its run
+    /// args' label).
     async fn adoptable(
         &self,
         container_prefix: &str,
         spec: &AcquireSpec<'_>,
-        inspected: &InspectRow,
+        inspected: &Found,
         labels: &HashMap<String, String>,
         port: u16,
     ) -> Result<(Option<ModelRuntime>, crate::runtime::argv::RenderSpec), String> {
@@ -617,126 +540,65 @@ impl Registry {
         let mut render = runtime
             .preview_spec(container_prefix, port, spec.models_dir, spec.data_dir)
             .map_err(|e| format!("rendering the container spec failed: {e}"))?;
-        // With the options a start passes, so the restart policy it left out
-        // is left out of this digest too.
-        let globals = self
-            .cdi()
-            .globals(container_prefix, &runtime.extra_run_args);
-        render.set_globals(globals);
-        let expected = render_engine_args(&render);
-        if inspected.config.cmd != expected {
-            return Err(format!(
-                "its command is not the one this model renders now ({} vs {} args)",
-                inspected.config.cmd.len(),
-                expected.len()
-            ));
+        // A partial start's container carries its grant (`lmgw.grant`): its
+        // command has the `--max-vram` rendered from it, and so must the one
+        // it is compared with.
+        if let (EngineArgs::Image(img), Some(held)) = (
+            &mut render.engine,
+            labels
+                .get(crate::runtime::argv::GRANT_LABEL)
+                .and_then(|l| crate::runtime::argv::HeldTo::parse(l)),
+        ) {
+            img.held = Some(held);
         }
-        match labels.get(RUN_ARGS_LABEL) {
-            Some(got) if *got == run_args_digest(&render.extra_run_args) => {}
-            Some(_) => return Err("its run args are not the ones this model renders now".into()),
-            None => {
-                return Err(
-                    "it carries no record of its run args (started by an older lmgw), so \
-                     they cannot be told to be the ones this model renders now"
-                        .into(),
-                )
-            }
+        // A fitted llama-server start's container carries its placement
+        // (`lmgw.llama-fit`): its command has the values rendered from it
+        // with `--fit off`, and so must the one it is compared with — only
+        // those the row still leaves to fitting, so a row since edited to
+        // its own value is not adopted with the stale one.
+        if let (
+            EngineArgs::Llama(crate::runtime::argv::LlamaArgs::Chat { params, args, .. }),
+            Some(f),
+        ) = (
+            &render.engine,
+            labels
+                .get(crate::runtime::argv::FITTED_LABEL)
+                .and_then(|l| crate::runtime::argv::Fitted::parse(l)),
+        ) {
+            let left = crate::vram::plan::chat::fit::left(params, args);
+            let placement = f.placement.only(left);
+            render.fitted = (!placement.is_whole()).then_some(crate::runtime::argv::Fitted {
+                bytes: f.bytes,
+                placement,
+            });
         }
+        self.launcher
+            .same_start(container_prefix, &render, inspected, labels)?;
         Ok((probed, render))
     }
 
-    /// [`Self::exited`], at most once per [`CONTAINER_EXIT_POLL`]: `next` is
-    /// when the next look is due, and moves on each time one is taken.
-    pub(super) async fn exited_since(&self, name: &str, next: &mut Instant) -> Option<String> {
+    /// [`Launcher::exited`](crate::runtime::launcher::Launcher::exited), at
+    /// most once per [`CONTAINER_EXIT_POLL`]: `next` is when the next look is
+    /// due, and moves on each time one is taken.
+    pub(super) async fn exited_since(
+        &self,
+        name: &str,
+        next: &mut Instant,
+    ) -> Option<crate::runtime::launcher::Exited> {
         if Instant::now() < *next {
             return None;
         }
         *next = Instant::now() + CONTAINER_EXIT_POLL;
-        self.exited(name).await
+        self.launcher.exited(name).await
     }
 
-    /// `Some("the container exited with code N")` when podman says a starting
-    /// container is no longer running, so the readiness poll can stop at once
-    /// instead of waiting out the load timeout on a port nothing will ever
-    /// open again — and so is "no such container", the one failing inspect
-    /// with a clear answer. Anything else podman cannot answer clearly —
-    /// inspect failing otherwise, JSON it cannot read, a state it does not
-    /// name — is `None`: "keep waiting", so a doubt never fails a start that
-    /// might still come up.
-    pub(super) async fn exited(&self, name: &str) -> Option<String> {
-        let out = self
-            .podman(&["inspect", "--format", "json", name])
-            .await
-            .ok()?;
-        // A start only asks after its own `podman run` succeeded, so a name
-        // podman no longer knows is a container somebody removed while it
-        // loaded — dead, not "keep waiting" until the load budget is spent.
-        if !out.ok() {
-            return is_no_such_container(&out.stderr)
-                .then(|| "the container was removed while the model was loading".to_string());
-        }
-        let rows: Vec<InspectStateRow> = serde_json::from_str(&out.stdout).ok()?;
-        let state = rows.into_iter().next()?.state?;
-        match state.status.as_str() {
-            "exited" | "stopped" | "dead" if !state.running => Some(format!(
-                "the container exited with code {} ({}) while the model was loading",
-                state.exit_code, state.status
-            )),
-            _ => None,
-        }
-    }
-
-    /// The host PID of each named container's init process — `State.Pid` —
-    /// in one `podman inspect` for all of them (candidate-aliases design
-    /// §4.7's per-process attribution).
-    ///
-    /// Measured 2026-09-27 under rootless podman: for a chat container this
-    /// is llama-server itself, and the PID NVML lists. A name podman does not
-    /// know, or a container that is not running (`State.Pid` 0), is simply
-    /// absent from the map — podman prints the containers it found and names
-    /// the rest on stderr, exiting non-zero. `Err` only when podman could not
-    /// be run, or failed without naming a single container.
+    /// The host PID of each named container's root process, through the
+    /// launcher (candidate-aliases design §4.7's per-process attribution;
+    /// Podman: `State.Pid`, in one `podman inspect` for all of them). A name
+    /// that is not running is absent from the map; `Err` only when nothing
+    /// could be learned.
     pub async fn host_pids(&self, names: &[String]) -> Result<HashMap<String, u32>, String> {
-        if names.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let mut argv: Vec<String> =
-            vec!["inspect".into(), "--format".into(), HOST_PID_FORMAT.into()];
-        argv.extend(names.iter().cloned());
-        let out = self
-            .podman_argv(&argv)
-            .await
-            .map_err(|e| format!("podman inspect could not be run: {e}"))?;
-        let pids = parse_host_pids(&out.stdout);
-        if pids.is_empty() && !out.ok() {
-            return Err(format!(
-                "podman inspect failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            ));
-        }
-        Ok(pids)
-    }
-
-    /// `podman inspect` one container, decoded down to the two fields
-    /// adoption reads.
-    async fn inspect(&self, name: &str) -> Result<InspectRow, String> {
-        let out = self
-            .podman(&["inspect", "--format", "json", name])
-            .await
-            .map_err(|e| format!("podman inspect could not be run: {e}"))?;
-        if !out.ok() {
-            return Err(format!(
-                "podman inspect failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            ));
-        }
-        let rows: Vec<InspectRow> = serde_json::from_str(&out.stdout)
-            .map_err(|e| format!("podman inspect returned unreadable JSON: {e}"))?;
-        rows.into_iter()
-            .next()
-            .ok_or_else(|| "podman inspect returned no container".to_string())
+        self.launcher.host_pids(names).await
     }
 
     /// One `GET http://127.0.0.1:<port><path>`; true when the container
@@ -788,7 +650,9 @@ impl Registry {
         }
     }
 
-    /// `podman ps -a --filter … --format json`, reduced to [`PsEntry`].
+    /// `podman ps -a --filter … --format json`, reduced to [`PsEntry`] — for
+    /// the containers outside the launcher (the agents', MCP's), on Podman
+    /// directly.
     ///
     /// Every filter is passed as its own `--filter`, which podman ANDs. An
     /// empty stdout is podman's answer for "nothing matches", not a malformed
@@ -800,26 +664,11 @@ impl Registry {
             argv.push("--filter".into());
             argv.push(f.clone());
         }
-        let out = self
-            .podman_argv(&argv)
-            .await
-            .map_err(|e| format!("podman ps could not be run: {e}"))?;
-        if !out.ok() {
-            return Err(format!(
-                "podman ps failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            ));
-        }
-        if out.stdout.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows: Vec<PsRow> = serde_json::from_str(&out.stdout)
-            .map_err(|e| format!("podman ps returned unreadable JSON: {e}"))?;
+        let rows = decode_ps(self.podman_argv(&argv).await)?;
         Ok(rows
             .into_iter()
             .map(|r| PsEntry {
-                name: r.names.first().cloned().unwrap_or_default(),
+                name: r.name().unwrap_or_default().to_string(),
                 labels: r.labels,
                 state: r.state,
                 created: r.created,
@@ -828,51 +677,75 @@ impl Registry {
     }
 }
 
-/// The `--format` of [`Registry::host_pids`]: one `<name> <pid>` line per
-/// container. A space is a safe separator — podman refuses a container name
-/// with one.
-pub const HOST_PID_FORMAT: &str = "{{.Name}} {{.State.Pid}}";
-
-/// [`HOST_PID_FORMAT`]'s output, as `name -> pid` for every running
-/// container. A line that does not parse — or names PID 0, a container that
-/// is not running — is left out.
-fn parse_host_pids(stdout: &str) -> HashMap<String, u32> {
-    stdout
-        .lines()
-        .filter_map(|l| {
-            let (name, pid) = l.trim().rsplit_once(' ')?;
-            let pid: u32 = pid.trim().parse().ok()?;
-            (pid > 0 && !name.is_empty()).then(|| (name.trim().to_string(), pid))
-        })
-        .collect()
+/// The grant an adopted image container was started with, read back from its
+/// `lmgw.grant` label into the render it was compared against
+/// (`admission_grant.rs`): what the ledger charges it, with a warning worded
+/// by what actually holds sd-server — the grant's `--max-vram`, the row's own
+/// `max_vram`, or nothing in a build without the flag — and, where it is not
+/// held to the grant, the same note a start leaves on its entry
+/// ([`super::admission_grant::unheld_note`]), so nothing it does teaches the
+/// row a working budget. `None` for every other container.
+fn adopted_grant(
+    render: &crate::runtime::argv::RenderSpec,
+    class: Class,
+    model_id: &str,
+) -> Option<(PartialGrant, Option<String>)> {
+    use super::admission_grant::{held_by, unheld_note, HeldBy};
+    if let Some(f) = render.fitted {
+        return Some((adopted_fit(f, class, model_id), None));
+    }
+    let EngineArgs::Image(img) = &render.engine else {
+        return None;
+    };
+    let held = img.held?;
+    let mut grant = PartialGrant {
+        bytes: held.granted,
+        max_vram_bytes: held.max_vram,
+        warning: String::new(),
+        llama: None,
+    };
+    let budget = crate::runtime::argv::max_vram_arg(held.max_vram);
+    let how = match held_by(img, &grant) {
+        HeldBy::Grant => format!("held sd-server to {budget} GiB (--max-vram)"),
+        HeldBy::OwnAsGranted => {
+            format!("with the max_vram in its args holding sd-server to {budget} GiB (--max-vram)")
+        }
+        HeldBy::Own(k, v) => format!("but {k} {v} in its args is what holds sd-server"),
+        HeldBy::NoFlag => "but this sd-server build has no --max-vram, so sd-server sizes \
+                           itself to the driver's free memory"
+            .to_string(),
+    };
+    grant.warning = format!(
+        "{}: {}/{model_id} was adopted from an earlier run of lmgw, which gave it {} on the \
+         card, {how}; it keeps that until its container stops",
+        crate::vram::partial::PARTIAL_FIT,
+        class.as_str(),
+        crate::hf::fmt_bytes(held.granted),
+    );
+    let note = unheld_note(img, &grant);
+    Some((grant, note))
 }
 
-/// Recover the published host port from `podman inspect` (§3.4/§3.5): the
-/// binding for the container's own `8080/tcp`, which is the only port a
-/// managed container ever publishes ([`podman_run_argv`](crate::runtime::argv::podman_run_argv) writes `-p
-/// <host>:8080`). Any other key is somebody else's container or a hand-edited
-/// one, and is not guessed at.
-fn host_port(row: &InspectRow) -> Option<u16> {
-    row.network_settings
-        .ports
-        .get("8080/tcp")?
-        .as_ref()?
-        .iter()
-        .find_map(|b| b.host_port.parse().ok())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_host_pids;
-
-    /// What podman printed for `inspect --format '{{.Name}} {{.State.Pid}}'`
-    /// over a running container, an exited one and a name it did not know
-    /// (measured 2026-09-27: found containers on stdout, the unknown one on
-    /// stderr, exit 125).
-    #[test]
-    fn host_pids_keep_running_containers_only() {
-        let pids = parse_host_pids("lmgw-chat-a-1a2b3c 1213087\nlmgw-aux-b-4d5e6f 0\n\ngarbage\n");
-        assert_eq!(pids.len(), 1, "{pids:?}");
-        assert_eq!(pids["lmgw-chat-a-1a2b3c"], 1213087);
+/// The grant of an adopted llama-server container lmgw fitted in `--fit`'s
+/// place, from its `lmgw.llama-fit` label as compared: what the ledger
+/// charges it, with the warning a start leaves — a lowered context, or
+/// layers off the card — worded for the adoption.
+fn adopted_fit(f: crate::runtime::argv::Fitted, class: Class, model_id: &str) -> PartialGrant {
+    let p = f.placement;
+    let lead = match (p.n_gpu_layers, p.n_cpu_moe) {
+        (None, None) => crate::vram::partial::llama::CONTEXT_FITTED,
+        _ => crate::vram::partial::PARTIAL_FIT,
+    };
+    PartialGrant {
+        bytes: f.bytes,
+        max_vram_bytes: 0,
+        warning: format!(
+            "{lead}: {}/{model_id} was adopted from an earlier run of lmgw, which gave it {} \
+             on the card and told llama-server {}; it keeps that until its container stops",
+            class.as_str(),
+            crate::hf::fmt_bytes(f.bytes),
+            p.flags()
+        ),
+        llama: Some(p),
     }
 }

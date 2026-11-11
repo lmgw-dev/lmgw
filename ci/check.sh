@@ -163,6 +163,9 @@ fi
 stage "inline JSON ratchet (ci/json_ratchet.py)"
 python3 ci/json_ratchet.py
 
+stage "Windows-safe tracked paths (ci/windows_names.py)"
+python3 ci/windows_names.py
+
 stage "cargo fmt --check (workspace)"
 cargo fmt --check --all
 

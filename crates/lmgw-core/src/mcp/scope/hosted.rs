@@ -327,6 +327,7 @@ mod tests {
             hosts_label: None,
             self_admin: DeviceAdmin::Off,
             link: Default::default(),
+            ..Default::default()
         };
         ToolScope {
             self_admin: false,

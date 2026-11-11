@@ -260,8 +260,12 @@ fn an_override_to_a_device_keeps_the_input_embeddings_charged() {
     let to_card = ["-ot".to_string(), "token_embd=CUDA0".to_string()];
     let fp = footprint(&files(s, None), "r.gguf", &Shape::of(&p, &to_card));
     assert_eq!(fp.weights_bytes, 11 * MIB);
+    // The header lists no tensors, so any override to a device charges them.
     let note = fp.note.unwrap_or_default();
-    assert!(note.contains("--override-tensor"), "{note}");
+    assert!(
+        note.contains("input embeddings (") && note.contains("charged to the card"),
+        "{note}"
+    );
 }
 
 /// Review should-fix 4: a hybrid draft model keeps a recurrent state per

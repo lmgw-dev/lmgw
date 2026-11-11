@@ -47,6 +47,10 @@
 //! (`vision_rule`, `vision_dpi`), and a reading is never capped: one the
 //! model's own context cuts off is a failed page, not a stored fragment.
 
+// The agent runs in a Linux container: on any other system the library is empty and the binary
+// says it runs on Linux only (not on Windows yet).
+#![cfg(target_os = "linux")]
+
 pub mod app;
 pub mod budget;
 pub mod chat;

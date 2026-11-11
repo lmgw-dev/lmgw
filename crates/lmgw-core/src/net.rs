@@ -7,6 +7,11 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+/// The public origin and the TLS listener's addresses (headless server
+/// design D9, §4.3).
+mod public;
+pub use public::*;
+
 /// One address the gateway is reachable at, plus a hint for the chip tooltip
 /// ("localhost", or the interface name for LAN addresses).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,18 +35,23 @@ fn url_host(ip: IpAddr) -> String {
 /// answers on — a `0.0.0.0` socket answers on IPv4 only, `[::]` on both
 /// (Linux dual-stack).
 pub fn reachable_urls(bind_addr: &str) -> Vec<Reachable> {
+    reachable_urls_as(Scheme::Http, bind_addr)
+}
+
+/// [`reachable_urls`] for a listener that speaks `scheme`.
+pub fn reachable_urls_as(scheme: Scheme, bind_addr: &str) -> Vec<Reachable> {
     let Ok(addr) = bind_addr.parse::<SocketAddr>() else {
         // Not host:port (a hostname, say) — pass it through untouched rather
         // than inventing something.
         return vec![Reachable {
-            url: format!("http://{bind_addr}"),
+            url: format!("{scheme}://{bind_addr}"),
             label: String::new(),
         }];
     };
     let port = addr.port();
     if !addr.ip().is_unspecified() {
         return vec![Reachable {
-            url: format!("http://{}:{port}", url_host(addr.ip())),
+            url: format!("{scheme}://{}:{port}", url_host(addr.ip())),
             label: if addr.ip().is_loopback() {
                 "localhost".into()
             } else {
@@ -51,7 +61,7 @@ pub fn reachable_urls(bind_addr: &str) -> Vec<Reachable> {
     }
 
     let mut out = vec![Reachable {
-        url: format!("http://127.0.0.1:{port}"),
+        url: format!("{scheme}://127.0.0.1:{port}"),
         label: "localhost".into(),
     }];
     let dual_stack = addr.is_ipv6();
@@ -64,7 +74,7 @@ pub fn reachable_urls(bind_addr: &str) -> Vec<Reachable> {
         (a.ip().is_ipv6(), &a.name, a.ip()).cmp(&(b.ip().is_ipv6(), &b.name, b.ip()))
     });
     for i in ifaces {
-        let url = format!("http://{}:{port}", url_host(i.ip()));
+        let url = format!("{scheme}://{}:{port}", url_host(i.ip()));
         if out.iter().any(|r| r.url == url) {
             continue;
         }
@@ -97,13 +107,25 @@ pub fn dashboard_url(
     this_computer: bool,
     arrived_on: Option<IpAddr>,
 ) -> Option<String> {
+    dashboard_url_as(Scheme::Http, bind_addr, this_computer, arrived_on)
+}
+
+/// [`dashboard_url`] for a listener that speaks `scheme`.
+pub fn dashboard_url_as(
+    scheme: Scheme,
+    bind_addr: &str,
+    this_computer: bool,
+    arrived_on: Option<IpAddr>,
+) -> Option<String> {
     if this_computer {
-        return Some(format!("{}/", primary_base_url(bind_addr)));
+        let first = reachable_urls_as(scheme, bind_addr).into_iter().next();
+        return first.map(|r| format!("{}/", r.url));
     }
     let Ok(addr) = bind_addr.parse::<SocketAddr>() else {
         // A host name: loopback by name reaches nothing from elsewhere.
         let host = bind_addr.rsplit_once(':').map_or(bind_addr, |(h, _)| h);
-        return (!host.eq_ignore_ascii_case("localhost")).then(|| format!("http://{bind_addr}/"));
+        return (!host.eq_ignore_ascii_case("localhost"))
+            .then(|| format!("{scheme}://{bind_addr}/"));
     };
     let port = addr.port();
     let host = if addr.ip().is_unspecified() {
@@ -113,7 +135,7 @@ pub fn dashboard_url(
     } else {
         addr.ip()
     };
-    Some(format!("http://{}:{port}/", url_host(host)))
+    Some(format!("{scheme}://{}:{port}/", url_host(host)))
 }
 
 /// The machine's own host name, or `None` where the kernel does not publish
@@ -239,7 +261,7 @@ fn compose_own_host_names(
     out
 }
 
-fn push_name(out: &mut Vec<String>, name: String) {
+pub(crate) fn push_name(out: &mut Vec<String>, name: String) {
     let name = name.to_ascii_lowercase();
     if !name.is_empty() && !out.contains(&name) {
         out.push(name);

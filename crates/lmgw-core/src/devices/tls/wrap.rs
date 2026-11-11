@@ -5,9 +5,13 @@
 //! The key file is PEM either way, and its label says which:
 //! [`PLAIN_LABEL`] is the standard PKCS#8 one (`openssl pkey` reads it), and
 //! [`WRAPPED_LABEL`] carries a version byte, the 96-bit nonce and the
-//! ciphertext with its tag, sealed under [`AAD`]. Each wrapping key seals
-//! exactly one key file: a new one is made whenever the file is written
-//! wrapped, so a nonce drawn at random never repeats under a key.
+//! ciphertext with its tag, sealed under [`AAD`]. Under the Secret Service
+//! each wrapping key seals exactly one key file: a new one is made whenever
+//! the file is written wrapped. The server image's fixed key
+//! (`wrap_secret`) seals the file again at every write (the creation, a
+//! re-wrap of a plain key, each rotation), each time under a fresh 96-bit
+//! random nonce; NIST SP 800-38D bounds random nonces at 2^32 seals under
+//! one key, which owner-made rotations do not approach.
 
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretBox};
@@ -49,6 +53,14 @@ impl WrapKey {
             other.0.expose_secret(),
         )
         .is_ok()
+    }
+
+    /// The same key again, for a store that hands its one key out more
+    /// than once (`wrap_secret`).
+    pub(crate) fn duplicate(&self) -> Self {
+        let mut bytes = Box::new([0u8; 32]);
+        bytes.copy_from_slice(self.0.expose_secret());
+        Self(SecretBox::new(bytes))
     }
 
     /// The key as a store keeps it: 64 lowercase hex digits.

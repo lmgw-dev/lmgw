@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::state::SharedState;
 
-use super::super::attribution::{Fill, Member};
+use super::super::attribution::{self, Fill, Member};
 use super::super::nvml::ProcessMemory;
 use super::super::scheduler::CONTROL_TIMEOUT;
 use super::super::VramScheduler;
@@ -28,6 +28,18 @@ impl VramScheduler {
         generation: u64,
         model_id: &str,
     ) -> Result<Vec<u32>, String> {
+        self.container_pids_labeled(state, generation, format!("audio/{model_id}"))
+            .await
+    }
+
+    /// [`Self::container_pids`] of any class's container, `label` naming it
+    /// (`"{class}/{model_id}"`) for its tombstone.
+    pub(in crate::vram) async fn container_pids_labeled(
+        &self,
+        state: &SharedState,
+        generation: u64,
+        label: String,
+    ) -> Result<Vec<u32>, String> {
         let wait = self.pid_plan(state, Fill::Verdict);
         if !wait.is_empty() {
             let reads = futures::future::join_all(wait.into_iter().map(|r| r.done()));
@@ -40,21 +52,17 @@ impl VramScheduler {
         }
         let root = self.pids.lock().unwrap().root(generation)?;
         let tree = self.procs.read().unwrap().clone();
-        let label = format!("audio/{model_id}");
-        let pids = tokio::task::spawn_blocking(move || {
-            std::iter::once(root)
-                .chain(tree.descendants(root))
-                .collect::<Vec<u32>>()
+        let member = tokio::task::spawn_blocking(move || {
+            Member::measure(generation, label, root, tree.as_ref())
         })
         .await
-        .map_err(|e| format!("process walk failed: {e}"))?;
+        .map_err(|e| format!("process walk failed: {e}"))??;
         // The tree it was read with, for its tombstone once it stops.
-        self.pids.lock().unwrap().remember(&[Member {
-            generation,
-            label,
-            pids: pids.clone(),
-        }]);
-        Ok(pids)
+        self.pids
+            .lock()
+            .unwrap()
+            .remember(std::slice::from_ref(&member));
+        Ok(member.pids)
     }
 
     /// What the driver lists for `pids` right now. `Ok(None)`: none of them
@@ -66,30 +74,44 @@ impl VramScheduler {
     /// while its trigger is armed; with it off, the PID plans these readings
     /// make would otherwise pile tombstones up for good (WP7 review, low).
     /// The sampler passes `false` — twenty times a second is no place for it.
-    pub(super) async fn read_processes(
+    pub(in crate::vram) async fn read_processes(
         &self,
         pids: &[u32],
         settle: bool,
     ) -> Result<Option<u64>, String> {
         let probe = self.probe();
+        let tree = self.procs.read().unwrap().clone();
         let tombstones = if settle {
-            self.pids.lock().unwrap().tombstone_pids()
+            self.pids.lock().unwrap().tombstones()
         } else {
             Vec::new()
         };
         let own = pids.to_vec();
-        let asked: HashSet<u32> = own.iter().chain(&tombstones).copied().collect();
-        let listed = tokio::task::spawn_blocking(move || {
+        let (listed, asked, reused) = tokio::task::spawn_blocking(move || {
+            let reused = attribution::reused(&tombstones, tree.as_ref());
+            let retired: Vec<u32> = tombstones
+                .iter()
+                .map(|t| t.pid)
+                .filter(|p| !reused.contains(p))
+                .collect();
+            let asked: HashSet<u32> = own.iter().chain(&retired).copied().collect();
             probe
-                .processes(&own, &tombstones)
+                .processes(&own, &retired)
+                .map(|listed| (listed, asked, reused))
                 .map_err(|e| format!("no per-process GPU memory right now: {e}"))
         })
         .await
         .map_err(|e| format!("GPU probe thread failed: {e}"))??;
         if settle {
             // Only the pruning is wanted here: what the tombstones still
-            // hold is the outside-VRAM pass's figure, not this one's.
-            let _ = self.pids.lock().unwrap().settle(&listed, &asked);
+            // hold is the outside-VRAM pass's figure, not this one's. `pids`
+            // may be a generation retired since it was measured; `settle`
+            // then lets them drop none of its tombstones.
+            let _ = self
+                .pids
+                .lock()
+                .unwrap()
+                .settle(&listed, &asked, pids, &reused);
         }
         own_share(pids, &listed)
     }

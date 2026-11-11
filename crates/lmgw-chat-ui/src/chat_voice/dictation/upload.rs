@@ -93,7 +93,7 @@ pub(crate) async fn transcribe(
     let status = resp.status;
     let header = resp.header("x-lmgw-fallback").map(str::to_string);
     if resp.ok() {
-        let bytes = resp.bytes().await.map_err(&transport)?;
+        let bytes = resp.bytes().await.map_err(transport)?;
         return serde_json::from_slice::<Transcript>(&bytes)
             .map_err(|e| transport(format!("bad answer: {e}")));
     }

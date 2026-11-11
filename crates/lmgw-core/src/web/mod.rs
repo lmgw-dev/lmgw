@@ -43,7 +43,7 @@ pub mod api_usage;
 pub(crate) mod audio;
 pub(crate) mod audio_lab;
 pub(crate) use audio_lab::{library_clips, library_voices, voice_dir_is_library};
-mod aux;
+mod aux_models;
 mod chat;
 /// The thread list's query, which the API document describes.
 pub(crate) use chat::{ListThreadsQuery, RowsQuery};
@@ -150,6 +150,7 @@ pub(crate) mod hf;
 /// sibling for `/v1/images/*`.
 mod image_lab;
 pub(crate) use image_lab::model_stem;
+pub mod accounts;
 /// The lab store's routes (labs-store design §1.6): `/labs/api/*`, shared by
 /// the three labs.
 mod labs_store;
@@ -213,6 +214,7 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
         // session route registered after it would answer `404` instead of
         // logging anyone in (principals §3.4).
         .merge(session::routes(state))
+        .merge(accounts::routes(state))
         // Last: the SPA owns `/` and every path no other plane claimed.
         .merge(ui::routes(state))
 }

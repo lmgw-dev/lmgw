@@ -95,7 +95,8 @@ pub(crate) async fn compose(state: &SharedState) -> dto::WiringView {
         upstreams,
         models_dir_missing: models_dir.trim().is_empty(),
         models_dir,
-        base_url: crate::net::primary_base_url(&snap.settings.bind_addr),
+        // The public origin (D9): what a person pastes into a client.
+        base_url: crate::net::public_base_url(&snap.settings, snap.serving_tls.as_ref()),
     }
 }
 

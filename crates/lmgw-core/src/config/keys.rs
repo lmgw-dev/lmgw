@@ -89,6 +89,16 @@ pub struct ApiKey {
     /// owner's confirmation. Empty on every other kind.
     #[serde(default)]
     pub link: DeviceLink,
+    /// The account (headless server design §5.1): for an `owner` row the
+    /// account it acts as, for every other kind the account that created or
+    /// paired it. `None` on a row from before accounts, or made by lmgw
+    /// itself (an agent's token, an internal identity).
+    #[serde(default)]
+    pub account_id: Option<i64>,
+    /// The creator's sign-in name, copied at creation: the Keys and Devices
+    /// cards' "made by" still names a deleted account.
+    #[serde(default)]
+    pub made_by_login: Option<String>,
 }
 
 /// What a device row keeps of its pairing over the device link (device link
@@ -421,7 +431,9 @@ impl ScopeMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetPeriod {
     Day,

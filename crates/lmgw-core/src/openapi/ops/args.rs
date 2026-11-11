@@ -476,3 +476,71 @@ pub(crate) fn agent_id_only() -> Value {
         &["id"],
     )
 }
+
+/// `account_create { login*, display_name }` (headless server design §5.6).
+pub(crate) fn account_create() -> Value {
+    obj(
+        json!({
+            "login": str_p("Sign-in name: letters a–z, digits, '.', '_' and '-', stored in lowercase, at most 64 characters."),
+            "display_name": str_p("Any text, shown beside the login."),
+        }),
+        &["login"],
+    )
+}
+
+/// `account_set { id*, display_name, enabled }`.
+pub(crate) fn account_set() -> Value {
+    obj(
+        json!({
+            "id": int_p("Account id, from account_list."),
+            "display_name": str_p("New display name; left out keeps it."),
+            "enabled": bool_p("Enable or disable the account; left out keeps it."),
+        }),
+        &["id"],
+    )
+}
+
+/// `{ id* }` of one account.
+pub(crate) fn account_id() -> Value {
+    obj(
+        json!({ "id": int_p("Account id, from account_list.") }),
+        &["id"],
+    )
+}
+
+/// `session_end { id | account }`.
+pub(crate) fn session_end() -> Value {
+    obj(
+        json!({
+            "id": int_p("One session's id, from account_sessions."),
+            "account": int_p("An account's id: ends every session of that account (Sign out everywhere)."),
+        }),
+        &[],
+    )
+}
+
+/// `accounts_switch { enabled* }`.
+pub(crate) fn accounts_switch() -> Value {
+    obj(
+        json!({ "enabled": bool_p("Turn accounts on (true) or off (false) on this desktop.") }),
+        &["enabled"],
+    )
+}
+
+/// `audit_list { account?, before?, count? }`.
+pub(crate) fn audit_list() -> Value {
+    obj(
+        json!({
+            "account": {
+                "oneOf": [
+                    { "type": "integer", "description": "An account's id: the entries that acted as it." },
+                    { "type": "string", "enum": ["none", "everyone"], "description": "none: the entries of no account (the offline command line, failed and throttled sign-ins); everyone: every entry." },
+                ],
+                "description": "Whose entries the page holds; every entry when absent.",
+            },
+            "before": int_p("An entry's id: the page holds the entries older than it (the previous page's last id). Absent: the newest entries."),
+            "count": int_p("Entries on the page, 1 or more; 50 when absent."),
+        }),
+        &[],
+    )
+}

@@ -1,5 +1,13 @@
-//! llama-server CLI argv + `podman run` argv for one per-model container
-//! (design §3.6).
+//! A model's engine argv and the `podman run` argv around it (design §3.6),
+//! in two halves (Windows design §4.1):
+//!
+//! - the **engine argv** — llama-server's flags, audio.cpp's command,
+//!   sd-server's flags — rendered here for every launcher, against an
+//!   [`EngineView`] that says where the engine sees its files and which
+//!   address it listens on ([`engine_argv`]; [`render_engine_args`] is the
+//!   container's view);
+//! - the **`podman run` wrapper** (`podman.rs`: [`podman_run_argv`], the
+//!   labels, the mounts, `-p`), which only the Podman launcher uses.
 //!
 //! This is what replaced the INI world (§7's deleted `render_preset` /
 //! `render_aux_preset`): each model's own container gets direct-mode CLI
@@ -12,95 +20,44 @@
 //!   (`reasoning_preserve`).
 //! - Value-taking options keep `--key value` as two tokens.
 //! - Model-relative paths (`gguf_path`, `mmproj`, `model-draft`) rewrite onto
-//!   the `/models` mount.
+//!   the view's models directory (the `/models` mount in a container).
 //! - Direct mode has no router to name the model after the request, so
 //!   `-m`/`--alias` are always emitted, not left to the caller's freeform
 //!   args.
 //! - `--embeddings`/`--reranking` replace the preset's `embedding =
 //!   true`/`reranking = true` keys; rerankers still never get a `--pooling`
 //!   flag (a llama-server quirk that outlived the preset renderer).
-//! - No `--host`/`--port`/preset flags: the container always listens on
-//!   `0.0.0.0:8080` internally (the port published on the host's loopback
-//!   maps to it), and
+//! - No preset flags; `--host`/`--port` are the view's: a container always
+//!   listens on `0.0.0.0:8080` internally (the port published on the host's
+//!   loopback maps to it), and
 //!   `idle_seconds` is lmgw-side now, so no sleep-related flag is rendered.
 //!
 //! The canonical-key dedup table (`SHORT_ALIASES`/`canonical_key` below) is
 //! the surviving copy of the one the preset renderer carried (§7: "the
 //! canonical-key dedup table survives in the argv renderer").
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{AuxBackend, AuxKind, LlamaParams};
+use crate::config::{AudioModel, AudioSettings, AuxBackend, AuxKind, LlamaParams};
 use crate::sdcpp_caps::SdcppCaps;
 
 use super::Class;
 
-mod aux;
+mod aux_models;
+mod llama_fit;
+mod podman;
+mod view;
 
-/// llama-server's port inside the container: fixed, because the published
-/// host port (§3.5) is what varies per model.
-const CONTAINER_PORT: u16 = 8080;
+pub use llama_fit::{Fitted, Left, LlamaPlacement, FITTED_LABEL};
 
-/// The label that records which `extra_run_args` a container was started
-/// with, as [`run_args_digest`]. Boot adoption compares it with what the
-/// model renders now: podman keeps a label exactly as written, where it
-/// normalizes the flags themselves, so the flags cannot be compared as text.
-pub const RUN_ARGS_LABEL: &str = "lmgw.run_args";
-
-/// The label naming the lmgw that started a container: its data dir's
-/// instance id (`backends::run::load_instance_id`). Two instances can share a
-/// `container_prefix` — every dev copy is `lmgw-dev` — and so the instance
-/// label; the reconciliation pass after boot (`registry/unheld.rs`) acts only
-/// on containers carrying its own owner, never on another instance's.
-pub const OWNER_LABEL: &str = "lmgw.owner";
-
-/// `argv` (a [`podman_run_argv`]) with [`OWNER_LABEL`]`=<owner>` after its
-/// other labels.
-pub fn stamp_owner(mut argv: Vec<String>, owner: &str) -> Vec<String> {
-    let at = argv
-        .iter()
-        .rposition(|a| a == "--label")
-        .map_or(argv.len().min(1), |i| i + 2);
-    argv.splice(
-        at..at,
-        ["--label".to_string(), format!("{OWNER_LABEL}={owner}")],
-    );
-    argv
-}
-
-/// `argv` (a [`podman_run_argv`]) with `--pull=never` right after its `run`
-/// verb (after any of Podman's global options before it):
-/// the registry's start of a model and a benchmark's container (machine-check
-/// design §5). Each downloaded a missing image first — admission before the
-/// gate, a benchmark before its GPU lease — so the start never fetches bytes
-/// while it holds a reservation or the card; an image gone in between fails
-/// the start with podman's own "image not known" instead of a download
-/// nobody can see. Not in [`podman_run_argv`] itself, which the rendered
-/// command line also uses: a line copied from it pulls what it needs.
-///
-/// # Panics
-///
-/// When `argv` has no `run` verb: every caller hands it a
-/// [`podman_run_argv`], and inserting the flag anywhere else would make it
-/// another command.
-pub fn never_pull(mut argv: Vec<String>) -> Vec<String> {
-    let at = argv
-        .iter()
-        .position(|a| a == "run")
-        .unwrap_or_else(|| panic!("never_pull takes a podman run argv, with its verb: {argv:?}"));
-    argv.insert(at + 1, "--pull=never".into());
-    argv
-}
-
-/// A digest of `podman run` flags, for [`RUN_ARGS_LABEL`]: the first eight
-/// bytes of the SHA-256 of their JSON list, in hex.
-pub fn run_args_digest(args: &[String]) -> String {
-    use sha2::{Digest, Sha256};
-    let json = serde_json::to_string(args).unwrap_or_default();
-    hex::encode(&Sha256::digest(json.as_bytes())[..8])
-}
+pub use podman::{
+    command_line, never_pull, podman_run_argv, run_args_digest, stamp_owner, OWNER_LABEL,
+    RUN_ARGS_LABEL,
+};
+pub use view::EngineView;
 
 /// Short llama-server aliases for flags that have a dedicated field, mapped
 /// to the long name the structured renderer emits — the dedup table §7 kept
@@ -110,6 +67,7 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("n", "n-predict"),
     ("predict", "n-predict"),
     ("ngl", "n-gpu-layers"),
+    ("ncmoe", "n-cpu-moe"),
     ("t", "threads"),
     ("b", "batch-size"),
     ("ub", "ubatch-size"),
@@ -124,6 +82,8 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("mm", "mmproj"),
     ("md", "model-draft"),
     ("ngld", "spec-draft-ngl"),
+    ("fitc", "fit-ctx"),
+    ("fitt", "fit-target"),
     ("rea", "reasoning"),
     ("rerank", "reranking"),
     ("embedding", "embeddings"),
@@ -145,12 +105,23 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
 /// does read it, because the X2 hazard does not reach it: it moves exactly
 /// the five keys an aux row has a field for and matches the canonical name
 /// against those five, so an alias of any other flag stays in `args`.
-pub(crate) fn canonical_key(key: &str) -> &str {
-    SHORT_ALIASES
-        .iter()
-        .find(|(short, _)| *short == key)
-        .map(|(_, long)| *long)
-        .unwrap_or(key)
+///
+/// `key` is the flag without its dashes. An underscore reads as a dash, as
+/// llama-server reads it: `common/arg.cpp` maps every `_` of a `--` argument
+/// to `-` before looking it up, so `--ctx_size` is `--ctx-size` and
+/// `--n_cpu_moe` is `--n-cpu-moe` (171e8846b). It does so only for `--`
+/// arguments, but no single-dash flag has an underscore in its name, so
+/// reading one here the same way changes no spelling llama-server accepts.
+pub(crate) fn canonical_key(key: &str) -> Cow<'_, str> {
+    let key: Cow<'_, str> = if key.contains('_') {
+        Cow::Owned(key.replace('_', "-"))
+    } else {
+        Cow::Borrowed(key)
+    };
+    match SHORT_ALIASES.iter().find(|(short, _)| *short == key) {
+        Some((_, long)) => Cow::Borrowed(long),
+        None => key,
+    }
 }
 
 /// The value of the llama-server flag `key` (its long name, as the renderer
@@ -202,7 +173,7 @@ pub enum LlamaArgs {
         gguf_path: String,
         kind: AuxKind,
         /// Rendered for [`AuxKind::Embed`] only, regardless of this value —
-        /// see `aux::push_aux_flags`.
+        /// see `aux_models::push_aux_flags`.
         pooling: Option<String>,
         ctx_size: Option<i64>,
         /// The row's fields of decision-models design §3.3, each rendered as
@@ -240,17 +211,28 @@ fn gguf_path(llama: &LlamaArgs) -> &str {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineArgs {
     Llama(LlamaArgs),
-    /// audio.cpp's container command is the same regardless of which model
-    /// is running (`server --config /config/<file>`, [`audio_container_args`]
-    /// mirrors `audio::podman_run_args`'s tail exactly) — the per-model
+    /// audio.cpp's command is the same regardless of which model is running
+    /// (`server --config /config/<file>` in a container) — the per-model
     /// selection is entirely in [`RenderSpec::config_mount`]'s `server.json`.
-    Audio,
+    /// The row and its engine settings ride along so a launcher whose view
+    /// is not the container's renders that file in its own view
+    /// ([`crate::runtime::audio::render_single_model_config_in`]).
+    Audio(Box<AudioArgs>),
     /// sd-server: argv again, but from two JSON maps rather than a struct
     /// (image-generation design §3, §4) — and with the flag *spellings* taken
     /// from the image's own `--help`, because sd-server mixes separators
     /// (`--clip_l`, `--diffusion-model`) in a way no substitution rule
     /// reproduces.
     Image(ImageArgs),
+}
+
+/// One audio row's `server.json` inputs: the row, and the class settings with
+/// the row's own backend and threads in effect
+/// ([`crate::runtime::descriptor::ModelRuntime::audio_settings`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioArgs {
+    pub settings: AudioSettings,
+    pub model: AudioModel,
 }
 
 /// One image row's argv inputs, plus the vocabulary its keys are spelled
@@ -271,6 +253,55 @@ pub struct ImageArgs {
     /// nothing at all, an array as the flag repeated once per element.
     pub args: serde_json::Map<String, serde_json::Value>,
     pub caps: Arc<SdcppCaps>,
+    /// What VRAM admission gave a start that fits only partially
+    /// (`vram::partial`, the registry entry's grant): its budget rendered as
+    /// `--max-vram` so sd-server sizes itself to that rather than to the
+    /// driver's live free memory, which includes what admission keeps free
+    /// for others, and both figures recorded on the container
+    /// ([`GRANT_LABEL`]) so boot adopts it. The flag is not rendered where
+    /// the row's `args` name `max_vram` themselves, or the build has no such
+    /// flag. `None` for every start that got the whole, and wherever no
+    /// start is rendered.
+    pub held: Option<HeldTo>,
+}
+
+/// A partial start's grant as its container carries it ([`ImageArgs::held`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldTo {
+    /// What admission reserved on the card for it, in bytes.
+    pub granted: u64,
+    /// The budget sd-server is held to (`--max-vram`), in bytes.
+    pub max_vram: u64,
+}
+
+/// The label that records a partial start's [`HeldTo`] on its container,
+/// `<granted>:<max_vram>` in bytes: what boot reconciliation renders the
+/// expected command from, and what the ledger charges the adopted entry.
+pub const GRANT_LABEL: &str = "lmgw.grant";
+
+impl HeldTo {
+    /// The [`GRANT_LABEL`] value.
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.granted, self.max_vram)
+    }
+
+    /// A [`GRANT_LABEL`] value read back; `None` for anything else.
+    pub fn parse(label: &str) -> Option<HeldTo> {
+        let (g, m) = label.trim().split_once(':')?;
+        Some(HeldTo {
+            granted: g.parse().ok()?,
+            max_vram: m.parse().ok()?,
+        })
+    }
+}
+
+/// `bytes` as sd-server's `--max-vram` value: GiB (sd.cpp's 1024³), to the
+/// thousandth, rounded down so sd-server is never given more than admission
+/// reserved — and never 0, which would mean "live free VRAM".
+pub fn max_vram_arg(bytes: u64) -> String {
+    const GIB: u128 = 1024 * 1024 * 1024;
+    let milli = (u128::from(bytes) * 1000 / GIB).max(1);
+    format!("{}.{:03}", milli / 1000, milli % 1000)
 }
 
 /// Caller-resolved inputs to render one model's container (§3.6). Decoupled
@@ -344,6 +375,12 @@ pub struct RenderSpec {
     /// caller (`descriptor::render_spec`, from `class`) — the registry never
     /// guesses at it.
     pub health_path: &'static str,
+    /// What VRAM admission fitted a llama-server chat start to in place of
+    /// llama.cpp's `--fit` (`vram::partial::llama`): rendered over the row's
+    /// params with `--fit off`, and recorded on the container
+    /// ([`FITTED_LABEL`]) so boot adopts it. `None` for every other start,
+    /// and wherever no start is rendered.
+    pub fitted: Option<Fitted>,
 }
 
 impl RenderSpec {
@@ -409,48 +446,29 @@ pub fn args_to_lines(args: &[String]) -> String {
     lines.join("\n")
 }
 
-/// Render one model's full container command line as a single copyable
-/// string: `podman run … <image> <engine args…>`, shell-quoted.
-///
-/// The honest answer to "what will actually be run", which is what the
-/// deleted `preset_section` used to be for (§8: local_edit's "Rendered
-/// preset" panel becomes "Rendered command line").
-pub fn command_line(spec: &RenderSpec) -> String {
-    std::iter::once("podman".to_string())
-        .chain(podman_run_argv(spec))
-        .map(|tok| {
-            shlex::try_quote(&tok)
-                .map(|q| q.into_owned())
-                .unwrap_or(tok)
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Rewrite a models-dir-relative path onto the `/models` mount, exactly like
-/// the preset's `path_kv!` did.
-fn mount_path(p: &str) -> String {
-    format!("/models/{}", p.trim_start_matches('/'))
-}
-
 /// Render the llama-server CLI args for one model (not including `podman
 /// run …` — see [`podman_run_argv`] for the full wrapping command). Empty for
 /// an [`EngineArgs::Audio`] spec — audio has no CLI-flag surface at all; call
 /// [`render_engine_args`] to dispatch on the engine correctly instead of
 /// calling this directly unless the spec is already known to be llama-shaped.
 pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
+    llama_args_in(spec, &EngineView::container())
+}
+
+/// [`render_llama_args`] in `view`.
+fn llama_args_in(spec: &RenderSpec, view: &EngineView) -> Vec<String> {
     let EngineArgs::Llama(llama) = &spec.engine else {
         return Vec::new();
     };
     let mut out: Vec<String> = vec![
         "-m".into(),
-        mount_path(gguf_path(llama)),
+        view.model_path(gguf_path(llama)),
         "--alias".into(),
         spec.model_id.clone(),
         "--host".into(),
-        "0.0.0.0".into(),
+        view.listen_host.clone(),
         "--port".into(),
-        CONTAINER_PORT.to_string(),
+        view.listen_port.to_string(),
     ];
     // Always-emitted keys are claimed up front so a freeform arg cannot
     // relabel the model or repoint host/port, the same protection
@@ -463,7 +481,13 @@ pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
 
     match llama {
         LlamaArgs::Chat { params, args, .. } => {
-            push_chat_params(&mut out, params, &mut taken);
+            let fitted = spec.fitted.map(|f| {
+                let mut p = (**params).clone();
+                f.placement.apply(&mut p);
+                p
+            });
+            let params: &LlamaParams = fitted.as_ref().unwrap_or(params);
+            push_chat_params(&mut out, params, &mut taken, view);
             push_freeform_args(&mut out, args, &taken);
         }
         LlamaArgs::Aux {
@@ -478,7 +502,7 @@ pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
             threads,
             args,
         } => {
-            let flags = aux::AuxFlags {
+            let flags = aux_models::AuxFlags {
                 kind: *kind,
                 pooling: pooling.as_deref(),
                 ctx_size: *ctx_size,
@@ -488,7 +512,7 @@ pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
                 backend: *backend,
                 threads: *threads,
             };
-            aux::push_aux_flags(&mut out, flags, &mut taken);
+            aux_models::push_aux_flags(&mut out, flags, &mut taken, view);
             push_freeform_args(&mut out, args, &taken);
         }
     }
@@ -499,12 +523,17 @@ pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
 /// Mirrors `audio::podman_run_args`'s tail exactly (`server --config
 /// /config/<CONFIG_FILE_NAME>`) — audio.cpp takes no model-selecting flag,
 /// the mounted `server.json` at that path is the model.
-fn render_audio_args() -> Vec<String> {
-    vec![
-        "server".into(),
+fn audio_args_in(view: &EngineView) -> Vec<String> {
+    let config = [
         "--config".into(),
-        format!("/config/{}", super::audio::CONFIG_FILE_NAME),
-    ]
+        view.config_path(super::audio::CONFIG_FILE_NAME),
+    ];
+    match view.in_container {
+        true => std::iter::once("server".to_string())
+            .chain(config)
+            .collect(),
+        false => config.into(),
+    }
 }
 
 /// sd-server's container command tail (image-generation design §3):
@@ -537,6 +566,11 @@ fn render_audio_args() -> Vec<String> {
 /// the pre-flight (`ops::image_model_problems`) reports them at save time, and
 /// this is the backstop for a row that reached a start anyway.
 pub fn render_image_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
+    image_args_in(spec, &EngineView::container())
+}
+
+/// [`render_image_args`] in `view`.
+fn image_args_in(spec: &RenderSpec, view: &EngineView) -> Result<Vec<String>, String> {
     let EngineArgs::Image(img) = &spec.engine else {
         return Ok(Vec::new());
     };
@@ -573,9 +607,9 @@ pub fn render_image_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
 
     let mut out: Vec<String> = vec![
         "--listen-ip".into(),
-        "0.0.0.0".into(),
+        view.listen_host.clone(),
         "--listen-port".into(),
-        CONTAINER_PORT.to_string(),
+        view.listen_port.to_string(),
         "--eager-load".into(),
     ];
     let mut taken: BTreeSet<String> = super::image::CLAIMED_FLAGS
@@ -590,7 +624,7 @@ pub fn render_image_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
             .flag_for(key)
             .ok_or_else(|| format!("this image has no '{key}' flag to point at a directory"))?;
         out.push(flag.to_string());
-        out.push(mount_path(&super::image::dir_path_from(
+        out.push(view.model_path(&super::image::dir_path_from(
             &img.files,
             &caps_key_in(caps, &img.files, key),
             default,
@@ -618,7 +652,7 @@ pub fn render_image_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
             ));
         };
         out.push(flag.flag.clone());
-        out.push(mount_path(path));
+        out.push(view.model_path(path));
     }
 
     // Runtime + generation flags. The stored JSON type decides the shape: a
@@ -637,6 +671,13 @@ pub fn render_image_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
             continue;
         }
         push_image_value(&mut out, &flag.flag, value)?;
+    }
+    // What admission gave a partial start: the row's own `max_vram` wins.
+    if let (Some(held), Some(flag)) = (img.held, caps.get("max_vram")) {
+        if taken.insert(flag.key.clone()) {
+            out.push(flag.flag.clone());
+            out.push(max_vram_arg(held.max_vram));
+        }
     }
     Ok(out)
 }
@@ -712,10 +753,24 @@ fn unknown_key_message(caps: &SdcppCaps, what: &str, key: &str) -> String {
 /// [`render_image_args`] gives the start path, which is where it belongs — a
 /// start must fail loudly, a comparison must only fail to match.
 pub fn render_engine_args(spec: &RenderSpec) -> Vec<String> {
+    engine_argv(spec, &EngineView::container()).unwrap_or_default()
+}
+
+/// The engine's own argv for `spec`, in `view` (Windows design §4.1): the
+/// half of a render every launcher shares. [`render_engine_args`] is this in
+/// a container's view; a launcher that starts the engine as a host process
+/// passes the host directories and port. `Err` only for an image row that
+/// cannot be rendered ([`render_image_args`]).
+///
+/// audio.cpp's `server.json`, which names the model files and the listen
+/// address, renders in a view of its own
+/// ([`crate::runtime::audio::render_single_model_config_in`]). Not in `view`
+/// yet: paths a row's freeform args spell themselves.
+pub fn engine_argv(spec: &RenderSpec, view: &EngineView) -> Result<Vec<String>, String> {
     match &spec.engine {
-        EngineArgs::Llama(_) => render_llama_args(spec),
-        EngineArgs::Audio => render_audio_args(),
-        EngineArgs::Image(_) => render_image_args(spec).unwrap_or_default(),
+        EngineArgs::Llama(_) => Ok(llama_args_in(spec, view)),
+        EngineArgs::Audio(_) => Ok(audio_args_in(view)),
+        EngineArgs::Image(_) => image_args_in(spec, view),
     }
 }
 
@@ -723,7 +778,12 @@ pub fn render_engine_args(spec: &RenderSpec) -> Vec<String> {
 /// `push_params_as_ini` uses, so a diff between the two renderers stays a
 /// diff of syntax rather than of coverage. Returns nothing — `taken` is
 /// filled in place so [`push_freeform_args`] can see it.
-fn push_chat_params(out: &mut Vec<String>, p: &LlamaParams, taken: &mut BTreeSet<String>) {
+fn push_chat_params(
+    out: &mut Vec<String>,
+    p: &LlamaParams,
+    taken: &mut BTreeSet<String>,
+    view: &EngineView,
+) {
     macro_rules! value_flag {
         ($key:expr, $v:expr) => {
             if let Some(v) = $v {
@@ -737,7 +797,7 @@ fn push_chat_params(out: &mut Vec<String>, p: &LlamaParams, taken: &mut BTreeSet
         ($key:expr, $v:expr) => {
             if let Some(p) = $v.as_deref().filter(|p: &&str| !p.is_empty()) {
                 out.push(format!("--{}", $key));
-                out.push(mount_path(p));
+                out.push(view.model_path(p));
                 taken.insert($key.to_string());
             }
         };
@@ -754,6 +814,8 @@ fn push_chat_params(out: &mut Vec<String>, p: &LlamaParams, taken: &mut BTreeSet
     value_flag!("ctx-size", &p.ctx_size);
     value_flag!("n-predict", &p.n_predict);
     value_flag!("n-gpu-layers", &p.n_gpu_layers);
+    value_flag!("n-cpu-moe", &p.n_cpu_moe);
+    value_flag!("moe-cache-mib", &p.moe_cache_mib);
     value_flag!("threads", &p.threads);
     value_flag!("batch-size", &p.batch_size);
     value_flag!("ubatch-size", &p.ubatch_size);
@@ -860,7 +922,7 @@ fn push_freeform_args(out: &mut Vec<String>, args: &[String], taken: &BTreeSet<S
             Some((k, v)) => (k, Some(v)),
             None => (key_part, None),
         };
-        let dup = taken.contains(key) || taken.contains(canonical_key(key));
+        let dup = taken.contains(key) || taken.contains(&*canonical_key(key));
         if inline_value.is_some() {
             if !dup {
                 out.push(tok.clone());
@@ -878,59 +940,4 @@ fn push_freeform_args(out: &mut Vec<String>, args: &[String], taken: &BTreeSet<S
         }
         i += if takes_value { 2 } else { 1 };
     }
-}
-
-/// Build the full `podman run` argv for one model's container (§3.3 + §3.6 +
-/// the prod template, §10.4). Pure; unit-tested.
-///
-/// No `--rm`: a stopped container keeps its logs for post-mortem, and
-/// `--replace` collects it on the next start (§3.6). Everything after the
-/// image name is [`render_engine_args`]'s output, handed straight to the
-/// image's entrypoint. [`RenderSpec::globals`] come first, before `run`:
-/// Podman takes a global option only there.
-pub fn podman_run_argv(spec: &RenderSpec) -> Vec<String> {
-    let mut args: Vec<String> = spec.globals.clone();
-    args.extend(["run".into(), "-d".into(), "--replace".into()]);
-    if spec.init {
-        args.push("--init".into());
-    }
-    args.extend([
-        "--name".into(),
-        spec.container_name.clone(),
-        "--label".into(),
-        format!("lmgw.instance={}", spec.container_prefix),
-        "--label".into(),
-        format!("lmgw.class={}", spec.class.as_str()),
-        "--label".into(),
-        format!("lmgw.model={}", spec.model_id),
-        "--label".into(),
-        format!("lmgw.engine={}", spec.class.engine()),
-        "--label".into(),
-        format!("{RUN_ARGS_LABEL}={}", run_args_digest(&spec.extra_run_args)),
-    ]);
-    args.extend(spec.extra_run_args.iter().cloned());
-    // Loopback only: every client reaches a model through lmgw's own
-    // routes, which carry its auth, policy and logging — a port published on
-    // every interface would hand the LAN an unauthenticated llama-server.
-    args.extend([
-        "-p".into(),
-        format!("127.0.0.1:{}:{}", spec.host_port, CONTAINER_PORT),
-        "-v".into(),
-        format!("{}:/models:ro", spec.models_dir.trim_end_matches('/')),
-    ]);
-    if let Some(cfg) = &spec.config_mount {
-        args.push("-v".into());
-        args.push(format!("{}:/config:ro", cfg.display()));
-    }
-    // Last of the podman-side flags, immediately before the image: the
-    // image's own ENTRYPOINT is what this replaces, and putting it anywhere
-    // else in the line would still work but would read as if it belonged to
-    // the mount above it.
-    if let Some(bin) = &spec.entrypoint {
-        args.push("--entrypoint".into());
-        args.push(bin.clone());
-    }
-    args.push(spec.image.clone());
-    args.extend(render_engine_args(spec));
-    args
 }

@@ -171,7 +171,8 @@ fn parts(p: &Path) -> Vec<OsString> {
         .collect()
 }
 
-#[cfg(test)]
+// Every case is a symlink's.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

@@ -282,7 +282,7 @@ The new `proxy/systemone.rs` gets a `CAPABILITY_TABLE` row
 5. Build `POST {upstream.base}/systemone` with the upstream's bearer and extra headers. The body is
    the client's object with `model` set to the route's upstream model. The builder is a new child
    module `egress/openai_wire/systemone.rs`, beside the shared rerank builder
-   (`egress/openai_wire/aux.rs:149`). The `openai` and `llama_cpp` protocols both use it. A local
+   (`egress/openai_wire/aux_models.rs:149`). The `openai` and `llama_cpp` protocols both use it. A local
    route goes through `vram::send_local`, as rerank does.
 6. Relay status, content type, `Retry-After` and body as the upstream sent them (§2.7). The
    response is non-streaming. `Retry-After` is relayed by `proxy/relay.rs` (`RelayedHead`), shared
@@ -713,7 +713,7 @@ be far longer than the ubatch, and a long option list is what needs the 2048.
 `headroom_mb` setting (default 1024), and the plan's rationale told the owner to raise the setting
 when the buffer exceeded it. The aux footprint now carries a compute term: `vram/compute.rs`
 derives llama.cpp's buffer from the header and the row's ubatch, batch, ctx and flash attention,
-and `vram/plan/aux.rs` charges it (Appendix C has the formula and its measurements). Chat
+and `vram/plan/aux_models.rs` charges it (Appendix C has the formula and its measurements). Chat
 estimates were unchanged then; since 2026-10-14 a chat row is charged its compute buffers too
 (Appendix C.2).
 
@@ -836,7 +836,7 @@ option and the five fields: a CPU switch with threads, ubatch and batch, and the
 editor hides `pooling` for decision rows. The Test button runs §3.7. The API reference page's
 tester picks models for the route through `model_task::DECISION`.
 
-*As built (WP6):* the aux editor (`model_editors/aux.rs`, with `aux_fields.rs`, `aux_plan.rs` and
+*As built (WP6):* the aux editor (`model_editors/aux_models.rs`, with `aux_fields.rs`, `aux_plan.rs` and
 `aux_save.rs`) edits the five fields, says the row's public name under its kind's prefix and its
 route (`lmgw-api-types::public_names`, the gateway's own rule), and hides `pooling` for rerank and
 decision rows. A blank context names `ctx_size` in `clear`. "Fill from plan" shows each planned
@@ -1355,7 +1355,7 @@ The owner decided all of them on 2026-10-13, and they were built the same day (D
   2026-10-13: yes.* Before, an embed or rerank plan set no ubatch, so such a row took
   llama-server's 512 tokens per input whatever its context. As built:
   - The aux plan sets both to the trained ctx for an embed or rerank model whose input llama-server
-    cannot split. The rule is llama.cpp's `can_split`, as `runtime::aux::splits_input`, read from
+    cannot split. The rule is llama.cpp's `can_split`, as `runtime::aux_models::splits_input`, read from
     the header's `attention.causal` and the pooling: only a last-token embedder or a causal
     reranker splits. That covers embeddinggemma, whose header has no `attention.causal`, through
     its mean pooling. Code: `modelinfo/aux_batch.rs`.
@@ -1384,7 +1384,7 @@ The owner decided all of them on 2026-10-13, and they were built the same day (D
     largest per-layer `feed_forward_length`, `n_deepstack_layers`, the output head's bytes;
     `gguf/tensors.rs` reads tensor sizes from the data offsets) plus the row's ubatch, batch, ctx
     and flash attention.
-  - `vram/plan/aux.rs` charges it on GPU aux rows. A row with `-ngl 0` and no `backend` whose run
+  - `vram/plan/aux_models.rs` charges it on GPU aux rows. A row with `-ngl 0` and no `backend` whose run
     args pass a GPU device is charged its compute buffer plus its projector (it was 0).
     `backend: cpu`, and `-ngl 0` without a device, stay at 0.
   - llama.cpp's four false values for `-fa` (off, disabled, false, 0) count as off. A header
@@ -1476,7 +1476,7 @@ Two more entries came out of the same work and are not lettered items:
   and that scales with the ubatch and batch. The owner wanted it filed as a separate fix, outside
   this slice (owner item b). *Fixed 2026-10-13 (owner item b):* the aux footprint charges the
   compute buffer, and a row at `-ngl 0` with a GPU device is charged it plus its projector
-  (`vram/compute.rs`, `vram/plan/aux.rs`; Appendix C).
+  (`vram/compute.rs`, `vram/plan/aux_models.rs`; Appendix C).
 - **A relayed 429 or 503 loses `Retry-After`.** `/v1/systemone` relays status, content type and
   body, and no other header (§2.1 step 6), so TypeSafe's 429 or an OpenRouter rate limit reaches the
   client without the upstream's `Retry-After`. `/tokenize` relays the same way. Relaying that one
@@ -1847,6 +1847,102 @@ charged 1.5 GiB of weights that never reach the card. llama.cpp applies `--overr
 these tensors too, so a row whose args override any tensor to a device buffer keeps them charged,
 and its note says why.
 
+**Tensors kept in host memory** (2026-11-09, `vram/plan/chat/offload.rs`, read in llama.cpp
+171e8846b: `common/arg.cpp`, `llama-model-loader.cpp`, `ggml-backend.cpp`). llama.cpp turns a
+row's tensor overrides into one ordered list of `(regex, buffer)` pairs, in argv order, and a
+weight gets the buffer of the first pattern found anywhere in its name (`std::regex_search`). The
+footprint takes off the card every tensor whose first match is the CPU, matched by name against
+the tensor list of every part of a split set (`ModelSummary::tensor_list`, each tensor's bytes from
+its data offsets):
+- the chat row's `n_cpu_moe` field and `--n-cpu-moe N` / `-ncmoe N`: one pattern
+  `blk\.{i}\.ffn_(up|down|gate|gate_up)_(ch|)exps` per layer `i < N` (`LLM_FFN_EXPS_REGEX`), the
+  routed experts. Shared experts (`_shexp`) and the router (`ffn_gate_inp`) stay on the card. The
+  field renders before the freeform args, so its patterns come first, and a copy of the flag in the
+  args is dropped beside it, as for every field;
+- `--cpu-moe` / `-cmoe`: the same pattern for every layer; `--n-cpu-ffn N`: a dense FFN's
+  `blk\.{i}\.ffn_(up|down|gate)\.`;
+- `--override-tensor` / `-ot` `pattern=buffer,…`, matched with the `fancy-regex` crate, which reads
+  ECMAScript's lookaheads and backreferences as `std::regex` does. A pattern it cannot compile
+  stays on the safe side: one to the CPU keeps nothing off the card, and one to a device may claim
+  any tensor ahead of the overrides after it, so nothing a later override keeps in host memory is
+  taken off the card and the input embeddings are charged (`-ot "<unreadable>=CUDA0" --cpu-moe`
+  charges every expert). The note says what that leaves charged. An override to a device charges
+  the host-kept input embeddings only when it matches them (it used to charge them for any device
+  override);
+- a draft model's own list (`--spec-draft-n-cpu-moe`, `--spec-draft-cpu-moe`,
+  `--spec-draft-override-tensor` and their aliases) against the draft model's header. The draft's
+  header is its named file's, so a split draft model's later parts are charged to the card, and
+  the note says so.
+
+Every spelling counts: the aliases, and underscores for dashes (`--n_cpu_moe`, `--override_tensor`,
+`--moe_cache_mib`), which llama.cpp reads the same (`common/arg.cpp` maps every `_` of a `--`
+argument to `-`). The renderer's dedup, the shape and the dedicated-field warning read them through
+one function (`argv::canonical_key`), so `--ctx_size` beside the `ctx_size` field is dropped like
+`--ctx-size`. llama.cpp refuses `--n-cpu-moe=7`; lmgw reads it the same but never renders it.
+
+**The expert cache.** `--moe-cache-mib N`, the chat row's `moe_cache_mib` field (a copy in the
+args counts when the field is unset), keeps the most used of the experts held in host memory in a
+cache of N MiB on the card. It is charged to the weights in full whenever the row keeps routed
+experts (`LLM_FFN_EXPS_REGEX` tensors) in host memory, or may (an unreadable pattern, a header
+without a tensor list), and not otherwise, which the note says. The
+flag is newer than the llama.cpp source read for this section; its meaning is taken from its
+`--help` line ("GPU cache size in MiB for the MoE experts kept in the CPU", default 0, off). A draft
+model's twin of it is not counted yet. *Measured 2026-11-09* (the Qwen3.8 file below, image official-master, ubatch 1024, ctx 262144, q8_0 cache, on a 24 GiB test card, 22.5 GiB usable, with about 2.7 GiB in use by other programs): `--cpu-moe --moe-cache-mib 6144` loads at about 21.8 GiB used, and
+`--n-cpu-moe 43` without a cache at about 21.7 GiB.
+
+The note names the bytes each override keeps off the card, an override that matches nothing, and a
+split set whose later parts' headers weren't read (their tensors stay charged).
+
+**Op offload.** A matrix product whose weight sits in host memory runs on the card when its batch
+is at least `GGML_OP_OFFLOAD_MIN_BATCH` tokens (32 by default in the CUDA backend), and the
+scheduler copies the weight into the card's compute buffer for it, one weight per split (a new
+split starts at each, so the copy's memory is reused; `--no-op-offload` turns it off). The reserve
+graph is the ubatch's, so a context whose ubatch reaches 32 is charged the largest host-kept weight
+of the layers it runs on top of its compute buffer: the main context the main layers', an MTP
+context its MTP layers', a draft context the draft model's. A weight outside the layers (an
+`-ot output=CPU` head) counts for the main and the MTP context both. It is an upper estimate: the copy
+lives only as long as its product, not necessarily at the widest phase, and a weight type llama.cpp
+repacks for the CPU (`CPU_REPACK` is not a host buffer) is computed there without a copy.
+
+**Sparse attention (`qwen4exp`).** Qwen3.8-Flash-Next's full-attention layers attend only to the
+cells an indexer picks (`src/models/qwen4exp.cpp`, `llama-memory-hybrid-idx.cpp`, 171e8846b;
+`vram/compute/qsa.rs`), which costs two things the rest of this formula did not know:
+- *the indexer's cache*: one key head of `attention.indexer.key_length` per cell, no V, at the K
+  cache type, in every full-attention layer, over the attention cache's cells. 408 MiB at 262,144
+  cells, q8_0 and 12 layers, charged beside the KV cache;
+- *the scoring*: every cell gets its block's score (`compress_ratios`, blocks of 4) as an f32
+  tensor of every cell by every batch token (`get_rows`), made contiguous into a second one
+  (`cont`), then added to an f32 copy of the mask before the top-k. Neither op runs in place, so two
+  are live together: 8 bytes per cell and token, plus the per-block bias input (4 bytes per block
+  and token). At a long context it is the layer's widest phase, 1,152 / 2,304 / 4,608 MiB at
+  ubatch 512 / 1024 / 2048 and 262,144 cells, against a 512 MiB copy plus activations for the
+  attention after it. The term is read from the graph and from `ggml-alloc`'s in-place rules at
+  171e8846b, not from a compute-buffer line; the image may build it differently.
+
+A test case, `unsloth/Qwen3.8-Flash-Next-GGUF` UD-IQ4_XS (48 layers, 512 experts, split in
+four parts), read from its headers on 2026-11-09: routed experts 56.24 GiB, 60.10 GiB of weights on
+the card without offload (its 26.8 GiB of per-layer embeddings stay on the host), the largest
+expert matrix 550 MiB (the op-offload copy). *Measured 2026-11-09* by direct llama-server probes, image official-master, a 24 GiB test card, 23,028 MiB usable, with about 2,765 MiB in use by other programs: ctx 262144, q8_0 K and V, flash attention on, `-ngl 999`, 16 threads, the F16 projector,
+`parallel` unset (four slots over a unified cache). "Process" is the card's used memory less what other programs hold. The rows are in the table below, dated; "before" is the footprint without the
+indexer's cache and the scoring, "now" with them, and
+`offload/tests.rs::measured_qwen38_rows_are_covered` pins them. Now's terms: weights
+12894 / 10669 / 10963 (6144 of it the cache) / 7382 MiB at `--n-cpu-moe 41` / 43 / `--cpu-moe` /
+46; KV 4120 MiB in every row (3264 attention, 448 recurrent state, 408 the indexer's); compute 1958
+/ 3366 / 6182 MiB at ubatch 512 / 1024 / 2048 (550 of it the op-offload copy).
+
+Before, every row was charged 1.5 to 4.0 GiB less than the process took (0.5 to 2.9 GiB below it
+with the 1 GiB headroom), and the row that ran out of memory would have been admitted. Now, with
+the headroom, each loaded row is covered (by 217 to 1197 MiB) and the failing one is refused:
+21996 MiB against the 20263 the card had. The rest of the gap between footprint and process is the
+CUDA context, the projector's buffer and the CUDA pool's temporaries (the top-k's), which the
+headroom covers. The slope between ubatch 1024 and 2048 is smaller than the scoring term says (the
+ubatch 2048 row is over-charged by 1.2 GiB), so either the image reuses more of those tensors than
+171e8846b's graph suggests or the desktop's share differed between probes: not measured yet with
+`-lv 4` compute-buffer lines, which would settle it.
+
+The ladder rung plan (`/api/ladder-rung-plan`) asks with the base row's `n_cpu_moe` and
+`moe_cache_mib`; it still leaves out the other shape fields (ubatch, slots, speculative types).
+
 **Estimate against the process**, for the rows probed with their real argv (MiB):
 
 | row | estimate before | estimate now | process | process − now |
@@ -1860,6 +1956,14 @@ and its note says why.
 | readerlm-v2 | 1807 | 10044 | 10472 | 428 |
 | lfm2.5-8b | 8593 | 10308 | 10706 | 398 |
 | ling-3.0-tiny | 5388 | 5431 | 5942 | 511 |
+| Qwen3.8-Flash-Next UD-IQ4_XS, `--n-cpu-moe 41`, ub 512 (2026-11-09) | 18008 | 18973 | 19544 | 571 |
+| the same, `--n-cpu-moe 43`, ub 1024 (2026-11-09) | 16122 | 18156 | 18963 | 807 |
+| the same, `--cpu-moe --moe-cache-mib 6144`, ub 1024 (2026-11-09) | 16416 | 18450 | 19082 | 632 |
+| the same, `--n-cpu-moe 46`, ub 2048 (2026-11-09) | 13512 | 17684 | 17511 | -173 |
+| the same, `--n-cpu-moe 43`, ub 2048 (2026-11-09) | 16800 | 20972 | out of memory above 20263 | refused |
+
+The 2026-11-09 rows are the "Sparse attention" paragraph's above; their "process" is the card's
+used memory less the desktop's, not `nvidia-smi`'s per-process figure.
 
 What remains is the CUDA context (about 400 to 450 MiB per process), a projector's buffer and,
 for Ling and LFM2, a recurrent state the header has no `ssm.*` keys to size (77 MiB and 0.3 MiB,

@@ -54,16 +54,9 @@ struct OldRow {
 }
 
 pub(in crate::store) async fn one_fallback_notice(pool: &SqlitePool) -> anyhow::Result<()> {
-    if !table_exists(pool, "_sqlx_migrations").await?
-        || migration_applied(pool, ONE_FALLBACK_MIGRATION).await?
-        || !table_exists(pool, "settings").await?
-    {
+    let Some(raw) = settings_ahead_of_0095(pool).await? else {
         return Ok(());
-    }
-    let raw: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'settings'")
-            .fetch_optional(pool)
-            .await?;
+    };
     let global = global_as_loaded(pool, raw.as_deref()).await?;
     let settings = crate::store::snapshot::settings_from_row(raw.as_deref());
 
@@ -148,11 +141,62 @@ pub(in crate::store) async fn one_fallback_notice(pool: &SqlitePool) -> anyhow::
     Ok(())
 }
 
+/// The stored settings blob while 0095 is still to run (`Some`, the blob
+/// itself `None` without a row); `None` when 0095 does not apply.
+async fn settings_ahead_of_0095(pool: &SqlitePool) -> anyhow::Result<Option<Option<String>>> {
+    if !table_exists(pool, "_sqlx_migrations").await?
+        || migration_applied(pool, ONE_FALLBACK_MIGRATION).await?
+        || !table_exists(pool, "settings").await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'settings'")
+            .fetch_optional(pool)
+            .await?,
+    ))
+}
+
+/// 0095's refusal alone, reading only: what a container start asks ahead
+/// of its copy (`before_copy`), so a start this refuses makes none.
+pub(in crate::store) async fn refuse_unreadable_global(pool: &SqlitePool) -> anyhow::Result<()> {
+    let Some(raw) = settings_ahead_of_0095(pool).await? else {
+        return Ok(());
+    };
+    judge_global(pool, raw.as_deref()).await.map(|_| ())
+}
+
+/// What [`judge_global`] found: the global as the loader read it, or a
+/// blank the SQL would not read as one, to even out first.
+enum Judged {
+    Global(Option<String>),
+    EvenOut,
+}
+
 /// The global hold fallback as the loader read it — `None` when unset,
 /// blank, or in a blob the loader did not read as `Settings` — after
 /// refusing the start where the migration's SQL would read it differently.
 async fn global_as_loaded(pool: &SqlitePool, raw: Option<&str>) -> anyhow::Result<Option<String>> {
-    let Some(raw) = raw else { return Ok(None) };
+    match judge_global(pool, raw).await? {
+        Judged::Global(g) => Ok(g),
+        // Blank to the loader, not to SQL's TRIM: even it out first.
+        Judged::EvenOut => {
+            sqlx::query(
+                "UPDATE settings SET value = json_set(value, '$.hold.fallback_alias', NULL) \
+                 WHERE key = 'settings'",
+            )
+            .execute(pool)
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+/// [`global_as_loaded`]'s reading and its refusal, writing nothing.
+async fn judge_global(pool: &SqlitePool, raw: Option<&str>) -> anyhow::Result<Judged> {
+    let Some(raw) = raw else {
+        return Ok(Judged::Global(None));
+    };
     // As text: a global that is a JSON number or boolean is copied by the
     // SQL as its text, and is the refusal below, not a type error here.
     let sql: Option<String> = sqlx::query_scalar(
@@ -196,18 +240,9 @@ async fn global_as_loaded(pool: &SqlitePool, raw: Option<&str>) -> anyhow::Resul
                 None => format!("'{}'", sql.unwrap_or_default()),
             }
         ),
-        // Blank to the loader, not to SQL's TRIM: even it out first.
-        (Some(g), true) if g.trim().is_empty() => {
-            sqlx::query(
-                "UPDATE settings SET value = json_set(value, '$.hold.fallback_alias', NULL) \
-                 WHERE key = 'settings'",
-            )
-            .execute(pool)
-            .await?;
-            Ok(None)
-        }
-        (Some(g), _) if g.trim().is_empty() => Ok(None),
-        _ => Ok(global),
+        (Some(g), true) if g.trim().is_empty() => Ok(Judged::EvenOut),
+        (Some(g), _) if g.trim().is_empty() => Ok(Judged::Global(None)),
+        _ => Ok(Judged::Global(global)),
     }
 }
 

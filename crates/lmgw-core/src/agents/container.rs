@@ -148,6 +148,7 @@ pub enum Signal {
     Kill,
 }
 
+#[cfg(unix)]
 impl Signal {
     /// The signal number the kernel knows it by.
     pub fn raw(self) -> i32 {
@@ -378,22 +379,11 @@ impl Spawner for TokioSpawner {
                                 // once tokio has reaped it — then there is nothing
                                 // left to signal, and the next pass reports how it
                                 // ended.
-                                if let Some(pid) = child.id() {
-                                    send_signal(pid, sig);
-                                }
+                                deliver(&mut child, sig);
                             }
                         }
                     };
-                    waited.map(|s| {
-                        use std::os::unix::process::ExitStatusExt;
-                        match (s.code(), s.signal()) {
-                            (Some(c), _) => Exit::Code(c),
-                            (None, Some(sig)) => Exit::Signal(sig),
-                            // Neither: not a shape Unix produces, but a `-1` that
-                            // claimed to be an exit status would be a lie.
-                            (None, None) => Exit::Signal(0),
-                        }
-                    })
+                    waited.map(exit_of)
                 }),
             })
         })
@@ -419,9 +409,54 @@ impl Spawner for TokioSpawner {
     }
 }
 
+#[cfg(unix)]
+fn deliver(child: &mut tokio::process::Child, sig: Signal) {
+    if let Some(pid) = child.id() {
+        send_signal(pid, sig);
+    }
+}
+
+/// Windows has no SIGTERM: a [`Signal::Term`] is not delivered there (the
+/// [`Signal::Kill`] that [`terminate`] sends after its grace stops the
+/// child), and a Kill terminates the process itself. Agents and engine
+/// builds do not run on Windows yet (Windows design §4.5).
+#[cfg(windows)]
+fn deliver(child: &mut tokio::process::Child, sig: Signal) {
+    match sig {
+        Signal::Term => tracing::debug!("SIGTERM has no Windows equivalent; not delivered"),
+        Signal::Kill => {
+            if let Err(e) = child.start_kill() {
+                tracing::debug!("stopping the child: {e}");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn exit_of(s: std::process::ExitStatus) -> Exit {
+    use std::os::unix::process::ExitStatusExt;
+    match (s.code(), s.signal()) {
+        (Some(c), _) => Exit::Code(c),
+        (None, Some(sig)) => Exit::Signal(sig),
+        // Neither: not a shape Unix produces, but a `-1` that
+        // claimed to be an exit status would be a lie.
+        (None, None) => Exit::Signal(0),
+    }
+}
+
+/// A Windows process always ends with a code.
+#[cfg(windows)]
+fn exit_of(s: std::process::ExitStatus) -> Exit {
+    match s.code() {
+        Some(c) => Exit::Code(c),
+        None => Exit::Signal(0),
+    }
+}
+
 /// `kill(2)` one pid. A failure is logged, not returned: the only one that
 /// can happen to a child we still own is ESRCH (it exited between the check
 /// and the call), and the status future reports that exit anyway.
+#[cfg(unix)]
 fn send_signal(pid: u32, sig: Signal) {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return;
@@ -765,6 +800,7 @@ pub fn runs_root(data_dir: &Path, prefix: &str) -> (PathBuf, bool) {
 ///
 /// `DirBuilder::mode` sets the mode at creation rather than after it, so there
 /// is no window in which the directory exists with the umask's permissions.
+#[cfg(unix)]
 fn mkdir_0700(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
@@ -772,6 +808,16 @@ fn mkdir_0700(path: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(format!("creating {}: {e}", path.display())),
     }
+}
+
+/// A run directory holds the run's secrets; its owner and access are not
+/// checked on Windows yet (Windows design §4.4), so none is made there.
+#[cfg(not(unix))]
+fn mkdir_0700(path: &Path) -> Result<(), String> {
+    Err(format!(
+        "creating the private run directory {} is not supported on Windows yet",
+        path.display()
+    ))
 }
 
 impl RunDir {
@@ -818,6 +864,7 @@ impl RunDir {
     }
 
     /// One `0600` file in the run directory.
+    #[cfg(unix)]
     pub fn write(&self, name: &str, body: &str) -> Result<PathBuf, String> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -832,6 +879,17 @@ impl RunDir {
         f.write_all(body.as_bytes())
             .map_err(|e| format!("writing {}: {e}", path.display()))?;
         Ok(path)
+    }
+}
+
+#[cfg(not(unix))]
+impl RunDir {
+    /// Never reached: [`RunDir::create`] refuses on Windows.
+    pub fn write(&self, name: &str, _body: &str) -> Result<PathBuf, String> {
+        Err(format!(
+            "writing {} privately is not supported on Windows yet",
+            self.path.join(name).display()
+        ))
     }
 }
 
@@ -1077,9 +1135,16 @@ pub fn loopback_note(bind_addr: &str) -> Option<String> {
 /// log is the number podman will actually use. `None` is a `/proc` that did not
 /// answer, and the line says so in words instead of printing a uid lmgw made
 /// up.
+#[cfg(unix)]
 pub fn process_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+}
+
+/// Windows has no uid to map.
+#[cfg(not(unix))]
+pub fn process_uid() -> Option<u32> {
+    None
 }
 
 /// The start line's `keep-id` half (§5.5), for a manifest that declares a slot.
@@ -1974,5 +2039,6 @@ pub async fn logs_tail(spawner: &Arc<dyn Spawner>, name: &str, tail: usize) -> S
     }
 }
 
-#[cfg(test)]
+// Real children, signals, modes and uids.
+#[cfg(all(test, unix))]
 mod tests;

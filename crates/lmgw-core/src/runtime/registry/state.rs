@@ -97,6 +97,10 @@ pub(super) struct Entry {
     pub(super) state: RuntimeState,
     pub(super) started_at: Instant,
     pub(super) in_flight: u32,
+    /// Claims ever taken on this entry: a request served while a reading
+    /// was taken moves it even where `in_flight` is back to 0 by the end
+    /// (`vram::partial::floor`).
+    pub(super) claims: u64,
     pub(super) last_used: Instant,
     /// `vram.unload_timeout_seconds`, captured when the entry was claimed.
     ///
@@ -169,6 +173,35 @@ pub(super) struct Entry {
     /// the owner's ([`ownership`]'s module doc). Never reset while the entry
     /// lives — a climb keeps it — and gone with the entry.
     pub(super) owner: Origin,
+    /// What VRAM admission gave this start when it fits only partially on
+    /// the card (`admission_grant.rs`): set where the claim is taken, kept
+    /// for the entry's life. `None` for every other start.
+    pub(super) grant: Option<PartialGrant>,
+    /// What VRAM admission said of a start that got all of its charge
+    /// (`admission_grant::Staged::note`): kept for the entry's life, as a
+    /// grant's warning is. `None` for every other start.
+    pub(super) admission_note: Option<String>,
+    /// A request has run on it while it was ready: a claim a request was
+    /// answered on was let go (`AcquireGuard::mark_sent`), or a ladder
+    /// send ended (`climb::SendGuard`). What llama-server puts on the card
+    /// at its first prompt (the CUDA pool's temporaries) is in the driver's
+    /// figure from then on, so the ledger drops its margin
+    /// (`vram::headroom`). False for an adopted container until it serves
+    /// one, and again for the new container of a climb.
+    pub(super) served: bool,
+    /// Adopted at boot or by a reconciliation pass from a container an
+    /// earlier lmgw (or an earlier run of this one) started: whether it
+    /// served a request then is not known (`vram::headroom`'s first-prompt
+    /// margin reads it). False for every start of this lmgw, and again for
+    /// the new container of a climb.
+    pub(super) adopted: bool,
+    /// The engine an image container was **started** (or adopted) with —
+    /// its resolved engine image, run args and native build
+    /// ([`crate::vram::plan::image::engine_key`]): the key every figure it
+    /// teaches its row is learned under, and the one the ledger reads the
+    /// row's figures by while it runs. Set once it is ready; `None` before
+    /// that and for every other class.
+    pub(super) engine_key: Option<String>,
 }
 
 /// Serializable snapshot of one entry, for the status/ops surfaces (§8).
@@ -190,6 +223,9 @@ pub struct RuntimeView {
     pub port: u16,
     pub state: RuntimeState,
     pub in_flight: u32,
+    /// [`Entry::claims`]. Not published.
+    #[serde(skip)]
+    pub claims: u64,
     /// Seconds since the entry became `ready` (since it was claimed, while
     /// still starting). An age rather than a timestamp: `Instant` has no
     /// wall-clock meaning to serialize, and every consumer wants the age.
@@ -252,6 +288,19 @@ pub struct RuntimeView {
     /// Absent when not.
     #[serde(default, skip_serializing_if = "ownership::is_false")]
     pub draining_for_owner: bool,
+    /// [`Entry::grant`]. Not published: its warning is in [`Self::warnings`],
+    /// and its bytes are the ledger's.
+    #[serde(skip)]
+    pub grant: Option<PartialGrant>,
+    /// [`Entry::served`]. Not published.
+    #[serde(skip)]
+    pub served: bool,
+    /// [`Entry::adopted`]. Not published.
+    #[serde(skip)]
+    pub adopted: bool,
+    /// [`Entry::engine_key`]. Not published.
+    #[serde(skip)]
+    pub engine_key: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {

@@ -53,7 +53,7 @@ pub(crate) fn lands_on_gpu(snap: &Snapshot, route: &Route) -> bool {
             .aux_models
             .iter()
             .find(|m| m.model_id == target.model_id)
-            .is_none_or(|m| crate::runtime::aux::placement(m.backend) == Placement::Gpu),
+            .is_none_or(|m| crate::runtime::aux_models::placement(m.backend) == Placement::Gpu),
         Class::Chat | Class::Image => true,
     }
 }

@@ -13,6 +13,8 @@
 
 use serde::Serialize;
 
+mod load;
+
 /// One device's memory, as the driver reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GpuMemory {
@@ -154,13 +156,16 @@ pub struct NvmlProbe {
 
 impl NvmlProbe {
     pub fn detect() -> Self {
-        let nvml = nvml_wrapper::Nvml::init().map_err(|e| e.to_string());
+        let nvml = load::init();
         match &nvml {
             Ok(_) => tracing::info!("NVML loaded — VRAM admission control has device telemetry"),
+            #[cfg(not(windows))]
             Err(e) => tracing::info!(
                 "NVML unavailable ({e}) — trying amdgpu's sysfs counters next \
                  (see vram::detect_probe)"
             ),
+            #[cfg(windows)]
+            Err(e) => tracing::info!("NVML unavailable ({e}) — no GPU telemetry"),
         }
         Self { nvml }
     }
@@ -170,6 +175,29 @@ impl NvmlProbe {
     /// rather than of `devices()` so the decision costs no driver call.
     pub fn is_available(&self) -> bool {
         self.nvml.is_ok()
+    }
+
+    /// Every device's PCI address, in driver index order — what the
+    /// Windows probe matches WDDM adapters by ([`super::wddm::counted`]).
+    pub fn pci_addresses(&self) -> Result<Vec<super::wddm::PciAddress>, String> {
+        let nvml = self.nvml.as_ref().map_err(Clone::clone)?;
+        let count = nvml
+            .device_count()
+            .map_err(|e| format!("nvmlDeviceGetCount: {e}"))?;
+        (0..count)
+            .map(|index| {
+                let pci = nvml
+                    .device_by_index(index)
+                    .and_then(|d| d.pci_info())
+                    .map_err(|e| format!("nvmlDeviceGetPciInfo({index}): {e}"))?;
+                super::wddm::PciAddress::from_nvml_bus_id(&pci.bus_id).ok_or_else(|| {
+                    format!(
+                        "nvmlDeviceGetPciInfo({index}): bus id '{}' is not DDDDDDDD:BB:DD.F",
+                        pci.bus_id
+                    )
+                })
+            })
+            .collect()
     }
 }
 

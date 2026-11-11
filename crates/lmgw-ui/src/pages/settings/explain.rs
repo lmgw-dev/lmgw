@@ -190,11 +190,18 @@ pub(super) fn explain(group: &'static str, page: Page) -> Option<AnyView> {
     };
     // Why the stored suffix shadows the gateway, when it does: said where the
     // setting is read, not only where it was typed (origins §4.1).
+    // And that agent pages are unreachable from other machines under the
+    // `localhost` suffix where other machines reach the dashboard (headless
+    // server design D27).
     let warning = (group == "agent-containers").then_some(move || {
         page.data.with(|d| {
-            d.as_ref()
-                .and_then(|v| v["agent_origin_suffix_warning"].as_str())
+            let v = d.as_ref()?;
+            let lines: Vec<_> = ["agent_origin_suffix_warning", "agent_origin_remote_warning"]
+                .iter()
+                .filter_map(|k| v[*k].as_str())
                 .map(|w| view! { <div class="notice warn">{w.to_string()}</div> })
+                .collect();
+            (!lines.is_empty()).then_some(lines)
         })
     });
     Some(

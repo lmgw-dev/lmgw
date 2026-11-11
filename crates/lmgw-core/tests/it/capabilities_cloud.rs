@@ -810,6 +810,9 @@ fn image(model_id: &str) -> ImageModel {
         capabilities_override: None,
         peak_extra_bytes: None,
         peak_learned_at: None,
+        idle_bytes: None,
+        work_bytes: None,
+        learned_key: None,
         prompt_style: None,
         preview_mode: None,
     }

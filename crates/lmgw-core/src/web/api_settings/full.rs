@@ -31,6 +31,13 @@ async fn settings_view(st: &SharedState) -> dto::SettingsFull {
     // read: what the dir sits on can change under a setting nobody retyped
     // (container-builds §5, §7, §8).
     let builds_dir = st.builds_dir();
+    // The copies container starts made before migrating (ruling 14, §6.4);
+    // the desktop makes none and lists none.
+    let copies = if st.deployment().is_container() {
+        crate::store::migration_copies(&crate::store::backups_dir(&st.data_dir))
+    } else {
+        crate::store::CopyList::default()
+    };
     dto::SettingsFull {
         bind_addr: s.bind_addr.clone(),
         auth_enabled: s.auth_enabled,
@@ -114,6 +121,32 @@ async fn settings_view(st: &SharedState) -> dto::SettingsFull {
         realtime: crate::ops::realtime_view(&s.realtime),
         mcp: crate::ops::mcp_settings_view(&s.mcp),
         devices: crate::ops::devices_settings_view(&s.devices, &s.bind_addr),
+        // The main listener's TLS and the public origin (headless server
+        // design §4): the section, the listener as it runs, and the base
+        // every link is built from now.
+        tls: dto::TlsSettings {
+            cert_path: s.tls.cert_path.clone(),
+            key_path: s.tls.key_path.clone(),
+            listen: s.tls.listen.clone(),
+            handshake_timeout_s: s.tls.handshake_timeout_s,
+        },
+        tls_status: st.main_tls.status(s),
+        public_url: s.public_url.clone(),
+        public_base_url: crate::net::public_base_url(s, snap.serving_tls.as_ref()),
+        // Proxy mode (§4.5): the list, and what it has seen since the start.
+        trusted_proxies: s.trusted_proxies.clone(),
+        proxy_status: crate::server::forwarded::status(s, &st.proxy_seen),
+        agent_origin_remote_warning: crate::agents::service::remote_suffix_warning(
+            s,
+            st.deployment().is_container(),
+        ),
+        // Accounts (headless server design §5.6, §5.11).
+        accounts: dto::AccountsSettingsDto {
+            enabled: s.accounts.enabled,
+            session_days: s.accounts.session_days,
+            audit_days: s.accounts.audit_days,
+        },
+        accounts_status: crate::accounts::switch::status(st).await,
         api_keys: snap
             .api_keys
             .iter()
@@ -125,8 +158,24 @@ async fn settings_view(st: &SharedState) -> dto::SettingsFull {
             .collect(),
         data_dir: st.data_dir.display().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        // Where this lmgw runs, what its container pins, and its stop budget
+        // against the unit's (headless server design §2.2, D20).
+        deployment: st.deployment(),
+        dev: st.dev(),
+        pinned: {
+            let facts = st.start_facts();
+            crate::config::deployment::pinned(facts.deployment)
+                .iter()
+                .map(|p| p.dto(facts.source(*p)))
+                .collect()
+        },
+        stop_budget: st.stop_budget(),
+        update_notice: st.update_notice(),
+        migration_copies: copies.copies,
+        migration_copies_error: copies.error,
         // A derived fact, like the built-in prompt above: what an audio row on
         // the CPU runs with when it names no thread count.
         host_cpu: crate::host::cpu().into(),
+        headroom_now: st.vram.headroom_now(&snap),
     }
 }

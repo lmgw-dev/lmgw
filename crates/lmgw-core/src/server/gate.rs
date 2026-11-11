@@ -97,6 +97,11 @@ pub(super) async fn principal_mw(
         .get::<axum::extract::ConnectInfo<Conn>>()
         .map(|c| c.0.clone());
     ctx.via = conn.as_ref().map_or(Via::Plain, |c| c.via);
+    ctx.scheme = conn
+        .as_ref()
+        .map_or(crate::net::Scheme::Http, |c| c.scheme());
+    ctx.local = conn.as_ref().map(|c| c.local);
+    ctx.peer = conn.as_ref().map(|c| c.peer.ip());
     if let Some(conn) = conn.filter(|c| c.via == Via::Devices) {
         return super::device_gate::resolve(&state, &snap, &conn, ctx, req, next).await;
     }
@@ -117,12 +122,16 @@ pub(super) async fn principal_mw(
     let bearer = crate::agents::token::presented(req.headers()).is_some();
     let subprotocol_key =
         crate::realtime::subprotocol_key(req.uri().path(), req.headers()).filter(|_| !bearer);
+    // The scheme it came in with (headless server design §4.3, §4.5): the
+    // listener's, or a trusted proxy's word for the client's. Which cookie
+    // counts, and which `Origin` is this gateway's.
+    let scheme = ctx.scheme;
     let by_cookie = !bearer
         && subprotocol_key.is_none()
-        && crate::principal::session_cookie(req.headers()).is_some();
+        && crate::principal::session_cookie(req.headers(), scheme).is_some();
     let resolved = match subprotocol_key {
         Some(key) => crate::principal::from_bearer(&snap, key),
-        None => crate::principal::resolve(req.headers(), &snap),
+        None => crate::principal::resolve(req.headers(), &snap, scheme),
     };
     // A cookie that matched nothing authenticated nothing, and the rule is
     // about cookies that authenticate — so it is a cookie which *resolved to
@@ -131,7 +140,7 @@ pub(super) async fn principal_mw(
     // behind the cookie it replayed, or `owner_key_disabled` tells it which
     // of the owner's keys it is holding.
     let resolved = if by_cookie && !matches!(resolved, Ok(Principal::Anonymous)) {
-        crate::principal::same_origin(req.headers()).and(resolved)
+        crate::principal::same_origin(req.headers(), scheme).and(resolved)
     } else {
         resolved
     };
@@ -147,6 +156,14 @@ pub(super) async fn principal_mw(
         }
     };
 
+    // Accounts (headless server design §5.2, §5.11): a session's
+    // `last_seen_at`, once an hour; and an owner key that came in the
+    // cookie, whose connections end when accounts come on.
+    if let Some(session) = who.session() {
+        crate::accounts::sessions::touch(&state, session);
+    } else if by_cookie && who.is_owner() {
+        ctx.owner_key_cookie = true;
+    }
     fill(&state, &mut ctx, who, req.headers());
     req.extensions_mut().insert(ctx);
     next.run(req).await
@@ -362,6 +379,15 @@ fn gate(
         // request budget, and a dashboard read never was. The two checks that
         // need the alias, scope and budget, stay post-body in
         // `policy::check_alias`; the alias is in the body.
+        // The audit log's writer (headless server design §5.8): an `Admin`
+        // write, once let in.
+        if cap == Cap::Admin {
+            let template = crate::audit::at_gate::template_of(&req, &path);
+            if crate::audit::at_gate::audits(req.method(), &template, &path) {
+                return crate::audit::at_gate::run(&state, snap, &ctx, template, path, req, next)
+                    .await;
+            }
+        }
         if cap != Cap::Inference {
             return next.run(req).await;
         }

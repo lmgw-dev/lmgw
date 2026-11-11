@@ -58,7 +58,7 @@ pub(super) async fn door(
     if ctx.principal != Principal::Anonymous {
         return None;
     }
-    let origin = foreign_origin(headers)?;
+    let origin = foreign_origin(headers, ctx.scheme)?;
     let message = match door {
         Door::Upgrade => format!(
             "an anonymous realtime session may only be opened from this gateway's own origin, \
@@ -189,20 +189,21 @@ pub fn is_beta_client(headers: &HeaderMap) -> bool {
 
 /// The `Origin` of a request that came from a page other than this gateway's
 /// own (§10.1), or `None` — no `Origin` at all (an SDK client) or one naming
-/// this very host.
+/// this very host under the request's own `scheme`.
 ///
-/// Both schemes count as this host: the listener speaks `http`, but a TLS
-/// proxy in front of it makes the same page `https://<host>`, and that page is
-/// no more foreign for it.
-pub fn foreign_origin(headers: &HeaderMap) -> Option<String> {
+/// The scheme is part of the origin, as `/mcp`'s guard reads it: `scheme` is
+/// the listener's, or behind a trusted proxy the one it forwarded (headless
+/// server design §4.5), so a TLS proxy's `https://<host>` page is this
+/// gateway's once the proxy is trusted, and `http://<host>` is then another
+/// origin.
+pub fn foreign_origin(headers: &HeaderMap, scheme: crate::net::Scheme) -> Option<String> {
     let origin = headers.get(header::ORIGIN)?.to_str().unwrap_or("?").trim();
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .unwrap_or_default();
-    let same = !host.is_empty()
-        && (origin == format!("http://{host}") || origin == format!("https://{host}"));
+    let same = !host.is_empty() && origin == format!("{}://{host}", scheme.as_str());
     (!same).then(|| origin.to_string())
 }
 
@@ -357,5 +358,43 @@ impl Limits {
         } else {
             format!("{frame_name} ({} MiB)", self.frame_mb)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::Scheme;
+
+    fn headers(origin: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("lmgw.example:8443"));
+        h.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+        h
+    }
+
+    #[test]
+    fn the_origin_is_this_host_under_the_request_s_own_scheme_only() {
+        let https = headers("https://lmgw.example:8443");
+        let http = headers("http://lmgw.example:8443");
+        assert_eq!(foreign_origin(&https, Scheme::Https), None);
+        assert_eq!(foreign_origin(&http, Scheme::Http), None);
+        assert_eq!(
+            foreign_origin(&http, Scheme::Https).as_deref(),
+            Some("http://lmgw.example:8443"),
+            "a plain page is another origin than the https one"
+        );
+        assert_eq!(
+            foreign_origin(&https, Scheme::Http).as_deref(),
+            Some("https://lmgw.example:8443"),
+            "an https page on a plain request: a proxy lmgw does not trust"
+        );
+        assert_eq!(
+            foreign_origin(&headers("https://evil.example"), Scheme::Https).as_deref(),
+            Some("https://evil.example")
+        );
+        let mut none = https.clone();
+        none.remove(header::ORIGIN);
+        assert_eq!(foreign_origin(&none, Scheme::Https), None, "an SDK client");
     }
 }

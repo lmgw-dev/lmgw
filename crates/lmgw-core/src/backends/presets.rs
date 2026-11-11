@@ -729,6 +729,24 @@ const SD_CCACHE_MOUNT: PresetEdit = PresetEdit {
     ),
 };
 
+/// Since upstream's "cache CUDA compilation" commit (2026-11-02) the CUDA
+/// Dockerfile brings its own ccache: the package, `ENV CCACHE_DIR=/root/.cache/ccache
+/// CCACHE_MAXSIZE=2G`, the compiler launchers and a build step that mounts
+/// `/root/.cache/ccache` and zeroes, cleans up and prints the stats itself.
+/// So this edit replaces upstream's mount and its `ccache --zero-stats` with
+/// [`ccache_run!`]: the cache lands in lmgw's cache (`/ccache`, the build's
+/// size) and not in upstream's. The `export` runs in the step's own shell, so
+/// it wins over the `ENV` for the whole step, `ccache --cleanup` included, and
+/// upstream's `ccache --show-stats` stays as the stats in the log.
+const SD_CUDA_CCACHE_MOUNT: PresetEdit = PresetEdit {
+    name: "ccache-mount",
+    role: EditRole::Ccache,
+    required: true,
+    find:
+        "RUN --mount=type=cache,target=/root/.cache/ccache \\\n    ccache --zero-stats && \\\n    ",
+    replace: ccache_run!(),
+};
+
 const SD_BUILD_INFO: [PresetEdit; 2] = [
     PresetEdit {
         name: "build-info-args",
@@ -756,16 +774,9 @@ const SD_CUDA: &[PresetEdit] = &[
         find: "FROM nvidia/cuda:",
         replace: "FROM docker.io/nvidia/cuda:",
     },
-    // sd.cpp needs no cuDNN; the plain images are the ones every other
-    // engine's build already pulled (§14.2).
-    PresetEdit {
-        name: "drop-cudnn",
-        role: EditRole::BaseImage,
-        required: false,
-        find: "-cudnn-",
-        replace: "-",
-    },
-    SD_CCACHE_MOUNT,
+    // The `-cudnn-` -> `-` edit is gone: upstream's own file uses the plain
+    // images since 2026-11 (sd.cpp needs no cuDNN, §14.2).
+    SD_CUDA_CCACHE_MOUNT,
     SD_BUILD_INFO[0],
     SD_BUILD_INFO[1],
 ];

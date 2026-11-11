@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use crate::facts::{Facts, Kind, Meta};
+use crate::facts::{Facts, Kind, Meta, Posix};
 
 use super::embedded::{HELPER, NVIDIA_INSTALL_GUIDE, PKEXEC, POLICY};
 use super::steps::{Installer, Step};
@@ -205,16 +205,19 @@ fn root_owned_regular(meta: &Meta, path: &str, max_mode: u32) -> Result<(), Stri
     if meta.kind != Kind::File {
         return Err(format!("{path} is not a regular file"));
     }
-    if meta.uid != 0 {
-        return Err(format!("{path} belongs to user {}, not to root", meta.uid));
+    let Some(Posix { mode, uid }) = meta.posix else {
+        return Err(format!("{path} has no POSIX owner and mode on this system"));
+    };
+    if uid != 0 {
+        return Err(format!("{path} belongs to user {uid}, not to root"));
     }
-    if meta.mode & 0o7000 != 0 {
+    if mode & 0o7000 != 0 {
         return Err(format!("{path} has a setuid, setgid or sticky bit"));
     }
-    if meta.mode & !max_mode & 0o777 != 0 {
+    if mode & !max_mode & 0o777 != 0 {
         return Err(format!(
             "{path} has mode {:04o}, more than {max_mode:04o}",
-            meta.mode & 0o7777
+            mode & 0o7777
         ));
     }
     Ok(())
@@ -242,7 +245,10 @@ pub fn helper_installed(f: &dyn Facts) -> Result<(), String> {
         let meta = f
             .lstat(dir)
             .map_err(|e| format!("{d} could not be read: {e}"))?;
-        if meta.kind != Kind::Dir || meta.uid != 0 || meta.mode & 0o022 != 0 {
+        let root_only = meta
+            .posix
+            .is_some_and(|p| p.uid == 0 && p.mode & 0o022 == 0);
+        if meta.kind != Kind::Dir || !root_only {
             return Err(format!("{d} is not a directory that only root can write"));
         }
     }

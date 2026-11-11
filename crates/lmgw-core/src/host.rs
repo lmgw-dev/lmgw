@@ -68,10 +68,74 @@ impl From<HostCpu> for lmgw_api_types::HostCpu {
     }
 }
 
-/// The host's CPUs, read from sysfs on first use.
+/// The host's CPUs, read on first use: from sysfs, and on Windows from
+/// `GetLogicalProcessorInformationEx` ([`windows_cores`]).
 pub fn cpu() -> HostCpu {
     static CPU: OnceLock<HostCpu> = OnceLock::new();
-    *CPU.get_or_init(|| read_cpu(Path::new("/sys/devices/system/cpu")))
+    #[cfg(windows)]
+    {
+        *CPU.get_or_init(|| match windows_cores() {
+            Some(cores) => HostCpu {
+                physical_cores: cores,
+                logical_cpus: lmgw_machine::cpu::logical(),
+                source: CoreSource::Topology,
+            },
+            None => read_cpu(Path::new("/sys/devices/system/cpu")),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        *CPU.get_or_init(|| read_cpu(Path::new("/sys/devices/system/cpu")))
+    }
+}
+
+/// Windows' physical cores: one `RelationProcessorCore` entry of
+/// `GetLogicalProcessorInformationEx` per core, every processor group's;
+/// `None` when the call fails, so [`read_cpu`]'s fallback (the logical count)
+/// answers.
+#[cfg(windows)]
+fn windows_cores() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetLogicalProcessorInformationEx, RelationProcessorCore,
+    };
+    let mut len = 0u32;
+    // SAFETY: a size query: no buffer, the needed length written to `len`.
+    unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, std::ptr::null_mut(), &mut len)
+    };
+    if len == 0 {
+        return None;
+    }
+    // u64 elements: the entries hold pointer-sized masks, so the buffer is
+    // aligned for them.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: `buf` holds at least `len` bytes, the length given.
+    if unsafe {
+        GetLogicalProcessorInformationEx(RelationProcessorCore, buf.as_mut_ptr().cast(), &mut len)
+    } == 0
+    {
+        return None;
+    }
+    let bytes = buf.as_ptr().cast::<u8>();
+    let (mut at, mut cores) = (0usize, 0usize);
+    // Each entry starts with its kind and its size (two 32-bit fields).
+    while at + 8 <= len as usize {
+        // SAFETY: `at + 8` is within the `len` bytes the call wrote.
+        let (kind, size) = unsafe {
+            (
+                std::ptr::read_unaligned(bytes.add(at).cast::<i32>()),
+                std::ptr::read_unaligned(bytes.add(at + 4).cast::<u32>()),
+            )
+        };
+        if size == 0 {
+            return None;
+        }
+        if kind == RelationProcessorCore {
+            cores += 1;
+        }
+        at += size as usize;
+    }
+    (cores > 0).then_some(cores)
 }
 
 /// [`cpu`] for the sysfs CPU directory at `root`

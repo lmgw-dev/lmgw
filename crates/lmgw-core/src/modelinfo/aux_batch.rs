@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::config::AuxKind;
 use crate::gguf::ModelSummary;
-use crate::runtime::aux::{self as aux_rt, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{self as aux_rt, LLAMA_DEFAULT_UBATCH};
 use crate::vram::compute::{self, Ask, Weights};
 
 /// Whether llama-server splits an input of this header across ubatches, as
@@ -115,7 +115,7 @@ pub(super) fn plan(
             if let Some(extra) = compute::uncharged_if_decoder(s, &ask) {
                 cost.push_str(&format!(
                     ". That figure is an encoder's: {}",
-                    crate::vram::plan::aux::uncertain_encoder(extra)
+                    crate::vram::plan::aux_models::uncertain_encoder(extra)
                 ));
             }
             cost

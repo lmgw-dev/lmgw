@@ -346,6 +346,19 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
                 }
             })}
         {move || {
+            // D27 (headless server design): wherever other machines reach
+            // the dashboard behind TLS or in the server image, the server's
+            // own sentence, when the bind address says nothing.
+            let remote = settings
+                .get()
+                .and_then(|r| r.ok())
+                .and_then(|s| s.agent_origin_remote_warning);
+            (lan_host().is_none())
+                .then_some(remote)
+                .flatten()
+                .map(|w| view! { <div class="notice warn">{w}</div> })
+        }}
+        {move || {
             lan_host()
                 .map(|h| {
                     view! {

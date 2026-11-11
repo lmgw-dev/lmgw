@@ -98,15 +98,39 @@ pub fn proposed_urls(settings: &Settings, local_only: bool) -> Result<Vec<String
 /// that is a point-to-point link (WireGuard) or a LAN's. The listener's
 /// concrete address alone when it is set to one; empty when the machine has
 /// none to propose (the form says so, and the owner adds a URL by hand).
+///
+/// With `public_url` set, `https://<its host>:<device port>` comes first
+/// (headless server design §4.3): inside a container the interface
+/// addresses are the container's view, and the public name is the one the
+/// device's network resolves. The device listener's leaf certificates then
+/// carry that name, as every device URL's host goes into them.
 pub fn proposed_for_device(settings: &Settings) -> Result<Vec<Proposed>, String> {
     let port = settings.devices.effective_port(&settings.bind_addr)?;
+    let mut out = Vec::new();
+    if let Some(u) = crate::net::public_url(settings) {
+        out.push(Proposed {
+            url: format!("https://{}:{port}", u.host),
+            interface: "public URL".into(),
+            wireguard: false,
+        });
+    }
+    for p in proposed_on_interfaces(settings, port) {
+        if !out.iter().any(|o| o.url == p.url) {
+            out.push(p);
+        }
+    }
+    Ok(out)
+}
+
+/// [`proposed_for_device`]'s addresses of this machine, on `port`.
+fn proposed_on_interfaces(settings: &Settings, port: u16) -> Vec<Proposed> {
     if let DevicesListen::Addr(ip) = settings.devices.listen {
         if !ip.is_loopback() {
-            return Ok(vec![Proposed {
+            return vec![Proposed {
                 url: format!("https://{}:{port}", url_host(ip)),
                 interface: String::new(),
                 wireguard: false,
-            }]);
+            }];
         }
     }
     let temporary = ipv6_temporary();
@@ -124,14 +148,15 @@ pub fn proposed_for_device(settings: &Settings) -> Result<Vec<Proposed>, String>
             }
         })
         .collect();
-    Ok(propose_labelled(&ifaces, port))
+    propose_labelled(&ifaces, port)
 }
 
 /// One proposed URL, with the interface it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposed {
     pub url: String,
-    /// The interface's name; empty for a listener set to one address.
+    /// The interface's name; empty for a listener set to one address,
+    /// `public URL` for the public URL's host.
     pub interface: String,
     /// On a point-to-point link: a WireGuard (or Tailscale) interface.
     pub wireguard: bool,
@@ -732,6 +757,7 @@ fe800000000000000000000000000001 02 40 20 80   eth0
             hosts_label: Some("desk".into()),
             self_admin: crate::config::DeviceAdmin::Off,
             link: Default::default(),
+            ..Default::default()
         });
         let refused = |l: &str| label_refusal(&snap, l, None);
         assert!(refused("tablet_").is_some_and(|w| w.contains("cannot end in '_'")));

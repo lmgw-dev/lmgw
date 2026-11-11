@@ -95,12 +95,14 @@ async fn the_setting_defaults_to_off_and_saves_on_both_paths() {
     );
     let e = settings_set(&state, patch(json!({ "chat_voice_audio_input": "any" })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("off, on"), "{e}");
     // The value's name before 2026-10-06 is refused on input.
     let e = settings_set(&state, patch(json!({ "chat_voice_audio_input": "local" })))
         .await
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert!(e.contains("'local' is not one of off, on"), "{e}");
     assert_eq!(state.snapshot().settings.chat_voice_audio_input, "on");
 

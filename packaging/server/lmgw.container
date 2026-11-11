@@ -1,0 +1,130 @@
+# lmgw on a server: a rootless Quadlet unit for a dedicated service account with linger
+# (headless server design §3.3, ruling 10). Install it as
+# ~/.config/containers/systemd/lmgw.container of that account, beside the three .volume files,
+# then: systemctl --user daemon-reload && systemctl --user start lmgw
+#
+# The image arrives as an archive, never from a registry (ruling 11):
+#   podman load -i lmgw-server-<version>.oci.tar
+#   podman tag localhost/lmgw-server:<version, + written as _> localhost/lmgw-server:current
+#   systemctl --user restart lmgw
+#
+# The unit serves TLS (headless server design §4): put the certificate pair into this account's
+# ~/lmgw-tls/ as tls.crt (the chain, leaf first) and tls.key before the first start, and set
+# LMGW_PUBLIC_URL below to the address people open. The host's ACME client or its deploy hook
+# copies a renewed pair into that directory; lmgw serves it from the next connection on, without
+# a restart. The hook writes or copies the pair in (never mv, which keeps the file's SELinux label),
+# with tls.key owned by this service account and mode 600.
+# Without TLS: drop the two LMGW_TLS_ lines and the ~/lmgw-tls Volume=, set
+# LMGW_PUBLIC_URL=http://lmgw.example:8787 (keep it: links are built on loopback without it), and
+# publish 8787 (TCP and UDP) in place of 8443; the plain listener then binds every
+# address of the container. systemd reads a "#" as a comment only at the start of a line, so
+# every note here sits on a line of its own.
+[Unit]
+Description=lmgw gateway
+# No network-online.target here: Quadlet adds Wants= and After= on
+# podman-user-wait-network-online.service to a rootless unit itself.
+
+[Container]
+# A loaded archive, retagged (ruling 11): nothing to pull from, so a missing image fails the start
+# with Podman's own sentence instead of asking a registry that does not exist (seen 2026-11-08 with
+# podman run --pull=never, Podman 6.1.3: "…: image not known").
+Image=localhost/lmgw-server:current
+ContainerName=lmgw
+Pull=never
+# The report's minimal set of flags, without --privileged. The card by its CDI name, from the
+# host's system CDI spec. Expected, not yet run: that AddDevice= passes a CDI name through to
+# podman run --device as written (the dry run shows --device nvidia.com/gpu=all); else
+# PodmanArgs=--device.
+AddDevice=nvidia.com/gpu=all
+AddDevice=/dev/net/tun
+AddCapability=SYS_ADMIN NET_ADMIN
+# The confined variant (ruling 3); label=disable is the shared variant's, which is not yet.
+SecurityLabelType=container_engine_t
+# The only way the spike found to a writable /sys/fs/cgroup for the inner Podman's limits.
+# Expected, not yet run under Quadlet: that the entrypoint's cgroup leaf works with Quadlet's
+# default CgroupsMode=split as it did with podman run's enabled; else CgroupsMode=enabled.
+PodmanArgs=--systemd=always
+# --systemd=always switches the stop signal to SIGRTMIN+3, which lmgw does not handle.
+StopSignal=SIGTERM
+# D20: a whole quit, 10 s for the server's streams + (10 s + vram.unload_timeout_seconds, 60 s
+# by default) for a running benchmark + 15 s for the model containers. lmgw compares
+# LMGW_STOP_TIMEOUT with its stored unload timeout at every start and says on Settings → About
+# and in the log when a quit can take longer; then raise all three numbers here together.
+StopTimeout=95
+Environment=LMGW_STOP_TIMEOUT=95
+Volume=lmgw-data.volume:/data
+Volume=lmgw-store.volume:/var/lib/containers
+Volume=lmgw-buildcache.volume:/var/tmp
+# The TLS pair (D8), read-only from a host directory of its own, which the host's ACME client or
+# deploy hook writes. :z gives it a label the confined container can read; a file created in the
+# directory later takes that label, but one moved in from elsewhere (mv) keeps its own and the
+# container cannot read it (seen 2026-11-08, container-selinux 2.251.0): the hook writes or copies
+# into the directory, then renames there. Not a Podman secret: a secret is copied in when the
+# container is created, so a renewed one reaches lmgw only at the next start. Expected, not yet
+# run under Quadlet: that %h expands to the service account's home in Volume=.
+Volume=%h/lmgw-tls:/etc/lmgw/tls:ro,z
+# The device CA's wrapping key (headless server design §9, WP8): a Podman secret this account
+# creates once, before the first start:
+#   openssl rand -hex 32 | podman secret create lmgw-wrap-key -
+# Podman mounts it at /run/secrets/lmgw-wrap-key, over --systemd=always's /run tmpfs (seen
+# 2026-11-08, Podman 6.1.3), and lmgw seals the CA's key in /data/tls/ under it, so a copy of the
+# data volume alone does not carry that key; a plain key from a start without the secret is
+# wrapped by the next start with it, the device listener on or off. A missing secret fails the
+# start: the ExecStartPre= in [Service] says in the journal how to make it, before Podman would
+# with its bare "no such secret". Without this line (and that ExecStartPre=) lmgw keeps the key
+# plain (0600) and says so in its log; a key already wrapped then cannot be opened until the
+# secret is back or the device CA is rotated. The secret sits unencrypted in this account's Podman
+# storage (the default file driver), not on the data volume: back it up on its own, since a
+# wrapped key opens only with it (podman secret inspect --showsecret --format '{{.SecretData}}'
+# lmgw-wrap-key prints it). A volume backup that leaked together with the secret: stop lmgw,
+# podman secret rm lmgw-wrap-key, make it anew with the command above, start lmgw (the device CA
+# is unreadable then) and rotate the device CA, which seals a new key under the new secret. A
+# rotation alone does not end the leak: the same secret still opens the old copy.
+Secret=lmgw-wrap-key,mode=0400
+# The TLS listener and its WebRTC group (the image's tls.listen 0.0.0.0:8443, D22), the device
+# listener and its group (the HTTP port + 1). The plain listener is the container's loopback
+# behind TLS (127.0.0.1:8787, D6): agents, the health check and the command line reach it there,
+# and it is not published.
+PublishPort=8443:8443
+PublishPort=8443:8443/udp
+PublishPort=8788:8788
+PublishPort=8788:8788/udp
+# The TLS pair as the container sees it, and the one public origin every link, snippet, pairing
+# proposal and agent origin is built from (D9). Replace lmgw.example with the server's name,
+# which the certificate must cover; a different outer port works when the URL names it.
+Environment=LMGW_TLS_CERT=/etc/lmgw/tls/tls.crt
+Environment=LMGW_TLS_KEY=/etc/lmgw/tls/tls.key
+Environment=LMGW_PUBLIC_URL=https://lmgw.example:8443
+# The unit counts as started once lmgw answers. The startup probe asks every 2 s until the first
+# answer, so a normal start is ready within seconds; the regular check takes over then. Its
+# start period is TimeoutStartSec's, so a migrating release's long first start (§6.4) is never
+# counted unhealthy before systemd itself would give up. The startup probe never restarts the
+# container (HealthStartupRetries is 0 by default): TimeoutStartSec decides. Expected, not yet
+# run under systemd: that Notify=healthy reaches ready when the startup probe passes.
+# 8787 is the image's plain listener (127.0.0.1:8787 behind TLS, 0.0.0.0:8787 without): an
+# LMGW_BIND_ADDR pinned to another port must change it in both probes' URLs, and without TLS in
+# the PublishPort= lines.
+HealthCmd=curl -fsS http://127.0.0.1:8787/api/version
+HealthStartupCmd=curl -fsS http://127.0.0.1:8787/api/version
+HealthStartupInterval=2s
+HealthStartPeriod=900s
+Notify=healthy
+
+[Service]
+# A refused start is restarted. A migrating one copies the databases once and reuses those copies
+# while they are unchanged, so the restarts do not fill the volume (design D113).
+Restart=always
+# The wrapping key secret of Secret= above, checked before Podman is asked, so a missing one says
+# in the journal how to make it. Drop this line together with Secret= to run with the key plain.
+ExecStartPre=/bin/sh -c 'podman secret exists lmgw-wrap-key || { echo "lmgw: the Podman secret lmgw-wrap-key, the device CA wrapping key, does not exist. Make it once, as this account: openssl rand -hex 32 | podman secret create lmgw-wrap-key - (and back it up on its own). Or remove the Secret=lmgw-wrap-key line and this ExecStartPre= from the unit to run with the device CA key kept plain." >&2; exit 1; }'
+# A migrating release's first start copies the database and runs the migrations before lmgw
+# answers; nothing is pulled at a start. HealthStartPeriod= above is the same number.
+TimeoutStartSec=900
+# Above StopTimeout: Quadlet's ExecStop (podman rm -v -f -i) waits StopTimeout before it kills,
+# then removes the container, and systemd must not kill that removal. The kill and the removal
+# took 0.25 s with an inner container running (podman rm -v -f -t 0, Podman 6.1.3, 2026-11-08);
+# 10 s above StopTimeout leaves forty times that for a loaded host.
+TimeoutStopSec=105
+
+[Install]
+WantedBy=default.target

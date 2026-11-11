@@ -496,6 +496,11 @@ fn DeviceLine(
             None => view! { <span class="dim">"never connected"</span> }.into_any(),
         }
     };
+    // Who paired it (headless server design §5.1).
+    let made_by = move || {
+        row.with(|r| r.as_ref().and_then(|r| r.made_by.clone()))
+            .map(|m| view! { " " <span class="dim mono-sm">{format!("paired by {m}")}</span> })
+    };
     let reaches = move || {
         row.with(|r| {
             r.as_ref()
@@ -764,7 +769,7 @@ fn DeviceLine(
                 {open_flag}
                 {v1_flag}
             </td>
-            <td class="nowrap">{state}</td>
+            <td class="nowrap">{state}{made_by}</td>
             <td class="wrap dev-reach dim">{reaches}</td>
             <td class="wrap dev-spend">{spend}</td>
             <td class="actions">

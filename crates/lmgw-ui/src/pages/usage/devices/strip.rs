@@ -84,6 +84,12 @@ pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl
             </span>
         })
     };
+    let deployment = crate::deployment::deployment();
+    let server = move || {
+        deployment
+            .get()
+            .is_some_and(lmgw_api_types::Deployment::is_container)
+    };
     let authority = move || {
         let s = status.get()?;
         let ca = s.ca;
@@ -106,7 +112,7 @@ pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl
             return Some(
                 view! {
                     <span class="dim">
-                        "device CA: " {logic::ca_words(DeviceCaState::Missing, None)}
+                        "device CA: " {logic::ca_words(DeviceCaState::Missing, None, false)}
                         " (made when the listener first runs)"
                     </span>
                 }
@@ -114,7 +120,7 @@ pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl
             );
         };
         let wrapped = ca.key_mode.map(|m| m == DeviceCaKeyMode::Wrapped);
-        let mode = logic::ca_words(ca.state, wrapped);
+        let mode = logic::ca_words(ca.state, wrapped, server());
         let short = logic::fp_short(&fp);
         let whole = fp.clone();
         let pem = ca.certificate_pem.clone();

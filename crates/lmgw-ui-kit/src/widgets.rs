@@ -99,6 +99,19 @@ impl Toasts {
         self.push(ToastKind::Err, msg.into());
     }
 
+    /// A success toast the page shows after the reload it is about to do
+    /// (a switch that changed this browser's cookie): kept in the tab's
+    /// `sessionStorage` until [`ToastHost`] mounts again and shows it.
+    pub fn ok_after_reload(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        match window().session_storage() {
+            Ok(Some(store)) if store.set_item(AFTER_RELOAD_KEY, &msg).is_ok() => {}
+            // No storage (a private window that refuses it): shown now,
+            // for the moment before the reload.
+            _ => self.ok(msg),
+        }
+    }
+
     pub fn dismiss(&self, id: u64) {
         self.list.update(|l| l.retain(|t| t.id != id));
     }
@@ -140,6 +153,9 @@ impl Toasts {
     }
 }
 
+/// The `sessionStorage` key of [`Toasts::ok_after_reload`]'s message.
+const AFTER_RELOAD_KEY: &str = "lmgw-toast-after-reload";
+
 /// From this many toasts on, the stack offers to clear itself in one click.
 const DISMISS_ALL_FROM: usize = 3;
 
@@ -152,6 +168,12 @@ pub fn ToastHost() -> impl IntoView {
     };
     provide_context(toasts);
     listen_downloads(toasts);
+    if let Ok(Some(store)) = window().session_storage() {
+        if let Ok(Some(msg)) = store.get_item(AFTER_RELOAD_KEY) {
+            let _ = store.remove_item(AFTER_RELOAD_KEY);
+            toasts.ok(msg);
+        }
+    }
     let many = move || toasts.list.with(Vec::len) >= DISMISS_ALL_FROM;
     view! {
         <div class="toast-host">

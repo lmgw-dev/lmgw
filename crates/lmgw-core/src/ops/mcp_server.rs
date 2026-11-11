@@ -462,6 +462,7 @@ mod tests {
             hosts_label: Some("phone".into()),
             self_admin: crate::config::DeviceAdmin::Off,
             link: Default::default(),
+            ..Default::default()
         });
         for name in ["phone", "PHONE", "phone.", "phone_", "phone!"] {
             let e = reject_device_label(&snap, name).expect_err(name);

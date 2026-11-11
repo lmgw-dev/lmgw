@@ -38,7 +38,7 @@ pub fn is_device_route(method: &Method, path: &str) -> bool {
 pub fn serves_on(via: Via, method: &Method, path: &str, cap: Cap) -> bool {
     let own = is_device_route(method, path);
     match via {
-        Via::Plain => !own,
+        Via::Plain | Via::Tls => !own,
         Via::Devices => own || matches!(cap, Cap::Inference | Cap::Chat | Cap::Transfer),
     }
 }

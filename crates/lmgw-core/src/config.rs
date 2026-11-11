@@ -3,6 +3,9 @@
 //! Config is cached in an `Arc<Snapshot>` swapped atomically on edit, so the
 //! request hot path never reads the database.
 
+/// Where this lmgw runs and what a container start pins and seeds
+/// (headless server design §2).
+pub mod deployment;
 mod routes;
 pub use routes::*;
 mod llama_route;

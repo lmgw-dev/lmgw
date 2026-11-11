@@ -75,7 +75,8 @@ impl ModelSummary {
     /// This summary, a split file's first part's, with the facts of the
     /// tensors in `later` (every later part's header, in order) taken over
     /// the whole set: the host-kept input embeddings and the output head
-    /// (module doc). Everything else in a split set's metadata is part 1's
+    /// (module doc), and every part's tensors ([`super::TensorList`]).
+    /// Everything else in a split set's metadata is part 1's
     /// own, which llama.cpp loads it from. A file that isn't split, with no
     /// later parts, is unchanged.
     pub fn of_set(mut self, later: &[&ModelSummary]) -> Self {
@@ -88,6 +89,7 @@ impl ModelSummary {
         self.host_input_bytes = set.host_input_bytes();
         self.output_head_bytes = set.output_head_bytes();
         self.head_tensors = set;
+        self.take_tensors(later);
         self
     }
 }

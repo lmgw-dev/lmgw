@@ -542,6 +542,23 @@ where
     send_local_marked(hold, route, timeout, build, None).await
 }
 
+/// [`send_local`] for a request that runs no prompt on the container — a
+/// token count (`/tokenize`, `/apply-template`, a native count): its answer
+/// does not mark the container as having served one, so a llama-server
+/// keeps its first-prompt margin (`Entry::served`, `vram::headroom`) until
+/// a request that actually runs a prompt or encodes has run on it.
+pub async fn send_local_count<F>(
+    hold: Option<&LocalHold>,
+    route: &Route,
+    timeout: Option<Duration>,
+    build: F,
+) -> Result<reqwest::Response, GatewayError>
+where
+    F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
+{
+    send_local_as(hold, route, timeout, build, None, false).await
+}
+
 /// [`send_local`] for a caller that bills a stop by whether a prompt went out
 /// (`prompt_sent`, which its `build` sets as each attempt leaves): a send
 /// that finds the container dead clears it before the recovery — a dead
@@ -559,6 +576,22 @@ pub async fn send_local_marked<F>(
 where
     F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    send_local_as(hold, route, timeout, build, prompt_sent, true).await
+}
+
+/// [`send_local_marked`]; `runs`: the request runs a prompt or encodes on
+/// the container, so its answer marks it as having served one.
+async fn send_local_as<F>(
+    hold: Option<&LocalHold>,
+    route: &Route,
+    timeout: Option<Duration>,
+    build: F,
+    prompt_sent: Option<&AtomicBool>,
+    runs: bool,
+) -> Result<reqwest::Response, GatewayError>
+where
+    F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
+{
     let Some(hold) = hold else {
         // No local container in this route's future: one send, no recovery,
         // exactly what the call site did before. A cloud upstream that could
@@ -568,14 +601,21 @@ where
     };
 
     let build = &build;
-    retry_dead_container(hold, move || async move {
+    let sent = retry_dead_container(hold, move || async move {
         let sent = send_built(build(&on_hold(route, hold))?, timeout).await;
         if let (Some(flag), Err(GatewayError::Transport(_))) = (prompt_sent, &sent) {
             flag.store(false, Ordering::Relaxed);
         }
         sent
     })
-    .await
+    .await;
+    // Answered: once the claim is let go, the container has served a
+    // request (`Entry::served`, the ledger's first-prompt margin) — one
+    // that ran a prompt or encoded, never a count.
+    if runs && sent.is_ok() {
+        hold.guard().mark_sent();
+    }
+    sent
 }
 
 /// [`send_local`]'s dead-container policy, for any call against the container

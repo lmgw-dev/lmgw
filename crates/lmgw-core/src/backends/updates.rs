@@ -41,8 +41,7 @@
 //! comes, so the row always ends as the newest state. A check of one build
 //! and a full check running side by side merge per build: the newer
 //! observation of a build is kept, whichever check finished last.
-//! Restarts are frequent (lmgw is started by hand each morning; dev
-//! instances far more often): with the last check's time persisted, the
+//! Restarts are frequent (an app start, and dev instances far more often): with the last check's time persisted, the
 //! schedule resumes where it was instead of re-asking every remote a few
 //! minutes after each start, and the badge is right from the first frame.
 //!
@@ -335,6 +334,10 @@ pub struct Stored {
     pub last_all: Option<String>,
     pub builds: BTreeMap<i64, BuildObservation>,
     pub images: BTreeMap<String, ImageObservation>,
+    /// The pinned engine releases' upstream check, by engine (`llama`,
+    /// `sdcpp`, `audio`, `espeak`); empty where lmgw has no pins (Windows
+    /// design §4.2).
+    pub engines: BTreeMap<String, crate::runtime::engine_assets::releases::ReleaseObservation>,
 }
 
 impl Stored {
@@ -1049,6 +1052,17 @@ async fn observe_images(state: &SharedState) -> Option<BTreeMap<String, ImageObs
     Some(out)
 }
 
+/// The pinned engine releases' upstream check (Windows design §4.2), where
+/// this platform has pins; `None` (nothing asked, nothing changed) where it
+/// has none, which is Linux: its engines are the images above.
+async fn observe_engine_releases(
+    timeout: Duration,
+) -> Option<BTreeMap<String, crate::runtime::engine_assets::releases::ReleaseObservation>> {
+    use crate::runtime::engine_assets::{pins, releases};
+    let pins = pins::current()?;
+    Some(releases::observe(releases::API, pins, timeout, &now_rfc3339()).await)
+}
+
 // ---------------------------------------------------------------------------
 // The checks
 // ---------------------------------------------------------------------------
@@ -1172,6 +1186,7 @@ pub async fn check_all(state: &SharedState) -> Result<BuildUpdatesResponse, Stri
     }
     let observed = observe(state, &targets).await;
     let images = observe_images(state).await;
+    let engines = observe_engine_releases(updates.remote_timeout()).await;
     {
         let mut s = updates.lock();
         // A build that was deleted, or lost its last comparable run, drops
@@ -1181,6 +1196,9 @@ pub async fn check_all(state: &SharedState) -> Result<BuildUpdatesResponse, Stri
         merge_full_check(&mut s, &checked, observed, began);
         if let Some(images) = images {
             s.images = images;
+        }
+        if let Some(engines) = engines {
+            s.engines = engines;
         }
         s.last_all = Some(now_rfc3339());
     }
@@ -1266,6 +1284,11 @@ pub async fn summary(state: &AppState) -> UpdatesSummary {
             .images
             .iter()
             .filter(|(name, o)| o.update_available && in_use.contains(*name))
+            .count() as u32,
+        engines_with_updates: stored
+            .engines
+            .values()
+            .filter(|o| o.update_available)
             .count() as u32,
         checked_at: stored.last_all,
     }

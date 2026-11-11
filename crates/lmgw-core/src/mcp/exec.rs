@@ -1061,6 +1061,9 @@ pub struct SelfAdminExecutor {
     state: SharedState,
     ctx: RequestCtx,
     proto: &'static str,
+    /// How the audit log names this executor's writing calls (§5.8): the
+    /// dashboard's Chat unless the run says otherwise.
+    via: crate::audit::Via,
 }
 
 impl SelfAdminExecutor {
@@ -1069,7 +1072,16 @@ impl SelfAdminExecutor {
             state,
             ctx,
             proto: crate::telemetry::ADMIN_TOOL_PROTO,
+            via: crate::audit::Via::Chat,
         }
+    }
+
+    /// Name this executor's writing calls in the audit log as reaching the
+    /// gateway by `via` (a `/v1/responses` or realtime caller's `api`, an
+    /// agent run's `agent`).
+    pub fn audited_as(mut self, via: crate::audit::Via) -> Self {
+        self.via = via;
+        self
     }
 
     /// Log this executor's calls under a different `ingress_proto`, the way
@@ -1099,7 +1111,8 @@ impl ToolExecutor for SelfAdminExecutor {
                 // and nobody changes the access settings through a tool (L5's
                 // notes, 2026-10-07).
                 let caller = selfadmin::Caller::of(&self.ctx.principal);
-                selfadmin::call_capped(&self.state, name, arguments, caller).await
+                let actor = crate::audit::Actor::with_via(&snap, &self.ctx, self.via);
+                selfadmin::call_capped(&self.state, name, arguments, caller, Some(&actor)).await
             };
             let outcome = match call {
                 Ok(v) => ToolOutcome {

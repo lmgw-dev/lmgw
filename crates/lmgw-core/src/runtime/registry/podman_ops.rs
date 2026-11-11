@@ -1,4 +1,5 @@
-//! Low-level podman verbs and container bookkeeping.
+//! Container bookkeeping, the launcher verbs the registry lends its callers,
+//! and the podman verbs outside the launcher (the engine vocabulary probes).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,6 +8,14 @@ use tokio::sync::watch;
 
 use super::*;
 use crate::runtime::Class;
+
+/// Why an engine's flag vocabulary is not read where lmgw starts its engines
+/// as native processes: the reads run the engine's container image, and a
+/// read of the native executable's own `--help` is not built yet (Windows
+/// design §4.2, §7 WP8).
+pub(crate) const NATIVE_HELP: &str = "this lmgw starts its engines as native processes, which \
+     have no container image to read the flags from, and reading the native build's own --help \
+     is not built yet";
 
 impl Registry {
     /// Is a container for this model in the map (in any state)?
@@ -45,7 +54,8 @@ impl Registry {
             .map(|e| e.host_port)
     }
 
-    /// Does a container with exactly this name exist (in any state)?
+    /// Does a container with exactly this name exist (in any state)? Asked of
+    /// the launcher ([`Launcher::exists`](crate::runtime::launcher::Launcher::exists)).
     ///
     /// For the legacy sweep (§3.4), which matches the router-mode containers by
     /// name because they carry no labels to filter on.
@@ -57,16 +67,7 @@ impl Registry {
     /// *nothing* about, and forgetting it would leave a router-mode container
     /// running with nothing left in the system that could ever rediscover it.
     pub async fn container_exists(&self, name: &str) -> Presence {
-        match self.podman(&["inspect", "--format", "json", name]).await {
-            Ok(out) if out.ok() => Presence::Present,
-            Ok(out) if is_no_such_container(&out.stderr) => Presence::Absent,
-            Ok(out) => Presence::Unknown(format!(
-                "podman inspect {name} failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            )),
-            Err(e) => Presence::Unknown(format!("podman inspect {name} could not be run: {e}")),
-        }
+        self.launcher.exists(name).await
     }
 
     /// Stop and remove a container this registry has no entry for, by name.
@@ -76,8 +77,8 @@ impl Registry {
     /// — then `rm -f`, because unlike a managed container nothing will ever
     /// `--replace` this one.
     pub async fn remove_unmanaged(&self, name: &str) -> Result<(), String> {
-        self.stop_quietly(name).await;
-        self.rm_force(name).await
+        self.launcher.stop_quietly(name).await;
+        self.launcher.remove(name).await
     }
 
     /// Drop *our* entry (identified by its phase channel, never by key
@@ -115,7 +116,13 @@ impl Registry {
     /// container did not use it, and stamping it would hide a corpse from the
     /// idle reaper and the LRU for a full idle period every time a client
     /// retried — the reaper starvation this parameter exists to prevent.
-    pub(super) fn release(&self, key: &Key, phase: &Arc<watch::Sender<Phase>>, stamp: bool) {
+    pub(super) fn release(
+        &self,
+        key: &Key,
+        phase: &Arc<watch::Sender<Phase>>,
+        stamp: bool,
+        sent: bool,
+    ) {
         let mut map = self.map();
         if let Some(e) = map.get_mut(key) {
             if !Arc::ptr_eq(&e.phase, phase) {
@@ -124,6 +131,10 @@ impl Registry {
             e.in_flight = e.in_flight.saturating_sub(1);
             if stamp {
                 e.last_used = Instant::now();
+                // A request ran on it (`Entry::served`).
+                if sent && e.state == RuntimeState::Ready {
+                    e.served = true;
+                }
             }
         }
     }
@@ -133,14 +144,11 @@ impl Registry {
         self.podman_argv(&argv).await
     }
 
-    /// `podman <argv>` through the runner — refused when it gives a
-    /// container the graphics card without lmgw's CDI spec dir
-    /// ([`crate::runtime::cdi::OwnSpec::refuse_unpointed`]).
+    /// `podman <argv>` through the runner, for the verbs outside the
+    /// launcher — refused when it gives a container the graphics card without
+    /// lmgw's CDI spec dir ([`crate::runtime::cdi::OwnSpec::refuse_unpointed`]).
     pub(super) async fn podman_argv(&self, argv: &[String]) -> std::io::Result<CmdOutput> {
-        self.cdi()
-            .refuse_unpointed(argv)
-            .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
-        self.runner.run("podman", argv).await
+        crate::runtime::launcher::podman::run(&*self.runner, &self.cdi(), argv).await
     }
 
     /// `llama-server --help` for one image, cached (§3.6, "probe / help").
@@ -177,6 +185,14 @@ impl Registry {
         image: &str,
         extra_run_args: &[String],
     ) -> Result<String, String> {
+        if !self.launcher.runs_containers() {
+            // A native llama-server has no image to read, and no read of the
+            // native executable's own `--help` is built yet (Windows design
+            // §4.2): say that, not why a podman run would fail.
+            return Err(format!(
+                "could not read llama-server --help from image '{image}': {NATIVE_HELP}"
+            ));
+        }
         let facts = self.image_facts(image).await;
         if let Ok(f) = &facts {
             if let Some(cached) = self
@@ -402,78 +418,16 @@ impl Registry {
             .map_err(|e| format!("podman run could not be run: {e}"))
     }
 
-    /// `podman logs --tail <n>` for one container, verbatim (§3.6/§8's `logs`
-    /// verb — the `lmgw__container action=logs` surface).
+    /// The last `tail` lines one model's container printed, verbatim (§3.6/§8's
+    /// `logs` verb — the `lmgw__container action=logs` surface), through the
+    /// launcher (Podman: `podman logs --tail <n>`).
     ///
-    /// Unlike [`Self::log_excerpt`] this is not a failure post-mortem: it is a
-    /// caller-driven read of whatever the container has printed, so it
-    /// returns the raw tail rather than filtering for "interesting" lines.
-    /// With one container per model this is the only place a caller without a
-    /// shell on the box can see why a model is misbehaving after it started
-    /// cleanly.
+    /// Not a failure post-mortem: a caller-driven read of whatever the
+    /// container has printed, so it is the raw tail rather than the
+    /// "interesting" lines. With one container per model this is the only
+    /// place a caller without a shell on the box can see why a model is
+    /// misbehaving after it started cleanly.
     pub async fn logs_tail(&self, container: &str, tail: usize) -> Result<String, String> {
-        let out = self
-            .podman(&["logs", "--tail", &tail.to_string(), container])
-            .await
-            .map_err(|e| format!("podman logs could not be run: {e}"))?;
-        if !out.ok() {
-            return Err(format!(
-                "podman logs failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            ));
-        }
-        Ok(format!("{}{}", out.stdout, out.stderr))
-    }
-
-    /// Best-effort `podman logs --tail` for a failed start. Prefers the lines
-    /// that look like a diagnosis and falls back to the plain tail when none
-    /// match — an empty excerpt would leave the error saying nothing at all,
-    /// which is the whole failure mode this exists to prevent.
-    pub(super) async fn log_excerpt(&self, container: &str) -> Vec<String> {
-        let Ok(out) = self
-            .podman(&["logs", "--tail", &LOG_TAIL.to_string(), container])
-            .await
-        else {
-            return Vec::new();
-        };
-        log_excerpt_of(&format!("{}\n{}", out.stdout, out.stderr))
-    }
-}
-
-/// [`Registry::log_excerpt`]'s reading of a log tail, for a caller that
-/// fetched the tail itself (the benchmark's own container, which is not a
-/// registry entry): the last [`LOG_EXCERPT_LINES`] lines that look like a
-/// diagnosis, else the last lines as they are.
-pub fn log_excerpt_of(text: &str) -> Vec<String> {
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let tail = |it: Vec<&str>| -> Vec<String> {
-        it.into_iter()
-            .rev()
-            .take(LOG_EXCERPT_LINES)
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    };
-    let interesting: Vec<&str> = lines
-        .iter()
-        .copied()
-        .filter(|l| {
-            let low = l.to_ascii_lowercase();
-            ["error", "failed", "unknown model", "exiting", "cannot"]
-                .iter()
-                .any(|needle| low.contains(needle))
-        })
-        .collect();
-    if interesting.is_empty() {
-        tail(lines)
-    } else {
-        tail(interesting)
+        self.launcher.logs_tail(container, tail).await
     }
 }

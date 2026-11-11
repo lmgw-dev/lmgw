@@ -21,8 +21,11 @@ use secrecy::zeroize::Zeroizing;
 use super::ca::{self, Ca, CaFacts, KeyMode};
 use super::files::{TrustFiles, CERT_NAME, KEY_NAME};
 use super::leaf::LeafCache;
-use super::secret::{NoSecretService, StoreError, WrapKeyStore};
+use super::secret::{NoSecretService, StoreError, WrapKeyStore, NO_STORE, PLAIN_KEPT, STORE};
 use super::wrap::{self, WrapKey, PLAIN_LABEL, WRAPPED_LABEL};
+use super::wrap_secret::{WRAP_KEY_SECRET_HOW, WRAP_KEY_SECRET_NAME};
+
+mod secret_start;
 
 /// Why the CA cannot be used. Each says what it found and where.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -43,6 +46,9 @@ pub enum TrustError {
     WrapKeyMissing(String),
     #[error("{0}")]
     SecretService(String),
+    /// The server image's wrapping key secret holds no key (`wrap_secret`).
+    #[error("{0}")]
+    WrapKeySecret(String),
 }
 
 impl TrustError {
@@ -56,6 +62,7 @@ impl TrustError {
             Self::NoSecretService(_) => K::NoSecretService,
             Self::WrapKeyMissing(_) => K::WrapKeyMissing,
             Self::SecretService(_) => K::SecretService,
+            Self::WrapKeySecret(_) => K::WrapKeySecret,
         }
     }
 }
@@ -147,12 +154,12 @@ fn read_cert_file(files: &TrustFiles) -> Result<CertificateDer<'static>, TrustEr
     Ok(CertificateDer::from(parsed.into_contents()))
 }
 
-/// What a store's error means for the CA (§2.1).
-fn store_error(e: StoreError, wrapped_on_disk: bool) -> TrustError {
+/// What `store`'s error means for the CA (§2.1).
+fn store_error(store: &dyn WrapKeyStore, e: StoreError, wrapped_on_disk: bool) -> TrustError {
     match e {
         StoreError::Unavailable(why) => TrustError::NoSecretService(format!(
-            "{KEY_NAME} is wrapped, and no Secret Service answers this start ({why}); start \
-             lmgw in the desktop session"
+            "{KEY_NAME} is wrapped, and {NO_STORE} this start ({why}); start lmgw in the \
+             desktop session"
         )),
         StoreError::Declined => TrustError::Locked(format!(
             "the wallet's unlock prompt was declined, so the device CA's key {}; the device \
@@ -163,6 +170,8 @@ fn store_error(e: StoreError, wrapped_on_disk: bool) -> TrustError {
                 "cannot be wrapped"
             }
         )),
+        // The image's secret, a file that holds no key: its own kind.
+        StoreError::Failed(why) if store.secret_file().is_some() => TrustError::WrapKeySecret(why),
         StoreError::Failed(why) => TrustError::SecretService(why),
     }
 }
@@ -179,21 +188,39 @@ async fn open_key(
             let keys = store
                 .get(data_dir)
                 .await
-                .map_err(|e| store_error(e, true))?;
+                .map_err(|e| store_error(store, e, true))?;
             if keys.is_empty() {
-                return Err(TrustError::WrapKeyMissing(format!(
-                    "{KEY_NAME} is wrapped, and the Secret Service holds no wrapping key for \
-                     this data directory (its item was deleted, or the wallet replaced); rotate \
-                     the device CA to make a new one"
-                )));
+                return Err(TrustError::WrapKeyMissing(match store.secret_file() {
+                    Some(secret) => format!(
+                        "{KEY_NAME} is wrapped, and no wrapping key secret is mounted at {} (the \
+                         Podman secret {WRAP_KEY_SECRET_NAME} was removed, or the unit lost its \
+                         Secret={WRAP_KEY_SECRET_NAME} line); restore the secret it was wrapped \
+                         under, or rotate the device CA, which makes a new key kept plain",
+                        secret.display()
+                    ),
+                    None => format!(
+                        "{KEY_NAME} is wrapped, and {STORE} holds no wrapping key for \
+                         this data directory (its item was deleted, or the wallet replaced); \
+                         rotate the device CA to make a new one"
+                    ),
+                }));
             }
             keys.iter()
                 .find_map(|k| wrap::open(k, &key.contents).ok())
                 .ok_or_else(|| {
-                    TrustError::Unreadable(format!(
-                        "{KEY_NAME}: no wrapping key the Secret Service holds for this data \
-                         directory opens it; rotate the device CA"
-                    ))
+                    TrustError::Unreadable(match store.secret_file() {
+                        Some(secret) => format!(
+                            "{KEY_NAME}: the wrapping key secret at {} does not open it (the \
+                             secret was replaced, or this data comes from another lmgw, a \
+                             desktop's included); restore the secret it was wrapped under, or \
+                             rotate the device CA",
+                            secret.display()
+                        ),
+                        None => format!(
+                            "{KEY_NAME}: no wrapping key {STORE} holds for this data \
+                             directory opens it; rotate the device CA"
+                        ),
+                    })
                 })
         }
     }
@@ -201,26 +228,43 @@ async fn open_key(
 
 /// A key file's text: how it keeps the key, its PEM, and the wrapping key
 /// added to the store for it (to keep when the store is pruned after the
-/// write).
+/// write; `None` for a plain key and for a store's fixed key, which has
+/// nothing to prune).
 struct KeyText {
     mode: KeyMode,
     pem: Zeroizing<String>,
     wrap_key: Option<WrapKey>,
 }
 
-/// The key file's PEM for `pkcs8`: wrapped under a new wrapping key added
-/// to the store first (beside the old items, which still open the file on
-/// disk until it is replaced), or plain when no Secret Service answers
-/// (§2.1).
+/// The key file's PEM for `pkcs8`: under the store's fixed key when it is
+/// one (the server image's secret, headless server design §9; asked before
+/// any key is made), else wrapped under a new wrapping key added to the
+/// store first (beside the old items, which still open the file on disk
+/// until it is replaced), or plain when no Secret Service answers or no
+/// secret is mounted (§2.1).
 async fn key_file_for(
     files: &TrustFiles,
     data_dir: &Path,
     store: &dyn WrapKeyStore,
     pkcs8: &[u8],
 ) -> Result<KeyText, TrustError> {
-    let wrap_key = WrapKey::generate().map_err(TrustError::Unreadable)?;
-    match store.add(data_dir, &wrap_key).await {
-        Ok(()) => {
+    let added = match store.fixed_key() {
+        Some(Ok(fixed)) => {
+            let sealed = wrap::seal(fixed, pkcs8).map_err(TrustError::Unreadable)?;
+            return Ok(KeyText {
+                mode: KeyMode::Wrapped,
+                pem: Zeroizing::new(pem::encode(&pem::Pem::new(WRAPPED_LABEL, sealed))),
+                wrap_key: None,
+            });
+        }
+        Some(Err(e)) => Err(e),
+        None => {
+            let wrap_key = WrapKey::generate().map_err(TrustError::Unreadable)?;
+            store.add(data_dir, &wrap_key).await.map(|()| wrap_key)
+        }
+    };
+    match added {
+        Ok(wrap_key) => {
             let sealed = wrap::seal(&wrap_key, pkcs8).map_err(TrustError::Unreadable)?;
             Ok(KeyText {
                 mode: KeyMode::Wrapped,
@@ -229,18 +273,26 @@ async fn key_file_for(
             })
         }
         Err(StoreError::Unavailable(why)) => {
-            tracing::warn!(
-                "no Secret Service answers ({why}): the device CA's key is kept plain in {} \
-                 (0600) until a start that reaches one wraps it",
-                files.key.display()
-            );
+            match store.secret_file() {
+                Some(_) => tracing::warn!(
+                    "{why}: the device CA's key is kept plain in {} (0600) until a start with \
+                     the secret wraps it (`{WRAP_KEY_SECRET_HOW}`, and \
+                     Secret={WRAP_KEY_SECRET_NAME} in the unit)",
+                    files.key.display()
+                ),
+                None => tracing::warn!(
+                    "{NO_STORE} ({why}): the device CA's key is kept plain in {} \
+                     {PLAIN_KEPT} until a start that reaches one wraps it",
+                    files.key.display()
+                ),
+            }
             Ok(KeyText {
                 mode: KeyMode::Plain,
                 pem: Zeroizing::new(pem::encode(&pem::Pem::new(PLAIN_LABEL, pkcs8.to_vec()))),
                 wrap_key: None,
             })
         }
-        Err(e) => Err(store_error(e, false)),
+        Err(e) => Err(store_error(store, e, false)),
     }
 }
 
@@ -251,11 +303,11 @@ async fn key_file_for(
 async fn prune(data_dir: &Path, store: &dyn WrapKeyStore, keep: &WrapKey) {
     match store.prune(data_dir, keep).await {
         Ok(0) => {}
-        Ok(n) => tracing::info!(
-            "deleted {n} old wrapping key item(s) of the device CA from the Secret Service"
-        ),
+        Ok(n) => {
+            tracing::info!("deleted {n} old wrapping key item(s) of the device CA from {STORE}")
+        }
         Err(e) => tracing::warn!(
-            "old wrapping key items of the device CA stay in the Secret Service ({e}); they \
+            "old wrapping key items of the device CA stay in {STORE} ({e}); they \
              open nothing, and the next write of the key deletes them"
         ),
     }
@@ -293,15 +345,21 @@ async fn load_or_create(
     let pkcs8 = open_key(data_dir, store, &key_file).await?;
     let mut ca = ca::load(der, &pkcs8, key_file.mode)?;
     if key_file.mode == KeyMode::Plain {
-        // A plain key, and maybe a Secret Service at hand now: wrap it and
-        // replace the plain file (§2.1).
+        // A plain key, and maybe a Secret Service or the image's secret at
+        // hand now: wrap it and replace the plain file (§2.1).
         let text = key_file_for(files, data_dir, store, &pkcs8).await?;
-        if let Some(keep) = &text.wrap_key {
+        if text.mode == KeyMode::Wrapped {
             files.write_key(text.pem.as_bytes())?;
-            prune(data_dir, store, keep).await;
+            if let Some(keep) = &text.wrap_key {
+                prune(data_dir, store, keep).await;
+            }
+            let under = match store.secret_file() {
+                Some(secret) => format!("under the wrapping key secret {}", secret.display()),
+                None => format!("in {STORE}"),
+            };
             tracing::info!(
-                "the device CA's key in {} is wrapped in the Secret Service now; the plain file \
-                 was replaced (a copy a snapshot or a backup took of it was not)",
+                "the device CA's key in {} is wrapped {under} now; the plain file was replaced \
+                 (a copy a snapshot or a backup took of it was not)",
                 files.key.display()
             );
             ca = ca::load(ca.certificate().clone(), &pkcs8, KeyMode::Wrapped)?;
@@ -318,9 +376,13 @@ struct MakeFailed {
 }
 
 /// A new CA in `files`, replacing whatever is there: the key file first,
-/// then the certificate, each replaced atomically. Its wrapping key, when
-/// there is one, replaces the store's item for this data directory first,
-/// so whatever the files held before no longer opens.
+/// then the certificate, each replaced atomically. Under the Secret Service
+/// its new wrapping key replaces the store's item for this data directory
+/// (the old ones pruned after the write), so a copy of the old key file no
+/// longer opens. Under the image's fixed key the new key is sealed under
+/// the same secret, so an older copy of the key file (a backup of the data
+/// volume) still opens with that secret until the secret is replaced
+/// (headless server design D98).
 async fn make(
     files: &TrustFiles,
     data_dir: &Path,
@@ -409,9 +471,19 @@ fn peek(files: &TrustFiles) -> State {
 
 impl Trust {
     /// Where the CA key's wrapping key is kept from now on: the session's
-    /// Secret Service in the app (`AppState::init_with`), a fake in tests.
+    /// Secret Service in the app (`AppState::init_with`), the image's
+    /// secret in container mode, a fake in tests.
     pub fn set_store(&self, store: Arc<dyn WrapKeyStore>) {
         *self.store.lock().unwrap() = store;
+    }
+
+    /// How the key file of `data_dir` keeps the key, read from its PEM
+    /// label without opening it or asking the store; `None` when there is
+    /// no readable key file. For the start's line about the image's secret.
+    pub fn key_mode_on_disk(data_dir: &Path) -> Option<KeyMode> {
+        read_key_file(&TrustFiles::in_data_dir(data_dir))
+            .ok()
+            .map(|k| k.mode)
     }
 
     fn store(&self) -> Arc<dyn WrapKeyStore> {
@@ -443,8 +515,12 @@ impl Trust {
     }
 
     /// Replace the CA of `data_dir` with a new one (the owner's rotation,
-    /// §5.5): a new key under a new wrapping key and a new certificate, the
-    /// old key and its wrapping key not kept, and the leaf cache emptied.
+    /// §5.5): a new key and a new certificate, the old key not kept, and the
+    /// leaf cache emptied. Under the Secret Service the new key is wrapped
+    /// under a new wrapping key and the old one is deleted; under the image's
+    /// fixed key it is sealed under the same secret, which still opens an
+    /// older copy of the old key file (a volume backup) until the secret is
+    /// replaced ([`make`], headless server design D98).
     /// Every device paired under the old CA stops verifying lmgw; resetting
     /// their rows is the caller's.
     ///

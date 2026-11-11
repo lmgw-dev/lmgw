@@ -6,6 +6,10 @@
 //! covers the seams: argument and answer shapes, the dispatch, refusals in
 //! words, delete-with-images, and the mode gate.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use crate::common;
 use crate::support::backends_fake as support;
 
@@ -277,6 +281,8 @@ async fn a_refused_definition_names_the_field() {
 /// the controller went away after the save — failing a run before anything
 /// is fetched, with the same sentence. Never dropped or swapped for another
 /// limit.
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn cpus_without_the_cpuset_controller_is_refused_on_save_and_at_run_start() {
     let h = Harness::new().await;
@@ -316,6 +322,8 @@ async fn cpus_without_the_cpuset_controller_is_refused_on_save_and_at_run_start(
     assert_eq!(got["runs"][0]["status"], "failed");
 }
 
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_run_starts_as_a_job_its_log_reads_by_offset_and_its_history_pages() {
     let h = Harness::new().await;
@@ -506,7 +514,12 @@ async fn a_dev_instance_deletes_the_build_but_none_of_its_images() {
 /// rather than by calling into `lmgw_core::backends::run`, which is
 /// crate-private.
 fn cache_dir(h: &Harness, id: &str) -> std::path::PathBuf {
+    #[cfg(unix)]
     let uid = unsafe { libc::getuid() };
+    // Windows has no uid (lmgw-core's `real_uid` is `None` there and the delete
+    // skips the cache dirs); 0 only keeps this helper compiling.
+    #[cfg(not(unix))]
+    let uid = 0;
     h.root
         .join("vartmp")
         .join(format!("buildah-cache-{uid}"))
@@ -518,6 +531,9 @@ fn touch_cache_dir(dir: &std::path::Path, bytes: usize) {
     std::fs::write(dir.join("stats"), vec![0u8; bytes]).unwrap();
 }
 
+// buildah's cache dirs are Unix's: a build delete on Windows skips them
+// (Windows design §3.1, §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn delete_removes_only_this_builds_own_cache_dirs() {
     let h = Harness::new().await;
@@ -574,6 +590,9 @@ async fn delete_removes_only_this_builds_own_cache_dirs() {
 
 /// A build switched from CUDA to Vulkan still owns the caches its CUDA runs
 /// filled: delete removes those too.
+// buildah's cache dirs are Unix's: a build delete on Windows skips them
+// (Windows design §3.1, §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn delete_removes_the_caches_of_every_backend_its_runs_used() {
     let h = Harness::new().await;
@@ -1254,6 +1273,8 @@ async fn read_only_lists_the_build_reads_and_refuses_the_writes() {
         .is_empty());
 }
 
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn full_defines_runs_and_reads_a_build_through_the_tools() {
     let h = Harness::new().await;

@@ -4,6 +4,10 @@
 //! the gateway adds to an answer without adding it to the type is dropped by
 //! the read and fails here.
 
+// Its tests that read or start agents, run engine builds or extract a PDF are
+// Unix's (Windows design §4.5, §3.1), so on Windows some of what they use is not.
+#![cfg_attr(windows, allow(unused_imports, dead_code))]
+
 use std::io::{Cursor, Read};
 
 use lmgw_api_types::chat::Ack;
@@ -43,6 +47,9 @@ fn header(r: &reqwest::Response, name: &str) -> String {
     r.headers()[name].to_str().unwrap().to_string()
 }
 
+// Its PDF needs poppler, which PDF extraction does not run on Windows yet
+// (Windows design §3.1): the upload answers 422 there.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_attachment_routes_answer_their_types() {
     let chat = chat_mock().await;

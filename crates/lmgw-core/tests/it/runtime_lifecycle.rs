@@ -37,6 +37,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::common;
 
+mod llama_fit_adoption;
+
 // ---------------------------------------------------------------------------
 // The fake podman
 // ---------------------------------------------------------------------------
@@ -363,6 +365,9 @@ fn image_runtime(model_id: &str) -> ModelRuntime {
             capabilities_override: None,
             peak_extra_bytes: None,
             peak_learned_at: None,
+            idle_bytes: None,
+            work_bytes: None,
+            learned_key: None,
             prompt_style: None,
             preview_mode: None,
         }),
@@ -835,6 +840,184 @@ async fn an_adopted_image_container_keeps_the_capabilities_its_probe_read() {
     // The start's warnings are still gone with the process that made them —
     // "unknown" rather than a stale copy.
     assert!(view[0].warnings.is_empty(), "{:?}", view[0].warnings);
+}
+
+/// Item 4 of the second review: a partial start's container carries its
+/// grant (`lmgw.grant`) and a `--max-vram` the row alone does not render.
+/// Boot renders the expected command from the label, adopts the container
+/// instead of removing it, and the entry keeps the grant the ledger charges.
+/// Without the label the same command is not the row's, and is removed.
+#[tokio::test]
+async fn an_adopted_partial_image_container_keeps_its_grant() {
+    let sd = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sdcpp/v1/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SD_CAPS))
+        .mount(&sd)
+        .await;
+    let port = sd.address().port();
+    let models = tempfile::tempdir().unwrap();
+    let dir = models.path().display().to_string();
+    const MIB: u64 = 1024 * 1024;
+    let held = lmgw_core::runtime::argv::HeldTo {
+        granted: 3584 * MIB,
+        max_vram: 2560 * MIB,
+    };
+
+    let rt = image_runtime("z-image-turbo");
+    let mut render = rt
+        .preview_spec("lmgw", port, &dir, Path::new(DATA_DIR))
+        .unwrap();
+    if let lmgw_core::runtime::argv::EngineArgs::Image(img) = &mut render.engine {
+        img.held = Some(held);
+    }
+    let cmd = render_engine_args(&render);
+    assert!(cmd.iter().any(|a| a == "2.500"), "{cmd:?}");
+    let name = container_name("lmgw", Class::Image, "z-image-turbo");
+    for labelled in [true, false] {
+        let spec = AcquireSpec {
+            runtime: &rt,
+            container_prefix: "lmgw",
+            models_dir: &dir,
+            data_dir: Path::new(DATA_DIR),
+            may_write_models_dir: true,
+            load_timeout: Duration::from_millis(2_000),
+            stop_timeout: Duration::from_millis(500),
+        };
+        let mut labels = managed(Class::Image, "z-image-turbo");
+        if labelled {
+            labels.insert(
+                lmgw_core::runtime::argv::GRANT_LABEL.to_string(),
+                held.label(),
+            );
+        }
+        let podman = Arc::new(Podman::default());
+        podman.add(FakeContainer {
+            name: name.clone(),
+            labels,
+            state: "running".into(),
+            cmd: cmd.clone(),
+            host_port: port,
+        });
+        let reg = registry(podman.clone(), vec![]);
+        let report = reg.reconcile("lmgw", &[spec]).await;
+        if !labelled {
+            assert!(report.adopted.is_empty(), "{:?}", report.adopted);
+            assert_eq!(
+                report
+                    .removed
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>(),
+                vec![name.clone()],
+                "{:?}",
+                report.removed
+            );
+            continue;
+        }
+        assert_eq!(report.adopted, vec![name.clone()], "{:?}", report.removed);
+        let view = reg.list();
+        let grant = view[0].grant.clone().expect("the label's grant");
+        assert_eq!(
+            (grant.bytes, grant.max_vram_bytes),
+            (held.granted, held.max_vram)
+        );
+        assert!(
+            view[0].warnings.iter().any(|w| w.contains(
+                "was adopted from an earlier run of lmgw, which gave it 3.5 GiB on the card, \
+                 held sd-server to 2.500 GiB (--max-vram)"
+            )),
+            "{:?}",
+            view[0].warnings
+        );
+    }
+}
+
+/// Item 4 of the third review: an adopted partial container whose row sets
+/// its own `max_vram` is worded by what holds sd-server. Where that is the
+/// budget admission gave it, it is held as given; where it is not (the row
+/// changed after the decision), the entry gets back the note that it is not
+/// held to its grant, so it teaches no working budget.
+#[tokio::test]
+async fn an_adopted_partial_image_container_says_what_holds_it() {
+    let sd = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sdcpp/v1/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SD_CAPS))
+        .mount(&sd)
+        .await;
+    let port = sd.address().port();
+    let models = tempfile::tempdir().unwrap();
+    let dir = models.path().display().to_string();
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let held = lmgw_core::runtime::argv::HeldTo {
+        granted: 3 * GIB,
+        max_vram: 2 * GIB,
+    };
+    let name = container_name("lmgw", Class::Image, "z-image-turbo");
+    for (own, as_given) in [("2", true), ("1.5", false)] {
+        let mut rt = image_runtime("z-image-turbo");
+        if let Some(m) = rt.image_model.as_mut() {
+            m.args.insert("max_vram".into(), json!(own));
+        }
+        let mut render = rt
+            .preview_spec("lmgw", port, &dir, Path::new(DATA_DIR))
+            .unwrap();
+        if let lmgw_core::runtime::argv::EngineArgs::Image(img) = &mut render.engine {
+            img.held = Some(held);
+        }
+        let cmd = render_engine_args(&render);
+        assert!(cmd.iter().any(|a| a == own), "the row's own wins: {cmd:?}");
+        let spec = AcquireSpec {
+            runtime: &rt,
+            container_prefix: "lmgw",
+            models_dir: &dir,
+            data_dir: Path::new(DATA_DIR),
+            may_write_models_dir: true,
+            load_timeout: Duration::from_millis(2_000),
+            stop_timeout: Duration::from_millis(500),
+        };
+        let mut labels = managed(Class::Image, "z-image-turbo");
+        labels.insert(
+            lmgw_core::runtime::argv::GRANT_LABEL.to_string(),
+            held.label(),
+        );
+        let podman = Arc::new(Podman::default());
+        podman.add(FakeContainer {
+            name: name.clone(),
+            labels,
+            state: "running".into(),
+            cmd,
+            host_port: port,
+        });
+        let reg = registry(podman.clone(), vec![]);
+        let report = reg.reconcile("lmgw", &[spec]).await;
+        assert_eq!(report.adopted, vec![name.clone()], "{:?}", report.removed);
+        let view = reg.list();
+        let w = &view[0].warnings;
+        let unheld = w
+            .iter()
+            .any(|w| lmgw_core::runtime::registry::is_unheld_note(w));
+        if as_given {
+            assert!(
+                w.iter().any(|w| w.contains(
+                    "which gave it 3.0 GiB on the card, with the max_vram in its args holding \
+                     sd-server to 2.000 GiB (--max-vram)"
+                )),
+                "{w:?}"
+            );
+            assert!(!unheld, "held as given: {w:?}");
+        } else {
+            assert!(
+                w.iter().any(|w| w.contains(
+                    "which gave it 3.0 GiB on the card, but max_vram 1.5 in its args is what \
+                     holds sd-server"
+                )),
+                "{w:?}"
+            );
+            assert!(unheld, "the note is back: {w:?}");
+        }
+    }
 }
 
 /// Audio's container command is the same string for every audio model

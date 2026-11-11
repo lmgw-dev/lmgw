@@ -45,6 +45,28 @@ pub(super) const OPS: &[OpDoc] = &[
         example: None,
     },
     OpDoc {
+        name: "headroom_forget",
+        tag: TAG,
+        summary: "Forget the headroom's learned growth of other programs' GPU memory",
+        description: Some(
+            "Deletes every reading auto headroom learned from (`vram_outside_hours`), in memory \
+             and stored: auto uses the fixed `headroom_mb` until it has watched the card for \
+             `hours_needed` hours again. For a growth a one-off taught, such as a game run \
+             without the hold. The answer is the headroom as it is now (`HeadroomNow`).",
+        ),
+        tool: None,
+        args: OpArgs::NoArgs,
+        response: Resp::Json(|g| g.root_schema_for::<dto::HeadroomNow>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: Some(
+            "forgets every reading of other programs' GPU memory; auto headroom uses the fixed \
+             value until it has learned again",
+        ),
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
         name: "machine_check",
         tag: TAG,
         summary: "Check whether this computer can run local models",

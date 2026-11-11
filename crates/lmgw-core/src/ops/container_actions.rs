@@ -50,7 +50,20 @@ fn done(class: Class, model_id: &str, ok: bool, message: String) -> dto::ModelDo
         running: None,
         held: None,
         message,
+        warnings: Vec::new(),
     }
+}
+
+/// The warnings of `class`/`model_id`'s runtime entry: what its start found,
+/// and a start that fits only partially on the GPU (`vram::partial`).
+fn entry_warnings(state: &SharedState, class: Class, model_id: &str) -> Vec<String> {
+    state
+        .runtime()
+        .list()
+        .into_iter()
+        .find(|v| v.class == class && v.model_id == model_id)
+        .map(|v| v.warnings)
+        .unwrap_or_default()
 }
 
 /// The refusal `container` gives `start` and `restart` while the hold is on
@@ -239,6 +252,7 @@ async fn model_start(
     match start_model(state, class, model_id).await {
         Ok(port) => Ok(ContainerAnswer::Done(dto::ModelDone {
             port: Some(port),
+            warnings: entry_warnings(state, class, model_id),
             ..done(
                 class,
                 model_id,
@@ -388,6 +402,7 @@ async fn model_apply(
     match start_model(state, class, model_id).await {
         Ok(port) => Ok(ContainerAnswer::Done(dto::ModelDone {
             port: Some(port),
+            warnings: entry_warnings(state, class, model_id),
             ..done(
                 class,
                 model_id,

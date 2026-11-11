@@ -457,6 +457,8 @@ pub struct RungPlanInput<'a> {
     pub mmproj_path: Option<&'a str>,
     pub draft_gguf_path: Option<&'a str>,
     pub n_gpu_layers: Option<i64>,
+    pub n_cpu_moe: Option<i64>,
+    pub moe_cache_mib: Option<i64>,
 }
 
 /// `GET /api/ladder-rung-plan` (ladder design §4.2, §6): one rung's footprint,
@@ -519,6 +521,8 @@ pub async fn ladder_rung_plan(
             mmproj_path,
             draft_gguf_path,
             n_gpu_layers: input.n_gpu_layers,
+            n_cpu_moe: input.n_cpu_moe,
+            moe_cache_mib: input.moe_cache_mib,
             ..Default::default()
         },
         args: Vec::new(),

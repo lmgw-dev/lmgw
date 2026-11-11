@@ -47,6 +47,8 @@ pub struct Podman {
 
 impl Podman {
     /// `image` is on the box.
+    // Used by the agent suites that are Unix's (Windows design §4.5).
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn with(self, image: &str, digest: Option<&str>, manifest: Option<&str>) -> Self {
         self.here
             .lock()
@@ -68,6 +70,8 @@ impl Podman {
     /// port the argv publishes, that answers every request `200`. The health
     /// probe finds it, and `podman logs --tail n` answers `tail=<n>` and `n`
     /// lines.
+    // Used by the agent-starting suites, which are Unix's (Windows design §4.5).
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn serving(mut self) -> Self {
         self.serve = true;
         self
@@ -75,6 +79,8 @@ impl Podman {
 
     /// `podman run -d` does not answer until the start is cancelled: a cold
     /// pull that outlasts the test.
+    // Used by the agent-starting suites, which are Unix's (Windows design §4.5).
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn holding_start(mut self) -> Self {
         self.hold_start = true;
         self

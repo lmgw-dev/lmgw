@@ -527,6 +527,8 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
             mmproj_path: Some("mid.gguf"),
             draft_gguf_path: None,
             n_gpu_layers: None,
+            n_cpu_moe: None,
+            moe_cache_mib: None,
         },
     )
     .await
@@ -544,6 +546,8 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
             mmproj_path: Some("../outside.gguf"),
             draft_gguf_path: None,
             n_gpu_layers: None,
+            n_cpu_moe: None,
+            moe_cache_mib: None,
         },
     )
     .await
@@ -561,6 +565,8 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
             mmproj_path: None,
             draft_gguf_path: Some("nope.gguf"),
             n_gpu_layers: None,
+            n_cpu_moe: None,
+            moe_cache_mib: None,
         },
     )
     .await
@@ -579,6 +585,8 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
             mmproj_path: None,
             draft_gguf_path: None,
             n_gpu_layers: None,
+            n_cpu_moe: None,
+            moe_cache_mib: None,
         },
     )
     .await

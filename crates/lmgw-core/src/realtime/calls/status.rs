@@ -16,17 +16,27 @@ use super::{CallInfo, CallState, Calls, Group, GroupState};
 use crate::principal::Principal;
 
 impl Group {
-    /// The rule that binds the group, naming its settings (§3.1).
-    fn rule(self) -> &'static str {
+    /// The rule that binds the group, naming its settings by their rows on
+    /// Settings (§3.1).
+    fn rule(self) -> String {
+        use lmgw_api_types::settings_labels::{
+            BIND_ADDRESS_AT, DEVICE_LISTENER_AT, TLS_LISTEN_AT, WEBRTC_PORT_AT, WEBRTC_TLS_PORT_AT,
+        };
         match self {
-            Self::Plain => {
-                "bind_addr's address, on realtime.webrtc_port (null: the HTTP port's \
-                 number), bound at the start beside the plain listener"
-            }
-            Self::Devices => {
-                "the device listener's addresses and port (devices.listen, devices.port), \
-                 bound, moved and closed with it"
-            }
+            Self::Plain => format!(
+                "the bind address's IP ({BIND_ADDRESS_AT}), on the WebRTC calls UDP port \
+                 ({WEBRTC_PORT_AT}; unset: the bind address's port), bound at the start beside \
+                 the plain listener"
+            ),
+            Self::Tls => format!(
+                "the TLS address's IP ({TLS_LISTEN_AT}), on the WebRTC calls TLS UDP port \
+                 ({WEBRTC_TLS_PORT_AT}; unset: the TLS address's port), bound at the start \
+                 beside the TLS listener"
+            ),
+            Self::Devices => format!(
+                "the device listener's addresses and port ({DEVICE_LISTENER_AT}), bound, moved \
+                 and closed with it"
+            ),
         }
     }
 }
@@ -35,6 +45,7 @@ impl Group {
     fn wire(self) -> wire::WebRtcGroup {
         match self {
             Group::Plain => wire::WebRtcGroup::Plain,
+            Group::Tls => wire::WebRtcGroup::Tls,
             Group::Devices => wire::WebRtcGroup::Devices,
         }
     }
@@ -129,7 +140,7 @@ impl Calls {
             };
             wire::WebRtcGroupStatus {
                 group: g.wire(),
-                rule: g.rule().into(),
+                rule: g.rule(),
                 state,
                 addrs,
                 error,
@@ -138,7 +149,17 @@ impl Calls {
         let now = Instant::now();
         wire::WebRtcStatus {
             enabled: !self.inner.off_at_start.load(Ordering::Relaxed),
-            groups: vec![group(Group::Plain), group(Group::Devices)],
+            // The TLS group once a start configured it (D22): a gateway
+            // without a TLS listener shows the two groups it always had.
+            groups: if self.groups().contains_key(&Group::Tls) {
+                vec![
+                    group(Group::Plain),
+                    group(Group::Tls),
+                    group(Group::Devices),
+                ]
+            } else {
+                vec![group(Group::Plain), group(Group::Devices)]
+            },
             dropped: self.dropped(),
             calls: self.list().iter().map(|c| call(c, now)).collect(),
         }

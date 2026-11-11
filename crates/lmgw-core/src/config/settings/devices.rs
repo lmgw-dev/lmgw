@@ -13,7 +13,7 @@ use lmgw_api_types::device_link as wire;
 use serde::{Deserialize, Serialize};
 
 /// Where the device listener binds (device link design §4.1, D24).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, schemars::JsonSchema)]
 pub enum DevicesListen {
     /// `127.0.0.1` and `[::1]`: while every paired device is this computer.
     #[default]
@@ -68,7 +68,7 @@ impl<'de> Deserialize<'de> for DevicesListen {
 }
 
 /// Settings → Network & access → Devices.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DevicesSettings {
     /// The device listener: off until the first pairing turns it on

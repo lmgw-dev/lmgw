@@ -658,6 +658,7 @@ async fn a_row_whose_path_is_its_gguf_file_is_present() {
 /// (one GGUF left: the directory is handed over as it is), and the row's
 /// problems name the link and its target rather than leave the difference
 /// unsaid. A link inside the models dir counts and is no problem.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_gguf_link_out_of_the_models_dir_is_named_and_not_counted() {
     let (_state, base, dir) = gateway(SelfAdmin::Full).await;
@@ -716,6 +717,7 @@ async fn a_gguf_link_out_of_the_models_dir_is_named_and_not_counted() {
 /// in it is dangling to audio.cpp, though none is a link of its own, so lmgw
 /// counts none and hands over the directory — and the row's problems name
 /// the directory's link instead of saying nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_row_directory_linked_out_of_the_models_dir_is_named() {
     let (_state, base, dir) = gateway(SelfAdmin::Full).await;

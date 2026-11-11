@@ -20,7 +20,41 @@ use crate::store;
 use crate::telemetry::TelemetryBus;
 use crate::vram::VramScheduler;
 
+pub mod data_dir_lock;
+pub mod data_dirs;
+pub use data_dirs::{default_data_dir, home_default_data_dir, local_data_dir};
+pub mod dev_instance;
 pub mod fresh_install;
+
+/// The host an entry point boots a gateway on: podman, the GPU and the rest
+/// of the machine (driver files, `nvidia-ctk`, `XDG_RUNTIME_DIR`).
+/// [`Host::real`] is this machine's; a test passes fakes, as
+/// [`AppState::init_with_host`]'s do.
+#[derive(Clone)]
+pub struct Host {
+    pub runner: Arc<dyn runtime::registry::CommandRunner>,
+    pub probe: Arc<dyn crate::vram::GpuProbe>,
+    pub machine: Arc<dyn lmgw_machine::Facts>,
+    /// Where a container-mode start reads the device CA's wrapping key
+    /// (headless server design §9): [`crate::devices::tls::WRAP_KEY_SECRET`]
+    /// on this machine, a test's own file in tests.
+    pub wrap_key_secret: PathBuf,
+}
+
+impl Host {
+    /// This machine: the real podman, the GPU probe it detects, and the
+    /// system's facts.
+    pub fn real() -> Self {
+        Self {
+            runner: Arc::new(runtime::registry::TokioRunner),
+            probe: crate::vram::detect_probe(),
+            machine: Arc::new(lmgw_machine::SystemFacts::prepared_by(
+                crate::child::system_tool,
+            )),
+            wrap_key_secret: PathBuf::from(crate::devices::tls::WRAP_KEY_SECRET),
+        }
+    }
+}
 
 /// Per-`init_for_tests` counter behind the unique `data_dir` each test gateway
 /// gets.
@@ -83,6 +117,9 @@ pub struct AppState {
     /// gateway answers it, and two gateways in one test process must not
     /// exchange each other's.
     pub login_nonces: crate::web::session::LoginNonces,
+    /// Accounts' runtime (headless server design §5): the session desk,
+    /// the sign-in throttle and the password verifier's permits.
+    pub accounts: crate::accounts::Runtime,
     /// The lab cells being answered now (labs-store design §2.6): a second
     /// post of one is the lab's 409, not a second dispatch. Here rather than
     /// in a `static` for [`Self::agent_ledger`]'s reason.
@@ -252,6 +289,17 @@ pub struct AppState {
     /// ([`Self::set_dev_for_tests`]), nothing in production writes it after
     /// boot.
     dev: std::sync::atomic::AtomicBool,
+    /// Where this lmgw runs and what its start was told (headless server
+    /// design D2, D20): read once by the entry point, given to
+    /// [`AppState::init_started`]. Read through [`Self::deployment`] and
+    /// [`Self::stop_budget`]; a lock only so a test can set it
+    /// ([`Self::set_start_for_tests`]), nothing in production writes it after
+    /// boot.
+    start: std::sync::RwLock<crate::config::deployment::StartFacts>,
+    /// The server image's update notice (headless server design §6.3):
+    /// what the last check of the feed found, `None` while this lmgw is the
+    /// newest, the check is off, or none ran ([`crate::update::notice`]).
+    update_notice: std::sync::RwLock<Option<lmgw_api_types::UpdateNotice>>,
     /// What the container-build executor reaches through the gateway rather
     /// than hardcodes (container-builds §5, §7): the forge client that answers
     /// "is this PR merged upstream?" — a no-op until one is installed — and,
@@ -300,6 +348,12 @@ pub struct AppState {
     /// that owns every call, the registry of live calls. In-process, like
     /// the stops: a call is live state.
     pub calls: crate::realtime::calls::Calls,
+    /// The main TLS listener while it serves, or why the last start did not
+    /// bring it up (headless server design §4): what Settings shows.
+    pub main_tls: crate::server::main_tls::TlsListenerSlot,
+    /// What proxy mode has seen since the server started (headless server
+    /// design §4.5): the main listeners' first peers, the last refusal.
+    pub proxy_seen: crate::server::forwarded::ProxySeen,
     /// This state's own `Weak`, set once the `Arc` exists: what a registry's
     /// hooks reach the state through ([`Self::wire_runtime`]) without a cycle.
     me: std::sync::OnceLock<std::sync::Weak<AppState>>,
@@ -393,7 +447,9 @@ pub fn dev_from_env() -> bool {
     dev_flag(std::env::var("LMGW_DEV").ok().as_deref())
 }
 
-fn dev_flag(v: Option<&str>) -> bool {
+/// [`dev_from_env`]'s reading of a value of `LMGW_DEV` (`None`: unset), for
+/// an entry point that reads its environment through a lookup of its own.
+pub fn dev_flag(v: Option<&str>) -> bool {
     match v.map(|v| v.trim().to_ascii_lowercase()) {
         None => false,
         Some(v) => !matches!(v.as_str(), "" | "0" | "false" | "no" | "off"),
@@ -411,30 +467,33 @@ fn dev_flag(v: Option<&str>) -> bool {
 /// private bus activates a Secret Service of its own on the user's keyring files.
 /// So the rule is the start's, not the environment's; the bus itself stays
 /// as it is, rootless podman's systemd cgroup manager needing it.
-fn wrap_key_store(dev: bool) -> Option<Arc<dyn crate::devices::tls::WrapKeyStore>> {
-    (!dev).then(|| {
-        Arc::new(crate::devices::tls::SecretServiceStore)
-            as Arc<dyn crate::devices::tls::WrapKeyStore>
-    })
+///
+/// In container mode (headless server design §9, WP8) there is no session
+/// bus to ask; the store is the image's fixed key, the Podman secret
+/// (`Secret=lmgw-wrap-key` in the unit), read once per start, dev instance
+/// or not: the rule above keeps dev instances off the desktop's wallet,
+/// which a file is not. Without the file it answers as no Secret Service
+/// does (the key stays plain, 0600, on the data volume, with the warn
+/// line), but its sentences name the secret. The start installs it and
+/// wraps a plain key at once ([`crate::devices::tls::Trust::start_on_secret`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrapKeyPlace {
+    /// The session's Secret Service: a desktop start that is production's.
+    SecretService,
+    /// The image's secret: every container-mode start.
+    ImageSecret,
+    /// None: a dev instance on the desktop.
+    Plain,
 }
 
-/// XDG data dir for lmgw (`~/.local/share/lmgw`).
-pub fn default_data_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("lmgw");
-        }
+fn wrap_key_place(dev: bool, deployment: crate::config::deployment::Deployment) -> WrapKeyPlace {
+    if deployment.is_container() {
+        WrapKeyPlace::ImageSecret
+    } else if dev {
+        WrapKeyPlace::Plain
+    } else {
+        WrapKeyPlace::SecretService
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".local/share/lmgw")
-}
-
-/// `~/.local/share/lmgw` from `HOME`, whatever `XDG_DATA_HOME` says: the
-/// installed app's data dir as it is when the variable is not set.
-pub fn home_default_data_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".local/share/lmgw"))
 }
 
 /// `LMGW_DATA_DIR`, with an empty value read as unset: an empty path would
@@ -548,19 +607,58 @@ impl AppState {
     /// asked podman would be asking about the installed app's containers
     /// (chat-voice WP5 review B1).
     pub async fn init_with(data_dir: PathBuf, dev: bool) -> anyhow::Result<SharedState> {
-        let state = Self::init_with_host(
+        Self::init_started(data_dir, dev, crate::config::deployment::Start::desktop()).await
+    }
+
+    /// [`Self::init_with`] for an entry point that says where it runs
+    /// (headless server design §1): `lmgw-server` passes the deployment
+    /// and, in container mode, what its environment pins and seeds, which
+    /// is applied to the stored settings before the snapshot is first
+    /// loaded — before anything reads or binds `bind_addr`.
+    pub async fn init_started(
+        data_dir: PathBuf,
+        dev: bool,
+        start: crate::config::deployment::Start,
+    ) -> anyhow::Result<SharedState> {
+        Self::init_started_on(data_dir, dev, start, Host::real()).await
+    }
+
+    /// [`Self::init_started`] on `host`'s seams: the whole start, the
+    /// Secret Service's rule included, for an entry point whose tests boot
+    /// it on a podman and a GPU of their own (`lmgw-server`'s `start`).
+    pub async fn init_started_on(
+        data_dir: PathBuf,
+        dev: bool,
+        start: crate::config::deployment::Start,
+        host: Host,
+    ) -> anyhow::Result<SharedState> {
+        let deployment = start.deployment;
+        let wrap_key_secret = host.wrap_key_secret;
+        let state = Self::init_started_with_host(
             data_dir,
             dev,
-            Arc::new(runtime::registry::TokioRunner),
-            crate::vram::detect_probe(),
-            Arc::new(lmgw_machine::SystemFacts::prepared_by(
-                crate::child::system_tool,
-            )),
+            start,
+            host.runner,
+            host.probe,
+            host.machine,
         )
         .await?;
-        match wrap_key_store(dev) {
-            Some(store) => state.devices.trust.set_store(store),
-            None => tracing::info!(
+        let trust = &state.devices.trust;
+        match wrap_key_place(dev, deployment) {
+            #[cfg(not(windows))]
+            WrapKeyPlace::SecretService => {
+                trust.set_store(Arc::new(crate::devices::tls::SecretServiceStore))
+            }
+            // Windows' counterpart (Windows design §4.4, WP6).
+            #[cfg(windows)]
+            WrapKeyPlace::SecretService => {
+                trust.set_store(Arc::new(crate::devices::tls::CredentialManagerStore))
+            }
+            WrapKeyPlace::ImageSecret => {
+                let found = crate::devices::tls::WrapKeySecret::read(&wrap_key_secret);
+                trust.start_on_secret(&state.data_dir, found).await
+            }
+            WrapKeyPlace::Plain => tracing::info!(
                 "a dev instance never asks the desktop's Secret Service: the device CA's key, \
                  once the device listener makes one, is kept plain (0600) in {}",
                 state.data_dir.join(crate::devices::tls::TLS_DIR).display()
@@ -583,17 +681,60 @@ impl AppState {
         probe: Arc<dyn crate::vram::GpuProbe>,
         machine: Arc<dyn lmgw_machine::Facts>,
     ) -> anyhow::Result<SharedState> {
+        let start = crate::config::deployment::Start::desktop();
+        Self::init_started_with_host(data_dir, dev, start, runner, probe, machine).await
+    }
+
+    /// [`Self::init_started`] through the host seams of
+    /// [`Self::init_with_host`]. `pub` (hidden) for the integration tests.
+    #[doc(hidden)]
+    pub async fn init_started_with_host(
+        data_dir: PathBuf,
+        dev: bool,
+        start: crate::config::deployment::Start,
+        runner: Arc<dyn runtime::registry::CommandRunner>,
+        probe: Arc<dyn crate::vram::GpuProbe>,
+        machine: Arc<dyn lmgw_machine::Facts>,
+    ) -> anyhow::Result<SharedState> {
         // Every path under the data dir may become a container mount.
         let data_dir = absolute_dir(data_dir);
         // A new data dir also gets its models dirs (`fresh_install`).
-        let db = fresh_install::open_db(&data_dir, dev).await?;
-        let corpus = quickdoc_core::store::open(&data_dir.join(crate::quickdoc::CORPUS_DB_FILE))
-            .await
-            .map_err(|e| anyhow::anyhow!("opening the corpus DB: {e}"))?;
-        let knowledge =
-            crate::knowledge::store::open(&data_dir.join(crate::knowledge::KNOWLEDGE_DB_FILE))
-                .await
-                .map_err(|e| anyhow::anyhow!("opening the knowledge DB: {e}"))?;
+        let db = fresh_install::open_db(&data_dir, dev, start.deployment).await?;
+        // The container's pinned and seeded settings, before the snapshot is
+        // first loaded: everything below reads `bind_addr` as pinned.
+        let mut start_facts = crate::config::deployment::StartFacts::from(&start);
+        if start.deployment.is_container() {
+            start_facts.sources =
+                crate::config::deployment::apply_at_start(&db, &start.env).await?;
+        }
+        // Their own migrations, each copied first in container mode as
+        // `lmgw.sqlite` is (ruling 14, D117).
+        let backups = start
+            .deployment
+            .is_container()
+            .then(|| store::backups_dir(&data_dir));
+        let corpus = store::migration_copy::around_open(
+            &data_dir,
+            &store::migration_copy::CORPUS,
+            backups.as_deref(),
+            async {
+                quickdoc_core::store::open(&data_dir.join(crate::quickdoc::CORPUS_DB_FILE))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("opening the corpus DB: {e}"))
+            },
+        )
+        .await?;
+        let knowledge = store::migration_copy::around_open(
+            &data_dir,
+            &store::migration_copy::KNOWLEDGE,
+            backups.as_deref(),
+            async {
+                crate::knowledge::store::open(&data_dir.join(crate::knowledge::KNOWLEDGE_DB_FILE))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("opening the knowledge DB: {e}"))
+            },
+        )
+        .await?;
         // Files a crash left mid-ingest: nothing is running them now.
         match crate::knowledge::store::reset_ingesting(&knowledge, None).await {
             Ok(0) => {}
@@ -676,7 +817,35 @@ impl AppState {
         // lmgw's own CDI spec asks the same podman whether it takes
         // `--cdi-spec-dir`.
         let checks = crate::machine::MachineChecks::system(machine.clone());
+        // On Windows no container reads a CDI spec: a managed one made every
+        // model start there run podman's `--help` and read NVIDIA's Linux
+        // driver files, two warnings per start (Windows design §7, WP8).
+        #[cfg(windows)]
+        let cdi = {
+            drop(machine);
+            runtime::cdi::OwnSpec::unmanaged(
+                "engines run as native processes on Windows: no container reads a CDI spec",
+            )
+        };
+        #[cfg(not(windows))]
         let cdi = runtime::cdi::OwnSpec::managed(machine, data_dir.clone(), runner.clone());
+        // Windows starts every engine as a native child process (Windows
+        // design §4.1); Linux keeps the Podman launcher, and builds the
+        // native one only through `Registry::with_launcher` (no setting
+        // selects it yet).
+        #[cfg(windows)]
+        let native = Arc::new(
+            runtime::launcher::Native::new(&data_dir)
+                .map_err(|e| anyhow::anyhow!("starting the native engine launcher: {e}"))?,
+        );
+        #[cfg(windows)]
+        let registry = runtime::registry::Registry::with_launcher(
+            native.clone(),
+            runner,
+            http.clone(),
+            Arc::new(runtime::registry::ephemeral_port),
+        );
+        #[cfg(not(windows))]
         let registry = runtime::registry::Registry::new(runner, http.clone());
         let app = Arc::new(Self {
             db,
@@ -697,6 +866,7 @@ impl AppState {
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
             login_nonces: Default::default(),
+            accounts: Default::default(),
             lab_cells: Default::default(),
             agent_meters: Default::default(),
             agent_services: Default::default(),
@@ -722,12 +892,16 @@ impl AppState {
             background: Default::default(),
             stops: Default::default(),
             calls: Default::default(),
+            main_tls: Default::default(),
+            proxy_seen: Default::default(),
             data_dir,
             _test_dir: None,
             settings_write: tokio::sync::Mutex::new(()),
             routing_write: Default::default(),
             snapshot_loads: SnapshotLoads::default(),
             dev: std::sync::atomic::AtomicBool::new(dev),
+            start: std::sync::RwLock::new(start_facts),
+            update_notice: Default::default(),
             builds: Default::default(),
             bench: Default::default(),
             chat_temp: Default::default(),
@@ -769,6 +943,9 @@ impl AppState {
         // snapshot: `resync_all` below and the shell's window both want a
         // gateway that already has its door key.
         crate::agents::token::seed_owner_keys(&app).await?;
+        // The audit log's retention (headless server design §5.8), for days
+        // that passed while nothing was written.
+        crate::audit::prune_at_start(&app).await;
         // The shipped agents, after migrations and before anything can serve a
         // request (agent-catalog §3). Idempotent, and it never resurrects a
         // built-in the owner deleted — see `agents::seed`.
@@ -825,6 +1002,16 @@ impl AppState {
         tokio::spawn(async move {
             crate::backends::run::boot_sweep(&st).await;
         });
+        // The native launcher chooses the engine build, which an image row's
+        // learned figures are keyed by (`vram::plan::image::engine_key`): its
+        // choice, from facts read once now and again at every start.
+        #[cfg(windows)]
+        {
+            let chooser = native.clone();
+            app.vram
+                .set_engine_build(Arc::new(move |class| chooser.expected_build(class)));
+            tokio::spawn(async move { native.read_facts().await });
+        }
         Ok(app)
     }
 
@@ -920,6 +1107,7 @@ impl AppState {
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
             login_nonces: Default::default(),
+            accounts: Default::default(),
             lab_cells: Default::default(),
             agent_meters: Default::default(),
             agent_services: Default::default(),
@@ -990,6 +1178,8 @@ impl AppState {
             background: Default::default(),
             stops: Default::default(),
             calls: Default::default(),
+            main_tls: Default::default(),
+            proxy_seen: Default::default(),
             _test_dir: Some(test_dir),
             data_dir: dir,
             settings_write: tokio::sync::Mutex::new(()),
@@ -999,6 +1189,8 @@ impl AppState {
             // from a dev shell must not get a different gateway. A test that
             // wants one says so with `set_dev_for_tests`.
             dev: std::sync::atomic::AtomicBool::new(false),
+            start: Default::default(),
+            update_notice: Default::default(),
             builds: Default::default(),
             bench: Default::default(),
             chat_temp: Default::default(),
@@ -1076,6 +1268,61 @@ impl AppState {
     #[doc(hidden)]
     pub fn set_dev_for_tests(&self, dev: bool) {
         self.dev.store(dev, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What this gateway's start was told and did (headless server design
+    /// D2, §2.2): the deployment, the unit's stop timeout, and where each
+    /// pinned setting's value came from.
+    pub fn start_facts(&self) -> crate::config::deployment::StartFacts {
+        *self.start.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Where this lmgw runs (headless server design D2).
+    pub fn deployment(&self) -> crate::config::deployment::Deployment {
+        self.start_facts().deployment
+    }
+
+    /// The update notice the last check of the feed left (§6.3).
+    pub fn update_notice(&self) -> Option<lmgw_api_types::UpdateNotice> {
+        self.update_notice
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Keep `notice` as the update notice; the one it replaces comes back.
+    pub(crate) fn set_update_notice(
+        &self,
+        notice: Option<lmgw_api_types::UpdateNotice>,
+    ) -> Option<lmgw_api_types::UpdateNotice> {
+        std::mem::replace(
+            &mut *self
+                .update_notice
+                .write()
+                .unwrap_or_else(|p| p.into_inner()),
+            notice,
+        )
+    }
+
+    /// The quit's length against the unit's stop timeout (D20), with the
+    /// unload timeout stored now; `None` on the desktop, which has no unit.
+    pub fn stop_budget(&self) -> Option<crate::config::deployment::StopBudget> {
+        let facts = self.start_facts();
+        facts.deployment.is_container().then(|| {
+            crate::config::deployment::stop_budget(
+                facts.stop_timeout,
+                self.snapshot().settings.vram.unload_timeout_seconds,
+            )
+        })
+    }
+
+    /// Test-only: what this gateway's start was told. `pub` (unconditional)
+    /// to match the other `set_*_for_tests` seams.
+    #[doc(hidden)]
+    pub fn set_start_for_tests(&self, facts: crate::config::deployment::StartFacts) {
+        *self.start.write().unwrap_or_else(|p| p.into_inner()) = facts;
+        // Accounts on follows container mode (D25): republished at once.
+        self.publish_over(Snapshot::clone);
     }
 
     /// The directory container builds use right now — the `builds_dir`
@@ -1231,6 +1478,19 @@ impl AppState {
         self.chat_feed.published(|| self.snapshot());
     }
 
+    /// Publish the main TLS listener that serves now, or that none does
+    /// (headless server design §4.3): runtime state on the snapshot, as the
+    /// GPU lease is, read by every URL builder. Called by
+    /// `server::main_tls::TlsListenerSlot` under its own lock, so a start
+    /// and an older start's stop never publish out of order.
+    pub fn set_serving_tls(&self, tls: Option<crate::net::ServingTls>) {
+        self.snapshot.rcu(|cur| {
+            let mut next = Snapshot::clone(cur);
+            next.serving_tls = tls.clone();
+            next
+        });
+    }
+
     /// Lay a key op's write over the published snapshot when the reload
     /// after it failed (review W2-6, W3-7): the row is written, and the
     /// snapshot that still says otherwise must not keep admitting the key it
@@ -1298,7 +1558,15 @@ impl AppState {
     /// go of the lock ([`SettingsPublished`]): a stdio server's start inside
     /// it can take as long as a cold image pull, and the GPU hold, which
     /// takes the lock too, would wait for it (the begin-write review's B-1).
+    ///
+    /// A save that switches the update check off clears the server image's
+    /// update notice (headless server design §6.3).
     pub async fn settings_saved(&self, s: &crate::config::Settings) -> SettingsPublished {
+        crate::update::notice::switched(
+            self,
+            self.snapshot().settings.update_check_enabled,
+            s.update_check_enabled,
+        );
         let first = match self.publish_snapshot().await {
             Ok(_) => return SettingsPublished::reloaded(),
             Err(e) => e,
@@ -1339,13 +1607,15 @@ impl AppState {
         self.mcp.reconcile(&self.snapshot()).await;
     }
 
-    /// Publish `snap` with whatever lease the snapshot it replaces carries.
-    /// `rcu`, so a lease taken or released while `snap` was being loaded is
+    /// Publish `snap` with whatever lease and serving TLS listener the
+    /// snapshot it replaces carries. `rcu`, so a lease taken or released (a
+    /// TLS listener brought up or stopped) while `snap` was being loaded is
     /// never lost or revived: the swap retries against the newer snapshot.
     fn store_carrying_lease(&self, snap: Snapshot) -> Arc<Snapshot> {
         self.publish_over(|cur| {
             let mut next = snap.clone();
             next.gpu_lease = cur.gpu_lease.clone();
+            next.serving_tls = cur.serving_tls.clone();
             next
         })
     }
@@ -1380,7 +1650,14 @@ impl AppState {
         let mut replaced = None;
         self.snapshot.rcu(|cur| {
             replaced = Some(cur.clone());
-            let next = Arc::new(next(cur));
+            let mut next = next(cur);
+            // Proxy mode's networks, read once per publish rather than per
+            // request (headless server design §4.5).
+            next.trusted_nets = crate::config::trusted_nets(&next.settings.trusted_proxies);
+            // Accounts on (D25) and the session desk (§5.2), per publish.
+            next.accounts_on = self.deployment().is_container() || next.settings.accounts.enabled;
+            next.sessions = self.accounts.sessions.clone();
+            let next = Arc::new(next);
             published = Some(next.clone());
             next
         });
@@ -1509,7 +1786,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dir, dev_flag, is_installed_data_dir, wrap_key_store, AppState};
+    use super::{
+        absolute_dir, dev_flag, is_installed_data_dir, wrap_key_place, AppState, WrapKeyPlace,
+    };
     use crate::config::SelfAdmin;
     use std::path::{Path, PathBuf};
 
@@ -1545,14 +1824,19 @@ mod tests {
     #[test]
     fn a_relative_data_dir_is_made_absolute() {
         let cwd = std::env::current_dir().unwrap();
+        // Joined part by part: Windows' `absolute` writes its own separator.
         assert_eq!(
             absolute_dir(PathBuf::from("target/dev-copy")),
-            cwd.join("target/dev-copy")
+            cwd.join("target").join("dev-copy")
         );
-        assert_eq!(
-            absolute_dir(PathBuf::from("/srv/lmgw")),
-            PathBuf::from("/srv/lmgw")
-        );
+        // An absolute dir stays as it is; a path with no drive is not one on
+        // Windows.
+        let abs = if cfg!(windows) {
+            r"C:\srv\lmgw"
+        } else {
+            "/srv/lmgw"
+        };
+        assert_eq!(absolute_dir(PathBuf::from(abs)), PathBuf::from(abs));
     }
 
     /// A stand-in for the installed app's dir: the guard's own comparison,
@@ -1572,9 +1856,12 @@ mod tests {
         let spelled = installed.join("..").join("lmgw");
         assert!(is_installed_data_dir(&spelled, moved, Some(&installed)));
         // A symlink to it.
-        let link = home.path().join("link");
-        std::os::unix::fs::symlink(&installed, &link).unwrap();
-        assert!(is_installed_data_dir(&link, moved, Some(&installed)));
+        #[cfg(unix)]
+        {
+            let link = home.path().join("link");
+            std::os::unix::fs::symlink(&installed, &link).unwrap();
+            assert!(is_installed_data_dir(&link, moved, Some(&installed)));
+        }
         // XDG_DATA_HOME's own dir, when it is the one named.
         assert!(is_installed_data_dir(moved, moved, Some(&installed)));
         // A copy is not.
@@ -1603,7 +1890,22 @@ mod tests {
     /// link design D2): it gets no store, so its device CA's key is plain.
     #[test]
     fn only_a_production_start_reaches_the_secret_service() {
-        assert!(wrap_key_store(true).is_none());
-        assert!(wrap_key_store(false).is_some());
+        use crate::config::deployment::Deployment;
+        assert_eq!(
+            wrap_key_place(true, Deployment::Desktop),
+            WrapKeyPlace::Plain
+        );
+        assert_eq!(
+            wrap_key_place(false, Deployment::Desktop),
+            WrapKeyPlace::SecretService
+        );
+        // Container mode asks no Secret Service (headless server design §9):
+        // it reads the image's secret, whatever `LMGW_DEV` says (D100).
+        for dev in [false, true] {
+            assert_eq!(
+                wrap_key_place(dev, Deployment::Container),
+                WrapKeyPlace::ImageSecret
+            );
+        }
     }
 }

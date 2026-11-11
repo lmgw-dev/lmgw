@@ -176,7 +176,7 @@ async fn until_starting(base: &Gw) {
 }
 
 /// A service-mode manifest. `provides` is either empty or the `provides` block.
-fn doc(image: &str, idle_seconds: i64, start_timeout: u64, provides: &str) -> String {
+pub(crate) fn doc(image: &str, idle_seconds: i64, start_timeout: u64, provides: &str) -> String {
     format!(
         r#"{{
   "schema_version": 1,
@@ -220,7 +220,7 @@ fn mount_doc() -> String {
     .to_string()
 }
 
-async fn install(base: &Gw, manifest: &str) {
+pub(crate) async fn install(base: &Gw, manifest: &str) {
     let (status, body) = op(
         base,
         "agent_set",
@@ -491,7 +491,7 @@ fn mcp_reply(body: &str) -> String {
 
 /// A fake `podman` that binds the host port its `run -d` argv publishes.
 #[derive(Default)]
-struct Fake {
+pub(crate) struct Fake {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
     /// `podman run -d` does not answer until the start is cancelled — a
     /// cold pull that outlasts the test.
@@ -643,7 +643,7 @@ fn port_taken(port: u16) -> CmdOutput {
     }
 }
 
-async fn with_fake() -> (SharedState, Gw, Arc<Mutex<Vec<Vec<String>>>>) {
+pub(crate) async fn with_fake() -> (SharedState, Gw, Arc<Mutex<Vec<Vec<String>>>>) {
     let (state, base, calls, _kill) = with(Fake::default()).await;
     (state, base, calls)
 }
@@ -2225,7 +2225,7 @@ async fn the_mcp_origin_guard_admits_an_agent_origin_and_refuses_a_foreign_page(
 
     for origin in [
         format!("http://board.localhost:{port}"),
-        "http://localhost".to_string(),
+        format!("http://localhost:{port}"),
     ] {
         let resp = base
             .client()
@@ -2240,9 +2240,12 @@ async fn the_mcp_origin_guard_admits_an_agent_origin_and_refuses_a_foreign_page(
 
     // A foreign page, and a label under the suffix that serves no app: neither
     // is an origin this gateway answers for.
+    // A portless origin is port 80 under http (headless server design §4.3,
+    // D38): another server on this box, not this gateway's listener.
     for origin in [
         "http://evil.example".to_string(),
         format!("http://nope.localhost:{port}"),
+        "http://localhost".to_string(),
     ] {
         let resp = base
             .client()

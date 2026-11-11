@@ -35,9 +35,14 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
         .connect_with(opts)
         .await?;
     crate::store::clamp_0600(path)?;
-    sqlx::migrate!("./migrations_knowledge").run(&pool).await?;
+    migrator().run(&pool).await?;
     crate::store::clamp_0600(path)?;
     Ok(pool)
+}
+
+/// `knowledge.db`'s migrations (`migrations_knowledge/`).
+pub fn migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate!("./migrations_knowledge")
 }
 
 /// In-memory `knowledge.db` for tests, anchored as the main store's is
@@ -45,7 +50,7 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
 /// take the database with it.
 pub async fn open_in_memory() -> anyhow::Result<SqlitePool> {
     let pool = crate::store::anchored_memory_pool(1).await?;
-    sqlx::migrate!("./migrations_knowledge").run(&pool).await?;
+    migrator().run(&pool).await?;
     Ok(pool)
 }
 

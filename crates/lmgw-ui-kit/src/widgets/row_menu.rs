@@ -54,7 +54,8 @@ impl MenuItem {
 ///
 /// Keyboard: ↑↓ Home End move, Enter/Space picks, Esc and Tab close. A
 /// danger item asks in place: its first pick turns it into "<label>? ✓", the
-/// second runs it; closing the menu disarms it. The second press of a
+/// second runs it, and while armed its `title` (what follows) shows under
+/// it; closing the menu disarms it. The second press of a
 /// double-click (or a held Enter) is not that second pick. Something that
 /// deletes what a modal should explain first (a model, an upstream) is a
 /// plain "Delete…" item that opens that modal instead.
@@ -206,6 +207,9 @@ pub fn RowMenu(
                             .map(|(i, m)| {
                                 let is_armed = move || armed.get() == Some(i);
                                 let label = m.label.clone();
+                                // An armed danger item says what follows in
+                                // the menu itself, not only in its tooltip.
+                                let note = m.danger.then(|| m.title.clone()).flatten();
                                 view! {
                                     <div
                                         class="menu-item"
@@ -229,6 +233,11 @@ pub fn RowMenu(
                                             } else {
                                                 label.clone()
                                             }
+                                        }}
+                                        {move || {
+                                            note.clone()
+                                                .filter(|_| is_armed())
+                                                .map(|n| view! { <div class="menu-item-note">{n}</div> })
                                         }}
                                     </div>
                                 }

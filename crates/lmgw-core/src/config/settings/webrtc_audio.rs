@@ -36,7 +36,7 @@ const KBPS_WHY: &str = "Opus encodes from 6 to 510 kbps";
 
 /// `realtime.webrtc_reorder_ms`, `realtime.webrtc_commit_window_ms` and
 /// `realtime.webrtc_output_kbps`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebRtcAudioSettings {
     /// How long str0m holds a call's frame behind a missing earlier one, in

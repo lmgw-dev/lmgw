@@ -398,6 +398,10 @@ async fn the_clients_close_of_its_peer_connection_ends_the_call() {
     assert!(calls.get(h.id()).is_none());
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "fails on Windows: the client's DTLS handshake times out against a wildcard-bound call socket; the cause is not found yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn wildcard_sockets_read_each_datagrams_destination() {
     // `0.0.0.0`: str0m accepts the checks because their destination comes

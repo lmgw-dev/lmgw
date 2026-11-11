@@ -1,7 +1,8 @@
 //! Background update check (§12): the app polls a small JSON manifest that CI
 //! attaches to every GitHub release, compares it to the running build's
 //! version, and — in the Tauri shell — prompts to download + `dnf install` the
-//! new RPM.
+//! new RPM, or on Windows to run the per-user installer (Windows design §4.4). The server image has no updater: [`notice`] polls the same feed
+//! there and only says what it found (headless server design §6.3).
 //!
 //! The mechanism — manifest, version order, sha256-verified download, the
 //! install step — is the `lmgw-update` crate's, shared with the desktop
@@ -11,7 +12,9 @@
 
 use std::path::Path;
 
-pub use lmgw_update::{is_newer, Feed, FeedAuth, ReleaseManifest, RpmArtifact, UpdateInfo};
+pub mod notice;
+
+pub use lmgw_update::{is_newer, Artifact, Feed, FeedAuth, ReleaseManifest, UpdateInfo};
 
 use crate::state::SharedState;
 
@@ -95,12 +98,95 @@ pub async fn check(state: &SharedState, current: &str) -> anyhow::Result<Option<
     Ok(lmgw_update::check(&state.http, &feed(state), current).await?)
 }
 
-/// Stream the RPM to `dest`, verifying the manifest sha256 when present. On a
-/// hash mismatch the partial file is removed so a retry re-downloads cleanly.
-pub async fn download_rpm(
-    state: &SharedState,
-    rpm: &RpmArtifact,
-    dest: &Path,
-) -> anyhow::Result<()> {
-    Ok(lmgw_update::download_rpm(&state.http, &feed(state), rpm, dest).await?)
+/// Stream an installer (the RPM, or the Windows installer) to `dest`, verifying
+/// the manifest sha256 when present. On a hash mismatch the partial file is
+/// removed so a retry re-downloads cleanly.
+pub async fn download(state: &SharedState, artifact: &Artifact, dest: &Path) -> anyhow::Result<()> {
+    Ok(lmgw_update::download(&state.http, &feed(state), artifact, dest).await?)
+}
+
+/// The installer's product name (`tauri.conf.json`'s `productName`): the
+/// per-user uninstall key the Windows installer writes is named after it.
+pub const PRODUCT: &str = "lmgw";
+
+/// Why this lmgw can't install `info` itself, as one or two sentences the
+/// tray's dialog and the dashboard's check both show; `None` when it can
+/// (Windows design §4.4). On Windows: a release without a Windows installer,
+/// an `nsis` entry the updater refuses (`lmgw_update::nsis::check_entry`),
+/// or a copy that is not the installer's own (`can_self_install`). On Linux:
+/// a host without `pkexec` and `dnf`.
+pub fn cannot_install(info: &UpdateInfo) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let Some(entry) = info.manifest.installer() else {
+            return Some(
+                "This release has no Windows installer, so there is nothing to install yet."
+                    .to_string(),
+            );
+        };
+        if let Err(e) = lmgw_update::nsis::check_entry(entry) {
+            return Some(format!(
+                "This release's Windows installer is refused: {e}. Install the new version with \
+                 the lmgw installer from the release."
+            ));
+        }
+        let why = lmgw_update::nsis::can_self_install(PRODUCT).err()?;
+        Some(format!(
+            "This lmgw can't update itself: {why}. Install the new version with the lmgw \
+             installer from the release."
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = info;
+        if lmgw_update::can_self_install() {
+            return None;
+        }
+        Some(
+            "This host is not RPM-based, so lmgw can't install it for you — self-install is \
+             RPM-only on Linux. Update the way you installed it: rebuild from source (`git pull \
+             && cargo tauri build`), or replace the AppImage."
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// 0.6.0+2 offered to 0.6.0+1, with a Windows installer of this sha256 or none.
+    fn info(nsis_sha256: Option<&str>) -> UpdateInfo {
+        let artifact = |file: &str, sha256: &str| Artifact {
+            file: file.into(),
+            url: format!("https://example.org/{file}"),
+            sha256: sha256.into(),
+        };
+        UpdateInfo {
+            current: "0.6.0+1".into(),
+            manifest: ReleaseManifest {
+                version: "0.6.0+2".into(),
+                notes: String::new(),
+                pub_date: String::new(),
+                rpm: artifact("lmgw.rpm", ""),
+                nsis: nsis_sha256.map(|sha| artifact("lmgw_0.6.0+2_x64-setup.exe", sha)),
+            },
+        }
+    }
+
+    #[test]
+    fn a_windows_copy_says_why_it_cannot_install() {
+        assert_eq!(
+            cannot_install(&info(None)).unwrap(),
+            "This release has no Windows installer, so there is nothing to install yet."
+        );
+        let why = cannot_install(&info(Some(""))).unwrap();
+        assert!(
+            why.starts_with("This release's Windows installer is refused: its sha256 is empty."),
+            "{why}"
+        );
+        // This test binary is no installer's copy.
+        let why = cannot_install(&info(Some(&"ab".repeat(32)))).unwrap();
+        assert!(why.starts_with("This lmgw can't update itself: "), "{why}");
+    }
 }

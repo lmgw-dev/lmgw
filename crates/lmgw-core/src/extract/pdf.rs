@@ -283,20 +283,7 @@ async fn run_piped_within(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let name = bin.display().to_string();
     let mut cmd = tokio::process::Command::new(bin);
-    // SAFETY: the hook runs in the forked child before exec and calls only
-    // `setrlimit`, which is async-signal-safe; it allocates nothing.
-    unsafe {
-        cmd.pre_exec(move || {
-            let lim = libc::rlimit {
-                rlim_cur: mem_limit as libc::rlim_t,
-                rlim_max: mem_limit as libc::rlim_t,
-            };
-            if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    limit_address_space(&mut cmd, mem_limit)?;
     let mut child = cmd
         .args(args)
         .stdin(Stdio::piped())
@@ -401,6 +388,38 @@ async fn run_piped_within(
     Ok(out)
 }
 
+/// The child's address space limited to `mem_limit` bytes (`RLIMIT_AS`).
+#[cfg(unix)]
+fn limit_address_space(cmd: &mut tokio::process::Command, mem_limit: u64) -> Result<(), RunError> {
+    // SAFETY: the hook runs in the forked child before exec and calls only
+    // `setrlimit`, which is async-signal-safe; it allocates nothing.
+    unsafe {
+        cmd.pre_exec(move || {
+            let lim = libc::rlimit {
+                rlim_cur: mem_limit as libc::rlim_t,
+                rlim_max: mem_limit as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+/// Poppler is not run without its memory limit, and a job object's limit is
+/// not set yet on Windows (Windows design §4.4, WP6).
+#[cfg(not(unix))]
+fn limit_address_space(
+    _cmd: &mut tokio::process::Command,
+    _mem_limit: u64,
+) -> Result<(), RunError> {
+    Err(RunError::Failed(
+        "PDF extraction's memory limit for poppler is not supported on Windows yet".to_string(),
+    ))
+}
+
 /// How much of a run's stderr is kept to be shown: 64 KiB. Display only.
 const STDERR_KEEP_BYTES: usize = 64 << 10;
 
@@ -408,10 +427,21 @@ const STDERR_KEEP_BYTES: usize = 64 << 10;
 /// as poppler's own out-of-memory message, a C++ `bad_alloc`, or the abort or
 /// segfault that follows one.
 fn ran_out_of_memory(status: &std::process::ExitStatus, stderr: &str) -> bool {
-    use std::os::unix::process::ExitStatusExt;
     let s = stderr.to_ascii_lowercase();
     let says = s.contains("bad_alloc") || s.contains("out of memory") || s.contains("memory alloc");
-    says || (matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV)) && s.contains("memory"))
+    says || (died_of_abort_or_segv(status) && s.contains("memory"))
+}
+
+#[cfg(unix)]
+fn died_of_abort_or_segv(status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV))
+}
+
+/// Windows has no signals; poppler does not run there yet ([`limit_address_space`]).
+#[cfg(not(unix))]
+fn died_of_abort_or_segv(_status: &std::process::ExitStatus) -> bool {
+    false
 }
 
 /// The first [`STDERR_LINES_SHOWN`] lines of `text`, trimmed, with `(… N more
@@ -475,6 +505,9 @@ mod tests {
         assert_eq!(PdfText::from_raw("").marked(), "");
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_missing_tool_is_a_visible_error_naming_poppler_utils() {
         let missing = Path::new("pdftotext-that-is-not-installed");
@@ -495,6 +528,9 @@ mod tests {
         assert_eq!(e, PdfError::ToolMissing);
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_run_that_overstays_is_killed_and_the_error_names_the_constant() {
         // `sleep` ignores stdin and outlives a 100 ms budget.
@@ -511,6 +547,9 @@ mod tests {
         assert!(s.contains("PDF_TIMEOUT") && s.contains("300 s"), "{s}");
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_large_input_does_not_deadlock_the_pipe() {
         // `cat` echoes stdin to stdout: 4 MiB is far past both pipe buffers,
@@ -523,6 +562,9 @@ mod tests {
         assert_eq!(out.len(), data.len());
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failing_tool_reports_its_exit_status() {
         let e = run_piped(
@@ -620,6 +662,9 @@ mod tests {
         );
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn output_past_the_limit_is_stopped_and_named() {
         // `yes` writes forever; the run is killed when stdout crosses the limit.
@@ -640,6 +685,9 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stderr_longer_than_what_is_kept_says_more_without_a_count() {
         // 400 KB of stderr against the 64 KiB kept: the count would be a lie.
@@ -705,6 +753,9 @@ mod tests {
         }
     }
 
+    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
+    // limit; Windows refuses every run (a_run_is_refused_on_windows).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_long_stderr_is_shown_as_its_first_lines_and_a_count() {
         let script = "for i in $(seq 1 100); do echo line$i >&2; done; exit 3";
@@ -716,5 +767,39 @@ mod tests {
         assert!(m.starts_with("line1\nline2\n"), "{m}");
         assert!(m.contains("line20\n(… 80 more lines) ("), "{m}");
         assert!(!m.contains("line21"), "{m}");
+    }
+
+    /// On Windows poppler is not run without its memory limit, which is not
+    /// set there yet (Windows design §3.1): every run, a missing tool's
+    /// included, is refused in those words before anything is started.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_run_is_refused_on_windows() {
+        let e = text_with(
+            Path::new("pdftotext-that-is-not-installed"),
+            Bytes::from_static(b"%PDF"),
+            PDF_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&e, PdfError::Failed { tool: "pdftotext", message }
+                if message.contains("not supported on Windows yet")),
+            "{e:?}"
+        );
+        let e = render_page_with(
+            Path::new("pdftoppm-that-is-not-installed"),
+            Bytes::from_static(b"%PDF"),
+            1,
+            PAGE_DPI,
+            PDF_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&e, PdfError::Failed { tool: "pdftoppm", message }
+                if message.contains("not supported on Windows yet")),
+            "{e:?}"
+        );
     }
 }

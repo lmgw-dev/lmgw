@@ -26,13 +26,19 @@ pub(crate) mod save_dialog;
 mod tests;
 
 /// What the download paths read from the process: `$HOME`,
-/// `$XDG_CONFIG_HOME` and the contents of `user-dirs.dirs` under it.
+/// `$XDG_CONFIG_HOME` and the contents of `user-dirs.dirs` under it on
+/// Linux; on Windows the user's Downloads known folder and the profile
+/// folder (`%USERPROFILE%`) as the home.
 pub(crate) struct DownloadEnv {
     pub home: Option<PathBuf>,
     pub user_dirs: String,
+    /// The Downloads folder the system names itself: Windows' known folder
+    /// (`FOLDERID_Downloads`). `None` on Linux, where `user-dirs.dirs` says.
+    pub known: Option<PathBuf>,
 }
 
 impl DownloadEnv {
+    #[cfg(not(windows))]
     pub fn from_process() -> Self {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let config = std::env::var_os("XDG_CONFIG_HOME")
@@ -43,15 +49,85 @@ impl DownloadEnv {
         let user_dirs = config
             .and_then(|c| std::fs::read_to_string(c.join("user-dirs.dirs")).ok())
             .unwrap_or_default();
-        Self { home, user_dirs }
+        Self {
+            home,
+            user_dirs,
+            known: None,
+        }
     }
 
-    /// The Downloads folder: `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, else
-    /// `~/Downloads`; `None` without a home.
+    /// Windows usually has no `HOME`: the Downloads folder is the shell's
+    /// known folder, and only when the shell cannot say it (logged)
+    /// `%USERPROFILE%\Downloads` ([`Self::downloads`]'s fallback).
+    #[cfg(windows)]
+    pub fn from_process() -> Self {
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
+        let known = known_downloads()
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "Windows did not name the Downloads folder ({e}): downloads go to \
+                     %USERPROFILE%\\Downloads ({})",
+                    home.as_ref()
+                        .map(|h| h.join("Downloads").display().to_string())
+                        .unwrap_or_else(|| "USERPROFILE is not set either".into())
+                );
+            })
+            .ok();
+        Self {
+            home,
+            user_dirs: String::new(),
+            known,
+        }
+    }
+
+    /// The Downloads folder: the one the system names ([`Self::known`]),
+    /// else `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, else `~/Downloads`;
+    /// `None` without either.
     pub fn downloads(&self) -> Option<PathBuf> {
+        if let Some(known) = &self.known {
+            return Some(known.clone());
+        }
         let home = self.home.as_deref()?;
         Some(xdg_download_dir(&self.user_dirs, home).unwrap_or_else(|| home.join("Downloads")))
     }
+}
+
+/// The user's Downloads known folder (`SHGetKnownFolderPath`), where the
+/// owner may have moved it.
+#[cfg(windows)]
+pub(crate) fn known_downloads() -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_Downloads, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    };
+    let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the GUID is a static; `path` receives a CoTaskMem string, freed
+    // below whatever the answer (the call sets it to null on failure).
+    let hr = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_Downloads,
+            KF_FLAG_DEFAULT as u32,
+            std::ptr::null_mut(),
+            &mut path,
+        )
+    };
+    let out = if hr < 0 || path.is_null() {
+        Err(std::io::Error::other(format!(
+            "SHGetKnownFolderPath(FOLDERID_Downloads) answered {hr:#010x}"
+        )))
+    } else {
+        // SAFETY: a NUL-terminated wide string from the call.
+        let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
+        // SAFETY: `len` units read above.
+        let units = unsafe { std::slice::from_raw_parts(path, len) };
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(units)))
+    };
+    // SAFETY: allocated by the call (or null, which CoTaskMemFree accepts).
+    unsafe { CoTaskMemFree(path.cast()) };
+    out
 }
 
 /// The file name of `proposed`, a suggested name or a path: its last part
@@ -132,8 +208,10 @@ pub(crate) fn unique_path(p: &mut PathBuf) {
     }
 }
 
-/// Where the Save As dialog opens and with which name.
+/// Where the Save As dialog opens and with which name. The dialog is
+/// Linux's (`save_dialog`); a Windows one is not built yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct DialogStart {
     /// `None` leaves the folder to the dialog (no home at all).
     pub folder: Option<PathBuf>,
@@ -142,10 +220,12 @@ pub(crate) struct DialogStart {
 
 /// What this app run remembers between downloads: the folder chosen last.
 #[derive(Debug, Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct SaveSession {
     last_dir: Option<PathBuf>,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl SaveSession {
     /// The dialog for a download suggested as `suggested`: its file name
     /// ([`file_name_of`]), in the folder chosen last while `is_dir` says it

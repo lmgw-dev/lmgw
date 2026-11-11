@@ -310,6 +310,8 @@ mod tests {
             kind,
             agent_id: None,
             fingerprint: String::new(),
+            account: None,
+            session: None,
         };
         let device = key(7, ApiKeyKind::Device);
         assert!(may_hang_up(&device, &device));

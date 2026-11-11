@@ -773,13 +773,32 @@ pub async fn image_model_set(
                 // (image-generation §9). A different file set is a different
                 // pipeline, and one changed flag — `offload_to_cpu`, `vae_tiling`,
                 // a default width — moves the compute buffers by gigabytes, so the
-                // measurement no longer describes anything. Reset rather than kept
-                // and quietly wrong; said out loud rather than reset in silence,
-                // because it is a promise admission has stopped making.
-                let peak_reset = cur.peak_extra_bytes.is_some()
-                    && (new.files != cur.files || new.args != cur.args);
+                // measurement no longer describes anything. So does another
+                // engine image (a CUDA build's context is not a Vulkan build's:
+                // 1.0 GiB against 5 MiB at rest) or other run args (another
+                // card). Reset rather than kept and quietly wrong; said out loud
+                // rather than reset in silence, because it is a promise
+                // admission has stopped making.
+                let pipeline_changed = new.files != cur.files
+                    || new.args != cur.args
+                    || new.image != cur.image
+                    || new.extra_run_args != cur.extra_run_args;
+                let peak_reset = cur.peak_extra_bytes.is_some() && pipeline_changed;
                 if peak_reset {
                     store::set_image_model_peak(&state.db, cur.id, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                // The learned idle residency and working budget
+                // (`vram::partial`) are read under the same files, flags and
+                // engine, and go with them.
+                if cur.idle_bytes.is_some() && pipeline_changed {
+                    store::set_image_model_idle(&state.db, cur.id, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                if cur.work_bytes.is_some() && pipeline_changed {
+                    store::set_image_model_work(&state.db, cur.id, None)
                         .await
                         .map_err(|e| e.to_string())?;
                 }
@@ -910,6 +929,9 @@ fn as_image_model(n: &store::NewImageModel) -> ImageModel {
         // reset by the save, which `image_model_set` does explicitly).
         peak_extra_bytes: None,
         peak_learned_at: None,
+        idle_bytes: None,
+        work_bytes: None,
+        learned_key: None,
         prompt_style: n.prompt_style,
         preview_mode: n.preview_mode,
     }
@@ -917,7 +939,7 @@ fn as_image_model(n: &store::NewImageModel) -> ImageModel {
 
 /// Read back one image model, or `None` when nothing matches — the image half
 /// of [`local_model_get`], same shape where the fields overlap.
-pub(super) fn image_model_get(
+pub(super) async fn image_model_get(
     snap: &Snapshot,
     state: &SharedState,
     id: Option<i64>,
@@ -981,6 +1003,20 @@ pub(super) fn image_model_get(
         peak_extra_bytes: m.peak_extra_bytes,
         peak_learned_at: m.peak_learned_at.clone(),
         peak: match m.peak_extra_bytes {
+            // Learned under another engine than the row resolves to now
+            // (migration 0105): admission does not count it.
+            Some(p)
+                if m.learned_key.as_deref()
+                    != Some(state.vram.image_engine_key(snap, m).as_str()) =>
+            {
+                format!(
+                    "one generation needed {} above idle under another engine build or run \
+                     args (learned {}); admission counts it as not learned until a generation \
+                     on this engine has run",
+                    hf::fmt_bytes(p),
+                    m.peak_learned_at.as_deref().unwrap_or("at an unknown time"),
+                )
+            }
             Some(p) => format!(
                 "one generation needed {} above idle (learned {}); admission keeps that much \
                  free for it while it is resident",
@@ -995,5 +1031,13 @@ pub(super) fn image_model_get(
         },
         command_line: command_line_preview(state, Class::Image, &m.model_id),
         problems: image_model_problems(&models_dir, m),
+        // A pipeline that keeps its weights off the card and would not fit
+        // on it whole (`vram::partial`).
+        warnings: state
+            .vram
+            .partial_fit_note(snap, Class::Image, &m.model_id)
+            .await
+            .into_iter()
+            .collect(),
     }))
 }

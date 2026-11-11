@@ -3,6 +3,8 @@
 //! warning pass and the runtime warning pass a card shows, and the token scope
 //! the config derives.
 
+#![cfg(target_os = "linux")]
+
 use lmgw_core::agents::{self, manifest, service, token, Agent};
 use lmgw_core::config::ScopeMode;
 use lmgw_core::state::AppState;

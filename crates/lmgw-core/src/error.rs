@@ -108,14 +108,18 @@ pub enum GatewayError {
     /// waiting cannot help: nothing that could ever be evicted would make this
     /// one fit, so it fails at once instead of holding a queue slot forever.
     #[error(
-        "'{model}' needs {need} of GPU memory plus {headroom} headroom, and the GPU holds \
-         {capacity} in total — no eviction can make it fit"
+        "'{model}' needs {need}, and the GPU holds {capacity} in total — no eviction can make \
+         it fit{hint}"
     )]
     VramTooLarge {
         model: String,
+        /// "X of GPU memory plus Y headroom" ([`Self::vram_need`]).
         need: String,
-        headroom: String,
         capacity: String,
+        /// The rest of the sentence, from its first `. `, or empty: for an
+        /// image pipeline that pins its weights on the card, the setting that
+        /// pins it and what would let it run with less (`vram::partial`).
+        hint: String,
     },
     /// The request waited `vram.queue_timeout_seconds` for GPU memory and never
     /// got it. `holding` names what was resident, so the refusal is actionable.
@@ -748,6 +752,18 @@ fn or_send_default(or_default: &bool) -> &'static str {
         ", or send service_tier default"
     } else {
         ""
+    }
+}
+
+impl GatewayError {
+    /// [`Self::VramTooLarge`]'s `need`: `need` bytes of GPU memory plus
+    /// `headroom`.
+    pub fn vram_need(need: u64, headroom: u64) -> String {
+        format!(
+            "{} of GPU memory plus {} headroom",
+            crate::hf::fmt_bytes(need),
+            crate::hf::fmt_bytes(headroom)
+        )
     }
 }
 

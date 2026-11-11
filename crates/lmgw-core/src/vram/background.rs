@@ -71,7 +71,7 @@ mod words;
 use words::in_use;
 
 use super::attribution::Fill;
-use super::{classify, lifecycle_spec, LocalHold, Target, VramScheduler, MIB};
+use super::{classify, lifecycle_spec, LocalHold, Target, VramScheduler};
 
 /// How a hold's model may be brought back when its container is gone under
 /// the hold — [`LocalHold::recover`]'s dead container, or a
@@ -352,13 +352,14 @@ impl VramScheduler {
             {
                 return Ok(BackgroundStart::Started(Box::new(hold)));
             }
+            self.read_fit_vocab(state, snap, target).await;
             let Some(fp) = self.footprint(snap, target.class, &target.model_id).await else {
                 return Ok(BackgroundStart::Blocked(format!(
                     "nothing lmgw can start — no row describes {label}"
                 )));
             };
-            let headroom = snap.settings.vram.headroom_mb.saturating_mul(MIB);
-            let needs = fp.total_bytes.saturating_add(headroom);
+            let headroom = self.start_headroom(snap, target.class, &target.model_id, &fp);
+            let margin = self.start_margin(snap, target.class, &target.model_id, &fp);
             // A model no card can hold is the configuration error it is
             // (§4.7's rule), not a deferral: wherever a busy card would
             // answer this start before it reads the card itself — the owner
@@ -376,9 +377,16 @@ impl VramScheduler {
             // the owner's start of this model would not be checked either —
             // and a total not known yet is judged nowhere before the gate:
             // both defer as before.
+            // Too large is judged without the learned growth, which only
+            // decides whether there is room now (`headroom`).
+            let structural = self.card_headroom(snap, target.class, &target.model_id, &fp);
             let blocked = |why: String| match self.known_total(snap) {
-                Some(total) if snap.settings.vram.enabled && needs > total => {
-                    Err(too_large(target, fp.total_bytes, headroom, total))
+                Some(total)
+                    if snap.settings.vram.enabled
+                        && fp.total_bytes.saturating_add(structural) > total
+                        && !super::partial::adapts(&fp) =>
+                {
+                    Err(too_large(snap, target, &fp, structural, total))
                 }
                 _ => Ok(BackgroundStart::Blocked(why)),
             };
@@ -435,9 +443,17 @@ impl VramScheduler {
                             .unwrap_or("no capacity to measure against"),
                     )));
                 };
-                // Again on this reading: a declared budget can shrink.
-                if needs > cap.total {
-                    return Err(too_large(target, fp.total_bytes, headroom, cap.total));
+                // A row llama.cpp's `--fit` would shrink, fitted to what
+                // this reading's card can give it (`partial::llama`).
+                let fp = self.fit_in(snap, target, fp.clone(), &l);
+                let needs = fp.total_bytes.saturating_add(headroom);
+                // Again on this reading: a declared budget can shrink. A
+                // pipeline that can run with less on the card is never too
+                // large for it (`partial`).
+                if fp.total_bytes.saturating_add(structural) > cap.total
+                    && !super::partial::adapts(&fp)
+                {
+                    return Err(too_large(snap, target, &fp, structural, cap.total));
                 }
                 // A start already decided for it (another admission's
                 // reservation) accounts for its memory; the `acquire` below
@@ -449,12 +465,38 @@ impl VramScheduler {
                     break Some(None);
                 }
                 if cap.free >= needs {
-                    break Some(Some(self.reserve(state, target, fp.total_bytes)));
+                    // A guest's deferral is how its fallback answers, so
+                    // it always has one (`partial::llama::whole`).
+                    let room = super::partial::Room {
+                        free: cap.free,
+                        headroom,
+                        others_hold: super::queue::others_hold(&l, target),
+                        fallback: true,
+                        cards: self.cards_for(snap, target),
+                    };
+                    let grant = super::partial::whole(target, &fp, room);
+                    break Some(Some(self.reserve_as(state, target, grant)));
                 }
                 if !self
                     .evict_one(state, target, &l, Victims::IdleBackground, None)
                     .await
                 {
+                    // Nothing more a guest may evict: with nothing of lmgw's
+                    // left on the card, a start that fits beside what other
+                    // programs hold now with its margin goes ahead, warned
+                    // (`queue::room_now`); a pipeline that can run with less
+                    // on the card goes ahead with what `partial` gives it. A
+                    // guest's deferral is how its fallback answers, so no
+                    // fallback is counted here — except for a llama-server
+                    // row, whose start with less than its target would stay
+                    // so for the owner too: its guest defers instead
+                    // (`partial::llama::decide`).
+                    let room =
+                        self.room_now(snap, &l, target, (headroom, margin), fp.llama.is_some());
+                    if let Some(grant) = super::partial::decide(target, &fp, room) {
+                        let grant = self.note_growth(target, grant, (headroom, margin), cap.free);
+                        break Some(Some(self.reserve_as(state, target, grant)));
+                    }
                     // The scheduler's per-process measurement, as admission's
                     // external shortfall reads it (waiting for a PID read in flight); none
                     // taken, no figure.
@@ -463,13 +505,13 @@ impl VramScheduler {
                         .await
                         .ok()
                         .map(|m| m.shares.outside);
-                    return Ok(BackgroundStart::Blocked(in_use(
-                        &l.residents,
-                        outside,
-                        &label,
-                        needs,
-                        cap.free,
-                    )));
+                    let why = in_use(&l.residents, outside, &label, needs, cap.free);
+                    return Ok(BackgroundStart::Blocked(
+                        match super::partial::why_not(&fp, room) {
+                            Some(w) => format!("{why}; {w}"),
+                            None => why,
+                        },
+                    ));
                 }
             };
             drop(gate);
@@ -536,14 +578,20 @@ impl VramScheduler {
     }
 }
 
-/// `vram_too_large` for `target`, whose `need` (plus `headroom`) is above the
-/// card's `capacity`.
-fn too_large(target: &Target, need: u64, headroom: u64, capacity: u64) -> GatewayError {
+/// `vram_too_large` for `target`, whose footprint `fp` (plus `headroom`) is
+/// above the card's `capacity`.
+fn too_large(
+    snap: &Snapshot,
+    target: &Target,
+    fp: &super::Footprint,
+    headroom: u64,
+    capacity: u64,
+) -> GatewayError {
     GatewayError::VramTooLarge {
         model: target.model_id.clone(),
-        need: fmt_bytes(need),
-        headroom: fmt_bytes(headroom),
+        need: GatewayError::vram_need(fp.total_bytes, headroom),
         capacity: fmt_bytes(capacity),
+        hint: super::partial::too_large_hint(snap, target, fp),
     }
 }
 

@@ -839,6 +839,8 @@ async fn an_extra_with_unrelated_history_is_squash_applied() {
 /// sd.cpp's case (§14.1): the base bumped a submodule, a PR bumped it further
 /// from an older base. merge-ort fast-forwards the gitlink only while the
 /// submodule is checked out — hence submodules at base before the merges.
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_submodule_bump_fast_forwards_and_the_tree_is_updated_after_the_merges() {
     let env = Env::new().await;
@@ -1222,6 +1224,8 @@ async fn pools_on_one_directory_share_their_lock_and_fetch_concurrently() {
 /// would resolve it against the worktree's path; the build's repository URL
 /// has to stand in, for nested relative URLs too (they resolve against their
 /// parent submodule's own origin).
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn relative_submodule_urls_resolve_against_the_builds_repository_url() {
     let env = Env::new().await;
@@ -1288,6 +1292,8 @@ async fn relative_submodule_urls_resolve_against_the_builds_repository_url() {
 /// merged tree resolves relative URLs against the BUILD's repository URL, not
 /// against the fork the extra came from (whose own sibling paths do not hold
 /// those repositories).
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn relative_submodules_of_a_forks_extra_resolve_against_the_build_url() {
     let env = Env::new().await;
@@ -1418,6 +1424,8 @@ fn add_submodule(sup: &Repo, remote: &Repo, name: &str, url: &str) {
 /// one), and every later run cloned from it. A run's URLs now come from its
 /// own `.gitmodules`, whatever the pool's config says, and reopening the pool
 /// removes the leftovers.
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn a_stale_submodule_url_in_the_pool_config_is_never_used_and_is_removed() {
     let env = Env::new().await;
@@ -1490,6 +1498,8 @@ async fn a_stale_submodule_url_in_the_pool_config_is_never_used_and_is_removed()
 /// win for both). The first also nests a submodule of that name, whose
 /// relative URL resolves against its parent submodule, never the top level's
 /// `-c submodule.lib.url`. No run writes `submodule.*` into the pool's config.
+// Engine builds from git are not on Windows (Windows design §4.5).
+#[cfg(unix)]
 #[tokio::test]
 async fn repositories_sharing_a_submodule_name_each_get_their_own_url() {
     let env = Env::new().await;

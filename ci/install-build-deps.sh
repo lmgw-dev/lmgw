@@ -51,7 +51,9 @@ install_prebuilt() { # <name> <want --version output> <url> <sha256>
 }
 
 # The tauri-cli release ships no checksum file; this hash was taken from the
-# downloaded tarball.
+# downloaded tarball. ci/build-windows.ps1 reads this version for the Windows
+# build and pins its Windows asset's hash itself, and src-tauri/windows/installer.nsi
+# is this version's NSIS template with lmgw's changes: a bump touches all three.
 TAURI_CLI_VERSION="2.12.0"
 TAURI_CLI_SHA256="8544e19c4312f653e80f92241ee4212b4d928ad33461bfb1d2997c52560c418f"
 install_prebuilt cargo-tauri "tauri-cli ${TAURI_CLI_VERSION}" \

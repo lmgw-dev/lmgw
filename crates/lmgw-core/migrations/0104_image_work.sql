@@ -1,0 +1,18 @@
+-- The smallest working budget of one image pipeline (VRAM admission's
+-- partial fit, `vram::partial`; the owner's ruling of 2026-11-11: never block
+-- what would work, warn where it fits only partially, refuse only what really
+-- cannot work).
+--
+-- The smallest `--max-vram` a generation of this row completed under, in
+-- bytes: a start that is given less than its on-card part goes ahead beside
+-- lmgw's other models, or while a fallback could answer, only with at least
+-- this much budget. Below it, or with none learned, it goes ahead only when
+-- nothing else of lmgw's is on the card and no fallback would answer.
+-- Measured 2026-11-11 on a GTX 970 (Vulkan, sd.cpp master-1079-a3c49b1):
+-- Z-Image-Turbo Q4_K at 512x512 fails at --max-vram 0.5 (its first segment
+-- asks for 942 MiB) and renders at 1, while its context at rest is 5 MiB, so
+-- the context (`idle_bytes`) is no working budget.
+--
+-- NULL is not measured yet. Lowered by each smaller budget that works; reset
+-- to NULL with the peak and the idle residency.
+ALTER TABLE image_models ADD COLUMN work_bytes INTEGER;

@@ -394,6 +394,26 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 (
+                    "headroom_mode",
+                    enum_p(
+                        "How VRAM admission's headroom is set (vram.headroom_mode): 'auto' \
+                         (default) learns it — the largest growth of other programs' GPU memory \
+                         seen in the last 7 days, plus a margin for each model still starting or \
+                         not measured yet — and uses headroom_mb until it has watched the card \
+                         for 24 hours; 'fixed' uses headroom_mb for everything. lmgw__settings \
+                         (vram.headroom) says what it is now and why.",
+                        &["auto", "fixed"],
+                    ),
+                ),
+                (
+                    "headroom_mb",
+                    int_p(
+                        "The fixed headroom in MiB (vram.headroom_mb, default 1024): GPU memory \
+                         VRAM admission keeps free beyond a model's estimate in 'fixed' mode, \
+                         and in 'auto' mode until it has learned enough.",
+                    ),
+                ),
+                (
                     "build_update_check_hours",
                     int_p(
                         "How often lmgw checks whether a container build's branch or PRs \

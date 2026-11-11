@@ -826,6 +826,9 @@ fn MountControl(
     // Asked once, and the only thing that decides between the two shapes: no
     // bridge, no picker to open (§5.4).
     let shell = crate::ui_scale::tauri_invoke().is_some();
+    // In the server image the path is the lmgw container's (headless server
+    // design §3.2): a host folder is mounted into it first.
+    let deployment = crate::deployment::deployment();
     let bound = move || !draft.text(&key.get_value()).trim().is_empty();
     view! {
         <div class="row secret-row">
@@ -833,11 +836,7 @@ fn MountControl(
                 class="input mono"
                 style="flex:1"
                 readonly=shell
-                placeholder=if shell {
-                    "not set"
-                } else {
-                    "absolute path on the gateway machine"
-                }
+                placeholder=move || crate::deployment::mount_placeholder(shell, deployment.get())
                 prop:value=move || draft.text(&key.get_value())
                 on:input=move |ev| draft.set_text(&key.get_value(), event_target_value(&ev))
             />

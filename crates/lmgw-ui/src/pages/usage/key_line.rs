@@ -279,6 +279,16 @@ pub(super) fn KeyLine(
                             <span class="chip off key-kind">"disabled"</span>
                         }
                     })}
+                // Accounts (headless server design §5.1, §5.11): a key that is
+                // paused or held by a disabled account, and who made it.
+                {move || {
+                    row.with(|r| r.as_ref().and_then(|r| r.paused.clone()))
+                        .map(|p| view! { " " <span class="chip off key-kind" title=p>"paused"</span> })
+                }}
+                {move || {
+                    row.with(|r| r.as_ref().and_then(|r| r.made_by.clone()))
+                        .map(|m| view! { " " <span class="dim mono-sm">{format!("made by {m}")}</span> })
+                }}
                 {move || super::device_tools::needs_grant_chips(unmet())}
             </td>
             <td class="clip key-scope mono-sm dim" title=scope>
@@ -319,7 +329,11 @@ pub(super) fn KeyLine(
                         })}
                     // An owner key's own two: stored, so copyable;
                     // replaceable, behind a question.
-                    {if owner {
+                    // Another account's sign-in key: changed through that
+                    // account, so neither copied nor rotated here (§5.1).
+                    {if owner && !row.with_untracked(|r| {
+                        r.as_ref().is_some_and(|r| r.door_of.is_some() && !r.yours)
+                    }) {
                         let items = vec![
                             MenuItem::new("Copy key", copy)
                                 .title("copy this key to the clipboard — it is stored, not shown once"),
@@ -415,5 +429,9 @@ fn kind_tip(kind: &str) -> Option<&'static str> {
 /// failing — rotate or revoke it on the agent's page), and the dashboard key
 /// is the door the server refuses to delete (principals §3.12).
 pub(super) fn revocable(r: &KeyRow) -> bool {
-    !matches!(r.kind.as_str(), "internal" | "agent") && r.name != "owner:dashboard"
+    !matches!(r.kind.as_str(), "internal" | "agent")
+        && r.name != "owner:dashboard"
+        // An account's sign-in key goes with its account (headless server
+        // design §5.1).
+        && r.door_of.is_none()
 }

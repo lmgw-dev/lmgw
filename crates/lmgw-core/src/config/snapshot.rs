@@ -68,6 +68,27 @@ pub struct Snapshot {
     /// store: carried over by every publish and read through
     /// [`Snapshot::gpu_block`] (see [`crate::bench::lease`]).
     pub gpu_lease: Option<std::sync::Arc<crate::bench::lease::GpuLease>>,
+    /// The main TLS listener while one serves (headless server design §4.3):
+    /// runtime state like `gpu_lease`, never loaded from the store, set and
+    /// cleared by the start that serves it
+    /// ([`crate::state::AppState::set_serving_tls`]) and carried over by every
+    /// publish. Every URL builder reads its TLS part from here, so a link
+    /// names a listener that answers.
+    pub serving_tls: Option<crate::net::ServingTls>,
+    /// `settings.trusted_proxies` read as networks (headless server design
+    /// §4.5): derived from the settings at every publish
+    /// ([`crate::state::AppState`]'s), so the main router's edge reads
+    /// them on every request without parsing the list each time.
+    pub trusted_nets: Vec<TrustedNet>,
+    /// Every `accounts` row (headless server design §5.1), loaded with the
+    /// keys: resolution names a disabled account from here.
+    pub accounts: Vec<crate::accounts::Account>,
+    /// Accounts on (D25): container mode, or `settings.accounts.enabled`.
+    /// Derived at every publish ([`crate::state::AppState`]'s).
+    pub accounts_on: bool,
+    /// The live sessions (§5.2): runtime state, the gateway's one desk,
+    /// set at every publish; a snapshot built by hand has an empty one.
+    pub sessions: std::sync::Arc<crate::accounts::sessions::SessionDesk>,
 }
 
 /// One row of `tool_disabled`: the owner switched this tool off, and where it

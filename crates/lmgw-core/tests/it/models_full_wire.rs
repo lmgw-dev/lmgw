@@ -235,6 +235,8 @@ async fn fill(state: &SharedState) {
         ctx_size: Some(131072),
         n_predict: Some(8192),
         n_gpu_layers: Some(99),
+        n_cpu_moe: Some(41),
+        moe_cache_mib: Some(6144),
         threads: Some(8),
         batch_size: Some(2048),
         ubatch_size: Some(512),

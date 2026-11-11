@@ -40,11 +40,21 @@ async fn the_attempts_row(g: &Gpu) {
     );
 }
 
+/// How long the client stays: past the refused connect, while the
+/// fallback's start waits at the gate (which holds it as long as needed).
+/// Windows answers a connect to a port nobody listens on only after it has
+/// retried the SYN, about 2 s on loopback; Linux at once.
+const STAYS: Duration = if cfg!(windows) {
+    Duration::from_secs(5)
+} else {
+    Duration::from_millis(400)
+};
+
 async fn leaves(gw: &Gw, route: &str, body: Value) {
     let gone = gw
         .client()
         .post(format!("{gw}{route}"))
-        .timeout(Duration::from_millis(400))
+        .timeout(STAYS)
         .json(&body)
         .send()
         .await;

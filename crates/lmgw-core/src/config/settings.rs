@@ -6,10 +6,16 @@ use serde::{Deserialize, Serialize};
 use super::settings_classes::{default_agent_origin_suffix, default_agent_script_image};
 use super::*;
 
+mod accounts;
+pub use accounts::*;
 mod dev_models_dir;
 pub use dev_models_dir::*;
 mod devices;
 pub use devices::*;
+mod proxies;
+pub use proxies::*;
+mod tls;
+pub use tls::*;
 mod webrtc;
 pub use webrtc::*;
 mod webrtc_audio;
@@ -31,7 +37,19 @@ pub use webrtc_audio::*;
 ///
 /// Ordered `Off < ReadOnly < Full`: a device's own level is capped by this
 /// one with `min` ([`DeviceAdmin::capped`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfAdmin {
     /// No `lmgw__*` tool is listed or callable.
@@ -115,7 +133,7 @@ fn default_jobs_max_rows() -> i64 {
 }
 
 /// Gateway settings, persisted as one JSON blob in the `settings` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Settings {
     pub bind_addr: String,
@@ -189,6 +207,43 @@ pub struct Settings {
     /// access setting: no self-admin tool changes it.
     #[serde(default)]
     pub devices: DevicesSettings,
+    /// The main listener's TLS (headless server design §4, D7, D8),
+    /// Settings → Network & access → TLS. Like `bind_addr`, an access
+    /// setting that applies at the next start: no self-admin tool changes
+    /// it, and the server image pins it (§2.1).
+    #[serde(default)]
+    pub tls: TlsSettings,
+    /// The one public origin (D9, §4.3), `https://lmgw.example:8443`: every
+    /// URL lmgw prints or hands a person or another machine is built from
+    /// it. Empty = derived from the TLS listener, else from `bind_addr`
+    /// ([`crate::net::public_base_url`]).
+    #[serde(default)]
+    pub public_url: String,
+    /// Proxy mode's trusted peers (headless server design §4.5): addresses
+    /// and CIDR networks whose connections have their `X-Forwarded-*` or
+    /// `Forwarded` headers read for the scheme, the host and the client
+    /// address ([`TrustedNet`]). Empty = off. Settings → Network & access →
+    /// TLS; applies at once, since every request reads it. Like
+    /// `public_url`, an access setting no self-admin tool changes, pinned
+    /// in the server image (`LMGW_TRUSTED_PROXIES`).
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Accounts (headless server design §5, ruling 17): the desktop's
+    /// switch, written only by `accounts_switch` (D29), and a session's
+    /// lifetime. Settings → Network & access → Accounts; no self-admin
+    /// tool changes either. Container mode has accounts on whatever
+    /// `enabled` says.
+    #[serde(default)]
+    pub accounts: AccountsSettings,
+    /// A container start has seeded this data dir (headless server design
+    /// §2.2): `auth_enabled`, `devices.listen` and the image's `bind_addr`
+    /// are written once, in the same settings write that sets this, by the
+    /// first container start that finds it unset
+    /// ([`crate::config::deployment::apply`]). A start that dies before
+    /// that write leaves it unset, and the next one seeds. No surface shows
+    /// or writes it.
+    #[serde(default)]
+    pub container_seeded: bool,
     /// Hugging Face access token for gated/private repos (empty = anonymous).
     pub hf_token: String,
     /// Poll the release feed for new app versions in the background (§12).
@@ -560,6 +615,11 @@ impl Default for Settings {
             realtime: RealtimeSettings::default(),
             mcp: super::McpSettings::default(),
             devices: DevicesSettings::default(),
+            tls: TlsSettings::default(),
+            public_url: String::new(),
+            trusted_proxies: Vec::new(),
+            accounts: AccountsSettings::default(),
+            container_seeded: false,
             hf_token: String::new(),
             update_check_enabled: true,
             update_token: String::new(),

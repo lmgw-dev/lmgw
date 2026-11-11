@@ -56,6 +56,17 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `file` relative to `src`, its parts joined with `/` on every system, as
+/// [`ALLOWED`] names them.
+fn rel_slashed(file: &Path, src: &Path) -> String {
+    file.strip_prefix(src)
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// The Chat's modules: the whole crate.
 fn chat_files(src: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -71,11 +82,7 @@ fn the_chat_reaches_lmgw_only_through_its_transport() {
     assert!(files.len() > 50, "the Chat's modules: {}", files.len());
     let mut hits = Vec::new();
     for file in &files {
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let rel = rel_slashed(file, &src);
         if rel.ends_with("chat_bytes/contract.rs") {
             continue;
         }

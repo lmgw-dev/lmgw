@@ -8,7 +8,7 @@
 //! example functions directly.
 
 pub(crate) mod anthropic;
-pub(crate) mod aux;
+pub(crate) mod aux_models;
 pub(crate) mod chat;
 pub(crate) mod errors;
 pub(crate) mod mcp;

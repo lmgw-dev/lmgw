@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Settings, Snapshot};
 use crate::gguf::{self, ModelSummary};
-use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::vram::compute::{self, Ask, Weights};

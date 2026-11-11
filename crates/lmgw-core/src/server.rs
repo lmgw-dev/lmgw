@@ -17,6 +17,9 @@ use crate::state::SharedState;
 
 /// `x-lmgw-background` (per-request background design §3).
 mod background;
+/// The drain before a declared oversize body's 413 on Windows.
+#[cfg(any(windows, test))]
+mod body_drain;
 /// The connect info both listeners serve with (device link design §4.5).
 mod conn;
 /// The principal on the device listener (device link design §4.7).
@@ -26,12 +29,22 @@ mod device_gate;
 pub mod device_listener;
 /// The device listener's face (device link design §4.6).
 mod face;
+/// Proxy mode (headless server design §4.5): a trusted proxy's forwarded
+/// headers read at the main router's edge.
+pub mod forwarded;
 /// `principal_mw` and the gate (principals §3.5, device link §4.7).
 mod gate;
+/// The start of a server: the bind, the TLS listener's bind, and the serve
+/// that runs the plain, the TLS and the device listener until the stop.
+mod listeners;
+/// The main TLS listener (headless server design §4): the reloading pair,
+/// its listener and the names it covers.
+pub mod main_tls;
+pub use listeners::{bind, bind_tls, run, serve, serve_with, BoundTls};
 mod stop;
 use background::background_or_400;
 pub use background::BACKGROUND_HEADER;
-pub use conn::{canonical, Conn, DevicePeer, SocketHandle, TimersOverride, Via};
+pub use conn::{canonical, scheme_of, Conn, DevicePeer, SocketHandle, TimersOverride, Via};
 pub use device_listener::{peer_key, DeviceListener};
 pub use face::{serves_on, DEVICE_ROUTES};
 pub(crate) use gate::{require, require_admin_token};
@@ -204,15 +217,27 @@ fn build_router_for(state: SharedState, via: Via) -> Router {
         // is answered above this and is the container's own.
         .layer(middleware::map_response(crate::web::stored::by_default));
     let routes = match via {
-        Via::Plain => plain_face(&state, routes),
+        Via::Plain | Via::Tls => plain_face(&state, routes),
         Via::Devices => face::device_face(routes),
     };
-    routes
-        // Outermost, so the trace covers the CORS preflights and the refusals
-        // too (§3.11). `make_span_with` because the default span records the
-        // whole URI, and a URI carries the query — see [`http_span`].
-        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(http_span))
-        .with_state(state)
+    let routes = routes
+        // Outermost but for proxy mode's edge, so the trace covers the CORS
+        // preflights and the refusals too (§3.11). `make_span_with` because
+        // the default span records the whole URI, and a URI carries the
+        // query — see [`http_span`].
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(http_span));
+    let routes = match via {
+        // Outside the trace (headless server design §4.5): the span then
+        // names the client and the scheme a trusted proxy forwarded, and
+        // every layer and route below reads them where it always looked.
+        // Not on the device listener: no proxy stands in front of mTLS.
+        Via::Plain | Via::Tls => routes.layer(middleware::from_fn_with_state(
+            state.clone(),
+            forwarded::edge,
+        )),
+        Via::Devices => routes,
+    };
+    routes.with_state(state)
 }
 
 /// The plain listener's two outer layers: CORS, and the agent origins'
@@ -261,16 +286,28 @@ fn plain_face(state: &SharedState, routes: Router<SharedState>) -> Router<Shared
 /// listener it came in on (device link design §4.5), so a log line says
 /// which of the two a request used.
 fn http_span(req: &axum::http::Request<axum::body::Body>) -> tracing::Span {
-    let via = req
+    let conn = req
         .extensions()
         .get::<axum::extract::ConnectInfo<Conn>>()
-        .map_or(Via::Plain, |c| c.0.via);
-    tracing::debug_span!(
+        .map(|c| &c.0);
+    let via = conn.map_or(Via::Plain, |c| c.via);
+    // The client and the scheme as a trusted proxy forwarded them (headless
+    // server design §4.5), and the proxy beside them when there was one.
+    let client = conn.map(|c| c.peer.ip().to_string()).unwrap_or_default();
+    let scheme = conn.map_or(crate::net::Scheme::Http, |c| c.scheme());
+    let span = tracing::debug_span!(
         "request",
         method = %req.method(),
         path = %req.uri().path(),
         via = %via,
-    )
+        client = %client,
+        scheme = %scheme,
+        proxy = tracing::field::Empty,
+    );
+    if let Some(p) = conn.and_then(|c| c.proxy) {
+        span.record("proxy", tracing::field::display(p.ip()));
+    }
+    span
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +391,7 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/api/session", Cap::Public),
     ("POST", "/api/session", Cap::Public),
     ("DELETE", "/api/session", Cap::Public),
+    ("POST", "/api/account/password", Cap::Public),
     ("GET", "/api/openapi.json", Cap::Admin),
     ("GET", "/api/status", Cap::Admin),
     ("GET", "/api/connect", Cap::Admin),
@@ -667,112 +705,6 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/{*path}", Cap::Public),
 ];
 
-/// Serve until `shutdown` resolves: [`bind`], then [`serve`].
-pub async fn run(
-    state: SharedState,
-    addr: std::net::SocketAddr,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<()> {
-    let listener = bind(&state, addr).await?;
-    serve(state, listener, shutdown, None).await
-}
-
-/// Refuse a dev instance on the production prefix, then bind `addr`.
-///
-/// Its own step so an entry point can act on the outcome before it serves:
-/// the shell builds its window only once this process holds the port, and
-/// never points one at whoever else does (chat-voice WP11 review m3).
-pub async fn bind(
-    state: &SharedState,
-    addr: std::net::SocketAddr,
-) -> anyhow::Result<tokio::net::TcpListener> {
-    // Before anything lists, removes or starts a container by prefix.
-    if let Some(why) =
-        crate::config::dev_prefix_refusal(state.dev(), &state.snapshot().settings.container_prefix)
-    {
-        anyhow::bail!(why);
-    }
-    tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))
-}
-
-/// Serve on `listener` (from [`bind`]) until `shutdown` resolves.
-///
-/// `released`, when given, fires as the listener closes: right after
-/// `shutdown`, before the open connections have drained. A restart that binds
-/// the same port again waits for it instead of racing the old listener.
-pub async fn serve(
-    state: SharedState,
-    listener: tokio::net::TcpListener,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-    released: Option<tokio::sync::oneshot::Sender<()>>,
-) -> anyhow::Result<()> {
-    // `bind` asked already; a caller with a listener of its own has not.
-    if let Some(why) =
-        crate::config::dev_prefix_refusal(state.dev(), &state.snapshot().settings.container_prefix)
-    {
-        anyhow::bail!(why);
-    }
-    let addr = listener.local_addr()?;
-    // WebRTC calls' plain socket group (calls design §3.1): bound beside the
-    // listener, closed with it before `released` fires.
-    let realtime = state.snapshot().settings.realtime.webrtc;
-    let released = state.calls.serve_plain(&realtime, addr, released).await;
-    let app = build_router(state.clone());
-    // axum drops the listener when the shutdown signal ends its accept loop,
-    // which fires `released`.
-    let listener = conn::PlainListener::new(listener, released);
-    tracing::info!("lmgw listening on http://{addr}");
-    // The headless owner's whole login procedure: click it (§3.4). One line
-    // per start, beside the listening line, at the same level and target —
-    // and a deliberate disclosure of a secret into the owner's own process
-    // log, the only one lmgw makes.
-    let base = crate::net::primary_base_url(&addr.to_string());
-    match state
-        .snapshot()
-        .owner_key(crate::agents::token::OWNER_DASHBOARD)
-    {
-        Some(key) => tracing::info!("dashboard login: {base}/api/session/login?token={key}"),
-        // Seeded by `AppState::init` and undeletable (§3.1), so this is the
-        // unreachable arm — and it logs rather than panics because a gateway
-        // that cannot print its login link still serves every other caller.
-        None => tracing::info!(
-            "dashboard login: unavailable — the '{}' key is missing or disabled; \
-             rotate it on Usage → Keys from a browser that still has a session",
-            crate::agents::token::OWNER_DASHBOARD
-        ),
-    }
-    spawn_background_tasks(state.clone());
-    // The device listener runs beside this one for as long as it serves
-    // (device link design §4.1, §4.4): started from the `devices` settings
-    // once this one is up — opening the CA may wait on the wallet's unlock
-    // prompt, which must not hold the plain listener — and stopped by the
-    // same stop, within the same bound, its own streams and sessions only.
-    let shutdown = futures::FutureExt::shared(Box::pin(shutdown));
-    let devices = {
-        let (st, stopped) = (state.clone(), shutdown.clone());
-        async move {
-            let epoch = st.devices.listener.claim(&st).await;
-            // Only the CA's opening is raced against the stop: the wallet's
-            // prompt may wait for as long as nobody answers it, and a stop
-            // must neither wait for it nor see the listener bind after it.
-            // The start itself changes the listener's state and is never cut.
-            let ca = tokio::select! {
-                ca = st.devices.listener.open_ca(&st) => Some(ca),
-                () = stopped.clone() => None,
-            };
-            if let Some(ca) = ca {
-                st.devices.listener.start_claimed(&st, epoch, ca).await;
-            }
-            stopped.await;
-            st.devices.listener.disarm(&st, epoch, STOP_WITHIN).await;
-        }
-    };
-    let (served, ()) = tokio::join!(serve_app(&state, listener, app, shutdown), devices);
-    served
-}
-
 /// Serve `app` until `shutdown` resolves, then stop within [`STOP_WITHIN`]
 /// (`server::stop`): the long-lived streams opened on this server end at
 /// once ([`Stops`]), the drain waits for the requests that finish by
@@ -805,7 +737,7 @@ where
     L: axum::serve::Listener<Addr = std::net::SocketAddr>,
     for<'a> Conn: axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
 {
-    stop::serve_stopping(state, listener, app, shutdown, within).await
+    stop::serve_stopping(state, Via::Plain, listener, app, shutdown, within).await
 }
 
 /// The Chat's step of the hourly maintenance tick: the thread sweep
@@ -971,6 +903,11 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     // image container is up.
     let st = state.clone();
     tokio::spawn(async move { crate::vram::peak::run(st).await });
+
+    // The outside-use sampler auto headroom learns from (`vram::headroom`):
+    // one attribution reading every 30 s.
+    let st = state.clone();
+    tokio::spawn(async move { crate::vram::headroom::run(st).await });
 
     // The build and registry-image update check (container-builds §8): every
     // `build_update_check_hours` (0 = off, re-read each cycle), a few minutes
@@ -1279,8 +1216,15 @@ pub(crate) async fn body_limit_mw(
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    if declared.is_some_and(|n| n > max_bytes) {
-        return body_limit_response(req.headers(), max_mb);
+    if let Some(n) = declared.filter(|&n| n > max_bytes) {
+        let refusal = body_limit_response(req.headers(), max_mb);
+        // Windows resets a connection closed with bytes unread, which loses
+        // the refusal: there the body is drained first, within a budget.
+        #[cfg(windows)]
+        body_drain::before_refusal(req, n, max_mb).await;
+        #[cfg(not(windows))]
+        let _ = n;
+        return refusal;
     }
     let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
 

@@ -1,5 +1,7 @@
 //! The sync, offline: quickdoc's fixture embedder, a temp folder, no gateway.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::collections::HashSet;

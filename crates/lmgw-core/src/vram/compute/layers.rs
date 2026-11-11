@@ -50,6 +50,15 @@ impl Layout {
     /// ([`Self::mtp`]). `Err` names the header value it needs and the file
     /// does not state.
     pub(crate) fn of(s: &ModelSummary) -> Result<Self, String> {
+        Self::of_from(s, 0)
+    }
+
+    /// [`Self::of`] with only the layers from `from` on keeping a cache or a
+    /// state: what of the main graph's KV cache sits on the card when
+    /// `--n-gpu-layers` leaves the first `from` layers on the CPU (llama.cpp
+    /// keeps each layer's cache with the layer). The kinds and their widest
+    /// read stay the whole model's, which the compute buffer reads.
+    pub(crate) fn of_from(s: &ModelSummary, from: u64) -> Result<Self, String> {
         let need = |v: Option<u64>, key: &str| {
             v.filter(|n| *n > 0)
                 .ok_or_else(|| format!("the header states no {key}"))
@@ -127,7 +136,7 @@ impl Layout {
                 if !attends {
                     // A recurrent block keeps a state; an attention-free
                     // one (Deci-style) keeps nothing.
-                    if interval.is_some() || s.has_recurrent_keys {
+                    if (interval.is_some() || s.has_recurrent_keys) && i >= from {
                         recurrent += 1;
                     }
                     continue;
@@ -139,7 +148,7 @@ impl Layout {
                 };
                 let k = if windowed { &mut swa } else { &mut full };
                 k.max_heads = k.max_heads.max(h);
-                if i < owners {
+                if i < owners && i >= from {
                     k.own_layers += 1;
                     k.own_heads += h;
                 }
@@ -150,14 +159,21 @@ impl Layout {
             // the attending one among recurrent layers, or the full one
             // among windowed layers.
             let every = interval.or(stride);
-            let special = every.map_or(n, |k| n / k);
-            let own_special = every.map_or(owners, |k| owners / k);
+            // The special layers among layers `a..b` (0-based): every k-th,
+            // counting from 1.
+            let specials = |a: u64, b: u64| {
+                let a = a.min(b);
+                every.map_or(b - a, |k| b / k - a / k)
+            };
+            let special = specials(0, n);
+            let own_special = specials(from, owners);
             full.own_layers = own_special;
             full.max_heads = if special > 0 { scalar } else { 0 };
             if interval.is_some() {
-                recurrent = n - special;
+                let on = n.saturating_sub(from.min(n));
+                recurrent = on - specials(from, n);
             } else if stride.is_some() {
-                swa.own_layers = owners - own_special;
+                swa.own_layers = owners.saturating_sub(from.min(owners)) - own_special;
                 swa.max_heads = if n > special { scalar } else { 0 };
             }
             full.own_heads = full.own_layers.saturating_mul(scalar);

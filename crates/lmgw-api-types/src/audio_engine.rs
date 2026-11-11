@@ -76,7 +76,7 @@ pub fn passes_gpu(args: &[String]) -> bool {
 }
 
 /// A host path that is a GPU node.
-fn is_gpu_node(path: &str) -> bool {
+pub fn is_gpu_node(path: &str) -> bool {
     path.starts_with("/dev/nvidia") || path.starts_with("/dev/dri") || path == "/dev/kfd"
 }
 

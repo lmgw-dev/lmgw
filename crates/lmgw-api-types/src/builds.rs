@@ -1448,6 +1448,10 @@ pub struct UpdatesSummary {
     /// too, and its update is on the Engines page, but it is not counted
     /// here.
     pub images_with_updates: u32,
+    /// Pinned engine releases (Windows design §4.2, the Engines page's
+    /// Windows column) whose upstream project has published a newer Windows
+    /// release; `0` where lmgw runs no pinned builds.
+    pub engines_with_updates: u32,
     /// When the last full check (every build and image) ended; `None` before
     /// the first one.
     pub checked_at: Option<String>,
@@ -1866,6 +1870,7 @@ mod tests {
         let summary = UpdatesSummary {
             builds_with_updates: 2,
             images_with_updates: 1,
+            engines_with_updates: 1,
             checked_at: Some("2026-09-26T06:00:00Z".into()),
         };
         let back: UpdatesSummary =

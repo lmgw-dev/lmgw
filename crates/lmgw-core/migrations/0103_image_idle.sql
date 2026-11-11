@@ -1,0 +1,17 @@
+-- The learned idle residency of one image pipeline (VRAM admission's partial
+-- fit, `vram::partial`; the owner's ruling of 2026-11-11: never block what
+-- would work, warn where it fits only partially).
+--
+-- What a row whose weights all wait off the card (`offload_to_cpu`, a whole
+-- `params_backend cpu|disk`) holds on the card while its container is up and
+-- idle: sd-server's own context, read per process (the driver's figure for
+-- the container's processes, `vram::partial::floor`). Admission takes it as
+-- the least such a pipeline runs with — below it the start waits, drains,
+-- evicts or falls back like any model that does not fit — and adds it to the
+-- learned peak (`peak_extra_bytes`, which is measured *above* it) for what
+-- one generation puts on the card. Measured with `offload_to_cpu` on a
+-- 24 GiB card: 1.0 GiB (the Z-Image-Turbo recipe's note).
+--
+-- NULL is not measured yet, which every surface that uses it says. Reset to
+-- NULL with the peak whenever `files` or `args` change.
+ALTER TABLE image_models ADD COLUMN idle_bytes INTEGER;

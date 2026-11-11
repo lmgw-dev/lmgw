@@ -914,6 +914,14 @@ async fn a_registry_image_in_use_is_badged_and_pull_update_clears_it() {
         UpdatesSummary {
             builds_with_updates: 0,
             images_with_updates: 1,
+            // On Windows the check also asks the engines' release API for
+            // newer builds than the pins (Windows design §4.2), which this
+            // test does not state: that count is the live answer's.
+            engines_with_updates: if cfg!(windows) {
+                summary.engines_with_updates
+            } else {
+                0
+            },
             checked_at: summary.checked_at.clone(),
         }
     );

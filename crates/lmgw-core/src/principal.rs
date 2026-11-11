@@ -18,9 +18,14 @@ use lmgw_api_types as dto;
 
 use crate::config::{ApiKey, ApiKeyKind, Snapshot};
 
-/// The cookie an owner's browser carries (§3.3). Host-only, `HttpOnly`,
-/// `SameSite=Strict`; accepted for `owner` rows and nothing else.
-pub const SESSION_COOKIE: &str = "lmgw_session";
+/// The session cookie's two names, one per scheme, and reading them out of
+/// a request (headless server design §4.3, D43).
+mod cookie;
+use cookie::from_cookie;
+pub use cookie::{
+    any_session_cookie, known_cookie, known_cookie_name, session_cookie, session_cookie_name,
+    KNOWN_COOKIE, KNOWN_COOKIE_HTTPS, SESSION_COOKIE, SESSION_COOKIE_HTTPS,
+};
 
 /// Who is making this request (§3.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +46,12 @@ pub enum Principal {
         /// row rotated since holds another, and every per-call check that
         /// re-reads the row refuses then (client-apps design §1.6).
         fingerprint: String,
+        /// The account it acts as (headless server design §5.1): set for
+        /// owner rows and for session cookies, `None` for every other kind.
+        account: Option<i64>,
+        /// The session it came in with (§5.2): `Some` for a session cookie
+        /// only.
+        session: Option<i64>,
     },
 }
 
@@ -89,6 +100,26 @@ impl Principal {
             kind: key.kind,
             agent_id: key.agent_id.clone(),
             fingerprint: key.fingerprint(),
+            account: (key.kind == ApiKeyKind::Owner)
+                .then_some(key.account_id)
+                .flatten(),
+            session: None,
+        }
+    }
+
+    /// The account this principal acts as (§5.1), if any.
+    pub fn account(&self) -> Option<i64> {
+        match self {
+            Self::Key { account, .. } => *account,
+            Self::Anonymous => None,
+        }
+    }
+
+    /// The session it came in with (§5.2), if any.
+    pub fn session(&self) -> Option<i64> {
+        match self {
+            Self::Key { session, .. } => *session,
+            Self::Anonymous => None,
         }
     }
 
@@ -463,23 +494,6 @@ impl IntoResponse for Refusal {
     }
 }
 
-/// The `lmgw_session` value out of the `Cookie` header.
-///
-/// Parsed by hand rather than with a cookie crate: the header is a
-/// `;`-separated list of `name=value` pairs, the value lmgw sets is 76 hex-ish
-/// ASCII characters with nothing to quote or percent-encode, and reading one
-/// name out of that list is the entire requirement.
-pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(name, _)| name.trim() == SESSION_COOKIE)
-        .map(|(_, value)| value.trim())
-}
-
 /// The row a presented credential matches, **skipping `internal` and
 /// `device` by kind before any hash is compared** (§3.1).
 ///
@@ -490,7 +504,7 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
 /// client certificate on the device listener alone (device link design D12,
 /// §4.8): its row's hash carries a prefix no bearer's has, and no bearer is
 /// ever compared with it.
-fn matching_row<'a>(snap: &'a Snapshot, presented: &str) -> Option<&'a ApiKey> {
+pub(crate) fn matching_row<'a>(snap: &'a Snapshot, presented: &str) -> Option<&'a ApiKey> {
     let hash = crate::config::hash_api_key(presented);
     snap.api_keys.iter().find(|k| {
         !matches!(k.kind, ApiKeyKind::Internal | ApiKeyKind::Device) && k.key_hash == hash
@@ -521,11 +535,15 @@ fn v1_device<'a>(snap: &'a Snapshot, presented: &str) -> Option<&'a ApiKey> {
 /// logged at `debug` and is **not** throttled — `policy::admit` counts only
 /// matched keys, and the keyspace is 256 bits. Said out loud so that nobody
 /// reads a rate limit into this that is not there.
-pub fn resolve(headers: &HeaderMap, snap: &Snapshot) -> Result<Principal, Refusal> {
+pub fn resolve(
+    headers: &HeaderMap,
+    snap: &Snapshot,
+    scheme: crate::net::Scheme,
+) -> Result<Principal, Refusal> {
     if let Some(bearer) = crate::agents::token::presented(headers) {
         return from_bearer(snap, bearer);
     }
-    if let Some(cookie) = session_cookie(headers) {
+    if let Some(cookie) = session_cookie(headers, scheme) {
         return from_cookie(snap, cookie);
     }
     Ok(Principal::Anonymous)
@@ -553,6 +571,13 @@ pub fn from_bearer(snap: &Snapshot, bearer: &str) -> Result<Principal, Refusal> 
         return Ok(Principal::Anonymous);
     };
     if key.enabled {
+        // An owner row of a disabled account, or of a paused one on a
+        // desktop with accounts off (headless server design §5.1, §5.11).
+        if key.kind == ApiKeyKind::Owner {
+            if let Some(block) = snap.owner_row_blocked(key.account_id) {
+                return Err(block.refusal());
+            }
+        }
         return Ok(Principal::from_key(key));
     }
     // A credential the owner switched off must say so, whichever kind it is:
@@ -571,28 +596,6 @@ pub fn from_bearer(snap: &Snapshot, bearer: &str) -> Result<Principal, Refusal> 
     }
 }
 
-/// The session cookie, which is a credential **only in the owner position**
-/// (§3.3): a client or agent key sitting in `lmgw_session` is not an error and
-/// not an authentication, it is simply not a credential there.
-fn from_cookie(snap: &Snapshot, cookie: &str) -> Result<Principal, Refusal> {
-    let Some(key) = matching_row(snap, cookie) else {
-        tracing::debug!("a presented session cookie matched no key row");
-        return Ok(Principal::Anonymous);
-    };
-    if key.kind != ApiKeyKind::Owner {
-        tracing::debug!(
-            "the session cookie carried a '{}' key; only owner keys authenticate a cookie",
-            key.kind.as_str()
-        );
-        return Ok(Principal::Anonymous);
-    }
-    if key.enabled {
-        Ok(Principal::from_key(key))
-    } else {
-        Err(Refusal::owner_key_disabled(&key.name))
-    }
-}
-
 /// The §3.6 same-origin rule, for a request whose principal came from the
 /// **cookie**.
 ///
@@ -602,14 +605,18 @@ fn from_cookie(snap: &Snapshot, cookie: &str) -> Result<Principal, Refusal> {
 /// `http://127.0.0.1:9999`, which any local process can serve — because a site
 /// is a host, not a host and a port. This is that gap, and nothing else.
 ///
-/// Checked against the request's **own `Host`**, not a hardcoded loopback
-/// list: a gateway bound to a LAN address, opened from that LAN address, is
-/// the owner's own dashboard and must pass. `http://` is the only scheme the
-/// listener speaks, so it is the only one an `Origin` may carry.
+/// Checked against the request's **own `Host`** and its scheme (headless
+/// server design §4.3; behind a trusted proxy both are the ones it
+/// forwarded, §4.5, which the router's edge writes in), not a hardcoded
+/// loopback list: a gateway bound to a LAN address, opened from that LAN
+/// address, is the owner's own dashboard and must pass. An `Origin` is
+/// `<scheme>://<Host>` exactly: `https://` on the TLS listener, `http://` on
+/// the plain one, so a plain page on the same host and port number never
+/// passes for the TLS one, nor the other way round.
 ///
 /// A bearer-authenticated request never reaches here (see the caller): `curl`
 /// sends no `Origin`, and a bearer is not something a foreign page holds.
-pub fn same_origin(headers: &HeaderMap) -> Result<(), Refusal> {
+pub fn same_origin(headers: &HeaderMap, scheme: crate::net::Scheme) -> Result<(), Refusal> {
     let header = |name: &str| {
         headers
             .get(name)
@@ -620,7 +627,7 @@ pub fn same_origin(headers: &HeaderMap) -> Result<(), Refusal> {
 
     if let Some(origin) = header("origin") {
         let host = header("host").unwrap_or_default();
-        return if origin == format!("http://{host}") {
+        return if origin == format!("{scheme}://{host}") {
             Ok(())
         } else {
             Err(Refusal::cross_origin_refused(&format!("'{origin}'")))
@@ -641,6 +648,7 @@ pub fn same_origin(headers: &HeaderMap) -> Result<(), Refusal> {
 mod tests {
     use super::*;
     use crate::config::{hash_api_key, Secret, Settings};
+    use crate::net::Scheme;
 
     fn key(id: i64, name: &str, kind: ApiKeyKind, plaintext: &str, enabled: bool) -> ApiKey {
         ApiKey {
@@ -716,7 +724,7 @@ mod tests {
             ("lmgw-agent-board", 2, ApiKeyKind::Agent),
             ("lmgw-owner-dash", 3, ApiKeyKind::Owner),
         ] {
-            let p = resolve(&with_bearer(token), &s).unwrap();
+            let p = resolve(&with_bearer(token), &s, Scheme::Http).unwrap();
             assert_eq!(p.key_id(), Some(id), "{token}");
             assert!(
                 matches!(p, Principal::Key { kind: k, .. } if k == kind),
@@ -726,14 +734,14 @@ mod tests {
         // And in the `x-api-key` spelling `/v1` has always accepted.
         let mut h = HeaderMap::new();
         h.insert("x-api-key", "lmgw-client".parse().unwrap());
-        assert_eq!(resolve(&h, &s).unwrap().key_id(), Some(1));
+        assert_eq!(resolve(&h, &s, Scheme::Http).unwrap().key_id(), Some(1));
     }
 
     #[test]
     fn the_cookie_authenticates_an_owner_and_nothing_else() {
         let s = snap();
         assert_eq!(
-            resolve(&with_cookie("lmgw-owner-dash"), &s)
+            resolve(&with_cookie("lmgw-owner-dash"), &s, Scheme::Http)
                 .unwrap()
                 .key_id(),
             Some(3)
@@ -741,26 +749,49 @@ mod tests {
         // Not an error, not a credential in that position (§3.3).
         for other in ["lmgw-client", "lmgw-agent-board", "lmgw-device-phone"] {
             assert_eq!(
-                resolve(&with_cookie(other), &s).unwrap(),
+                resolve(&with_cookie(other), &s, Scheme::Http).unwrap(),
                 Principal::Anonymous,
                 "{other}"
             );
         }
     }
 
+    /// Headless server design §4.3: on `https` only `__Host-lmgw_session`
+    /// is read, on `http` only `lmgw_session`.
+    #[test]
+    fn each_scheme_reads_its_own_cookie() {
+        let s = snap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "cookie",
+            format!("{SESSION_COOKIE_HTTPS}=lmgw-owner-dash")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(resolve(&h, &s, Scheme::Https).unwrap().key_id(), Some(3));
+        assert_eq!(resolve(&h, &s, Scheme::Http).unwrap(), Principal::Anonymous);
+        assert_eq!(
+            resolve(&with_cookie("lmgw-owner-dash"), &s, Scheme::Https).unwrap(),
+            Principal::Anonymous,
+            "a plain cookie is sent to every port and scheme of the host"
+        );
+        assert!(any_session_cookie(&h).is_some());
+        assert!(any_session_cookie(&with_cookie("x")).is_some());
+    }
+
     #[test]
     fn a_credential_that_matches_nothing_is_anonymous() {
         let s = snap();
         assert_eq!(
-            resolve(&with_bearer("sk-whatever"), &s).unwrap(),
+            resolve(&with_bearer("sk-whatever"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
         assert_eq!(
-            resolve(&with_cookie("lmgw-owner-stale"), &s).unwrap(),
+            resolve(&with_cookie("lmgw-owner-stale"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
         assert_eq!(
-            resolve(&HeaderMap::new(), &s).unwrap(),
+            resolve(&HeaderMap::new(), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
     }
@@ -770,13 +801,13 @@ mod tests {
         let s = snap();
         let mut h = with_cookie("lmgw-owner-dash");
         h.insert("authorization", "Bearer lmgw-client".parse().unwrap());
-        assert_eq!(resolve(&h, &s).unwrap().key_id(), Some(1));
+        assert_eq!(resolve(&h, &s, Scheme::Http).unwrap().key_id(), Some(1));
 
         // Including when the bearer matches nothing: falling back to the
         // cookie would hand a deliberate bad-key request the owner session.
         let mut h = with_cookie("lmgw-owner-dash");
         h.insert("authorization", "Bearer sk-nope".parse().unwrap());
-        assert_eq!(resolve(&h, &s).unwrap(), Principal::Anonymous);
+        assert_eq!(resolve(&h, &s, Scheme::Http).unwrap(), Principal::Anonymous);
     }
 
     #[test]
@@ -784,17 +815,20 @@ mod tests {
         let mut s = snap();
         // The empty hash `internal` rows really carry: an empty bearer is not
         // reachable through `presented`, so the real test is the next one.
-        assert_eq!(resolve(&with_bearer(""), &s).unwrap(), Principal::Anonymous);
+        assert_eq!(
+            resolve(&with_bearer(""), &s, Scheme::Http).unwrap(),
+            Principal::Anonymous
+        );
 
         // A build — or an owner with sqlite3 — that put a usable hash on an
         // internal row must not thereby have made it a credential.
         s.api_keys[3].key_hash = hash_api_key("lmgw-internal-somehow");
         assert_eq!(
-            resolve(&with_bearer("lmgw-internal-somehow"), &s).unwrap(),
+            resolve(&with_bearer("lmgw-internal-somehow"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
         assert_eq!(
-            resolve(&with_cookie("lmgw-internal-somehow"), &s).unwrap(),
+            resolve(&with_cookie("lmgw-internal-somehow"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
     }
@@ -803,7 +837,7 @@ mod tests {
     fn a_device_key_without_its_row_is_told_to_pair_again() {
         let s = snap();
         // Rotated or deleted: the prefix says it was a device's.
-        let e = resolve(&with_bearer("lmgw-device-0123abcd"), &s).unwrap_err();
+        let e = resolve(&with_bearer("lmgw-device-0123abcd"), &s, Scheme::Http).unwrap_err();
         assert_eq!(
             (e.status, e.code),
             (StatusCode::UNAUTHORIZED, "device_key_unknown")
@@ -815,7 +849,7 @@ mod tests {
         );
         // Device link D12: its row paired before TLS opens nothing any
         // more, and the refusal names it.
-        let e = resolve(&with_bearer("lmgw-device-phone"), &s).unwrap_err();
+        let e = resolve(&with_bearer("lmgw-device-phone"), &s, Scheme::Http).unwrap_err();
         assert_eq!(
             (e.status, e.code),
             (StatusCode::UNAUTHORIZED, "device_key_unknown")
@@ -830,7 +864,7 @@ mod tests {
         let mut bare = s.clone();
         bare.api_keys[4].key_hash = hash_api_key("lmgw-device-phone");
         assert_eq!(
-            resolve(&with_bearer("lmgw-device-phone"), &bare)
+            resolve(&with_bearer("lmgw-device-phone"), &bare, Scheme::Http)
                 .unwrap_err()
                 .code,
             "device_key_unknown"
@@ -838,11 +872,11 @@ mod tests {
         // Any other unknown bearer, and a device key in the cookie, stay
         // anonymous.
         assert_eq!(
-            resolve(&with_bearer("lmgw-zzz"), &s).unwrap(),
+            resolve(&with_bearer("lmgw-zzz"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
         assert_eq!(
-            resolve(&with_cookie("lmgw-device-0123abcd"), &s).unwrap(),
+            resolve(&with_cookie("lmgw-device-0123abcd"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
     }
@@ -853,23 +887,23 @@ mod tests {
         s.api_keys[1].enabled = false;
         s.api_keys[2].enabled = false;
 
-        let e = resolve(&with_bearer("lmgw-agent-board"), &s).unwrap_err();
+        let e = resolve(&with_bearer("lmgw-agent-board"), &s, Scheme::Http).unwrap_err();
         assert_eq!(e.code, "agent_disabled");
         assert_eq!(e.status, StatusCode::UNAUTHORIZED);
         assert!(e.message.contains("board"), "{}", e.message);
 
-        let e = resolve(&with_bearer("lmgw-owner-dash"), &s).unwrap_err();
+        let e = resolve(&with_bearer("lmgw-owner-dash"), &s, Scheme::Http).unwrap_err();
         assert_eq!(e.code, "owner_key_disabled");
         assert!(e.message.contains("owner key 'dashboard'"), "{}", e.message);
 
         // The cookie is the same credential by another door.
-        let e = resolve(&with_cookie("lmgw-owner-dash"), &s).unwrap_err();
+        let e = resolve(&with_cookie("lmgw-owner-dash"), &s, Scheme::Http).unwrap_err();
         assert_eq!(e.code, "owner_key_disabled");
 
         // A disabled *client* key too: §3.3's rule is that a matched disabled
         // row never falls through, whichever of the three kinds it is.
         s.api_keys[0].enabled = false;
-        let e = resolve(&with_bearer("lmgw-client"), &s).unwrap_err();
+        let e = resolve(&with_bearer("lmgw-client"), &s, Scheme::Http).unwrap_err();
         assert_eq!(e.code, "key_disabled");
         assert_eq!(e.status, StatusCode::UNAUTHORIZED);
         assert!(e.message.contains("client key 'laptop'"), "{}", e.message);
@@ -883,7 +917,7 @@ mod tests {
         // A key that matches *nothing* still falls through, which is what
         // keeps `/v1`'s "any key value works" promise with the toggle off.
         assert_eq!(
-            resolve(&with_bearer("lmgw-never-existed"), &s).unwrap(),
+            resolve(&with_bearer("lmgw-never-existed"), &s, Scheme::Http).unwrap(),
             Principal::Anonymous
         );
     }
@@ -904,7 +938,11 @@ mod tests {
             ("http://198.51.100.10:8001", "198.51.100.10:8001"),
         ] {
             assert!(
-                same_origin(&headers(&[("origin", origin), ("host", host)])).is_ok(),
+                same_origin(
+                    &headers(&[("origin", origin), ("host", host)]),
+                    Scheme::Http
+                )
+                .is_ok(),
                 "{origin}"
             );
         }
@@ -916,8 +954,11 @@ mod tests {
             "http://evil.example",
             "https://127.0.0.1:8001",
         ] {
-            let e = same_origin(&headers(&[("origin", origin), ("host", "127.0.0.1:8001")]))
-                .unwrap_err();
+            let e = same_origin(
+                &headers(&[("origin", origin), ("host", "127.0.0.1:8001")]),
+                Scheme::Http,
+            )
+            .unwrap_err();
             assert_eq!(e.code, "cross_origin_refused", "{origin}");
             assert_eq!(e.status, StatusCode::FORBIDDEN, "{origin}");
             assert!(e.message.contains(origin), "{}", e.message);
@@ -927,26 +968,47 @@ mod tests {
         // bookmark) is the owner opening their own dashboard.
         for site in ["same-origin", "none"] {
             assert!(
-                same_origin(&headers(&[
-                    ("sec-fetch-site", site),
-                    ("host", "127.0.0.1:8001")
-                ]))
+                same_origin(
+                    &headers(&[("sec-fetch-site", site), ("host", "127.0.0.1:8001")]),
+                    Scheme::Http
+                )
                 .is_ok(),
                 "{site}"
             );
         }
         for site in ["cross-site", "same-site"] {
-            let e = same_origin(&headers(&[
-                ("sec-fetch-site", site),
-                ("host", "127.0.0.1:8001"),
-            ]))
+            let e = same_origin(
+                &headers(&[("sec-fetch-site", site), ("host", "127.0.0.1:8001")]),
+                Scheme::Http,
+            )
             .unwrap_err();
             assert_eq!(e.code, "cross_origin_refused", "{site}");
             assert!(e.message.contains(site), "{}", e.message);
         }
 
         // Neither header: curl, a container, the shell's own window.
-        assert!(same_origin(&HeaderMap::new()).is_ok());
+        assert!(same_origin(&HeaderMap::new(), Scheme::Http).is_ok());
+
+        // On the TLS listener (headless server design §4.3) the origin is
+        // `https://<Host>`, and the plain scheme on the same host and port
+        // number is another origin, in both directions.
+        let tls = headers(&[
+            ("origin", "https://lmgw.example:8443"),
+            ("host", "lmgw.example:8443"),
+        ]);
+        assert!(same_origin(&tls, Scheme::Https).is_ok());
+        assert_eq!(
+            same_origin(&tls, Scheme::Http).unwrap_err().code,
+            "cross_origin_refused"
+        );
+        let plain = headers(&[
+            ("origin", "http://lmgw.example:8443"),
+            ("host", "lmgw.example:8443"),
+        ]);
+        assert_eq!(
+            same_origin(&plain, Scheme::Https).unwrap_err().code,
+            "cross_origin_refused"
+        );
     }
 
     #[test]

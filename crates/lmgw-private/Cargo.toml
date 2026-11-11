@@ -1,0 +1,24 @@
+[package]
+name = "lmgw-private"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Private files and directories on Windows: the owner and access checks, and creates that follow no link and take a private security descriptor from the start"
+
+# What "private" means on Windows (Windows design §4.4, WP6), for the three
+# crates that keep a file only lmgw's user may read: lmgw-core (the device
+# CA, lmgw's CDI spec dir, the main TLS key's readers), lmgw-update (the
+# download dir and file) and nothing else yet. On Unix the crate is empty:
+# there each caller keeps its own mode and uid code.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

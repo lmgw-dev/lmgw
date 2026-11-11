@@ -101,7 +101,13 @@ impl Registry {
             claim.key.1.clone(),
             claim.container_name.clone(),
         );
-        let verdict = match self.start_container(&spec.as_spec(), &name).await {
+        let of = super::start_of::StartOf {
+            key: &claim.key,
+            phase: &claim.phase,
+            generation: claim.generation,
+        };
+        let started = self.start_container(&spec.as_spec(), &name, of).await;
+        let verdict = match started {
             Ok(started) => claim.ready(started, &requester).await,
             Err(err) => {
                 claim.fail(&err);

@@ -1179,7 +1179,16 @@ fn assert_nested_shapes(v: &Value) {
         &FTS_WEIGHT_KEYS,
     );
     assert_shapes("hold", &v["hold"], &[("active", "bool")]);
-    assert_shapes("vram", &v["vram"], &[("fallback_on_external", "bool")]);
+    assert_shapes(
+        "vram",
+        &v["vram"],
+        &[
+            ("fallback_on_external", "bool"),
+            ("headroom", "object"),
+            ("headroom_mb", "int"),
+            ("headroom_mode", "string"),
+        ],
+    );
 }
 
 /// A gateway on its defaults: the text reads back through `SettingsRead` and
@@ -1343,7 +1352,11 @@ async fn the_settings_text_of_a_configured_gateway_reads_back_equal() {
         json!({"git.example.com": "<set>", "github.com": "<set>"})
     );
     assert_eq!(raw["hold"], json!({"active": true}));
-    assert_eq!(raw["vram"], json!({"fallback_on_external": false}));
+    assert_eq!(raw["vram"]["fallback_on_external"], json!(false));
+    assert_eq!(raw["vram"]["headroom_mode"], json!("auto"));
+    assert!(raw["vram"]["headroom"]["sentence"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("Headroom: auto")));
     assert_eq!(raw["router"]["extra_run_args"], json!(["--a", "--b=1"]));
     assert_eq!(raw["aux_router"]["extra_run_args"], json!(["--x"]));
     assert_eq!(raw["audio"]["extra_run_args"], json!(["--c", "--d", "--e"]));

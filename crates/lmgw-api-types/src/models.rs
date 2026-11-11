@@ -197,6 +197,12 @@ pub struct LlamaParams {
     /// `/v1/models` reports as `max_output_tokens`.
     pub n_predict: Option<i64>,
     pub n_gpu_layers: Option<i64>,
+    /// `--n-cpu-moe`: the routed experts of the first N layers of a
+    /// mixture-of-experts model stay in host memory, the rest on the card.
+    pub n_cpu_moe: Option<i64>,
+    /// `--moe-cache-mib`: a cache on the card, in MiB, for the most used of
+    /// the experts kept in host memory.
+    pub moe_cache_mib: Option<i64>,
     pub threads: Option<i64>,
     pub batch_size: Option<i64>,
     pub ubatch_size: Option<i64>,
@@ -509,6 +515,22 @@ pub struct ImageModel {
     /// When that figure was observed; `None` whenever the peak is.
     #[serde(default)]
     pub peak_learned_at: Option<String>,
+    /// The learned idle residency of a row whose weights all wait off the
+    /// card: sd-server's own context, outside the budget VRAM admission
+    /// holds it to. Written by the gateway, reset with the peak.
+    #[serde(default)]
+    pub idle_bytes: Option<u64>,
+    /// The smallest `--max-vram` budget a generation of this row completed
+    /// under: what VRAM admission knows it renders with when it does not fit
+    /// whole. Written by the gateway, reset with the peak.
+    #[serde(default)]
+    pub work_bytes: Option<u64>,
+    /// The engine the learned figures above belong to (the resolved engine
+    /// image, run args and native build, hashed): figures under another key
+    /// than the row resolves to now count as not measured. Written by the
+    /// gateway.
+    #[serde(default)]
+    pub learned_key: Option<String>,
     /// How the chat model writes this row's prompts (chat-media-tools
     /// design §3.4); `None` derives it from the matching recipe.
     #[serde(default)]

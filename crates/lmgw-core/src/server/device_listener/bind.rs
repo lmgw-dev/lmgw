@@ -64,13 +64,12 @@ impl Plan {
     }
 }
 
-/// One listening socket on `addr`: address reuse (a move rebinds while the
-/// old port's connections are in `TIME_WAIT`), dual-stack for `[::]`,
-/// IPv6-only for any other IPv6 address, close-on-exec (socket2's default),
-/// non-blocking for tokio.
+/// One listening socket on `addr`: its address option ([`own_address`]),
+/// dual-stack for `[::]`, IPv6-only for any other IPv6 address,
+/// close-on-exec (socket2's default), non-blocking for tokio.
 fn listen_on(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
+    own_address(&socket)?;
     if let IpAddr::V6(ip) = addr.ip() {
         socket.set_only_v6(!ip.is_unspecified())?;
     }
@@ -80,12 +79,62 @@ fn listen_on(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
+/// Unix: address reuse (`SO_REUSEADDR`), so a move rebinds while the old
+/// port's connections are in `TIME_WAIT`; a port another socket listens on
+/// is still refused.
+#[cfg(not(windows))]
+fn own_address(socket: &Socket) -> std::io::Result<()> {
+    socket.set_reuse_address(true)
+}
+
+/// Windows: `SO_EXCLUSIVEADDRUSE`. Windows' `SO_REUSEADDR` would let another
+/// process bind the same port beside the listener and take its
+/// connections; the exclusive option refuses any other socket the port.
+/// Its cost, as Microsoft documents it: a rebind of the same port can be
+/// refused while the old listener's accepted connections are not gone yet.
+#[cfg(windows)]
+fn own_address(socket: &Socket) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        setsockopt, SOCKET_ERROR, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+    };
+    let on: i32 = 1;
+    // SAFETY: the socket is open; `on` is the `BOOL` the option reads, its
+    // size passed.
+    let rc = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&on as *const i32).cast(),
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if rc == SOCKET_ERROR {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether `e` says the machine has no IPv6 (the loopback pair's `[::1]`
 /// then is skipped, and the IPv4 half serves alone).
+#[cfg(not(windows))]
 fn no_ipv6(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(libc::EAFNOSUPPORT) | Some(libc::EADDRNOTAVAIL) | Some(libc::EPROTONOSUPPORT)
+    )
+}
+
+/// The same in Winsock's codes, which the CRT's errnos never equal.
+#[cfg(windows)]
+fn no_ipv6(e: &std::io::Error) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{
+        WSAEADDRNOTAVAIL, WSAEAFNOSUPPORT, WSAEPROTONOSUPPORT,
+    };
+    matches!(
+        e.raw_os_error(),
+        Some(WSAEAFNOSUPPORT) | Some(WSAEADDRNOTAVAIL) | Some(WSAEPROTONOSUPPORT)
     )
 }
 
@@ -160,6 +209,50 @@ mod tests {
         assert!(Plan::of(&s).unwrap_err().contains("65535"));
         s.devices.port = Some(9000);
         assert_eq!(Plan::of(&s).unwrap().unwrap().port, 9000);
+    }
+
+    /// No other socket binds the listener's port beside it, not even one
+    /// asking for reuse (Windows' `SO_REUSEADDR` would let it, which
+    /// `SO_EXCLUSIVEADDRUSE` refuses).
+    #[tokio::test]
+    async fn no_other_socket_binds_the_listeners_port() {
+        let ours = listen_on("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = ours.local_addr().unwrap();
+        let other = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        other.set_reuse_address(true).unwrap();
+        let e = other.bind(&addr.into()).unwrap_err();
+        // Windows refuses a port held exclusively with WSAEACCES.
+        let refused = if cfg!(windows) {
+            std::io::ErrorKind::PermissionDenied
+        } else {
+            std::io::ErrorKind::AddrInUse
+        };
+        assert_eq!(e.kind(), refused, "{e}");
+    }
+
+    #[test]
+    fn no_ipv6_is_read_in_this_systems_codes() {
+        #[cfg(not(windows))]
+        let (yes, no) = (
+            [
+                libc::EAFNOSUPPORT,
+                libc::EADDRNOTAVAIL,
+                libc::EPROTONOSUPPORT,
+            ],
+            libc::ECONNREFUSED,
+        );
+        #[cfg(windows)]
+        let (yes, no) = {
+            use windows_sys::Win32::Networking::WinSock::*;
+            (
+                [WSAEAFNOSUPPORT, WSAEADDRNOTAVAIL, WSAEPROTONOSUPPORT],
+                WSAECONNREFUSED,
+            )
+        };
+        for code in yes {
+            assert!(no_ipv6(&std::io::Error::from_raw_os_error(code)), "{code}");
+        }
+        assert!(!no_ipv6(&std::io::Error::from_raw_os_error(no)));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Each `FeedAuth` sends its own header, and only that one, on both requests:
 //! the manifest and the RPM it names.
 
-use lmgw_update::{check, download_rpm, Error, Feed, FeedAuth};
+use lmgw_update::{check, download, Error, Feed, FeedAuth};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -45,7 +45,7 @@ async fn check_and_download(auth: FeedAuth) -> Vec<AuthSeen> {
         .expect("9.9.9 is newer");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("update.rpm");
-    download_rpm(&http, &feed, &info.manifest.rpm, &dest)
+    download(&http, &feed, &info.manifest.rpm, &dest)
         .await
         .unwrap();
     let requests = server.received_requests().await.unwrap();
@@ -138,7 +138,7 @@ async fn run_download(feed_server: &MockServer) {
     };
     let info = check(&http, &feed, "1.0.0").await.unwrap().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    download_rpm(&http, &feed, &info.manifest.rpm, &dir.path().join("u.rpm"))
+    download(&http, &feed, &info.manifest.rpm, &dir.path().join("u.rpm"))
         .await
         .unwrap();
 }

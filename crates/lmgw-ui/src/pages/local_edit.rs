@@ -130,6 +130,19 @@ const SECTIONS: &[(&str, &[Spec])] = &[
                 kind: Kind::Int,
             },
             Spec {
+                key: "n_cpu_moe",
+                label: "Expert layers kept in system RAM",
+                hint: "the first N layers' MoE experts stay in RAM, off the card (--n-cpu-moe)",
+                kind: Kind::Int,
+            },
+            Spec {
+                key: "moe_cache_mib",
+                label: "GPU cache for experts in RAM (MiB)",
+                hint: "keeps the most used of the experts in RAM on the card \
+                       (--moe-cache-mib)",
+                kind: Kind::Int,
+            },
+            Spec {
                 key: "flash_attn",
                 label: "Flash attention",
                 hint: "",
@@ -327,6 +340,8 @@ fn param_string(p: &LlamaParams, key: &str) -> String {
     match key {
         "ctx_size" => i(p.ctx_size),
         "n_gpu_layers" => i(p.n_gpu_layers),
+        "n_cpu_moe" => i(p.n_cpu_moe),
+        "moe_cache_mib" => i(p.moe_cache_mib),
         "threads" => i(p.threads),
         "batch_size" => i(p.batch_size),
         "ubatch_size" => i(p.ubatch_size),
@@ -572,6 +587,8 @@ struct LadderShared {
     mmproj_path: String,
     draft_gguf_path: String,
     n_gpu_layers: String,
+    n_cpu_moe: String,
+    moe_cache_mib: String,
     parallel: String,
     n_predict: String,
 }
@@ -677,8 +694,14 @@ fn rung_plan_pairs(
     add("cache_type_v", &shared.cache_type_v);
     add("mmproj_path", &shared.mmproj_path);
     add("draft_gguf_path", &shared.draft_gguf_path);
-    if let Ok(n) = shared.n_gpu_layers.trim().parse::<i64>() {
-        pairs.push(("n_gpu_layers", n.to_string()));
+    for (k, v) in [
+        ("n_gpu_layers", &shared.n_gpu_layers),
+        ("n_cpu_moe", &shared.n_cpu_moe),
+        ("moe_cache_mib", &shared.moe_cache_mib),
+    ] {
+        if let Ok(n) = v.trim().parse::<i64>() {
+            pairs.push((k, n.to_string()));
+        }
     }
     Some(pairs)
 }
@@ -1427,6 +1450,8 @@ fn Editor(id_param: String) -> impl IntoView {
             mmproj_path: f["mmproj_path"].get(),
             draft_gguf_path: f["draft_gguf_path"].get(),
             n_gpu_layers: f["n_gpu_layers"].get(),
+            n_cpu_moe: f["n_cpu_moe"].get(),
+            moe_cache_mib: f["moe_cache_mib"].get(),
             parallel: f["parallel"].get(),
             n_predict: f["n_predict"].get(),
         })
@@ -2333,6 +2358,8 @@ mod tests {
             mmproj_path: mmproj.to_string(),
             draft_gguf_path: draft.to_string(),
             n_gpu_layers: ngl.to_string(),
+            n_cpu_moe: String::new(),
+            moe_cache_mib: String::new(),
             parallel: String::new(),
             n_predict: String::new(),
         }
@@ -2368,5 +2395,17 @@ mod tests {
         let s = shared("", "", "", "", "auto");
         let pairs = rung_plan_pairs("m.gguf", "4096", &s).unwrap();
         assert!(!pairs.iter().any(|(k, _)| *k == "n_gpu_layers"));
+    }
+
+    /// Every rung keeps the base row's experts in host memory, so its
+    /// footprint is asked with them.
+    #[test]
+    fn rung_plan_pairs_carries_the_expert_offload() {
+        let mut s = shared("", "", "", "", "");
+        s.n_cpu_moe = "41".into();
+        s.moe_cache_mib = "6144".into();
+        let pairs = rung_plan_pairs("m.gguf", "4096", &s).unwrap();
+        assert!(pairs.contains(&("n_cpu_moe", "41".to_string())));
+        assert!(pairs.contains(&("moe_cache_mib", "6144".to_string())));
     }
 }

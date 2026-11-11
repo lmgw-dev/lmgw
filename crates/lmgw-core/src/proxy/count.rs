@@ -438,7 +438,8 @@ pub(crate) async fn count_text_route(
 
 /// Send one native count request and read its number: the request `build`
 /// renders against the route the attempt goes to, bounded by the route's own
-/// timeout, through [`crate::vram::send_local`]'s dead-container policy; an
+/// timeout, through [`crate::vram::send_local_count`]'s dead-container policy (a
+/// count runs no prompt, so it leaves the first-prompt margin in place); an
 /// error status mapped by the route's egress, a success read by its
 /// [`crate::egress::Egress::parse_count`].
 pub(super) async fn send_count<F>(
@@ -466,7 +467,7 @@ where
 {
     let egress = for_protocol(route.upstream.protocol);
     let timeout = route.upstream.request_timeout();
-    let resp = crate::vram::send_local(hold, route, None, |r| {
+    let resp = crate::vram::send_local_count(hold, route, None, |r| {
         build(r).map(|rb| with_timeout(rb, timeout))
     })
     .await?;

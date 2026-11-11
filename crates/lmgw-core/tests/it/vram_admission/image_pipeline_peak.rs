@@ -13,10 +13,7 @@ use super::*;
 pub(super) async fn add_image_model(f: &Fixture, model_id: &str, bytes: u64) -> i64 {
     let file = format!("{model_id}.gguf");
     let path = f._models_dir.path().join(&file);
-    std::fs::File::create(&path)
-        .unwrap()
-        .set_len(bytes)
-        .unwrap();
+    crate::support::sparse::create(&path, bytes);
     f.world().size.insert(model_id.to_string(), bytes);
 
     let mut files = serde_json::Map::new();
@@ -60,9 +57,20 @@ pub(super) async fn acquire_image(
 }
 
 async fn learn_peak(f: &Fixture, id: i64, bytes: u64) {
-    store::set_image_model_peak(&f.state.db, id, Some(bytes))
-        .await
-        .unwrap();
+    let key = {
+        let snap = f.state.snapshot();
+        let row = snap.image_models.iter().find(|m| m.id == id).unwrap();
+        f.state.vram.image_engine_key(&snap, row)
+    };
+    store::set_image_model_learned(
+        &f.state.db,
+        id,
+        &key,
+        store::LearnedFigure::Peak,
+        Some(bytes),
+    )
+    .await
+    .unwrap();
     f.state.reload_snapshot().await.unwrap();
 }
 

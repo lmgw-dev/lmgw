@@ -55,8 +55,9 @@ fn flavor(f: ModuleFlavor) -> &'static str {
     }
 }
 
-/// §1.1's item, and what it concluded.
-pub(super) fn judge(c: &CardFacts) -> (MachineItem, Card) {
+/// The detail every §1.1 item starts with: the display devices on the bus
+/// and the driver packages found.
+pub(super) fn base_detail(c: &CardFacts) -> Vec<String> {
     let mut detail: Vec<String> = c.pci.iter().map(pci_line).collect();
     if c.pci.is_empty() {
         detail.push("no display device on the PCI bus".into());
@@ -71,6 +72,12 @@ pub(super) fn judge(c: &CardFacts) -> (MachineItem, Card) {
                 .join(", ")
         ));
     }
+    detail
+}
+
+/// §1.1's item, and what it concluded.
+pub(super) fn judge(c: &CardFacts) -> (MachineItem, Card) {
+    let detail = base_detail(c);
     if c.has(Vendor::Nvidia) {
         return nvidia(c, detail);
     }

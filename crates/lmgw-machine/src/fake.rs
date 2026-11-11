@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use crate::facts::{CmdOut, Facts, Kind, Meta, Space};
+use crate::facts::{CmdOut, Facts, Kind, Meta, Posix, Space};
 
 /// A program's behaviour: its arguments in, its answer out.
 pub type Handler = Arc<dyn Fn(&[String]) -> io::Result<CmdOut> + Send + Sync>;
@@ -465,8 +465,10 @@ impl FakeFacts {
                 ino,
             } => Meta {
                 kind: Kind::File,
-                mode: *mode,
-                uid: *uid,
+                posix: Some(Posix {
+                    mode: *mode,
+                    uid: *uid,
+                }),
                 len: bytes.len() as u64,
                 ino: *ino,
                 mtime_ns: *mtime_ns,
@@ -480,8 +482,10 @@ impl FakeFacts {
                 ino,
             } => Meta {
                 kind: Kind::Dir,
-                mode: *mode,
-                uid: *uid,
+                posix: Some(Posix {
+                    mode: *mode,
+                    uid: *uid,
+                }),
                 len: 0,
                 ino: *ino,
                 mtime_ns: *mtime_ns,
@@ -489,8 +493,10 @@ impl FakeFacts {
             },
             Node::Link { target, ino } => Meta {
                 kind: Kind::Symlink,
-                mode: 0o777,
-                uid: 0,
+                posix: Some(Posix {
+                    mode: 0o777,
+                    uid: 0,
+                }),
                 len: target.as_os_str().len() as u64,
                 ino: *ino,
                 mtime_ns: DEFAULT_MTIME_NS,
@@ -590,8 +596,8 @@ impl Facts for FakeFacts {
         self.st().env.get(name).cloned()
     }
 
-    fn uid(&self) -> u32 {
-        self.st().uid
+    fn uid(&self) -> Option<u32> {
+        Some(self.st().uid)
     }
 
     fn user_name(&self) -> Option<String> {

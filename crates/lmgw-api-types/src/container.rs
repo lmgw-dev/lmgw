@@ -145,6 +145,12 @@ pub struct ModelDone {
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub held: Option<bool>,
     pub message: String,
+    /// `start` and `restart`: the started container's warnings, as its
+    /// runtime entry carries them — what its start found, and a start that
+    /// fits only partially on the GPU ("It will work but only fits partially
+    /// on the GPU, expect slowdowns: …"). Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One model, `logs`.

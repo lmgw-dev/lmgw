@@ -1,10 +1,12 @@
 //! The WebRTC calls' UDP listener (calls design §3.1, §9): its switch and
-//! the plain socket group's port, two keys of the `realtime` section
-//! (`realtime.webrtc_enabled`, `realtime.webrtc_port`), kept here and
-//! flattened into [`super::RealtimeSettings`].
+//! the plain and the TLS socket group's ports, three keys of the `realtime`
+//! section (`realtime.webrtc_enabled`, `realtime.webrtc_port`,
+//! `realtime.webrtc_tls_port`), kept here and flattened into
+//! [`super::RealtimeSettings`].
 //!
-//! Both apply at the next start, like `bind_addr`: the plain group binds
-//! beside the HTTP listener and is released with it
+//! All three apply at the next start, like `bind_addr`: the plain group binds
+//! beside the HTTP listener and the TLS group beside the TLS listener
+//! (headless server design D22), each released with its listener
 //! (`realtime::calls`). The device group follows the device listener live,
 //! on its addresses and port, and takes neither key's port; the switch, as
 //! the start read it, holds for it too.
@@ -18,10 +20,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub const WEBRTC_APPLIES: &str = "applies at the next start of lmgw";
 
 /// The keys a save names, with their section.
-pub const WEBRTC_KEYS: [&str; 2] = ["realtime.webrtc_enabled", "realtime.webrtc_port"];
+pub const WEBRTC_KEYS: [&str; 3] = [
+    "realtime.webrtc_enabled",
+    "realtime.webrtc_port",
+    "realtime.webrtc_tls_port",
+];
 
 /// `realtime.webrtc_enabled` and `realtime.webrtc_port`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebRtcSettings {
     /// The UDP listener for `POST /v1/realtime/calls`, both socket groups
@@ -34,6 +40,13 @@ pub struct WebRtcSettings {
     /// sockets bind the HTTP listener's IP.
     #[serde(deserialize_with = "port_lenient")]
     pub webrtc_port: Option<u16>,
+    /// The TLS group's UDP port (headless server design D22): `None` = the
+    /// TLS listener's port number, `0` = chosen by the OS. The sockets bind
+    /// `tls.listen`'s IP. A key of its own because on the desktop the plain
+    /// and the TLS group can both be bound, and one port for both would
+    /// collide.
+    #[serde(deserialize_with = "port_lenient")]
+    pub webrtc_tls_port: Option<u16>,
 }
 
 impl Default for WebRtcSettings {
@@ -41,6 +54,7 @@ impl Default for WebRtcSettings {
         Self {
             webrtc_enabled: true,
             webrtc_port: None,
+            webrtc_tls_port: None,
         }
     }
 }
@@ -51,93 +65,212 @@ impl WebRtcSettings {
         self.webrtc_port.unwrap_or(http_port)
     }
 
+    /// The TLS group's port beside a TLS listener on `tls_port`.
+    pub fn tls_port(&self, tls_port: u16) -> u16 {
+        self.webrtc_tls_port.unwrap_or(tls_port)
+    }
+
     /// Set `realtime.webrtc_port` from a save's value: `None` is the HTTP
     /// port's number, else a port from 0 (chosen by the OS) to 65535.
     pub fn set_port(&mut self, v: Option<i64>) -> Result<(), String> {
-        self.webrtc_port = match v {
-            None => None,
-            Some(n) => Some(u16::try_from(n).map_err(|_| {
-                format!(
-                    "realtime.webrtc_port is a UDP port from 0 (chosen by the OS) to 65535, or \
-                     null for the HTTP port's number; got {n}"
-                )
-            })?),
-        };
+        self.webrtc_port = port_of("realtime.webrtc_port", "the bind address's port", v)?;
         Ok(())
+    }
+
+    /// Set `realtime.webrtc_tls_port` from a save's value: `None` is the TLS
+    /// port's number, else a port from 0 (chosen by the OS) to 65535.
+    pub fn set_tls_port(&mut self, v: Option<i64>) -> Result<(), String> {
+        self.webrtc_tls_port = port_of("realtime.webrtc_tls_port", "the TLS address's port", v)?;
+        Ok(())
+    }
+}
+
+/// A save's port for `key`: `None` stays `None` (`unset` is what that
+/// means), a number from 0 to 65535 is the port. The refusal names the row.
+fn port_of(key: &str, unset: &str, v: Option<i64>) -> Result<Option<u16>, String> {
+    match v {
+        None => Ok(None),
+        Some(n) => u16::try_from(n).map(Some).map_err(|_| {
+            format!(
+                "{} is a UDP port from 0 (chosen by the OS) to 65535, or unset for {unset}; got \
+                 {n}",
+                webrtc_name(key)
+            )
+        }),
     }
 }
 
 /// Whether two bind addresses cover a common address: equal, or one a
 /// wildcard of a family the other is in. `[::]` counts as dual-stack, as the
-/// device group sets it.
-fn addresses_overlap(a: IpAddr, b: IpAddr) -> bool {
+/// device group sets it. The TCP listeners' check
+/// ([`super::tcp_port_collision`]) asks the same.
+pub(super) fn addresses_overlap(a: IpAddr, b: IpAddr) -> bool {
     let (a, b) = (a.to_canonical(), b.to_canonical());
     let covers = |w: IpAddr, x: IpAddr| w.is_unspecified() && (w.is_ipv6() || x.is_ipv4());
     a == b || covers(a, b) || covers(b, a)
 }
 
-/// The refusal of a save that would make the plain group (`bind_addr`'s
-/// address on `realtime.webrtc_port`) and the device group (the device
-/// listener's addresses on `devices.port`) want one UDP port on overlapping
-/// addresses: the second bind would fail at the start, and the device group
-/// would never come up. `Ok` when either group is off, a port is chosen by
-/// the OS (0), or the addresses do not overlap.
-pub fn webrtc_port_collision(s: &super::Settings) -> Result<(), String> {
-    if !s.realtime.webrtc.webrtc_enabled || !s.devices.listener {
-        return Ok(());
-    }
-    let Ok(http) = s.bind_addr.parse::<std::net::SocketAddr>() else {
-        return Ok(());
-    };
-    let Ok(device_port) = s.devices.effective_port(&s.bind_addr) else {
-        return Ok(());
-    };
-    let plain_port = s.realtime.webrtc.plain_port(http.port());
-    if plain_port == 0 || plain_port != device_port {
-        return Ok(());
-    }
-    use super::DevicesListen::{Addr, All, Loopback};
-    let overlap = match s.devices.listen {
-        All => true,
-        Loopback => [
-            IpAddr::from([127, 0, 0, 1]),
-            IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]),
-        ]
-        .into_iter()
-        .any(|lo| addresses_overlap(http.ip(), lo)),
-        Addr(ip) => addresses_overlap(http.ip(), ip),
-    };
-    if !overlap {
-        return Ok(());
-    }
-    let plain = match s.realtime.webrtc.webrtc_port {
-        Some(_) => format!("realtime.webrtc_port ({plain_port})"),
-        None => format!("realtime.webrtc_port (unset: the HTTP port's number, {plain_port})"),
-    };
-    let device = match s.devices.port {
-        Some(_) => format!("devices.port ({device_port})"),
-        None => format!("devices.port (unset: the HTTP port's number plus one, {device_port})"),
-    };
-    Err(format!(
-        "{plain} and {device} are one UDP port on overlapping addresses (bind_addr {}, \
-         devices.listen {}): the plain listener's and the device listener's WebRTC sockets \
-         cannot both bind it; change one of the two ports",
-        s.bind_addr,
-        s.devices.listen.as_text()
-    ))
+/// One socket group as the collision check sees it: what to call it, the
+/// addresses it binds, and its port.
+struct GroupPorts {
+    what: String,
+    addrs: Vec<IpAddr>,
+    port: u16,
 }
 
-/// The save's note for each WebRTC key it touched: when it applies.
-pub fn webrtc_applies<S: AsRef<str>>(touched: &[S]) -> Vec<String> {
+/// The socket groups `s` binds at a start, each with its addresses and port
+/// (calls design §3.1, headless server design D22): the plain group beside
+/// `bind_addr`, the TLS group beside `tls.listen` while a TLS listener is
+/// configured, the device group beside the device listener while it is on.
+fn groups(s: &super::Settings) -> Vec<GroupPorts> {
+    use lmgw_api_types::settings_labels::{DEVICE_LISTENER_AT, WEBRTC_PORT_AT, WEBRTC_TLS_PORT_AT};
+    let w = &s.realtime.webrtc;
+    let mut out = Vec::new();
+    if let Ok(http) = s.bind_addr.parse::<std::net::SocketAddr>() {
+        let port = w.plain_port(http.port());
+        out.push(GroupPorts {
+            what: format!(
+                "the WebRTC calls UDP port {port} ({}{WEBRTC_PORT_AT})",
+                if w.webrtc_port.is_none() {
+                    "unset: the bind address's port; "
+                } else {
+                    ""
+                }
+            ),
+            addrs: vec![http.ip()],
+            port,
+        });
+    }
+    if let Some(tls) = s.tls.listener() {
+        let port = w.tls_port(tls.addr.port());
+        out.push(GroupPorts {
+            what: format!(
+                "the WebRTC calls TLS UDP port {port} ({}{WEBRTC_TLS_PORT_AT})",
+                if w.webrtc_tls_port.is_none() {
+                    "unset: the TLS address's port; "
+                } else {
+                    ""
+                }
+            ),
+            addrs: vec![tls.addr.ip()],
+            port,
+        });
+    }
+    if s.devices.listener {
+        if let Ok(port) = s.devices.effective_port(&s.bind_addr) {
+            out.push(GroupPorts {
+                what: format!(
+                    "the device listener's port {port} ({}{DEVICE_LISTENER_AT})",
+                    if s.devices.port.is_none() {
+                        "unset: the bind address's port plus one; "
+                    } else {
+                        ""
+                    }
+                ),
+                addrs: device_addrs(&s.devices.listen),
+                port,
+            });
+        }
+    }
+    out
+}
+
+/// The addresses the device listener (and its group) binds under `listen`:
+/// `[::]` dual-stack for every address, both loopbacks for this computer.
+pub(super) fn device_addrs(listen: &super::DevicesListen) -> Vec<IpAddr> {
+    use super::DevicesListen::{Addr, All, Loopback};
+    match listen {
+        All => vec![IpAddr::from([0u16; 8])],
+        Loopback => vec![
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]),
+        ],
+        Addr(ip) => vec![*ip],
+    }
+}
+
+/// The refusal of a save that would make two socket groups (the plain
+/// group, the TLS group and the device group, [`groups`]) want one UDP port
+/// on overlapping addresses: the second bind would fail at the start, and
+/// that group would never come up. `Ok` when calls are off, a port is chosen
+/// by the OS (0), or the addresses do not overlap.
+pub fn webrtc_port_collision(s: &super::Settings) -> Result<(), String> {
+    if !s.realtime.webrtc.webrtc_enabled {
+        return Ok(());
+    }
+    let groups = groups(s);
+    for (i, a) in groups.iter().enumerate() {
+        for b in &groups[i + 1..] {
+            if a.port == 0 || a.port != b.port {
+                continue;
+            }
+            let overlap = a
+                .addrs
+                .iter()
+                .any(|x| b.addrs.iter().any(|y| addresses_overlap(*x, *y)));
+            if overlap {
+                return Err(format!(
+                    "{} and {} are one UDP port on overlapping addresses (the bind address {}, \
+                     the TLS address {}, the device listener on {}): two listeners' WebRTC \
+                     sockets cannot both bind it; change one of the two ports",
+                    a.what,
+                    b.what,
+                    s.bind_addr,
+                    if s.tls.listen.trim().is_empty() {
+                        "unset"
+                    } else {
+                        s.tls.listen.trim()
+                    },
+                    match s.devices.listen {
+                        super::DevicesListen::All => "every address".to_string(),
+                        super::DevicesListen::Loopback => "this computer only".to_string(),
+                        super::DevicesListen::Addr(ip) => ip.to_string(),
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a save's note calls a WebRTC key: its name on the Settings page
+/// (Realtime → WebRTC calls), never the config key.
+fn webrtc_name(key: &str) -> String {
+    use lmgw_api_types::settings_labels::{TLS_UDP_PORT, UDP_PORT, WEBRTC_CALLS};
+    match key {
+        "realtime.webrtc_port" => format!("the {WEBRTC_CALLS} {UDP_PORT}"),
+        "realtime.webrtc_tls_port" => format!("the {WEBRTC_CALLS} {TLS_UDP_PORT}"),
+        _ => format!("the {WEBRTC_CALLS} switch"),
+    }
+}
+
+/// The save's note for each WebRTC key it touched: when it applies. In the
+/// server image the next start is the service's restart on the host, and
+/// the note names its command (headless server design §6.2): the image has
+/// no in-process restart yet.
+pub fn webrtc_applies<S: AsRef<str>>(
+    deployment: crate::config::deployment::Deployment,
+    touched: &[S],
+) -> Vec<String> {
     touched
         .iter()
         .map(AsRef::as_ref)
         .filter(|k| WEBRTC_KEYS.contains(k))
-        .map(|k| format!("{k} {WEBRTC_APPLIES}"))
+        .map(|k| {
+            let name = webrtc_name(k);
+            if deployment.is_container() {
+                format!(
+                    "{name} {WEBRTC_APPLIES} ({} on the host)",
+                    lmgw_api_types::RESTART_COMMAND
+                )
+            } else {
+                format!("{name} {WEBRTC_APPLIES}")
+            }
+        })
         .collect()
 }
 
-/// A save's `webrtc_port`: absent leaves it, `null` is the HTTP port's
+/// A save's `webrtc_port` or `webrtc_tls_port`: absent leaves it, `null` is the HTTP port's
 /// number, a number is the port (`Option<Option<_>>`, which serde reads as
 /// one level without this).
 pub fn nullable_port<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<i64>>, D::Error> {
@@ -156,8 +289,8 @@ fn port_lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u16>, D::Error
         Some(p) => Ok(Some(p)),
         None => {
             tracing::warn!(
-                "stored setting realtime.webrtc_port = {raw} is no UDP port; using the HTTP \
-                 port's number until it is saved again"
+                "a stored WebRTC UDP port ({raw}) is no UDP port; using the listener's own port \
+                 number until it is saved again"
             );
             Ok(None)
         }
@@ -192,13 +325,25 @@ mod tests {
         for bad in [-1, 65536] {
             let e = w.set_port(Some(bad)).unwrap_err();
             assert!(
-                e.contains("realtime.webrtc_port") && e.contains(&bad.to_string()),
+                e.contains("the WebRTC calls UDP port") && e.contains(&bad.to_string()),
                 "{e}"
             );
         }
+        use crate::config::deployment::Deployment;
         assert_eq!(
-            webrtc_applies(&["realtime.webrtc_port", "realtime.threshold"]),
-            ["realtime.webrtc_port applies at the next start of lmgw"]
+            webrtc_applies(
+                Deployment::Desktop,
+                &["realtime.webrtc_port", "realtime.threshold"]
+            ),
+            ["the WebRTC calls UDP port applies at the next start of lmgw"]
+        );
+        // In the server image the next start is the service's restart.
+        assert_eq!(
+            webrtc_applies(Deployment::Container, &["realtime.webrtc_enabled"]),
+            [
+                "the WebRTC calls switch applies at the next start of lmgw (systemctl --user \
+                 restart lmgw on the host)"
+            ]
         );
     }
 
@@ -223,7 +368,10 @@ mod tests {
         apply(&mut r, r#"{"webrtc_port": null}"#).unwrap();
         assert_eq!(r.webrtc.webrtc_port, None);
         let e = apply(&mut r, r#"{"webrtc_port": 70000}"#).unwrap_err();
-        assert!(e.contains("realtime.webrtc_port"), "{e}");
+        assert!(
+            e.starts_with("the WebRTC calls UDP port is a UDP port"),
+            "{e}"
+        );
         // Both keys sit in the realtime section of the stored blob, and a
         // blob from before them reads the defaults.
         let blob = serde_json::to_value(RealtimeSettings::default()).unwrap();
@@ -265,15 +413,22 @@ mod tests {
         ] {
             let e = webrtc_port_collision(&ports(bind, None, listen, Some(8787))).unwrap_err();
             assert!(
-                e.contains("realtime.webrtc_port") && e.contains("devices.port"),
+                e.contains("the WebRTC calls UDP port 8787")
+                    && e.contains("the device listener's port 8787"),
                 "{bind} {listen}: {e}"
             );
+            assert!(!e.contains("realtime.") && !e.contains("devices."), "{e}");
         }
         // The plain port set onto the device listener's derived one.
         let e = webrtc_port_collision(&ports("127.0.0.1:8787", Some(8788), "loopback", None))
             .unwrap_err();
         assert!(
-            e.contains("realtime.webrtc_port (8788)") && e.contains("devices.port (unset"),
+            e.contains(
+                "the WebRTC calls UDP port 8788 (Settings → Realtime → WebRTC calls → UDP port)"
+            ) && e.contains(
+                "the device listener's port 8788 (unset: the bind address's port plus one; \
+                 Settings → Network & access → Devices → Device listener)"
+            ),
             "{e}"
         );
         // Apart: another address, another port, the OS's pick, or off.

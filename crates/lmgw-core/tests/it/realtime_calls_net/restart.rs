@@ -141,6 +141,7 @@ async fn the_port_setting_and_the_switch_apply_at_start() {
     let off = WebRtcSettings {
         webrtc_enabled: false,
         webrtc_port: None,
+        webrtc_tls_port: None,
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let passed = calls.serve_plain(&off, http, Some(tx)).await;
@@ -161,6 +162,7 @@ async fn the_port_setting_and_the_switch_apply_at_start() {
     let on = WebRtcSettings {
         webrtc_enabled: true,
         webrtc_port: Some(held.port()),
+        webrtc_tls_port: None,
     };
     let passed = calls.serve_plain(&on, http, None).await;
     assert!(passed.is_none(), "nothing bound, nothing to release");

@@ -175,7 +175,10 @@ async fn the_voice_keys_have_defaults_and_save_on_both_paths() {
         (json!({ "chat_voice_language": "deu" }), "ISO 639-1"),
         (json!({ "chat_turn_detection": "auto" }), "semantic_vad"),
     ] {
-        let e = settings_set(&state, patch(bad.clone())).await.unwrap_err();
+        let e = settings_set(&state, patch(bad.clone()))
+            .await
+            .unwrap_err()
+            .message;
         assert!(e.contains(word), "{bad}: {e}");
     }
     assert_eq!(state.snapshot().settings.chat_tts_alias, "my-tts");

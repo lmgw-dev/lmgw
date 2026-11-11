@@ -72,7 +72,8 @@ async fn models_view(st: &SharedState) -> Result<dto::ModelsFull, String> {
     }
     let mut aux = Vec::with_capacity(snap.aux_models.len());
     for m in &snap.aux_models {
-        let (threads, source) = crate::runtime::aux::threads_in_effect(m, crate::host::cpu());
+        let (threads, source) =
+            crate::runtime::aux_models::threads_in_effect(m, crate::host::cpu());
         let public_name = snap.aux_public_name(m);
         aux.push(dto::AuxModelView {
             deferrals_24h: deferrals(&public_name),

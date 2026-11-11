@@ -5,59 +5,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use tokio::sync::watch;
 
 use super::super::owned::Down;
-use super::super::reconcile::PsRow;
 use super::super::*;
 use super::{labelled_key, PassLimits};
+use crate::runtime::launcher::Listed;
 use crate::runtime::{container_name, Placement};
 
-/// The part of `podman inspect <name>` the pass reads: whether the container
-/// runs, and whose it is.
-#[derive(Debug, Deserialize)]
-struct InspectRow {
-    #[serde(default, rename = "Config")]
-    config: InspectConfig,
-    #[serde(default, rename = "State")]
-    state: Option<InspectState>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct InspectConfig {
-    #[serde(default, rename = "Labels")]
-    labels: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InspectState {
-    #[serde(default, rename = "Running")]
-    running: bool,
-}
-
-/// What podman says about one name, as far as the pass needs it.
+/// What the launcher says about one name, as far as the pass needs it.
 pub(super) struct Inspected {
     pub(super) running: bool,
     pub(super) labels: HashMap<String, String>,
 }
 
 impl Registry {
-    /// `podman inspect` one name; `None` when podman cannot say (no such
-    /// container, an unreadable answer).
+    /// The launcher's inspect of one name; `None` when it cannot say (no
+    /// such container, an unreadable answer, no state named).
     pub(super) async fn inspect_unheld(&self, name: &str) -> Option<Inspected> {
-        let out = self
-            .podman(&["inspect", "--format", "json", name])
-            .await
-            .ok()?;
-        if !out.ok() {
-            return None;
-        }
-        let rows: Vec<InspectRow> = serde_json::from_str(&out.stdout).ok()?;
-        let row = rows.into_iter().next()?;
+        let found = self.launcher.inspect(name).await.ok()?;
         Some(Inspected {
-            running: row.state?.running,
-            labels: row.config.labels.unwrap_or_default(),
+            running: found.running?,
+            labels: found.labels,
         })
     }
 
@@ -67,7 +36,7 @@ impl Registry {
     pub(super) async fn remove_unheld(
         self: &Arc<Self>,
         container_prefix: &str,
-        row: &PsRow,
+        row: &Listed,
         name: &str,
         limits: PassLimits,
     ) -> Result<bool, String> {
@@ -136,6 +105,7 @@ impl Registry {
                 state: RuntimeState::Stopping,
                 started_at: now,
                 in_flight: 0,
+                claims: 0,
                 last_used: now,
                 stop_timeout,
                 phase: phase.clone(),
@@ -149,6 +119,11 @@ impl Registry {
                 sends: watch::channel(0).0,
                 climb: None,
                 owner: Origin::Owner,
+                grant: None,
+                admission_note: None,
+                served: false,
+                adopted: false,
+                engine_key: None,
             },
         );
         Some(phase)

@@ -163,7 +163,17 @@ pub async fn boot(state: &SharedState) {
     // adopted containers' PIDs now rather than at the first verdict (§4.7).
     state.vram.cache_pids(state);
 
-    if report.listed {
+    if !registry.launcher().runs_containers() {
+        // The router-mode containers are Podman's, and a launcher that runs
+        // no containers cannot see them: its "absent" would retire names
+        // that were never looked for. The list stays for a Podman start.
+        if !snap.settings.legacy_container_names.is_empty() {
+            tracing::info!(
+                "skipping the router-mode container sweep: this lmgw starts its engines as native \
+                 processes, which cannot see the old containers; the names stay on the list"
+            );
+        }
+    } else if report.listed {
         legacy_sweep(state, &snap, &report.adopted).await;
     } else if !snap.settings.legacy_container_names.is_empty() {
         tracing::warn!(

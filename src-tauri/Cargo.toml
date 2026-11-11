@@ -36,6 +36,31 @@ webkit2gtk = { version = "2.0", features = ["v2_38"] }
 # show_main_window). The version tao builds the window with.
 gtk = "0.18"
 
+# Links handed to the shell's `open` verb (shell_open.rs) and the pairing
+# scheme's association (pairing.rs; Windows design §4.4). The version already
+# in the lock through tokio and Tauri.
+[target.'cfg(windows)'.dependencies]
+# Windows has no system libopus to link against, so the app built there links
+# the vendored one (lmgw-core's `opus-bundled`, cmake): `cargo tauri build`
+# and the installer need no feature flag (Windows design §4.4, WP7).
+lmgw-core = { path = "../crates/lmgw-core", features = ["opus-bundled"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The window's theme: the system's mode and accent from WinRT's UISettings
+# (desktop_palette/win.rs). The version tao and wry build the window with.
+windows = { version = "0.61.3", features = [
+    "UI_ViewManagement",
+    # The caption colour and the registry settings that decide it
+    # (desktop_palette/win.rs).
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Registry",
+] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

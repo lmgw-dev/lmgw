@@ -32,6 +32,9 @@ pub(super) async fn llama_vocabulary(
         .help_text(&snap.settings.container_prefix, image, run_args)
         .await
         .map(|help| crate::llama_caps::parse_help(&help))
+        // VRAM admission fits a row in `--fit`'s place only where the
+        // image has it (`vram::fit_vocab`).
+        .inspect(|caps| state.vram.note_llama_vocab(image, caps))
         .map_err(|e| format!("{e} — the extra args and flag values were not validated"))
 }
 
@@ -64,6 +67,15 @@ pub(super) async fn config_warnings(
     };
     let mut out: Vec<String> = restart.into_iter().collect();
     out.extend(caps.validate_args(args));
+    // A field whose flag is newer than some images
+    // ([`crate::llama_caps::NEWER_MANAGED_FLAGS`]), set on one that lacks it.
+    if params.moe_cache_mib.is_some() && !caps.supports("moe-cache-mib") {
+        out.push(
+            "moe_cache_mib renders `--moe-cache-mib`, which this image's llama-server does not \
+             know: the model will not start with it set"
+                .into(),
+        );
+    }
 
     // A flag with a dedicated field must not also come through the escape
     // hatch: the renderer drops the duplicate, so the arg would silently do

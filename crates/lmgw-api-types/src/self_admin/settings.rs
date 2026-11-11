@@ -131,13 +131,19 @@ pub struct SettingsRead {
     pub realtime: RealtimeSettings,
 }
 
-/// The one field of the GPU admission settings the tool reports.
+/// The fields of the GPU admission settings the tool reports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VramRead {
     /// Fall back when VRAM outside lmgw's control is short.
     pub fallback_on_external: bool,
+    /// How the headroom is set: `auto` (learned) or `fixed`.
+    pub headroom_mode: crate::HeadroomMode,
+    /// The fixed headroom in MiB (`fixed` mode, and `auto` until learned).
+    pub headroom_mb: u64,
+    /// What the headroom is now and where it comes from.
+    pub headroom: crate::HeadroomNow,
 }
 
 /// A model class as the tool reports it, for the chat (`router`), aux
@@ -224,7 +230,8 @@ mod tests {
     }
 
     /// A class's run arguments are a list, a class has four keys, the audio
-    /// class fifteen, and the GPU settings one.
+    /// class fifteen, and the GPU settings four: the external-VRAM
+    /// fallback and the headroom's mode, fixed value and what it is now.
     #[test]
     fn the_class_sections_have_the_keys_the_tool_always_sent() {
         let class = serde_json::to_value(ClassRead::default()).unwrap();
@@ -235,10 +242,11 @@ mod tests {
         let audio = serde_json::to_value(AudioRead::default()).unwrap();
         assert_eq!(audio.as_object().unwrap().len(), 15, "{audio}");
         assert!(audio["device"].is_i64() && audio["lazy_load"] == json!(false));
-        assert_eq!(
-            serde_json::to_value(VramRead::default()).unwrap(),
-            json!({"fallback_on_external": false})
-        );
+        let vram = serde_json::to_value(VramRead::default()).unwrap();
+        assert_eq!(vram["fallback_on_external"], json!(false));
+        assert_eq!(vram["headroom_mode"], json!("auto"));
+        assert_eq!(vram.as_object().unwrap().len(), 4, "{vram}");
+        assert!(vram["headroom"]["sentence"].is_string(), "{vram}");
     }
 
     /// The tool's text reads back through the type unchanged, a float stays a

@@ -2,12 +2,13 @@
 //! (api-docs design §4.7). Split by `ops-*` tag group (file-size discipline):
 //! each `table/*.rs` file owns one group's `pub(super) const OPS`, and
 //! [`table`] concatenates them in [`crate::web::op_names::all`]'s own order
-//! (`MAIN_OPS`, `AGENT_OPS`, `KEY_OPS`, `SETTINGS_OPS`) — `merge.rs` (the
+//! (`MAIN_OPS`, `AGENT_OPS`, `KEY_OPS`, `ACCOUNT_OPS`, `SETTINGS_OPS`) — `merge.rs` (the
 //! tool ↔ struct doc merge), `args.rs` (hand-written `Hand` schemas) and
 //! `divergence.rs` (`DIVERGENCES`) are its siblings.
 
 use super::super::registry::{Resp, SchemaFn};
 
+mod accounts;
 mod agents;
 mod bench;
 mod builds;
@@ -76,6 +77,7 @@ pub(crate) fn table() -> Vec<OpDoc> {
         bench::OPS,
         agents::OPS,
         keys::OPS,
+        accounts::OPS,
     ]
     .concat()
 }

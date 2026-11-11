@@ -1,0 +1,4 @@
+# lmgw.container mounts it: the databases, models, builds, the device CA and the data-dir lock (/data).
+# VolumeName= gives it design §3.2's name instead of Quadlet's default, systemd-lmgw-data.
+[Volume]
+VolumeName=lmgw-data

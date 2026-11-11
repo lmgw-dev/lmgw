@@ -241,12 +241,17 @@ impl std::fmt::Debug for SendGuard {
 
 impl Drop for SendGuard {
     fn drop(&mut self) {
-        let map = self.reg.map();
-        if let Some(e) = map.get(&self.key) {
+        let mut map = self.reg.map();
+        if let Some(e) = map.get_mut(&self.key) {
             // Only on the container it was counted on: a guard can outlive it
             // (a forced stop, a recovery), and the successor never counted it.
             if Arc::ptr_eq(&e.phase, &self.phase) && e.generation == self.generation {
                 e.sends.send_modify(|n| *n = n.saturating_sub(1));
+                // A request has run on it: what its first prompt put on the
+                // card is in the driver's figure now ([`Entry::served`]).
+                if e.state == RuntimeState::Ready {
+                    e.served = true;
+                }
             }
         }
     }
@@ -489,7 +494,12 @@ impl Registry {
         }
 
         let name = container_name(&job.spec.container_prefix, class, &model_id);
-        let started = self.start_container(&job.spec.as_spec(), &name).await;
+        let of = super::start_of::StartOf {
+            key: &job.key,
+            phase: &job.phase,
+            generation: job.generation,
+        };
+        let started = self.start_container(&job.spec.as_spec(), &name, of).await;
         unsettled.armed = false;
         let started = match started {
             Ok(started) => started,
@@ -517,6 +527,7 @@ impl Registry {
             capabilities,
             llama,
             gate,
+            ..
         } = started;
         let ours = {
             let mut map = self.map();
@@ -548,7 +559,7 @@ impl Registry {
         // the container is that entry's then.
         if !ours {
             if !self.holds_name(&name) {
-                if let Err(e) = self.rm_force(&name).await {
+                if let Err(e) = self.launcher.remove(&name).await {
                     tracing::warn!(container = %name, "removing the container of an aborted climb: {e}");
                 }
             }
@@ -783,6 +794,11 @@ impl ClimbTicket {
             }
             let generation = next_generation();
             e.generation = generation;
+            // A new container: its first prompt is still to come, and
+            // this lmgw started it.
+            e.served = false;
+            e.adopted = false;
+            e.admission_note = None;
             e.state = RuntimeState::Starting;
             e.host_port = 0;
             e.gate = None;

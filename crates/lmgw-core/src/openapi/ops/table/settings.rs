@@ -12,7 +12,12 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "settings_set",
         tag: TAG,
         summary: "Change gateway settings",
-        description: None,
+        description: Some(
+            "Sparse patch over the settings the self-admin tool may change. In the server image \
+             (container mode) a change of a setting its container pins (the WebRTC UDP port) is \
+             refused with 400 setting_pinned, naming the environment variable that sets it; a \
+             patch that carries a pinned setting at its stored value goes through.",
+        ),
         tool: Some("lmgw__settings_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::SettingsPatch>()),
         response: Resp::Json(|g| g.root_schema_for::<dto::SettingsSaved>()),
@@ -40,7 +45,13 @@ pub(super) const OPS: &[OpDoc] = &[
              folders that carry the self-admin toolset: its change feed receives them as \
              deleted, its turns on them stop, and its realtime sessions bound to one close \
              with 4004; raised from off, a device whose own level is above off receives them \
-             as created.",
+             as created. In the server image (container mode) a change of a setting its \
+             container pins (the bind address, the WebRTC UDP ports, the TLS pair and address, \
+             the public URL, the trusted proxies) is refused with 400 setting_pinned, naming \
+             the environment variable that sets it; a save that carries a pinned setting at \
+             its stored value goes through. trusted_proxies (proxy mode) takes addresses and \
+             CIDR networks, stores each as its network (127.0.0.1 as 127.0.0.1/32) and \
+             applies from the next request on.",
         ),
         tool: None,
         args: OpArgs::Struct(|g| {
@@ -86,7 +97,11 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Check whether a newer lmgw release is available",
         description: Some(
             "Poll the package registry now for a newer lmgw release than the one running, \
-             regardless of the periodic update-check setting.",
+             regardless of the periodic update-check setting. On the desktop a newer release is \
+             installed from the tray menu. The server image has no updater: it answers with the \
+             update notice's line (the version out, the version running, and that updates come \
+             as a new image archive to load before restarting the service) and keeps that \
+             notice, which Settings → About shows.",
         ),
         tool: None,
         args: OpArgs::NoArgs,

@@ -394,3 +394,31 @@ pub fn inspect_wire(answer: impl serde::Serialize) -> serde_json::Value {
 pub mod api_compat;
 pub mod captured_log;
 pub mod patience;
+
+/// The desktop's `update_check` answer for `version` from a feed with only
+/// an RPM: the tray's words, `update::cannot_install`'s reason on a host
+/// that cannot install it (Windows without the release's installer, Linux
+/// without pkexec and dnf), the pointer at the tray otherwise.
+pub fn desktop_update_answer(version: &str) -> String {
+    use lmgw_core::update::{cannot_install, Artifact, ReleaseManifest, UpdateInfo};
+    let current = env!("CARGO_PKG_VERSION");
+    let info = UpdateInfo {
+        current: current.into(),
+        manifest: ReleaseManifest {
+            version: version.into(),
+            notes: String::new(),
+            pub_date: String::new(),
+            rpm: Artifact {
+                file: "lmgw.rpm".into(),
+                url: "https://example.org/lmgw.rpm".into(),
+                sha256: String::new(),
+            },
+            nsis: None,
+        },
+    };
+    let found = format!("update available: {version} (you have {current})");
+    match cannot_install(&info) {
+        Some(why) => format!("{found}. {why}"),
+        None => format!("{found} — install it from the tray menu"),
+    }
+}

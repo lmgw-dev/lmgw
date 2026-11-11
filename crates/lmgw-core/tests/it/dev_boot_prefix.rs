@@ -142,8 +142,7 @@ async fn a_fresh_dev_data_dir_never_lists_or_removes_another_prefixs_containers(
     let leftover = data.join("agents").join("lmgw").join("run-7");
     std::fs::create_dir_all(&leftover).unwrap();
     let when = std::time::SystemTime::now() - Duration::from_secs(3600);
-    std::fs::File::open(&leftover)
-        .unwrap()
+    open_dir_for_times(&leftover)
         .set_times(std::fs::FileTimes::new().set_modified(when))
         .unwrap();
 
@@ -448,4 +447,25 @@ async fn the_server_reports_its_bind_and_releases_its_port_on_shutdown() {
         "{:?}",
         podman.calls()
     );
+}
+
+/// `dir` opened so its times can be set: on Windows a directory opens only
+/// with `FILE_FLAG_BACKUP_SEMANTICS`, and setting a time needs
+/// `FILE_WRITE_ATTRIBUTES`, which a plain open does not ask for.
+fn open_dir_for_times(dir: &std::path::Path) -> std::fs::File {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(dir).unwrap()
+    }
 }

@@ -42,6 +42,9 @@
 //! architectures (Qwen3.5's gated attention runs ~1.8× a plain one's), so
 //! that part is approximate; the masks and the copy are exact.
 //!
+//! A sparse-attention indexer (`qwen4exp`) adds a scoring phase of its own,
+//! [`super::qsa`].
+//!
 //! **Not here:** a projector's own buffer (13–248 MiB measured, sized by
 //! llama.cpp from per-projector image limits no header carries), the CUDA
 //! context (~450 MiB per process), allocator slack: the headroom's.
@@ -185,6 +188,13 @@ pub(crate) fn bytes(s: &ModelSummary, layout: &Layout, g: &Graph) -> Result<u64,
     };
     let ffn = mul(&[4, ub, dense.max(moe)]).saturating_add(mul(&[8, ub, ple]));
     let logits = mul(&[4, vocab, g.outputs.max(1)]);
+    // A sparse-attention indexer's scoring ([`super::qsa`]), a phase of its
+    // own before the attention.
+    let scoring = if g.single_layer {
+        0
+    } else {
+        super::qsa::scoring_bytes(s, g)
+    };
     Ok(if g.single_layer {
         masks
             .saturating_add(copy)
@@ -192,7 +202,7 @@ pub(crate) fn bytes(s: &ModelSummary, layout: &Layout, g: &Graph) -> Result<u64,
             .max(ffn)
             .max(logits)
     } else {
-        masks.saturating_add(copy.saturating_add(attn).max(ffn).max(logits))
+        masks.saturating_add(copy.saturating_add(attn).max(ffn).max(logits).max(scoring))
     })
 }
 

@@ -3,7 +3,8 @@
 //! freeform args, from there (the renderer passes those through, so the
 //! container runs with them): the context, slots and a unified cache, the
 //! batch sizes, flash attention, the cache types, a full-size window cache,
-//! tensor overrides, and speculative decoding.
+//! tensor overrides (the `n_cpu_moe` field among them, [`super::offload`])
+//! and op offload, and speculative decoding.
 //!
 //! Defaults are llama-server's own (b11549): ubatch 512, batch 2048, four
 //! slots over a unified cache when `parallel` is left on auto, an f16 cache,
@@ -14,9 +15,11 @@
 
 use crate::config::LlamaParams;
 use crate::runtime::argv::{canonical_key, flag_value};
-use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 
-use crate::vram::plan::aux::FLASH_ATTN_OFF;
+use crate::vram::plan::aux_models::FLASH_ATTN_OFF;
+
+use super::offload::{self, Override, Whose};
 
 /// llama.cpp's default draft window.
 pub(crate) const LLAMA_DEFAULT_DRAFT_N_MAX: u64 = 3;
@@ -66,6 +69,17 @@ pub(crate) struct Shape {
     /// buffer other than the CPU's. llama.cpp applies the overrides to the
     /// input embeddings too, so they may sit on the card after all.
     pub tensors_to_device: bool,
+    /// The tensor overrides of the model and of its draft model, in
+    /// llama.cpp's order: `n_cpu_moe`, `--n-cpu-moe`, `--cpu-moe`,
+    /// `--override-tensor` and the draft's twins ([`offload::overrides`]).
+    pub overrides: Vec<Override>,
+    pub draft_overrides: Vec<Override>,
+    /// Op offload: llama.cpp copies a host-kept weight to the card for a
+    /// large batch's product ([`offload`]); `--no-op-offload` turns it off.
+    pub op_offload: bool,
+    /// `--moe-cache-mib`: the card's cache for the experts kept in host
+    /// memory, in MiB; 0 off ([`offload`]).
+    pub moe_cache_mib: u64,
     /// Speculative decoding: its second context, the largest draft window
     /// of its types (`common_speculative_n_max`, 0 without speculative
     /// decoding), which widens the main context's outputs, and the draft
@@ -79,6 +93,113 @@ pub(crate) struct Shape {
     pub rollback: u64,
     pub draft_cache_k: Option<String>,
     pub draft_cache_v: Option<String>,
+    /// Where its layers go and whether llama.cpp's `--fit` may move them or
+    /// shrink the context ([`Fit`]).
+    pub fit: Fit,
+}
+
+/// What a row says about its layers' placement and llama.cpp's `--fit`
+/// (b12244 `common/fit.cpp`): `--fit` (on by default) shrinks an unset
+/// context down to `--fit-ctx` (4096 by default) and, while `--n-gpu-layers`
+/// is left on auto and no tensor override is set, moves layers off the card,
+/// both against the driver's live free memory less `--fit-target` (1024 MiB
+/// per device by default). A value the row sets is one `--fit` leaves alone
+/// ([`crate::vram::partial::llama`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Fit {
+    /// `--n-gpu-layers N` as a count: `None` for auto (unset, `auto`, -1)
+    /// and for all (`all`, -2 or less), which put every layer on the card
+    /// unless `--fit` moves some.
+    pub gpu_layers: Option<u64>,
+    /// `--n-gpu-layers` left on auto (unset, `auto`, -1).
+    pub layers_auto: bool,
+    /// `--fit` not off.
+    pub on: bool,
+    /// `--fit-ctx`, else llama.cpp's 4096: the least context `--fit` sets.
+    pub min_ctx: u64,
+    /// The row sets its context (a pool, or `-c 0` for the trained one,
+    /// which `--fit` leaves alone too).
+    pub ctx_set: bool,
+    /// `--no-kv-offload` (`-nkvo`): the KV cache stays in host memory.
+    pub kv_on_host: bool,
+    /// The row's own `--fit-target` (`-fitt`), in bytes: what llama.cpp
+    /// keeps free on the device beside the model (1024 MiB per device by
+    /// default). Per device, comma-separated; on the one card admission
+    /// fits to, the largest of them. `None` where the row sets none.
+    pub target: Option<u64>,
+}
+
+/// llama.cpp's default `--fit-ctx` (`common_params::fit_params_min_ctx`,
+/// b12244).
+pub(crate) const FIT_MIN_CTX: u64 = 4096;
+
+impl Fit {
+    /// What `params` and `args` say (the field first, a copy in the args as
+    /// the renderer passes it through).
+    fn of(params: &LlamaParams, args: &[String]) -> Self {
+        let ngl = params
+            .n_gpu_layers
+            .map(|n| n.to_string())
+            .or_else(|| flag_value(args, "n-gpu-layers").map(|v| v.trim().to_ascii_lowercase()));
+        let (gpu_layers, layers_auto) = match ngl.as_deref() {
+            None | Some("auto") | Some("") => (None, true),
+            Some("all") => (None, false),
+            Some(v) => match v.parse::<i64>() {
+                Ok(-1) => (None, true),
+                Ok(n) if n < 0 => (None, false),
+                Ok(n) => (Some(n.unsigned_abs()), false),
+                // llama-server refuses it; charged as all of it.
+                Err(_) => (None, false),
+            },
+        };
+        let fit = params
+            .fit
+            .clone()
+            .or_else(|| flag_value(args, "fit").map(str::to_owned))
+            .map(|v| v.trim().to_ascii_lowercase());
+        let on = !matches!(
+            fit.as_deref(),
+            Some("off" | "false" | "0" | "disabled" | "no")
+        );
+        let min_ctx = params
+            .fit_ctx
+            .or_else(|| flag_value(args, "fit-ctx").and_then(|v| v.trim().parse().ok()))
+            .filter(|n| *n > 0)
+            .map_or(FIT_MIN_CTX, i64::unsigned_abs);
+        let ctx_set = params.ctx_size.is_some()
+            || flag_value(args, "ctx-size").is_some()
+            || params.kv_unified_per_slot.is_some()
+            || flag_value(args, "kv-unified-per-slot").is_some();
+        let kv_on_host = args
+            .iter()
+            .rev()
+            .filter(|a| a.starts_with('-'))
+            .find_map(|a| match &*canonical_key(a.trim_start_matches('-')) {
+                "no-kv-offload" | "nkvo" => Some(true),
+                "kv-offload" | "kvo" => Some(false),
+                _ => None,
+            });
+        let target = flag_value(args, "fit-target").and_then(|v| {
+            v.split(',')
+                .filter_map(|m| m.trim().parse::<u64>().ok())
+                .max()
+                .map(|mib| mib.saturating_mul(1024 * 1024))
+        });
+        Self {
+            gpu_layers,
+            layers_auto,
+            on,
+            min_ctx,
+            ctx_set,
+            kv_on_host: kv_on_host.unwrap_or(false),
+            target,
+        }
+    }
+
+    /// `--fit` may shrink the context: on, and the row sets none.
+    pub(crate) fn ctx_adapts(&self) -> bool {
+        self.on && !self.ctx_set
+    }
 }
 
 impl Shape {
@@ -178,12 +299,20 @@ impl Shape {
             cache_v: text(&params.cache_type_v, &["cache-type-v"]),
             swa_full: present(args, "swa-full"),
             tensors_to_device: overrides_to_device(args),
+            overrides: offload::overrides(params.n_cpu_moe, args, Whose::Model),
+            draft_overrides: offload::overrides(None, args, Whose::Draft),
+            op_offload: offload::op_offload(args),
+            moe_cache_mib: params
+                .moe_cache_mib
+                .or_else(|| number("moe-cache-mib"))
+                .map_or(0, |n| n.max(0).unsigned_abs()),
             second,
             n_max,
             draft_n_max,
             rollback: if rollback { draft_n_max } else { 0 },
             draft_cache_k: text(&None, &["cache-type-k-draft", "ctkd", "spec-draft-type-k"]),
             draft_cache_v: text(&None, &["cache-type-v-draft", "ctvd", "spec-draft-type-v"]),
+            fit: Fit::of(params, args),
         }
     }
 
@@ -217,9 +346,10 @@ fn overrides_to_device(args: &[String]) -> bool {
         if !a.starts_with('-') {
             continue;
         }
+        let is_ot = |k: &str| matches!(&*canonical_key(k), "ot" | "override-tensor");
         match flag.split_once('=') {
-            Some((k, v)) if k == "ot" || k == "override-tensor" => values.push(v.to_string()),
-            None if flag == "ot" || flag == "override-tensor" => {
+            Some((k, v)) if is_ot(k) => values.push(v.to_string()),
+            None if is_ot(flag) => {
                 if let Some(v) = it.next() {
                     values.push(v.clone());
                 }
@@ -398,6 +528,32 @@ mod tests {
         assert!(shape(&["-ot", "exps=CPU,.*=CUDA0"]));
         assert!(shape(&["--override-tensor=.*=CUDA0"]));
         assert!(!shape(&[]));
+    }
+
+    /// llama-server reads `_` as `-` in a `--` flag, so the shape does:
+    /// `--ctx_size`, `--ubatch_size`, `--moe_cache_mib`, `--override_tensor`.
+    #[test]
+    fn underscore_spellings_read_as_their_flags() {
+        let s = Shape::of(
+            &LlamaParams::default(),
+            &args(&[
+                "--ctx_size",
+                "65536",
+                "--ubatch_size",
+                "1024",
+                "--moe_cache_mib",
+                "6144",
+                "--override_tensor",
+                "token_embd=CUDA0",
+                "--no_op_offload",
+            ]),
+        );
+        assert_eq!(
+            (s.ctx, s.ubatch, s.moe_cache_mib),
+            (Some(65536), 1024, 6144)
+        );
+        assert!(s.tensors_to_device && !s.op_offload);
+        assert_eq!(s.overrides.len(), 1, "{:?}", s.overrides);
     }
 
     #[test]

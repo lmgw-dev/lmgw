@@ -10,7 +10,8 @@
 //! "the image's own catalog": the audio.cpp catalog is fetched from its spec
 //! repo whatever the dir says, and the image ships no models. So all four get
 //! a default, `<data_dir>/models/<class>` (`chat`, `aux`, `audio`, `image`,
-//! the download targets' names), each its own directory, because a file
+//! the download targets' names; on Windows the installed app's are under its
+//! local dir, `super::local_data_dir`), each its own directory, because a file
 //! stays updatable only where the downloader put it and a GGUF is never
 //! shared between class dirs.
 //!
@@ -34,6 +35,7 @@ use std::path::{Path, PathBuf};
 use lmgw_api_types::settings_labels::{MODELS_DIR, RUNTIMES};
 use sqlx::SqlitePool;
 
+use crate::config::deployment::Deployment;
 use crate::config::Settings;
 use crate::hf::TARGETS;
 use crate::store;
@@ -45,9 +47,13 @@ pub const DB_FILE: &str = "lmgw.sqlite";
 pub const MODELS_SUBDIR: &str = "models";
 
 /// The models dir a fresh install gives download target `target`:
-/// `<data_dir>/models/<target>`.
+/// `<local>/models/<target>`, `<local>` the data dir's local dir
+/// ([`super::local_data_dir`]: the data dir itself on Linux,
+/// `%LOCALAPPDATA%\lmgw` for the installed app on Windows).
 pub fn default_models_dir(data_dir: &Path, target: &str) -> PathBuf {
-    data_dir.join(MODELS_SUBDIR).join(target)
+    super::local_data_dir(data_dir)
+        .join(MODELS_SUBDIR)
+        .join(target)
 }
 
 /// The class settings field behind a download target, as
@@ -76,6 +82,13 @@ pub fn fill_models_dirs(s: &mut Settings, data_dir: &Path) -> Vec<PathBuf> {
     set
 }
 
+/// Whether `data_dir` is new: it holds no database yet. Asked before
+/// [`open_db`] creates one; a database that cannot be looked for counts as
+/// there, so nothing is seeded over a dir this start cannot read.
+fn is_new_data_dir(data_dir: &Path) -> bool {
+    !data_dir.join(DB_FILE).try_exists().unwrap_or(true)
+}
+
 /// Open `data_dir`'s database (creating and migrating it as
 /// [`store::open`] does), and when it did not exist before, store the
 /// settings a fresh install starts with ([`fill_models_dirs`]) and create
@@ -86,8 +99,16 @@ pub fn fill_models_dirs(s: &mut Settings, data_dir: &Path) -> Vec<PathBuf> {
 /// stored, or a directory that cannot be created, is a warning. A class
 /// whose models dir stays empty then refuses a download by where to set it
 /// ([`crate::hf::models_dir_or_refuse`]).
-pub async fn open_db(data_dir: &Path, dev: bool) -> anyhow::Result<SqlitePool> {
-    open_db_judged(data_dir, dev, crate::backends::paths::is_tmpfs).await
+///
+/// In container mode a database with a pending migration is copied into
+/// the data dir's `backups/` first ([`store::migration_copy`], headless
+/// server design ruling 14); the desktop makes no copy.
+pub async fn open_db(
+    data_dir: &Path,
+    dev: bool,
+    deployment: Deployment,
+) -> anyhow::Result<SqlitePool> {
+    open_db_judged(data_dir, dev, deployment, crate::backends::paths::is_tmpfs).await
 }
 
 /// [`open_db`], asking whether the data dir is in RAM through `in_ram`
@@ -97,12 +118,15 @@ pub async fn open_db(data_dir: &Path, dev: bool) -> anyhow::Result<SqlitePool> {
 pub async fn open_db_judged(
     data_dir: &Path,
     dev: bool,
+    deployment: Deployment,
     in_ram: fn(&Path) -> bool,
 ) -> anyhow::Result<SqlitePool> {
-    let path = data_dir.join(DB_FILE);
-    // Before `open` creates it: a data dir without a database is new.
-    let fresh = !path.try_exists().unwrap_or(true);
-    let db = store::open(&path).await?;
+    // Before `open` creates it.
+    let fresh = is_new_data_dir(data_dir);
+    let backups = deployment
+        .is_container()
+        .then(|| store::backups_dir(data_dir));
+    let db = store::open_for_start(&data_dir.join(DB_FILE), backups.as_deref()).await?;
     if !fresh {
         return Ok(db);
     }
@@ -159,7 +183,9 @@ async fn seed(db: &SqlitePool, data_dir: &Path) -> anyhow::Result<()> {
     tracing::info!(
         "fresh install: models are stored under {} (one directory per class; change them under \
          Settings → {RUNTIMES})",
-        data_dir.join(MODELS_SUBDIR).display()
+        super::local_data_dir(data_dir)
+            .join(MODELS_SUBDIR)
+            .display()
     );
     Ok(())
 }
@@ -168,16 +194,22 @@ async fn seed(db: &SqlitePool, data_dir: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// `<data>/models/<class>` written with this system's separator
+    /// (`/srv/lmgw-data/models/chat` on Linux).
+    fn models(data: &Path, class: &str) -> String {
+        data.join("models").join(class).display().to_string()
+    }
+
     #[test]
     fn every_class_gets_its_own_dir_under_the_data_dir() {
         let mut s = Settings::default();
         let data = Path::new("/srv/lmgw-data");
         let set = fill_models_dirs(&mut s, data);
         assert_eq!(set.len(), 4);
-        assert_eq!(s.router.models_dir, "/srv/lmgw-data/models/chat");
-        assert_eq!(s.aux_router.models_dir, "/srv/lmgw-data/models/aux");
-        assert_eq!(s.audio.models_dir, "/srv/lmgw-data/models/audio");
-        assert_eq!(s.image.models_dir, "/srv/lmgw-data/models/image");
+        assert_eq!(s.router.models_dir, models(data, "chat"));
+        assert_eq!(s.aux_router.models_dir, models(data, "aux"));
+        assert_eq!(s.audio.models_dir, models(data, "audio"));
+        assert_eq!(s.image.models_dir, models(data, "image"));
         for t in TARGETS {
             assert_eq!(
                 crate::hf::models_dir_for_target(&s, t),
@@ -206,6 +238,6 @@ mod tests {
         let set = fill_models_dirs(&mut s, Path::new("/d"));
         assert_eq!(set.len(), 3);
         assert_eq!(s.audio.models_dir, "/mnt/voices");
-        assert_eq!(s.router.models_dir, "/d/models/chat");
+        assert_eq!(s.router.models_dir, models(Path::new("/d"), "chat"));
     }
 }

@@ -1,12 +1,19 @@
 # CI for lmgw — build the RPM on every push to `main` and publish it (plus an
 # updater manifest the app polls) to this project's GitLab *generic* package
-# registry. These are the private test builds, versioned <Cargo.toml version>+
+# registry, and, after it, the server image as an OCI archive job artifact (the
+# `server-binary` and `server-image` jobs; never pushed to any registry, headless
+# server design ruling 11). These are the private test builds, versioned <Cargo.toml version>+
 # <pipeline IID> so each sorts after the release it follows; public releases are
 # built from v<X.Y.Z> tags on GitHub by .github/workflows/release.yml, from the
 # same ci/build.sh. Tags build nothing here.
 #
-# Self-hosted runners are tag-selected (docker / macos); the Linux build uses
-# the `docker` tag for every job by default.
+# Self-hosted runners are tag-selected (docker / macos / windows); the Linux
+# build uses the `docker` tag for every job by default, and the Windows jobs
+# (`windows-check`, the compile check beside it, and `windows-installer`, the
+# per-user NSIS installer after it) the `windows` tag. `publish-windows` puts
+# that installer into the same feed after `publish` (Windows design §5, WP7). No
+# job needs a graphics card: the live engine tests run by hand, behind their
+# environment variables.
 #
 # REQUIRED CI/CD variable (Settings → CI/CD → Variables), set by the owner:
 #   LMGW_UPDATE_DEPLOY_TOKEN — masked; the token of a project deploy token
@@ -14,7 +21,8 @@
 #     `read_package_registry` scope. ci/build.sh compiles it into the test
 #     builds, together with this registry's `latest/latest.json` as their update
 #     feed, so an installed test build can read the private registry. It ends
-#     up in the RPM, hence read-only. If you mark it *protected*, `main` must be
+#     up in the RPM, and in the server binary and so the server image archive
+#     too, hence read-only: handing either to someone hands them the token. If you mark it *protected*, `main` must be
 #     a protected branch or the variable never reaches the job. Missing, the
 #     build still succeeds but warns, and its updater cannot reach the feed.
 default:
@@ -22,6 +30,7 @@ default:
 
 stages:
   - build
+  - server
   - publish
 
 # Only run for `main` (push, web, or API trigger). Skips MRs and other branches.
@@ -96,6 +105,174 @@ build:
   artifacts:
     paths:
       - dist/
+      # Trunk's UI bundle, for windows-installer: the Windows runner builds no wasm.
+      - crates/lmgw-ui/dist/
+    expire_in: 1 week
+
+# The Windows runner's jobs share this: tag `windows`, the shell executor with Windows
+# PowerShell 5.1, one job at a time, Rust stable MSVC on the PATH.
+#
+# The global CARGO_HOME, XDG_CACHE_HOME and ORT_CACHE_DIR point into the build dir for the docker
+# jobs' cache. The shell executor has no such cache, and GitLab's `git clean -ffdx` empties the
+# build dir of untracked and ignored files before every job, target/ included. So they live in
+# persistent dirs on the runner's D: drive: the registry, ort's ONNX Runtime download, the build
+# and the release build's tools survive between pipelines, and a check after a small change is
+# incremental instead of a cold pass (about 12 minutes with empty dirs, the crate downloads
+# included, 2026-11-10).
+.windows-runner:
+  tags: [windows]
+  interruptible: true
+  variables:
+    CARGO_HOME: 'D:\cargo-home'
+    XDG_CACHE_HOME: 'D:\cargo-cache'
+    ORT_CACHE_DIR: 'D:\cargo-cache\ort.pyke.io'
+    CARGO_TARGET_DIR: 'D:\cargo-target\lmgw'
+    # ci/build-windows.ps1's tauri-cli download (pinned, SHA-256 checked), kept between jobs.
+    LMGW_TOOLS_DIR: 'D:\cargo-tools'
+    # sccache (ci/windows-sccache.ps1: pinned, SHA-256 checked, fetched into LMGW_TOOLS_DIR when
+    # missing). Its cache lives on D: between jobs; the size is set here so it is visible.
+    # sccache caches no incremental crate, so incremental compilation is off.
+    RUSTC_WRAPPER: 'D:\cargo-tools\sccache\sccache.exe'
+    SCCACHE_DIR: 'D:\sccache'
+    SCCACHE_CACHE_SIZE: '100G'
+    CARGO_INCREMENTAL: '0'
+  # The hit rate in the log, also when the job failed.
+  after_script:
+    - Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; . ci\windows-sccache.ps1 -Stats
+
+# windows-check: the workspace compiles on Windows (Windows design §3, WP1): clippy with
+# `-D warnings` over every target, on the Windows runner. Stage `build`, so it runs beside the
+# RPM job, and not in publish's `needs`, so a Windows failure never holds back the Linux RPM.
+# scripts/windows-remote-check.sh runs the same check from a Linux checkout over ssh.
+#
+# Not run in GitLab yet: its variables and script lines were verified by hand on a Windows
+# runner, in a scratch checkout with empty dirs (2026-11-10): clippy passed, and a failing cargo
+# call ended the script with cargo's exit code.
+windows-check:
+  extends: .windows-runner
+  stage: build
+  script:
+    - Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; . ci\windows-sccache.ps1
+    # lmgw-core embeds crates/lmgw-ui/dist (Trunk's bundle, gitignored) with rust-embed, which
+    # needs the folder to exist. A check never reads it, so a placeholder page stands in.
+    - New-Item -ItemType Directory -Force crates\lmgw-ui\dist | Out-Null
+    - if (-not (Test-Path crates\lmgw-ui\dist\index.html)) { Set-Content -Path crates\lmgw-ui\dist\index.html -Value '<!-- placeholder, a check needs only the folder (.gitlab-ci.yml, windows-check) -->' }
+    - cargo --version; rustc --version
+    # Windows PowerShell does not fail a job on a native command's exit code in every runner
+    # version, so the code is passed on by hand.
+    # Windows PowerShell 5.1 turns a native command's stderr output (cargo's progress and
+    # warnings) into a terminating NativeCommandError under 'Stop'; the exit code is checked below.
+    - $ErrorActionPreference = 'Continue'
+    - cargo clippy --workspace --all-targets -- -D warnings; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # The Windows tests: not yet, until they pass on Windows (a separate work package makes them
+    # pass). Then this step runs them here, the live engine tests skipping themselves without
+    # their environment variables, so no step needs the runner's card:
+    # - cargo test --workspace; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# windows-installer: the per-user NSIS installer (Windows design §4.4, §5, WP7), built by
+# ci/build-windows.ps1 with the RPM's version (dist/build.env) and Trunk's UI bundle
+# (crates/lmgw-ui/dist), both from the `build` job's artifacts, and the same update feed and
+# deploy token baked in. A test build's profile, as the RPM's (thin LTO, 16 codegen units). Its
+# artifact is dist-windows/: the installer and nsis.json (version, file, size, sha256), which
+# publish-windows puts into the feed. Not in `publish`'s needs: a Windows failure never holds
+# back the RPM, it only leaves the feed without the installer. The installer is not signed yet.
+# Not run in GitLab yet: its script was verified by hand on a Windows runner (Windows design §5).
+windows-installer:
+  extends: .windows-runner
+  stage: server
+  needs:
+    - job: build
+      artifacts: true
+  timeout: 2h
+  variables:
+    CARGO_PROFILE_RELEASE_LTO: "thin"
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  script:
+    - $ErrorActionPreference = 'Stop'
+    - Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; . ci\windows-sccache.ps1
+    - $version = (Select-String -Path dist\build.env -Pattern '^VERSION=(.+)$').Matches[0].Groups[1].Value
+    # As in windows-check: the exit code is checked, a native command's stderr is no error.
+    - $ErrorActionPreference = 'Continue'
+    - powershell -NoProfile -ExecutionPolicy Bypass -File ci\build-windows.ps1 -Version $version; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  artifacts:
+    paths:
+      - dist-windows/
+    expire_in: 1 week
+
+# The server image (headless server design §3.1, §10), in two jobs after the RPM's and apart from
+# it: the RPM job (`build`) is the desktop's path and stays exactly as it is (ruling 7), and both
+# server jobs are allow_failure, so nothing here can hold back the RPM or its publish (which
+# needs only `build`). Not named `image`: at the top level that is GitLab's keyword for the
+# default job image.
+#
+# server-binary: the release lmgw-server (ci/build.sh with LMGW_BUILD_SERVER=only), with the
+# same version, update feed, deploy token and UI as the RPM. `needs: build` is for the order
+# only (its artifacts are not downloaded): the two release builds never compile side by side in
+# one pipeline. The cache is the RPM job's, pulled and never pushed back: the registry, the
+# tools and most of target/ are warm from it, and the RPM job's cache never carries the
+# server's feature set or a second multi-GiB target/ archive. The cost: the units whose
+# features differ for `-p lmgw-server` (lmgw-core and the dependencies it resolves
+# differently) compile in every run of this job.
+server-binary:
+  stage: server
+  image: fedora:latest
+  needs:
+    - job: build
+      artifacts: false
+  interruptible: true
+  allow_failure: true
+  timeout: 2h
+  variables:
+    # The RPM test builds' profile (see `build`).
+    CARGO_PROFILE_RELEASE_LTO: "thin"
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    LMGW_BUILD_SERVER: "only"
+  cache:
+    key: cargo-lmgw
+    policy: pull
+    paths:
+      - .cargo/registry/
+      - .cargo/bin/
+      - .cache/trunk/
+      - .cache/ort.pyke.io/
+      - target/
+  before_script:
+    - bash ci/install-build-deps.sh
+    # GNU time measures the build's peak memory (ci/build.sh).
+    - dnf -y install time >/dev/null
+  script:
+    - bash ci/build.sh
+  artifacts:
+    paths:
+      - dist/lmgw-server
+      - dist/build.env
+    expire_in: 1 week
+
+# server-image: ci/build-image.sh packs server-binary's dist/lmgw-server into
+# dist/lmgw-server-<version>.oci.tar with buildah (its own vfs store, chroot isolation). The
+# archive is this job's artifact and nothing else: no registry, no push. An administrator loads
+# it with `podman load -i`. Not yet run on the runner (§10, "Unverified"): the Containerfile's RUN
+# worked in a rootless Podman container with Podman's default capabilities (2026-11-08), but a
+# Docker engine's default seccomp profile refuses the namespaces and mounts buildah needs without
+# CAP_SYS_ADMIN, so on a Docker-backed runner this job is expected to fail until it runs
+# privileged or on a dedicated runner, the owner's call.
+server-image:
+  stage: server
+  image: fedora:latest
+  needs: ["server-binary"]
+  interruptible: true
+  allow_failure: true
+  before_script:
+    # buildah builds and writes the archive; jq reads the licence list from tauri.conf.json;
+    # opus lets the binary's --version run here, outside the image, as well as inside it;
+    # binutils' readelf checks the binary is stripped.
+    - dnf -y install --setopt=install_weak_deps=False buildah jq opus binutils >/dev/null
+  script:
+    - bash ci/build-image.sh
+  artifacts:
+    paths:
+      - dist/lmgw-server-*.oci.tar
+      - dist/lmgw-server-*.oci.tar.sha256
     expire_in: 1 week
 
 publish:
@@ -109,3 +286,24 @@ publish:
     - dnf -y install curl jq >/dev/null
   script:
     - bash ci/publish.sh
+
+# publish-windows: the Windows installer into the same registry, under its version, and into
+# latest.json as its `nsis` entry when the published manifest is this pipeline's (ci/publish.sh
+# windows). After `publish`, whose latest.json it extends. The resource group runs one publish
+# job at a time, but it does not make `publish` and `publish-windows` one step: a later
+# pipeline's `publish` can run between them, and then publish.sh skips latest.json on the
+# version mismatch, so this pipeline's installer is in the registry but not in the feed (the
+# later pipeline's own publish-windows adds its installer).
+publish-windows:
+  stage: publish
+  image: fedora:latest
+  needs:
+    - job: publish
+      artifacts: false
+    - job: windows-installer
+      artifacts: true
+  resource_group: registry-latest
+  before_script:
+    - dnf -y install curl jq >/dev/null
+  script:
+    - bash ci/publish.sh windows

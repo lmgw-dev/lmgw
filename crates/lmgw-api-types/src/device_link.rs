@@ -519,10 +519,14 @@ pub enum DeviceCaState {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum DeviceCaKeyMode {
     /// Encrypted (AES-256-GCM) under a key held in the session's Secret
-    /// Service.
+    /// Service, or in the server image under the Podman secret
+    /// `lmgw-wrap-key`.
     Wrapped,
     /// Plain PKCS#8, readable by its owner only: a start without a Secret
-    /// Service (headless). The next start that reaches one wraps it.
+    /// Service (headless) or, in the server image, without the secret. On
+    /// the desktop the device listener's next start that reaches a Secret
+    /// Service wraps it; in the server image, the next start with the
+    /// secret, whether the device listener is on or not.
     Plain,
 }
 
@@ -557,10 +561,14 @@ pub enum DeviceCaErrorKind {
     /// The key is wrapped and no Secret Service answers this start.
     NoSecretService,
     /// The key is wrapped and the Secret Service holds no wrapping key for
-    /// this data directory.
+    /// this data directory; in the server image, no wrapping key secret is
+    /// mounted.
     WrapKeyMissing,
     /// The Secret Service answered with an error.
     SecretService,
+    /// The server image's wrapping key secret is there and cannot be read
+    /// or holds no key (not 64 hex digits).
+    WrapKeySecret,
 }
 
 /// One server certificate the device listener presents (device link design

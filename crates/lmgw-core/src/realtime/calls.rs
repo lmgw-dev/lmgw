@@ -85,6 +85,9 @@ use sockets::SockId;
 pub enum Group {
     /// The plain listener's (`bind_addr`): stock clients.
     Plain,
+    /// The main TLS listener's (`tls.listen`, headless server design D22):
+    /// stock clients over `https`, on `realtime.webrtc_tls_port`.
+    Tls,
     /// The device listener's (device link §4): paired devices, one socket
     /// per address that listener binds, on its port, following it live.
     Devices,
@@ -95,6 +98,7 @@ impl Group {
     pub fn of(via: crate::server::Via) -> Self {
         match via {
             crate::server::Via::Plain => Self::Plain,
+            crate::server::Via::Tls => Self::Tls,
             crate::server::Via::Devices => Self::Devices,
         }
     }
@@ -103,6 +107,7 @@ impl Group {
     fn listener(self) -> &'static str {
         match self {
             Self::Plain => "the plain listener",
+            Self::Tls => "the TLS listener",
             Self::Devices => "the device listener",
         }
     }
@@ -115,7 +120,7 @@ impl Group {
     /// a UDP socket behind its candidate whatever the system's default.
     fn v6(self) -> sockets::V6 {
         match self {
-            Self::Plain => sockets::V6::System,
+            Self::Plain | Self::Tls => sockets::V6::System,
             Self::Devices => sockets::V6::DualOnWildcard,
         }
     }
@@ -277,7 +282,9 @@ impl Calls {
             for (group, g) in self.groups().iter_mut() {
                 if matches!(g.state, GroupState::Bound(_)) {
                     let again = match group {
-                        Group::Plain => "when the listener starts again (a restart of lmgw)",
+                        Group::Plain | Group::Tls => {
+                            "when the listener starts again (a restart of lmgw)"
+                        }
                         Group::Devices => {
                             "when the device listener starts or moves again (a change of its \
                              settings, or a restart of lmgw)"
@@ -384,8 +391,46 @@ impl Calls {
             return released;
         }
         let addr = SocketAddr::new(http.ip(), settings.plain_port(http.port()));
-        let ids = match self.bind_group(Group::Plain, &[addr], None).await {
-            GroupState::Bound(_) => self.socket_ids(Group::Plain),
+        self.serve_beside(Group::Plain, addr, released).await
+    }
+
+    /// The plain group's place when it is not bound because nothing outside
+    /// the server's container could reach it (headless server design D22:
+    /// in container mode with TLS the plain listener is loopback-only):
+    /// `Down`, said once.
+    pub fn plain_not_bound(&self, why: &str) {
+        self.set_group(Group::Plain, GroupState::Down, Vec::new(), None);
+        tracing::info!("WebRTC calls on the plain listener are not bound: {why}");
+    }
+
+    /// Bind the TLS group beside the TLS listener on `tls` (D22): one socket
+    /// on its IP, on `realtime.webrtc_tls_port`, or nothing when calls are
+    /// off; read after [`Self::serve_plain`], whose start read the switch.
+    /// `released` as [`Self::serve_plain`] takes it.
+    pub async fn serve_tls(
+        &self,
+        settings: &WebRtcSettings,
+        tls: SocketAddr,
+        released: Option<oneshot::Sender<()>>,
+    ) -> Option<oneshot::Sender<()>> {
+        if !settings.webrtc_enabled {
+            self.set_group(Group::Tls, GroupState::Off, Vec::new(), None);
+            return released;
+        }
+        let addr = SocketAddr::new(tls.ip(), settings.tls_port(tls.port()));
+        self.serve_beside(Group::Tls, addr, released).await
+    }
+
+    /// Bind `group` on `addr` beside its listener, closed when what comes
+    /// back fires or drops (the listener closed), and only then `released`.
+    async fn serve_beside(
+        &self,
+        group: Group,
+        addr: SocketAddr,
+        released: Option<oneshot::Sender<()>>,
+    ) -> Option<oneshot::Sender<()>> {
+        let ids = match self.bind_group(group, &[addr], None).await {
+            GroupState::Bound(_) => self.socket_ids(group),
             _ => return released,
         };
         let (closed, on_close) = oneshot::channel::<()>();
@@ -393,7 +438,7 @@ impl Calls {
         tokio::spawn(async move {
             // Fired or dropped: the listener is closed either way.
             let _ = on_close.await;
-            calls.close_sockets(Group::Plain, ids, STOP_WITHIN).await;
+            calls.close_sockets(group, ids, STOP_WITHIN).await;
             if let Some(r) = released {
                 let _ = r.send(());
             }
@@ -453,7 +498,7 @@ impl Calls {
     /// again by itself.
     fn failed(&self, group: Group, why: String, served_at: Option<ServedAt>) -> GroupState {
         let why = match group {
-            Group::Plain => why,
+            Group::Plain | Group::Tls => why,
             Group::Devices => {
                 format!("{why}; free the port, then save the device settings again or restart lmgw")
             }

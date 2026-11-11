@@ -22,7 +22,7 @@
 //! would have taken that file. The line "Q4_K_S remembers all 262 144 tokens,
 //! at 4.6 bits per weight" is for a file the card shows that isn't the pick:
 //! one the person chose themselves (D34), or the whole-card pick shown beside
-//! the beside one (D120). [`full_context_for`] names it (draft call D53).
+//! the beside one (D120). [`full_context_for`] names it (D53).
 
 use lmgw_api_types::model_find::{
     FileFit, FilePick, FitMark, FitMeasure, FullContextFile, PickRule,

@@ -79,7 +79,7 @@ pub struct Sizer {
 enum SizerKind {
     Chat {
         files: Box<ChatFiles>,
-        shape: Shape,
+        shape: Box<Shape>,
     },
     Aux {
         files: Box<GgufFiles>,
@@ -126,7 +126,7 @@ impl Sizer {
                     files: files.gguf_files(&companions),
                     draft,
                 }),
-                shape,
+                shape: Box::new(shape),
             },
             rel: files.rel.clone(),
             ctx,
@@ -136,7 +136,7 @@ impl Sizer {
     }
 
     /// An aux plan's sizer: the planned row's footprint on the GPU as
-    /// admission charges it ([`crate::vram::plan::aux`]). A plan that ties
+    /// admission charges it ([`crate::vram::plan::aux_models`]). A plan that ties
     /// the ubatch to the context (a whole input in one ubatch) keeps the tie
     /// at every context.
     pub fn aux(files: &PlanFiles, params: &Map<String, Value>) -> Self {
@@ -180,7 +180,7 @@ impl Sizer {
             SizerKind::Chat { files, shape } => {
                 let at = Shape {
                     ctx: c,
-                    ..shape.clone()
+                    ..(**shape).clone()
                 };
                 crate::vram::plan::chat::footprint(files, &self.rel, &at)
             }
@@ -190,8 +190,8 @@ impl Sizer {
                 batch,
                 tied,
             } => {
-                use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
-                use crate::vram::plan::aux::{footprint, Batches, Placement};
+                use crate::runtime::aux_models::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+                use crate::vram::plan::aux_models::{footprint, Batches, Placement};
                 let count = |n: Option<i64>, default: i64| n.unwrap_or(default).unsigned_abs();
                 let tied_to = c.filter(|_| *tied);
                 let batches = Batches {

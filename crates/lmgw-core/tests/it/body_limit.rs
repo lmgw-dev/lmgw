@@ -28,6 +28,11 @@ async fn serve(mb: u32) -> (SharedState, String) {
     (state, base)
 }
 
+/// A body over a 1 MiB limit and within the drain's budget on Windows (twice
+/// `max_body_mb`, `server::body_drain`), so the 413 reaches the client there
+/// too.
+const OVER_ONE_MIB: usize = 1536 * 1024;
+
 /// A chat request whose single message is `bytes` long — the shape of the real
 /// case, a base64 blob inlined into the conversation.
 fn body_of(bytes: usize) -> Value {
@@ -57,13 +62,7 @@ async fn post(base: &str, path: &str, body: &Value, anthropic: bool) -> (u16, Va
 async fn oversize_body_names_the_setting() {
     let (_state, base) = serve(1).await;
 
-    let (status, err) = post(
-        &base,
-        "/v1/chat/completions",
-        &body_of(2 * 1024 * 1024),
-        false,
-    )
-    .await;
+    let (status, err) = post(&base, "/v1/chat/completions", &body_of(OVER_ONE_MIB), false).await;
     assert_eq!(status, 413);
     assert_eq!(err["error"]["code"], "body_limit");
     let msg = err["error"]["message"].as_str().unwrap();
@@ -78,7 +77,7 @@ async fn oversize_body_names_the_setting() {
 async fn oversize_body_keeps_the_clients_protocol_shape() {
     let (_state, base) = serve(1).await;
 
-    let (status, err) = post(&base, "/v1/messages", &body_of(2 * 1024 * 1024), true).await;
+    let (status, err) = post(&base, "/v1/messages", &body_of(OVER_ONE_MIB), true).await;
     assert_eq!(status, 413);
     assert_eq!(err["type"], "error");
     assert_eq!(err["error"]["type"], "invalid_request_error");
@@ -131,7 +130,7 @@ async fn zero_means_unlimited() {
 #[tokio::test]
 async fn raising_the_limit_applies_without_a_restart() {
     let (state, base) = serve(1).await;
-    let body = body_of(2 * 1024 * 1024);
+    let body = body_of(OVER_ONE_MIB);
 
     let (status, _) = post(&base, "/v1/chat/completions", &body, false).await;
     assert_eq!(status, 413);
@@ -149,10 +148,44 @@ async fn raising_the_limit_applies_without_a_restart() {
     assert_eq!(err["error"]["code"], "unknown_alias");
 }
 
+/// A client sending `Expect: 100-continue` with a declared oversize body is
+/// refused before it sends a byte of it, on every system: no `100 Continue`
+/// asks for the body (on Windows the drain before a refusal leaves such a
+/// body alone), and the 413 comes at once.
+#[tokio::test]
+async fn an_expecting_client_is_refused_before_it_sends_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_state, base) = serve(1).await;
+    let addr = base.strip_prefix("http://").unwrap();
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        64u64 << 30
+    );
+    s.write_all(head.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        s.read_to_end(&mut answer),
+    )
+    .await
+    .expect("answered and closed without the body")
+    .unwrap();
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.starts_with("HTTP/1.1 413 "), "{answer}");
+    assert!(!answer.contains("100 Continue"), "{answer}");
+    assert!(answer.contains("\"body_limit\""), "{answer}");
+}
+
 /// A chunked body declares no length, so the header check cannot see it coming
 /// and the `Limited` wrapper is what actually stops it. That path arrives at the
 /// handler as a body *rejection*, and it has to be translated back into the same
 /// named error rather than surfacing as a generic 400 "malformed JSON".
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; only a declared oversize /v1 body is drained before its 413 on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn chunked_body_without_content_length_is_bounded_too() {
     let (_state, base) = serve(1).await;

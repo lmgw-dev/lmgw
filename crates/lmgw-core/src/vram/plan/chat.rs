@@ -5,7 +5,17 @@
 //! **Weights.** The files' bytes, less the input embeddings llama.cpp keeps
 //! in host memory: `token_embd` beside an untied output head (a tied head is
 //! copied to the card), and Gemma 4's per-layer embeddings, 1.5 GiB of an
-//! E4B file ([`ModelSummary::host_input_bytes`]).
+//! E4B file ([`ModelSummary::host_input_bytes`]). Less, too, the weights
+//! the row's tensor overrides keep in host memory: the `n_cpu_moe` field,
+//! `--n-cpu-moe`, `--cpu-moe`, `--n-cpu-ffn` and `--override-tensor`
+//! patterns to the CPU, matched against every tensor of every part; an
+//! override to a device that matches the input embeddings charges them
+//! ([`offload`]). A draft model's own overrides count against its file.
+//! The expert cache (`moe_cache_mib`, `--moe-cache-mib`) is charged in full
+//! beside them while routed experts are kept in host memory.
+//! With op offload a context whose ubatch reaches 32 is charged the largest
+//! host-kept weight on top of its compute buffer, the copy llama.cpp makes
+//! of it for a large batch's product.
 //!
 //! **KV cache.** Full-attention layers hold the whole context (padded to 256
 //! cells); sliding-window layers hold `window + ubatch` cells per slot, or
@@ -15,7 +25,9 @@
 //! charged at the cache type's real size, block scales included (q8_0 is
 //! 8.5 bits). A linear-attention layer keeps a recurrent state per slot, and
 //! one more per draft position a speculative row may roll back
-//! (`n_rs_seq`). Matches every probed model to the MiB.
+//! (`n_rs_seq`). Matches every probed model to the MiB. A sparse-attention
+//! indexer (`qwen4exp`) keeps a key cache of its own beside it
+//! ([`qsa`]).
 //!
 //! **Second context.** A speculative row runs one: `draft-mtp` without a
 //! draft model runs the weights' own MTP layers, with a cache of their own
@@ -40,9 +52,12 @@ use crate::gguf::{self, ModelSummary};
 use crate::runtime::argv::flag_value;
 use crate::vram::compute::chat::{self as cc, Graph};
 use crate::vram::compute::layers::{Kind, Layout};
+use crate::vram::compute::qsa;
 
 use super::{cpu_only, cpu_only_args, Footprint, GgufFiles, PlanCache};
 
+pub(crate) mod fit;
+pub(crate) mod offload;
 pub(crate) mod shape;
 pub(crate) use shape::{Second, Shape};
 
@@ -144,8 +159,8 @@ pub(crate) fn one_slot_kv(s: &ModelSummary, ctx: u64, cache: &str) -> Option<u64
     let bits = shape::block_bits(Some(cache))?;
     let g = Graph {
         ctx,
-        ubatch: crate::runtime::aux::LLAMA_DEFAULT_UBATCH.unsigned_abs(),
-        batch: crate::runtime::aux::LLAMA_DEFAULT_BATCH.unsigned_abs(),
+        ubatch: crate::runtime::aux_models::LLAMA_DEFAULT_UBATCH.unsigned_abs(),
+        batch: crate::runtime::aux_models::LLAMA_DEFAULT_BATCH.unsigned_abs(),
         slots: 1,
         unified: false,
         flash_attn_off: false,
@@ -161,7 +176,11 @@ pub(crate) fn one_slot_kv(s: &ModelSummary, ctx: u64, cache: &str) -> Option<u64
             .unwrap_or(0)
             .saturating_mul(n),
     };
-    Some(cache_bytes(&layout, &g, bits, bits).saturating_add(state))
+    Some(
+        cache_bytes(&layout, &g, bits, bits)
+            .saturating_add(qsa::cache_bytes(s, &layout, &g, bits))
+            .saturating_add(state),
+    )
 }
 
 /// The footprint of a chat row of `shape` whose files were read (`files`):
@@ -193,19 +212,74 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
         }
     };
     // The input embeddings llama.cpp keeps in host memory are not on the
-    // card ([`ModelSummary::host_input_bytes`]), unless a tensor override
-    // may have sent them there: llama.cpp applies `-ot` to them too.
+    // card ([`ModelSummary::host_input_bytes`]), and neither are the weights
+    // its tensor overrides keep there (`n_cpu_moe`, [`offload`]); an
+    // override to a device may send the input embeddings to the card after
+    // all, since llama.cpp applies the overrides to them too.
     let mut notes = Vec::new();
-    let weights = if shape.tensors_to_device && s.host_input_bytes > 0 {
+    let host = s.host_input_bytes.min(files.files.main_bytes);
+    // `--n-gpu-layers N` short of all of them leaves the first layers on the
+    // CPU, after every real override ([`offload::Family::Layer`]).
+    let first_gpu = first_gpu_layer(s, &shape.fit);
+    let mut overrides = shape.overrides.clone();
+    if let Some(first) = first_gpu {
+        overrides.push(offload::Override::FirstLayers {
+            flag: format!("--n-gpu-layers {}", shape.fit.gpu_layers.unwrap_or(0)),
+            family: offload::Family::Layer,
+            layers: first,
+        });
         notes.push(format!(
-            "its input embeddings ({}) are charged to the card: a --override-tensor in its \
-             args sends tensors to a device buffer, and llama.cpp applies it to them too",
-            crate::hf::fmt_bytes(s.host_input_bytes)
+            "--n-gpu-layers {} puts {} of its {} layers and the output layer on the card, and \
+             their share of the KV cache{}",
+            shape.fit.gpu_layers.unwrap_or(0),
+            s.block_count.unwrap_or(0).saturating_sub(first),
+            s.block_count.unwrap_or(0),
+            if shape.fit.kv_on_host {
+                " (none: --no-kv-offload keeps it in host memory)"
+            } else {
+                ""
+            }
         ));
-        weights
-    } else {
-        weights.saturating_sub(s.host_input_bytes.min(files.files.main_bytes))
+    }
+    let placed = offload::place(s, &overrides, true, "its");
+    let mut weights = match &placed {
+        Some(p) => {
+            notes.extend(p.notes.iter().cloned());
+            weights
+                .saturating_sub(host)
+                .saturating_add(p.onto_card)
+                .saturating_sub(p.off_card)
+        }
+        None if shape.tensors_to_device && s.host_input_bytes > 0 => {
+            notes.push(format!(
+                "its input embeddings ({}) are charged to the card: a --override-tensor in its \
+                 args sends tensors to a device buffer, and llama.cpp applies it to them too",
+                crate::hf::fmt_bytes(s.host_input_bytes)
+            ));
+            weights
+        }
+        None => weights.saturating_sub(host),
     };
+    let placed = placed.unwrap_or_default();
+    // The expert cache sits on the card beside the weights, while the row
+    // keeps routed experts in host memory ([`offload`]).
+    if shape.moe_cache_mib > 0 {
+        let cache = shape.moe_cache_mib.saturating_mul(1024 * 1024);
+        if placed.experts_off > 0 || placed.experts_unknown {
+            weights = weights.saturating_add(cache);
+            notes.push(format!(
+                "its cache for the experts kept in host memory (--moe-cache-mib {}) is charged \
+                 to the card in full",
+                shape.moe_cache_mib
+            ));
+        } else {
+            notes.push(format!(
+                "--moe-cache-mib {} is not charged: the row keeps no routed experts in host \
+                 memory for it to cache",
+                shape.moe_cache_mib
+            ));
+        }
+    }
     let not_sized = |ctx: Option<u64>, why: String, notes: &[String]| {
         let fp = Footprint::new(weights, 0, ctx, Some(why));
         notes.iter().fold(fp, |fp, n| fp.noting(n.clone()))
@@ -254,13 +328,31 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
         shape.cache_v.as_deref(),
         false,
     );
-    let mut kv = cache_bytes(&layout, &main, bk, bv).saturating_add(recurrent(
-        s,
-        &layout,
-        shape.slots.saturating_mul(1 + shape.rollback),
-        "its",
-        &mut notes,
-    ));
+    // The cache sits with its layer: only the layers on the card count, and
+    // none with `--no-kv-offload`.
+    let on_card = match first_gpu {
+        Some(first) => Layout::of_from(s, first).unwrap_or_else(|_| layout.clone()),
+        None => layout.clone(),
+    };
+    let mut kv = cache_bytes(&on_card, &main, bk, bv)
+        .saturating_add(qsa::cache_bytes(s, &on_card, &main, bk))
+        .saturating_add(recurrent(
+            s,
+            &on_card,
+            shape.slots.saturating_mul(1 + shape.rollback),
+            "its",
+            &mut notes,
+        ));
+    if shape.fit.kv_on_host {
+        if first_gpu.is_none() {
+            notes.push(
+                "--no-kv-offload keeps its KV cache in host memory: none of it is charged to the \
+                 card"
+                    .into(),
+            );
+        }
+        kv = 0;
+    }
     let mut compute = match cc::bytes(s, &layout, &main) {
         Ok(c) => c,
         Err(why) => {
@@ -268,6 +360,22 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
             0
         }
     };
+    // Op offload copies a host-kept weight into a context's compute buffer
+    // when its ubatch reaches the backend's minimum ([`offload`]).
+    let offloads =
+        shape.op_offload && shape.ubatch.min(shape.batch).min(ctx) >= offload::OP_OFFLOAD_MIN_BATCH;
+    let copy = |compute: &mut u64, context: &str, bytes: u64, notes: &mut Vec<String>| {
+        if offloads && bytes > 0 {
+            *compute = compute.saturating_add(bytes);
+            notes.push(offload::copy_note(context, bytes));
+        }
+    };
+    copy(
+        &mut compute,
+        "its main context's",
+        placed.largest_main,
+        &mut notes,
+    );
     let (dk, dv) = (
         shape.draft_cache_k.as_deref(),
         shape.draft_cache_v.as_deref(),
@@ -288,6 +396,12 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
                         notes.push(format!("the MTP context's compute buffer not sized: {why}"))
                     }
                 }
+                copy(
+                    &mut compute,
+                    "the MTP context's",
+                    placed.largest_mtp,
+                    &mut notes,
+                );
             }
             None => notes.push(
                 "spec_type draft-mtp, but the header has no MTP layers (nextn_predict_layers): \
@@ -296,64 +410,88 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
             ),
         },
         Second::Draft { path, block } => match &files.draft {
-            Some(Ok(d)) => match Layout::of(d) {
-                Ok(dl) => {
-                    // A draft model whose every layer reuses the target's
-                    // cache reads that cache, at the target's types.
-                    let shares = d
-                        .shared_kv_layers
-                        .is_some_and(|n| n >= d.block_count.unwrap_or(u64::MAX));
-                    // An EAGLE3 or DFlash drafter is an encoder to llama.cpp
-                    // (`llama_model_has_encoder`), so its context reserves
-                    // an output per batch token (measured: a
-                    // DFlash drafter, 803 MiB of compute at batch 1024);
-                    // a block drafter's otherwise `n_max + 1` per slot.
-                    let outputs = if matches!(d.architecture.as_deref(), Some("dflash" | "eagle3"))
-                    {
-                        shape.batch
-                    } else {
-                        shape
-                            .slots
-                            .saturating_mul(if *block { shape.draft_n_max + 1 } else { 1 })
-                    };
-                    let g = if shares {
-                        graph(
-                            outputs,
-                            shape.cache_k.as_deref(),
-                            shape.cache_v.as_deref(),
-                            false,
-                        )
-                    } else {
-                        let g = graph(outputs, dk, dv, false);
-                        // Its own cache, and a hybrid drafter's recurrent
-                        // state, one per slot (a draft context keeps no
-                        // rollback snapshots).
-                        kv = kv
-                            .saturating_add(cache_bytes(&dl, &g, dbk, dbv))
-                            .saturating_add(recurrent(
-                                d,
-                                &dl,
-                                shape.slots,
-                                "the draft model's",
-                                &mut notes,
-                            ));
-                        g
-                    };
-                    match cc::bytes(d, &dl, &g) {
-                        Ok(c) => compute = compute.saturating_add(c),
-                        Err(why) => {
-                            notes.push(format!("the draft model's compute buffer not sized: {why}"))
+            Some(Ok(d)) => {
+                // The draft model's own overrides keep its weights in host
+                // memory the same way (its input embeddings are charged).
+                let dp = offload::place(d, &shape.draft_overrides, false, "the draft model's")
+                    .unwrap_or_default();
+                weights = weights.saturating_sub(dp.off_card);
+                notes.extend(dp.notes);
+                copy(
+                    &mut compute,
+                    "the draft context's",
+                    dp.largest_main,
+                    &mut notes,
+                );
+                match Layout::of(d) {
+                    Ok(dl) => {
+                        // A draft model whose every layer reuses the target's
+                        // cache reads that cache, at the target's types.
+                        let shares = d
+                            .shared_kv_layers
+                            .is_some_and(|n| n >= d.block_count.unwrap_or(u64::MAX));
+                        // An EAGLE3 or DFlash drafter is an encoder to llama.cpp
+                        // (`llama_model_has_encoder`), so its context reserves
+                        // an output per batch token (measured: a
+                        // DFlash drafter, 803 MiB of compute at batch 1024);
+                        // a block drafter's otherwise `n_max + 1` per slot.
+                        let outputs =
+                            if matches!(d.architecture.as_deref(), Some("dflash" | "eagle3")) {
+                                shape.batch
+                            } else {
+                                shape.slots.saturating_mul(if *block {
+                                    shape.draft_n_max + 1
+                                } else {
+                                    1
+                                })
+                            };
+                        let g = if shares {
+                            graph(
+                                outputs,
+                                shape.cache_k.as_deref(),
+                                shape.cache_v.as_deref(),
+                                false,
+                            )
+                        } else {
+                            let g = graph(outputs, dk, dv, false);
+                            // Its own cache, and a hybrid drafter's recurrent
+                            // state, one per slot (a draft context keeps no
+                            // rollback snapshots).
+                            kv = kv
+                                .saturating_add(cache_bytes(&dl, &g, dbk, dbv))
+                                .saturating_add(recurrent(
+                                    d,
+                                    &dl,
+                                    shape.slots,
+                                    "the draft model's",
+                                    &mut notes,
+                                ));
+                            g
+                        };
+                        match cc::bytes(d, &dl, &g) {
+                            Ok(c) => compute = compute.saturating_add(c),
+                            Err(why) => notes
+                                .push(format!("the draft model's compute buffer not sized: {why}")),
                         }
                     }
+                    Err(why) => notes.push(format!(
+                        "the draft model's KV cache and compute buffer not sized: {why}"
+                    )),
                 }
-                Err(why) => notes.push(format!(
-                    "the draft model's KV cache and compute buffer not sized: {why}"
-                )),
-            },
-            Some(Err(e)) => notes.push(format!(
-                "the draft model's KV cache and compute buffer not sized: '{path}' could not be \
-                 read ({e})"
-            )),
+            }
+            Some(Err(e)) => {
+                notes.push(format!(
+                    "the draft model's KV cache and compute buffer not sized: '{path}' could not \
+                     be read ({e})"
+                ));
+                if !shape.draft_overrides.is_empty() {
+                    notes.push(
+                        "what the draft model's tensor overrides keep in host memory is charged \
+                         to the card: its header was not read"
+                            .into(),
+                    );
+                }
+            }
             None => notes.push(format!(
                 "the draft model's KV cache and compute buffer not sized: '{path}' was not read"
             )),
@@ -361,6 +499,16 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
     }
     let note = (!notes.is_empty()).then(|| notes.join(". "));
     Footprint::new(weights, kv, Some(ctx), note).with_compute(compute)
+}
+
+/// The first layer `fit`'s `--n-gpu-layers` puts on the card when that
+/// leaves some on the CPU: llama.cpp counts the output layer as one more
+/// layer and fills from the back (`i_gpu_start = n_layer + 1 − N`, b12244).
+/// `None` for all of them, auto, or a header without a layer count.
+pub(crate) fn first_gpu_layer(s: &ModelSummary, fit: &shape::Fit) -> Option<u64> {
+    let n = fit.gpu_layers.filter(|n| *n > 0)?;
+    let layers = s.block_count.filter(|b| *b > 0)?;
+    (n <= layers).then(|| layers + 1 - n)
 }
 
 impl PlanCache {
@@ -398,14 +546,25 @@ impl PlanCache {
         );
         let (dir, path) = (models_dir.to_string(), m.gguf_path.clone());
         self.get_or_insert(key, move || {
-            let files = ChatFiles::read(&dir, &path, &companions, draft.as_deref());
+            let files =
+                std::sync::Arc::new(ChatFiles::read(&dir, &path, &companions, draft.as_deref()));
             let fp = footprint(&files, &path, &shape);
             if cpu {
                 // The CPU note replaces the footprint's; a missing part
                 // still stops the load, so it still leads.
                 files.files.flag(cpu_only(fp))
             } else {
-                fp
+                // A row llama.cpp's `--fit` would shrink carries how far
+                // ([`fit`]); admission fits it to the card.
+                let sizer = fit::Sizer::of(files.clone(), &path, &shape);
+                Footprint {
+                    llama: sizer.map(|s| fit::LlamaFit {
+                        sizer: std::sync::Arc::new(s),
+                        target: Default::default(),
+                        fits_card: true,
+                    }),
+                    ..fp
+                }
             }
         })
         .await

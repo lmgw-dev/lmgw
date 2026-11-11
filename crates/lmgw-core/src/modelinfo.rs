@@ -21,7 +21,7 @@ use lmgw_api_types as dto;
 use crate::capabilities::{self, ModelCapabilities};
 use crate::config::{AuxKind, LlamaParams, LocalModel, Snapshot};
 use crate::gguf::{self, ModelSummary};
-use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
+use crate::runtime::aux_models::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store;
@@ -2741,6 +2741,13 @@ async fn image_model_test(
                            sd-server does not refuse it — it dies (design §12.8). An \
                            `edit` row is proven by a real edits request."
                         .to_string(),
+                    warnings: state
+                        .runtime()
+                        .list()
+                        .into_iter()
+                        .find(|v| v.class == Class::Image && v.model_id == model_id)
+                        .map(|v| v.warnings)
+                        .unwrap_or_default(),
                 }));
             }
             Ok(_) => format!(

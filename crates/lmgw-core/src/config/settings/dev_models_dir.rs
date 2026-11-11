@@ -115,6 +115,7 @@ mod tests {
         assert!(dev_models_dir_refusal(true, &data, &root.path().join("data2")).is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_into_another_tree_is_resolved() {
         let root = tempfile::tempdir().unwrap();

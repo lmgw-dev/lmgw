@@ -28,7 +28,6 @@
 //! server's run flags may name a relative bind-mount source that resolves
 //! against it.
 
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 /// A system tool lmgw runs — `podman`, `nvidia-smi`: it inherits no
@@ -55,7 +54,19 @@ pub fn system_tool_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::proce
 /// `close_range(2)` with `CLOSE_RANGE_CLOEXEC` needs Linux 5.11. On an older
 /// kernel the call fails and the child inherits what it would have without
 /// this; the spawn itself goes on.
+///
+/// On Windows this leaves the command as it is: a child there inherits only
+/// the handles marked inheritable, and Rust opens its own handles
+/// non-inheritable (Windows design §4.4); std makes the child's stdio ends
+/// inheritable for the spawn alone, under a lock of its own. A handle
+/// another library made inheritable would still pass (std creates every
+/// process with `bInheritHandles`): a handle list
+/// (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`) keeps it out, and is not set yet,
+/// because std's way to pass one (`spawn_with_attributes`) is unstable as of
+/// Rust 1.99.
+#[cfg(target_os = "linux")]
 pub fn stdio_only(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
     // SAFETY: the closure runs in the forked child before the exec, where
     // only async-signal-safe work is allowed. It makes one raw system call:
     // no allocation, no lock, no memory of the parent's touched.
@@ -72,5 +83,19 @@ pub fn stdio_only(cmd: &mut Command) -> &mut Command {
     }
 }
 
-#[cfg(test)]
+/// Other unix targets (macOS) have no `close_range`-based hygiene yet: the
+/// command is left as it is. std opens its own descriptors close-on-exec, so
+/// only a descriptor another library opened without it can reach the child.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn stdio_only(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+#[cfg(windows)]
+pub fn stdio_only(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+// They read the child's descriptors in /proc.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

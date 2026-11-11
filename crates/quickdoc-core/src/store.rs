@@ -36,8 +36,13 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .max_connections(8)
         .connect_with(opts)
         .await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    migrator().run(&pool).await?;
     Ok(pool)
+}
+
+/// A corpus DB's migrations (`migrations/`).
+pub fn migrator() -> sqlx::migrate::Migrator {
+    sqlx::migrate!("./migrations")
 }
 
 /// How long a connection waits for a lock another connection holds before

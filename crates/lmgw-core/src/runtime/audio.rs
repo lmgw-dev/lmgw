@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::config::{AudioModel, AudioSettings};
+use crate::runtime::argv::EngineView;
 
 mod engine;
 mod stale;
@@ -30,12 +31,17 @@ pub use stale::{recheck_left, stop_stale, LeftStale, Settled};
 
 /// The config file audio.cpp reads, inside the mounted `/config` dir.
 pub const CONFIG_FILE_NAME: &str = "server.json";
-/// audiocpp_server's port inside the container.
-const CONTAINER_PORT: u16 = 8080;
+
+/// [`render_server_config_in`] in a container's view: model paths under
+/// `/models`, listening on `0.0.0.0:8080`.
+pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String {
+    render_server_config_in(s, models, &EngineView::container())
+}
 
 /// Render `server.json` from the class settings and the models it should
-/// serve. Model paths are container paths (`/models/<path>`, or the one
-/// GGUF of several a row's `weight_id` picks there); `load_options`
+/// serve, in `view` (Windows design §4.1). Model paths are the view's
+/// (`/models/<path>` in a container, or the one GGUF of several a row's
+/// `weight_id` picks there), and so are the listen address and port; `load_options`
 /// / `session_options` / `default_request_options` / the voice keys are
 /// omitted when empty so audiocpp's defaults apply.
 ///
@@ -57,7 +63,11 @@ const CONTAINER_PORT: u16 = 8080;
 ///   off.
 /// - `log_request_body` — needs `--log` on the argv as well, and puts prompt
 ///   text in the container log.
-pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String {
+pub fn render_server_config_in(
+    s: &AudioSettings,
+    models: &[AudioModel],
+    view: &EngineView,
+) -> String {
     let models_json: Vec<Value> = models
         .iter()
         .filter(|m| m.enabled)
@@ -68,10 +78,10 @@ pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String 
             let direct = direct_file(s, m);
             let path = match &direct {
                 Some(file) => match m.path.trim_matches('/') {
-                    "" => format!("/models/{file}"),
-                    dir => format!("/models/{dir}/{file}"),
+                    "" => view.model_path(file),
+                    dir => view.model_path(&format!("{dir}/{file}")),
                 },
-                None => format!("/models/{}", m.path.trim_start_matches('/')),
+                None => view.model_path(&m.path),
             };
             let mut o = json!({
                 "id": m.model_id,
@@ -93,8 +103,7 @@ pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String 
             }
             if let Some(spec) = m.model_spec_override.as_deref().map(str::trim) {
                 if !spec.is_empty() {
-                    o["model_spec_override"] =
-                        Value::String(format!("/models/{}", spec.trim_start_matches('/')));
+                    o["model_spec_override"] = Value::String(view.model_path(spec));
                 }
             }
             // `config` / `weight`, not `config_id` / `weight_id`: the server
@@ -134,8 +143,8 @@ pub fn render_server_config(s: &AudioSettings, models: &[AudioModel]) -> String 
         })
         .collect();
     let mut cfg = json!({
-        "host": "0.0.0.0",
-        "port": CONTAINER_PORT,
+        "host": view.listen_host,
+        "port": view.listen_port,
         "backend": s.backend,
         "device": s.device,
         "threads": s.threads,
@@ -218,6 +227,16 @@ pub fn config_dir(data_dir: &Path, model_id: &str) -> PathBuf {
 /// `tests/it/runtime_descriptor.rs`).
 pub fn render_single_model_config(s: &AudioSettings, model: &AudioModel) -> String {
     render_server_config(s, std::slice::from_ref(model))
+}
+
+/// [`render_single_model_config`] in `view`: what a launcher that starts
+/// audio.cpp as a host process writes for it.
+pub fn render_single_model_config_in(
+    s: &AudioSettings,
+    model: &AudioModel,
+    view: &EngineView,
+) -> String {
+    render_server_config_in(s, std::slice::from_ref(model), view)
 }
 
 /// Write one model's `server.json` atomically (tmp + rename inside the

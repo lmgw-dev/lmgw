@@ -122,7 +122,7 @@ fn presented_credential(path: &str, headers: &HeaderMap) -> Option<&'static str>
     if headers.contains_key("x-lmgw-admin-token") {
         return Some("an x-lmgw-admin-token header");
     }
-    if crate::principal::session_cookie(headers).is_some() {
+    if crate::principal::any_session_cookie(headers).is_some() {
         return Some("the session cookie");
     }
     if crate::realtime::subprotocol_key(path, headers).is_some() {

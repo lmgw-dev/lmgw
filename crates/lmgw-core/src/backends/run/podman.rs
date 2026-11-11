@@ -303,9 +303,18 @@ fn dir_size(dir: &Path) -> u64 {
 /// The real (host) uid podman/buildah run as — never the 0:0 a cache mount's
 /// own uid/gid default to inside the build, which is what
 /// [`tags::cache_mount_dir_name`] hashes.
-pub(crate) fn real_uid() -> u32 {
+#[cfg(unix)]
+pub(crate) fn real_uid() -> Option<u32> {
     // SAFETY: `getuid()` takes no arguments and always succeeds.
-    unsafe { libc::getuid() }
+    Some(unsafe { libc::getuid() })
+}
+
+/// Windows has no uid, so there is none to name: `None`. The paths built from
+/// it (the build lock, buildah's cache root) are not computed there; each
+/// caller refuses or skips with its own note (Windows design §3.1).
+#[cfg(not(unix))]
+pub(crate) fn real_uid() -> Option<u32> {
+    None
 }
 
 /// Buildah's cache-mount root on this host: `/var/tmp/buildah-cache-<uid>`
@@ -467,7 +476,8 @@ pub(crate) fn build_argv(c: &BuildCommand<'_>) -> Vec<String> {
     argv
 }
 
-#[cfg(test)]
+// Podman's and buildah's paths and permission bits.
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -589,7 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_cache_dir_falls_back_to_unshare_rm_when_plain_removal_is_refused() {
-        if real_uid() == 0 {
+        if real_uid() == Some(0) {
             eprintln!("skipped: root ignores the permission bits this test relies on");
             return;
         }

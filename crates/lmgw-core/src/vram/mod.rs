@@ -59,10 +59,14 @@ pub mod attribution;
 mod background;
 mod climb;
 pub(crate) mod compute;
+mod fit_vocab;
+pub mod headroom;
 pub mod nvml;
+pub mod partial;
 pub mod peak;
 pub mod plan;
 pub mod residency;
+pub mod wddm;
 
 pub use background::{join, start_background, BackgroundStart, Restart};
 pub use climb::{climb, climb_for, Climbed};

@@ -667,12 +667,16 @@ pub(super) fn listener_words(s: &DeviceListenerStatus) -> (String, Tone) {
     }
 }
 
-/// The CA's key mode and state in words.
-pub(super) fn ca_words(state: DeviceCaState, wrapped: Option<bool>) -> &'static str {
-    match (state, wrapped) {
-        (DeviceCaState::Missing, _) => "not made yet",
-        (_, Some(true)) => "key wrapped in the Secret Service",
-        (_, Some(false)) => "key plain (no Secret Service at its start)",
+/// The CA's key mode and state in words; `server`, lmgw in the server
+/// image, where the key is wrapped under the server's wrapping key secret
+/// rather than the Secret Service (headless server design §9).
+pub(super) fn ca_words(state: DeviceCaState, wrapped: Option<bool>, server: bool) -> &'static str {
+    match (state, wrapped, server) {
+        (DeviceCaState::Missing, _, _) => "not made yet",
+        (_, Some(true), false) => "key wrapped in the Secret Service",
+        (_, Some(false), false) => "key plain (no Secret Service at its start)",
+        (_, Some(true), true) => "key wrapped under the server's wrapping key secret",
+        (_, Some(false), true) => "key plain (no wrapping key secret at the server's start)",
         _ => "",
     }
 }
@@ -1314,7 +1318,17 @@ mod tests {
             listener_words(&DeviceListenerStatus::default()).1,
             Tone::Off
         );
-        assert!(ca_words(DeviceCaState::Ready, Some(true)).contains("wrapped"));
-        assert!(ca_words(DeviceCaState::Ready, Some(false)).contains("plain"));
+        assert!(ca_words(DeviceCaState::Ready, Some(true), false).contains("Secret Service"));
+        assert!(ca_words(DeviceCaState::Ready, Some(false), false).contains("plain"));
+        // The server image words its own store, never the desktop's wallet.
+        for wrapped in [true, false] {
+            let w = ca_words(DeviceCaState::Stored, Some(wrapped), true);
+            assert!(
+                w.contains("wrapping key secret") && !w.contains("Secret Service"),
+                "{w}"
+            );
+        }
+        assert!(ca_words(DeviceCaState::Ready, Some(true), true).contains("wrapped"));
+        assert!(ca_words(DeviceCaState::Ready, Some(false), true).contains("plain"));
     }
 }

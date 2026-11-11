@@ -15,7 +15,7 @@ use crate::state::SharedState;
 use super::background::{self, Restart};
 use super::download::Engine;
 use super::ledger::Ledger;
-use super::scheduler::{Waiter, CONTROL_TIMEOUT, MIB, POLL};
+use super::scheduler::{Waiter, CONTROL_TIMEOUT, POLL};
 use super::stage_watch::WaitPhase;
 use super::stall::{evicting_stage, waiting_stage};
 use super::{
@@ -297,11 +297,12 @@ impl VramScheduler {
         if self.is_up(state, &target) {
             return Fit::Go(StartPermit { _reservation: None });
         }
+        self.read_fit_vocab(state, snap, &target).await;
         let Some(fp) = self.footprint(snap, class, model_id).await else {
             return Fit::Unchecked;
         };
-        let headroom = snap.settings.vram.headroom_mb.saturating_mul(MIB);
-        let needs = fp.total_bytes.saturating_add(headroom);
+        let headroom = self.start_headroom(snap, class, model_id, &fp);
+        let margin = self.start_margin(snap, class, model_id, &fp);
 
         let _gate = self.ask_gate().await;
         let l = self.ledger(state, snap).await;
@@ -318,24 +319,42 @@ impl VramScheduler {
         let Some(cap) = l.capacity.as_ref() else {
             return Fit::Unchecked;
         };
-        if needs > cap.total {
+        // A row llama.cpp's `--fit` would shrink, fitted to what this
+        // reading's card can give it (`partial::llama`).
+        let fp = self.fit_in(snap, &target, fp, &l);
+        let needs = fp.total_bytes.saturating_add(headroom);
+        // A pipeline that can run with less on the card is never too large
+        // for it (`partial`). Too large is judged without the learned
+        // growth, which only decides whether there is room now (`headroom`).
+        let structural = self.card_headroom(snap, class, model_id, &fp);
+        if fp.total_bytes.saturating_add(structural) > cap.total && !super::partial::adapts(&fp) {
             return Fit::Full(format!(
-                "'{model_id}' needs {} plus {} headroom and the GPU holds {} in total",
+                "'{model_id}' needs {} plus {} headroom and the GPU holds {} in total{}",
                 fmt_bytes(fp.total_bytes),
-                fmt_bytes(headroom),
-                fmt_bytes(cap.total)
+                fmt_bytes(structural),
+                fmt_bytes(cap.total),
+                super::partial::too_large_hint(snap, &target, &fp)
             ));
         }
-        if cap.free < needs {
+        // The whole where it fits, else what `partial` gives it. This start
+        // never evicts, so anything else of lmgw's on the card is something
+        // it could wait for; with nothing of lmgw's there, the learned
+        // growth is no reason not to start (`room_now`).
+        let room = self.room_now(snap, &l, &target, (headroom, margin), false);
+        let Some(grant) = super::partial::decide(&target, &fp, room) else {
             return Fit::Full(format!(
-                "'{model_id}' needs {} and only {} is free — {}",
+                "'{model_id}' needs {} and only {} is free — {}{}",
                 fmt_bytes(needs),
                 fmt_bytes(cap.free),
-                describe_holders(&l)
+                describe_holders(&l),
+                super::partial::why_not(&fp, room)
+                    .map(|w| format!("; {w}"))
+                    .unwrap_or_default()
             ));
-        }
+        };
+        let grant = self.note_growth(&target, grant, (headroom, margin), cap.free);
         Fit::Go(StartPermit {
-            _reservation: Some(self.reserve(state, &target, fp.total_bytes)),
+            _reservation: Some(self.reserve_as(state, &target, grant)),
         })
     }
 
@@ -352,15 +371,14 @@ impl VramScheduler {
         alias: &str,
         fallback: Option<&mut ExternalFallback<'_>>,
     ) -> Result<Decided, GatewayError> {
+        self.read_fit_vocab(state, snap, target).await;
         let Some(fp) = self.footprint(snap, target.class, &target.model_id).await else {
             return Ok(Decided::Go(None));
         };
-        let vs = &snap.settings.vram;
-        let headroom = vs.headroom_mb.saturating_mul(MIB);
-        let needs = fp.total_bytes.saturating_add(headroom);
+        let headroom = self.start_headroom(snap, target.class, &target.model_id, &fp);
 
         // Is there anything to decide against at all?
-        {
+        let (fp, needs) = {
             let l = self.ledger(state, snap).await;
             let Some(cap) = l.capacity.as_ref() else {
                 tracing::debug!(
@@ -369,17 +387,28 @@ impl VramScheduler {
                 );
                 return Ok(Decided::Go(None));
             };
+            // A row llama.cpp's `--fit` would shrink, fitted to what this
+            // reading's card can give it (`partial::llama`); fitted again
+            // on every reading of the wait (`Self::decide`).
+            let fp = self.fit_in(snap, target, fp, &l);
+            let needs = fp.total_bytes.saturating_add(headroom);
             // A model bigger than the GPU never becomes admissible, however
-            // long it waits, so it is refused here rather than queued forever.
-            if needs > cap.total {
+            // long it waits, so it is refused here rather than queued forever
+            // — unless it can run with less on the card, which admission
+            // then gives it (`partial`). Judged without the learned growth,
+            // which only decides whether there is room now (`headroom`).
+            let structural = self.card_headroom(snap, target.class, &target.model_id, &fp);
+            if fp.total_bytes.saturating_add(structural) > cap.total && !super::partial::adapts(&fp)
+            {
                 return Err(GatewayError::VramTooLarge {
                     model: target.model_id.clone(),
-                    need: fmt_bytes(fp.total_bytes),
-                    headroom: fmt_bytes(headroom),
+                    need: GatewayError::vram_need(fp.total_bytes, structural),
                     capacity: fmt_bytes(cap.total),
+                    hint: super::partial::too_large_hint(snap, target, &fp),
                 });
             }
-        }
+            (fp, needs)
+        };
 
         let started = Instant::now();
         let queued = self.enqueue(
@@ -405,14 +434,7 @@ impl VramScheduler {
         broadcast(state);
         let result = self
             .decide(
-                state,
-                snap,
-                target,
-                alias,
-                (fp.total_bytes, needs),
-                queued.id,
-                started,
-                fallback,
+                state, snap, target, alias, &fp, queued.id, started, fallback,
             )
             .await;
         drop(queued);
@@ -434,8 +456,16 @@ impl VramScheduler {
     /// With a `fallback` still usable, every pass of the wait — behind the
     /// gate, and for room once it holds it — takes §4.7's verdict again
     /// ([`Self::recheck`]); `External` leaves the queue (the caller drops the
-    /// waiter) with nothing reserved. `(bytes, needs)`: the footprint, and it
-    /// plus the headroom.
+    /// waiter) with nothing reserved. `base`: the footprint, fitted again on
+    /// every reading of the card where llama.cpp's `--fit` would shrink it
+    /// ([`Self::fit_in`]).
+    ///
+    /// **Learned growth decides waiting** (`headroom`): a start waits for,
+    /// and evicts, lmgw's own models until its footprint and its headroom —
+    /// the learned growth and its margin — are free. Once nothing of lmgw's
+    /// is left to wait for or evict, it goes ahead wherever it fits with its
+    /// margin alone, with a warning that names the growth
+    /// ([`Self::note_growth`]).
     #[allow(clippy::too_many_arguments)]
     async fn decide(
         &self,
@@ -443,7 +473,7 @@ impl VramScheduler {
         snap: &Snapshot,
         target: &Target,
         alias: &str,
-        (bytes, needs): (u64, u64),
+        base: &super::Footprint,
         waiter_id: u64,
         started: Instant,
         mut fallback: Option<&mut ExternalFallback<'_>>,
@@ -473,12 +503,16 @@ impl VramScheduler {
             }
         };
 
+        let headroom = self.start_headroom(snap, target.class, &target.model_id, base);
+        let margin = self.start_margin(snap, target.class, &target.model_id, base);
         self.set_phase(waiter_id, WaitPhase::Measuring, None);
         // Held from the first look that does not fit until this returns,
         // however it returns (candidate-aliases §4.5, §12 entry 47).
         let mut drain = None;
         // One reconciliation pass per wait, at its first dead end (`stall`).
         let mut looked = false;
+        // Why a pipeline that can run with less still waits, logged once.
+        let mut said_why = false;
         loop {
             // Switched on while this request waited — the hold, or a
             // benchmark's lease (benchmark design §3.2): nothing new goes on
@@ -507,9 +541,25 @@ impl VramScheduler {
                 return Ok(Decided::Go(None));
             }
 
+            // Fitted to what this reading's card can give it: lmgw's own
+            // models counted as room, so evicting them changes nothing,
+            // and with none left the target is what is free beside its
+            // margin (`partial::llama`).
+            let fitted = self.fit_in(snap, target, base.clone(), &l);
+            let fp = &fitted;
+            let needs = fp.total_bytes.saturating_add(headroom);
+            self.set_needs(waiter_id, needs);
             if cap.free >= needs {
                 self.set_phase(waiter_id, WaitPhase::Starting, None);
-                return Ok(Decided::Go(Some(self.reserve(state, target, bytes))));
+                let room = super::partial::Room {
+                    free: cap.free,
+                    headroom,
+                    others_hold: others_hold(&l, target),
+                    fallback: fallback.as_ref().is_some_and(|f| f.live()),
+                    cards: self.cards_for(snap, target),
+                };
+                let grant = super::partial::whole(target, fp, room);
+                return Ok(Decided::Go(Some(self.reserve_as(state, target, grant))));
             }
 
             if budget.is_some_and(|d| started.elapsed() >= d) {
@@ -558,6 +608,37 @@ impl VramScheduler {
                 };
                 // Measured again whatever the pass found: the gate was let go.
                 continue;
+            }
+            // Nothing more can be made free now. With nothing of lmgw's
+            // left on the card, the learned growth is no reason to wait any
+            // longer: a start that fits beside what other programs hold now
+            // with its margin goes ahead, warned (`room_now`). Else a
+            // pipeline that can run with less on the card goes ahead with
+            // what `partial` gives it — its on-card part, or what is free
+            // where that leaves the working budget it has rendered with;
+            // short of that, only when nothing else of lmgw's could be
+            // waited for and no fallback would answer instead.
+            let room = self.room_now(
+                snap,
+                &l,
+                target,
+                (headroom, margin),
+                fallback.as_ref().is_some_and(|f| f.live()),
+            );
+            if let Some(grant) = super::partial::decide(target, fp, room) {
+                let grant = self.note_growth(target, grant, (headroom, margin), cap.free);
+                self.set_phase(waiter_id, WaitPhase::Starting, None);
+                return Ok(Decided::Go(Some(self.reserve_as(state, target, grant))));
+            }
+            if !said_why {
+                if let Some(why) = super::partial::why_not(fp, room) {
+                    said_why = true;
+                    tracing::info!(
+                        "{}/{} waits for room: {why}",
+                        target.class.as_str(),
+                        target.model_id
+                    );
+                }
             }
             self.set_phase(
                 waiter_id,
@@ -935,6 +1016,88 @@ pub(crate) fn broadcast(state: &SharedState) {
         let view = st.vram.view(&st).await;
         st.telemetry.vram(view);
     });
+}
+
+/// Something of lmgw's other than `target` is on the card or reserved for
+/// it: a wait could free it (`partial::Room::others_hold`).
+pub(super) fn others_hold(l: &Ledger, target: &Target) -> bool {
+    l.residents
+        .iter()
+        .any(|r| !(r.container == target.class && r.model == target.model_id))
+}
+
+/// What lmgw's own models other than `target` on the card are charged, which
+/// a wait or an eviction frees: each its charge and the peak kept free for
+/// it, as `beside` counts what evicting one gives back. A reservation (a
+/// start another admission decided) is no victim and is not counted.
+pub(super) fn freeable(l: &Ledger, target: &Target) -> u64 {
+    l.residents
+        .iter()
+        .filter(|r| !(r.container == target.class && r.model == target.model_id))
+        .filter(|r| r.state != "reserved")
+        .map(|r| {
+            r.estimated_bytes
+                .saturating_add(r.peak_extra_bytes.unwrap_or(0))
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
+impl VramScheduler {
+    /// The room a start decides in once nothing more can be made free, on
+    /// ledger `l` (per-model containers §4, "Learned growth decides
+    /// waiting"): kept free beside it is its `headroom` — the learned growth
+    /// and its margin — while anything of lmgw's is on the card that a wait
+    /// could free; with nothing of lmgw's left, only its `margin`, so a start
+    /// that fits beside what other programs hold now goes ahead
+    /// ([`Self::note_growth`] says so).
+    pub(super) fn room_now(
+        &self,
+        snap: &Snapshot,
+        l: &Ledger,
+        target: &Target,
+        (headroom, margin): (u64, u64),
+        fallback: bool,
+    ) -> super::partial::Room {
+        let others = others_hold(l, target);
+        super::partial::Room {
+            free: l.capacity.as_ref().map_or(0, |c| c.free),
+            headroom: if others { headroom } else { margin },
+            others_hold: others,
+            fallback,
+            cards: self.cards_for(snap, target),
+        }
+    }
+
+    /// `grant`, with the warning of a start that goes ahead without the
+    /// learned growth kept free beside it where it does
+    /// ([`Self::growth_let_go`]).
+    pub(super) fn note_growth(
+        &self,
+        target: &Target,
+        grant: super::partial::Grant,
+        kept: (u64, u64),
+        free: u64,
+    ) -> super::partial::Grant {
+        use super::partial::Grant;
+        let bytes = match &grant {
+            Grant::Whole(b) | Grant::Noted(b, _) => *b,
+            Grant::Partial(g) => g.bytes,
+        };
+        let Some(note) = self.growth_let_go(target, bytes, kept, free) else {
+            return grant;
+        };
+        match grant {
+            Grant::Whole(b) => Grant::Noted(b, note),
+            Grant::Noted(b, n) => Grant::Noted(b, format!("{n}. {note}")),
+            Grant::Partial(mut g) => {
+                g.warning = match g.warning.is_empty() {
+                    true => note,
+                    false => format!("{}. {note}", g.warning),
+                };
+                Grant::Partial(g)
+            }
+        }
+    }
 }
 
 /// What is holding the GPU, for a refusal message. A timeout that only says

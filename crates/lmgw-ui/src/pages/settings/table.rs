@@ -11,7 +11,7 @@ use super::*;
 pub(super) const CATS: &[(&str, &str, &str)] = &[
     (
         "network",
-        "Network & access",
+        labels::NETWORK,
         "where the gateway listens and who may call it",
     ),
     (
@@ -65,6 +65,12 @@ pub(super) const CATS: &[(&str, &str, &str)] = &[
         "Appearance",
         "this window only — not a gateway setting",
     ),
+    (
+        "about",
+        "About",
+        "how this lmgw was started and, in the server image, its stop budget, updates and \
+         database copies",
+    ),
 ];
 pub(super) const CAT_SLUGS: &[&str] = &[
     "network",
@@ -79,6 +85,7 @@ pub(super) const CAT_SLUGS: &[&str] = &[
     "docs",
     "tokens",
     "appearance",
+    "about",
 ];
 
 /// A card within a category. `fold` makes it a collapsible [`Section`]
@@ -130,9 +137,11 @@ const fn class_group(
 }
 
 pub(super) const GROUPS: &[Group] = &[
-    g("network", "listen", "Gateway"),
+    g("network", "listen", labels::GATEWAY),
+    g("network", "tls", labels::TLS),
+    g("network", "accounts", labels::ACCOUNTS),
     g("network", "access", "Access"),
-    g("network", "devices", "Devices"),
+    g("network", "devices", labels::DEVICES),
     g("retention", "logs", "Request log"),
     g("retention", "jobs", "Job history"),
     g("retention", "chat", "Chat threads"),
@@ -185,7 +194,7 @@ pub(super) const GROUPS: &[Group] = &[
     g("realtime", "rt-barge", "Barge-in"),
     g("realtime", "rt-output", "Output"),
     g("realtime", "rt-limits", "Connection"),
-    g("realtime", "rt-webrtc", "WebRTC calls"),
+    g("realtime", "rt-webrtc", labels::WEBRTC_CALLS),
     g("agents", "agent-containers", "Agent containers"),
     g("agents", "tool-loop", "Responses tool loop"),
     g("agents", "mcp", "MCP"),
@@ -194,6 +203,7 @@ pub(super) const GROUPS: &[Group] = &[
     g("tokens", "tokens", "Tokens"),
     g("tokens", "updates", "Updates"),
     g("appearance", "window", "This window"),
+    g("about", "about", "This lmgw"),
 ];
 
 /// How wide a field's cell wants to be: numbers, words, paths.
@@ -239,6 +249,12 @@ pub(super) enum Ctl {
     ForgeTokens,
     /// The builds directory, with the path in use now and the tmpfs warning.
     BuildsDir,
+    /// A sentence the server works out, read from this `SettingsFull`
+    /// pointer (`/headroom_now/sentence`): never part of the draft.
+    Said(&'static str),
+    /// Forget auto headroom's learned growth (`headroom_forget`), behind a
+    /// confirmation: never part of the draft.
+    HeadroomForget,
     /// A default prompt: prose in a tall box, and a Reset that puts the
     /// built-in text back — the server's `…_builtin` at this `SettingsFull`
     /// pointer.
@@ -288,6 +304,17 @@ pub(super) enum Ctl {
     /// The WebRTC listener line, the firewall hint and the live calls —
     /// read, never part of the draft ([`webrtc::WebRtcPanel`]).
     WebRtc,
+    /// The TLS listener as it runs: its certificate, what it does not
+    /// cover, a failed reload — read, never part of the draft
+    /// ([`tls::TlsPanel`]).
+    TlsStatus,
+    /// Accounts: the desktop's switch, the banner and the accounts with
+    /// their sessions — ops, never part of the draft
+    /// ([`accounts::AccountsPanel`]).
+    Accounts,
+    /// The audit log's list ([`accounts::AuditPanel`]): an op, never part
+    /// of the draft.
+    AuditLog,
     Apply(&'static str),
     CheckNow,
     Theme,
@@ -302,6 +329,9 @@ pub(super) enum Ctl {
     MediaModel(lmgw_api_types::chat_media::MediaField),
     /// The default voice, from the voices of the drafted speech model.
     MediaVoice,
+    /// This lmgw's version, data dir, deployment and stop budget — read,
+    /// never part of the draft ([`about::AboutPanel`]).
+    About,
 }
 
 impl Ctl {
@@ -340,8 +370,14 @@ impl Ctl {
             | Ctl::Scale
             | Ctl::Link(_)
             | Ctl::Budget
+            | Ctl::Said(_)
+            | Ctl::HeadroomForget
             | Ctl::DeviceListener
-            | Ctl::WebRtc => return None,
+            | Ctl::WebRtc
+            | Ctl::TlsStatus
+            | Ctl::Accounts
+            | Ctl::AuditLog
+            | Ctl::About => return None,
         })
     }
 }
@@ -432,6 +468,10 @@ pub(super) const PDF_MODES: &[(&str, &str)] = &[
 pub(super) const CATALOG_REVISIONS: &[(&str, &str)] = &[
     ("pinned", "the commit the spec pins"),
     ("latest", "latest (main)"),
+];
+pub(super) const HEADROOM_MODES: &[(&str, &str)] = &[
+    ("auto", "learned from this computer"),
+    ("fixed", "the fixed amount below"),
 ];
 pub(super) const BACKENDS: &[(&str, &str)] = &[
     ("cuda", "cuda"),

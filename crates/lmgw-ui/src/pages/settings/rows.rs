@@ -4,11 +4,17 @@ use super::*;
 
 pub(super) const COMMON: &[Def] = &[
     // Network & access
-    f("network", "listen", "bind_addr", "Bind address", Ctl::Mono)
-        .req()
-        .unit("restart to apply")
-        .ph("127.0.0.1:8787")
-        .terms("listen port host interface"),
+    f(
+        "network",
+        "listen",
+        "bind_addr",
+        labels::BIND_ADDRESS,
+        Ctl::Mono,
+    )
+    .req()
+    .unit(RESTART_UNIT)
+    .ph("127.0.0.1:8787")
+    .terms("listen port host interface"),
     f(
         "network",
         "listen",
@@ -264,14 +270,40 @@ pub(super) const COMMON: &[Def] = &[
     f(
         "gpu",
         "admission",
-        "vram.headroom_mb",
+        "vram.headroom_mode",
         "Headroom",
+        Ctl::Choice(HEADROOM_MODES),
+    )
+    .hint("room kept free for other programs and for models still starting")
+    .terms("vram auto fixed headroom"),
+    f(
+        "gpu",
+        "admission",
+        "vram.headroom_mb",
+        "Fixed headroom",
         Ctl::Int(0),
     )
     .s()
     .unit("MiB")
-    .hint("kept free above the GGUF estimate")
+    .hint("used when fixed, and by auto until it has learned enough")
     .terms("vram"),
+    f(
+        "gpu",
+        "admission",
+        "headroom_now.sentence",
+        "Headroom now",
+        Ctl::Said("/headroom_now/sentence"),
+    )
+    .terms("vram auto headroom learned"),
+    f(
+        "gpu",
+        "admission",
+        "headroom_now.forget",
+        "Learned growth",
+        Ctl::HeadroomForget,
+    )
+    .hint("for a growth a one-off taught, such as a game run without the hold")
+    .terms("vram auto headroom learned forget game"),
     f(
         "gpu",
         "admission",

@@ -358,8 +358,9 @@ async fn open(
         urls: device.map(|k| k.link.urls.clone()).unwrap_or_default(),
         cert: device.and_then(|k| cert_of(&k.link)),
         dashboard_url: device.and_then(|k| {
-            crate::net::dashboard_url(
-                &settings.bind_addr,
+            crate::net::device_dashboard_url(
+                settings,
+                snap.serving_tls.as_ref(),
                 k.link.local_only,
                 ctx.conn.as_ref().map(|c| c.local.ip()),
             )

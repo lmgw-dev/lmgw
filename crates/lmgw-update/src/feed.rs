@@ -7,10 +7,10 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::manifest::{is_newer, ReleaseManifest, RpmArtifact, UpdateInfo};
+use crate::manifest::{is_newer, Artifact, ReleaseManifest, UpdateInfo};
 
 /// An update feed: the manifest's URL and the auth every request to its
-/// origin (the manifest, and the RPM it names when that is on the same
+/// origin (the manifest, and the installer it names when that is on the same
 /// origin) carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Feed {
@@ -44,8 +44,8 @@ impl fmt::Debug for FeedAuth {
 impl FeedAuth {
     /// Attach the auth header, if any, to a GET of `target`, but only when
     /// `target` has the same origin (scheme, host, port) as the feed's own
-    /// `feed_url`. The RPM URL is data from the feed and must not steer the
-    /// token to another host. An unparseable URL gets no header.
+    /// `feed_url`. An installer's URL is data from the feed and must not steer
+    /// the token to another host. An unparseable URL gets no header.
     fn apply(
         &self,
         req: reqwest::RequestBuilder,
@@ -83,7 +83,7 @@ pub enum Error {
     Http(reqwest::Error),
     /// Writing the download.
     Io(std::io::Error),
-    /// The downloaded RPM's hash is not the manifest's; the file is removed.
+    /// The downloaded file's hash is not the manifest's; the file is removed.
     Sha256Mismatch { expected: String, got: String },
 }
 
@@ -143,24 +143,26 @@ pub async fn check(
     }))
 }
 
-/// Stream the RPM to `dest` (with the feed's auth when `rpm.url` is on the
-/// feed's origin, without it otherwise), verifying the manifest
-/// sha256 when present. On a hash mismatch the partial file is removed so a
-/// retry re-downloads cleanly.
+/// Stream `artifact` (the RPM or the Windows installer) to `dest` (with the
+/// feed's auth when its URL is on the feed's origin, without it otherwise),
+/// verifying the manifest sha256 when present. On a hash mismatch the file is
+/// removed so a retry re-downloads cleanly.
 ///
-/// `dest` is the caller's path, never one built from `rpm.file` (see the crate
-/// docs). It is created fresh: `O_EXCL | O_NOFOLLOW`, mode 0600. A file or a
+/// `dest` is the caller's path, never one built from `artifact.file` (see the
+/// crate docs). It is created fresh: `O_EXCL | O_NOFOLLOW`, mode 0600. A file or a
 /// symlink already there is unlinked first (the link itself, never what it
 /// points at), so a leftover of an earlier run does not block a retry, and a
 /// link planted in between is refused by the exclusive create instead of
 /// followed. Put it in a directory only the user can write ([`crate::private_dir`]).
-pub async fn download_rpm(
+pub async fn download(
     http: &reqwest::Client,
     feed: &Feed,
-    rpm: &RpmArtifact,
+    artifact: &Artifact,
     dest: &Path,
 ) -> Result<(), Error> {
-    let req = feed.auth.apply(http.get(&rpm.url), &feed.url, &rpm.url);
+    let req = feed
+        .auth
+        .apply(http.get(&artifact.url), &feed.url, &artifact.url);
     let mut resp = req.send().await?.error_for_status()?;
 
     let mut file = create_fresh(dest).await?;
@@ -170,13 +172,16 @@ pub async fn download_rpm(
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
+    // Closed before a mismatch removes it: Windows deletes no file that is
+    // still open without delete sharing.
+    drop(file);
 
-    if !rpm.sha256.is_empty() {
+    if !artifact.sha256.is_empty() {
         let got = hex::encode(hasher.finalize());
-        if !got.eq_ignore_ascii_case(rpm.sha256.trim()) {
+        if !got.eq_ignore_ascii_case(artifact.sha256.trim()) {
             let _ = tokio::fs::remove_file(dest).await;
             return Err(Error::Sha256Mismatch {
-                expected: rpm.sha256.clone(),
+                expected: artifact.sha256.clone(),
                 got,
             });
         }
@@ -185,6 +190,29 @@ pub async fn download_rpm(
 }
 
 /// Create `dest` for writing as a new file, 0600, never through a symlink.
+///
+/// On Windows: a new file with the private descriptor ([`lmgw_private::create_new_file`]:
+/// `CREATE_NEW`, no link followed, only this user, `SYSTEM` and the Administrators let in), after
+/// the same unlink of what is there.
+#[cfg(windows)]
+async fn create_fresh(dest: &Path) -> std::io::Result<tokio::fs::File> {
+    let create = |dest: std::path::PathBuf| async move {
+        tokio::task::spawn_blocking(move || lmgw_private::create_new_file(&dest))
+            .await
+            .map_err(std::io::Error::other)?
+    };
+    let file = match create(dest.to_path_buf()).await {
+        // A leftover, or a link: removed as itself, never what it points at.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tokio::fs::remove_file(dest).await?;
+            create(dest.to_path_buf()).await?
+        }
+        other => other?,
+    };
+    Ok(tokio::fs::File::from_std(file))
+}
+
+#[cfg(unix)]
 async fn create_fresh(dest: &Path) -> std::io::Result<tokio::fs::File> {
     let open = || {
         let mut opts = tokio::fs::OpenOptions::new();

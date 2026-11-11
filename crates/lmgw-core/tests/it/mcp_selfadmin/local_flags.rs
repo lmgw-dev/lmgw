@@ -245,6 +245,59 @@ async fn kv_unified_round_trips_through_clear_and_the_command_line() {
     assert!(!cmd.contains("kv-unified"), "{cmd}");
 }
 
+/// `n_cpu_moe` round-trips through `lmgw__local_model_get`, reaches the
+/// command line as `--n-cpu-moe`, clears, and a negative count is refused.
+#[tokio::test]
+async fn n_cpu_moe_round_trips_and_a_negative_count_is_refused() {
+    let state = state_with_mode(SelfAdmin::Full).await;
+    let base = serve_with(state.clone()).await;
+    let sid = initialize(&base).await;
+    let (b, i) = (base.as_str(), sid.as_str());
+    let get = || async move {
+        payload(&call(b, i, "lmgw__local_model_get", json!({ "model_id": "moe" })).await)
+    };
+
+    let created = call(
+        &base,
+        &sid,
+        "lmgw__local_model_set",
+        json!({ "action": "create", "model_id": "moe", "gguf_path": "moe.gguf", "n_cpu_moe": 41, "moe_cache_mib": 6144 }),
+    )
+    .await;
+    assert!(!is_error(&created), "create failed: {}", text_of(&created));
+    let got = get().await;
+    assert_eq!(got["params"]["n_cpu_moe"], 41);
+    let cmd = got["command_line"].as_str().unwrap();
+    assert!(cmd.contains("--n-cpu-moe 41"), "{cmd}");
+    assert_eq!(got["params"]["moe_cache_mib"], 6144);
+    assert!(cmd.contains("--moe-cache-mib 6144"), "{cmd}");
+
+    let refused = call(
+        &base,
+        &sid,
+        "lmgw__local_model_set",
+        json!({ "action": "update", "model_id": "moe", "n_cpu_moe": -1 }),
+    )
+    .await;
+    assert!(is_error(&refused), "{}", text_of(&refused));
+    assert!(
+        text_of(&refused).contains("n_cpu_moe"),
+        "{}",
+        text_of(&refused)
+    );
+
+    call(
+        &base,
+        &sid,
+        "lmgw__local_model_set",
+        json!({ "action": "update", "model_id": "moe", "clear": "n_cpu_moe" }),
+    )
+    .await;
+    let got = get().await;
+    assert!(got["params"]["n_cpu_moe"].is_null(), "{got}");
+    assert!(!got["command_line"].as_str().unwrap().contains("n-cpu-moe"));
+}
+
 /// Decision D2 (unified-KV design §3.3): an explicitly shared pool with more
 /// than one effective slot and no `n_predict` has no bound to guard, so the
 /// save is refused rather than silently left unguarded — both with an

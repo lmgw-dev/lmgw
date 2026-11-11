@@ -18,21 +18,39 @@
 //! The one exception is `tests/trace_span.rs`, which installs a process-global
 //! `tracing` subscriber and so needs a process of its own; see its header.
 
+mod accounts;
 mod common;
 mod support;
 
+// Windows' wrapping-key store and private files (Windows design §4.4, WP6).
+#[cfg(windows)]
+mod credential_manager;
+#[cfg(windows)]
+mod private_files_windows;
+
 mod agent_stopped_rows;
 mod agents_catalog;
+// Real podman-shaped children, signals and modes.
+#[cfg(unix)]
 mod agents_container;
 mod agents_ledger;
 mod agents_ops_wire;
+// Starts agents, which are not on Windows (Windows design §4.5): their
+// private run dir is Unix's.
+#[cfg(unix)]
 mod agents_package;
 mod agents_run_meters;
 mod agents_run_responses;
 mod agents_runs;
 mod agents_script;
 mod agents_self_view;
+// Starts agents, which are not on Windows (Windows design §4.5): their
+// private run dir is Unix's.
+#[cfg(unix)]
 mod agents_service;
+// Starts agents, which are not on Windows (Windows design §4.5): their
+// private run dir is Unix's.
+#[cfg(unix)]
 mod agents_service_wire;
 mod agents_wire;
 mod anthropic_beta;
@@ -64,6 +82,7 @@ mod audio_streaming;
 mod audio_transcripts;
 mod audio_voicedesign;
 mod audio_voices_native;
+mod audit;
 mod aux_hoist;
 mod aux_models;
 mod aux_plan_batches;
@@ -73,6 +92,8 @@ mod backends_forge;
 mod backends_git;
 mod backends_ops;
 mod backends_registry_live;
+// Engine builds run on Linux only so far.
+#[cfg(unix)]
 mod backends_run;
 mod backends_updates;
 mod background_admission;
@@ -146,6 +167,7 @@ mod chat_voice_transcript;
 mod chat_voice_warm_group;
 mod chat_voice_writes;
 mod client_hangup;
+mod config_deployment;
 mod config_hoisting;
 mod config_mirrors_match;
 mod count_compat;
@@ -162,10 +184,14 @@ mod dev_models_dir;
 mod device_chat;
 mod device_face;
 mod device_keys;
+// Reads TCP_USER_TIMEOUT off its sockets.
+#[cfg(target_os = "linux")]
 mod device_listener;
 mod device_pairing;
 mod device_tls;
 mod device_upgrade;
+// The device CA's files are checked by mode and owner.
+#[cfg(unix)]
 mod devices_trust;
 mod docs_wire;
 mod e2e_proxy;
@@ -209,7 +235,11 @@ mod labs_store;
 mod ladder_models;
 mod ladder_wire;
 mod llama_facts;
+// They state a Linux machine (sysfs, rpm, Podman) through the fake facts;
+// Windows reads its own (`machine::windows_check`, tested in the crate).
+#[cfg(unix)]
 mod machine_check;
+mod main_tls;
 mod mcp_admin_plane;
 mod mcp_host;
 mod mcp_ingress;
@@ -227,6 +257,9 @@ mod media_ranges;
 mod media_tools;
 mod messages_compaction;
 mod messages_context_management;
+// Directory and file modes.
+#[cfg(unix)]
+mod migration_copy;
 mod migrations;
 mod mirror_no_nulls;
 mod model_get;
@@ -326,8 +359,14 @@ mod route_golden;
 mod route_walk;
 mod router;
 mod runtime_argv;
+// The private spec dir is checked by mode and owner.
+#[cfg(unix)]
 mod runtime_cdi;
 mod runtime_descriptor;
+mod runtime_engine_assets;
+mod runtime_engine_view;
+mod runtime_launcher;
+mod runtime_launcher_native;
 mod runtime_lifecycle;
 mod runtime_llama_props;
 mod runtime_ownership;
@@ -341,6 +380,7 @@ mod self_admin_docs;
 mod self_admin_profiles;
 mod self_admin_usage;
 mod self_admin_wire;
+mod server_forwarded;
 mod server_stop;
 mod session_login;
 mod settings_full_wire;
@@ -358,6 +398,7 @@ mod tool_inventory;
 mod transfers;
 mod ui_cache;
 mod ui_scripts;
+mod update_notice;
 mod upstream_settle;
 mod usage_fallback_price;
 mod usage_gemini_thoughts;
@@ -369,5 +410,6 @@ mod voice_lab;
 mod vram_admission;
 mod vram_chat_footprint;
 mod vram_split_gguf;
+mod vram_wddm;
 mod web_pages;
 mod wire_compat;

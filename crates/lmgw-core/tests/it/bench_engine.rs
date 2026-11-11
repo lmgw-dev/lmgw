@@ -777,7 +777,12 @@ async fn a_shared_pool_sizes_the_mixed_injection_to_fit() {
 async fn a_slot_too_small_for_the_steady_window_skips_mixed() {
     let mut params = fast(1, &[Phase::Mixed]);
     // 303 tokens beyond a 96-token prompt last ≈ 0.6 s at the fake's rate.
-    params.mixed_steady_ms = 1500;
+    // On Windows the fake's measured rate is lower (its sleeps are rounded
+    // up to the 15.6 ms timer tick), and at 1.5 s the stream it plans then
+    // fits the 400-token slot: a longer window keeps the slot too small (a Windows test VM measured 63 to 81 tok/s, a need of 385 to 491 tokens at 6 s). The
+    // skip waits for nothing, so the window costs no time.
+    params.mixed_steady_ms = if cfg!(windows) { 12_000 } else { 1500 };
+    let steady = format!("{} ms", params.mixed_steady_ms);
     let cfg = Config {
         per_slot_ctx: 400,
         ..Config::default()
@@ -802,10 +807,7 @@ async fn a_slot_too_small_for_the_steady_window_skips_mixed() {
         .iter()
         .find(|n| n.starts_with("mixed:"))
         .expect("a note on the skip");
-    assert!(
-        note.contains("skipped") && note.contains("1500 ms"),
-        "{note}"
-    );
+    assert!(note.contains("skipped") && note.contains(&steady), "{note}");
 }
 
 /// One slot: no mixed phase (and the plan says why). The row says no

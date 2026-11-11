@@ -408,12 +408,14 @@ pub fn watch(state: &SharedState, ctx: &crate::proxy::RequestCtx) -> Option<Watc
         .revocation_mark
         .unwrap_or_else(|| state.devices.revocations.mark());
     Some(Watched {
-        watch: state.devices.revocations.watch_from(
-            *id,
-            mark,
-            fingerprint.clone(),
-            ctx.cert_not_after,
-        ),
+        watch: state
+            .devices
+            .revocations
+            .watch_from(*id, mark, fingerprint.clone(), ctx.cert_not_after)
+            .seated(crate::devices::revoke::Seat {
+                session: principal.session(),
+                owner_key_cookie: ctx.owner_key_cookie,
+            }),
         state: state.clone(),
         who: who(principal),
         device: principal.is_device_key(),

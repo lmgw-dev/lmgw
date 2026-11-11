@@ -20,13 +20,18 @@ mod device_rows;
 pub(super) use device_rows::device_rows_notice;
 
 mod one_fallback;
-pub(super) use one_fallback::one_fallback_notice;
+pub(super) use one_fallback::{one_fallback_notice, refuse_unreadable_global};
 
 mod billable_units;
 pub(super) use billable_units::{refuse_unmappable_price_rows, BILLABLE_UNITS_MIGRATION};
 
 mod foreign_keys;
-pub(super) use foreign_keys::{check_after_migrations, mark_before_migrations};
+pub(super) use foreign_keys::{
+    check_after_migrations, check_pending, mark_before_migrations, pending, pending_versions,
+};
+
+mod before_copy;
+pub(super) use before_copy::{refuse_before_copy, BeforeCopy};
 
 /// Version of `0023_managed_upstreams_go_synthetic.sql`, the migration this
 /// guard stands in front of.
@@ -354,7 +359,7 @@ async fn migration_applied(pool: &SqlitePool, version: i64) -> anyhow::Result<bo
     Ok(found.is_some())
 }
 
-async fn table_exists(pool: &SqlitePool, name: &str) -> anyhow::Result<bool> {
+pub(in crate::store) async fn table_exists(pool: &SqlitePool, name: &str) -> anyhow::Result<bool> {
     let found: Option<String> =
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1")
             .bind(name)

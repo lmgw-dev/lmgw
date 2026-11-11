@@ -34,10 +34,7 @@ async fn a_warmed_voice_is_loaded_before_its_first_response() {
     // A 1 GiB model directory: what an unlearned row is charged.
     let dir = g.models_dir().join("pocket");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::File::create(dir.join("model.gguf"))
-        .unwrap()
-        .set_len(GIB)
-        .unwrap();
+    crate::support::sparse::create(dir.join("model.gguf"), GIB);
     // Pocket TTS keeps its built-in voice as a file of the model root, which
     // is how lmgw's voice list knows `alba` (audio-class gap 1). Empty: the
     // directory's size is what the row is charged.

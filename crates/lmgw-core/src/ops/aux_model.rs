@@ -381,7 +381,7 @@ pub(super) async fn aux_model_get(
     problems.extend(aux_config_warnings(state, &image, &run_args, m).await);
     let command_line = command_line_preview(state, Class::Aux, &m.model_id);
     let (threads_in_effect, threads_source) =
-        crate::runtime::aux::threads_in_effect(m, crate::host::cpu());
+        crate::runtime::aux_models::threads_in_effect(m, crate::host::cpu());
     let licence = crate::modelinfo::licence::of_file(state, &models_dir, &m.gguf_path).await;
     Ok(Some(dto::AuxModelDetail {
         id: m.id,
@@ -434,6 +434,18 @@ pub async fn aux_model_set(
 ) -> Result<dto::AuxModelSaved, String> {
     // From the snapshot the checks read to the commit (§14.2).
     let routing = state.routing_write().await;
+    aux_model_set_holding(state, routing, p).await
+}
+
+/// [`aux_model_set`] for a caller that already holds the routing-write lock
+/// (`routing`), so what it read under the lock before stays true through the
+/// commit: Get it settles a new row's id under it (D28,
+/// `jobs::model_get::set_up`). Let go once the snapshot is published.
+pub async fn aux_model_set_holding(
+    state: &SharedState,
+    routing: tokio::sync::OwnedMutexGuard<()>,
+    p: AuxModelPatch,
+) -> Result<dto::AuxModelSaved, String> {
     let snap = state.snapshot();
     let all = snap.aux_models.clone();
     let find = || -> Result<AuxModel, String> {

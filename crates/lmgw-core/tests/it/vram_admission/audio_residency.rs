@@ -33,10 +33,7 @@ pub(super) async fn add_audio_model(
     let dir = f._models_dir.path().join(model_id);
     std::fs::create_dir_all(&dir).unwrap();
     // Sparse: the size is metadata.
-    std::fs::File::create(dir.join("model.gguf"))
-        .unwrap()
-        .set_len(on_disk)
-        .unwrap();
+    crate::support::sparse::create(dir.join("model.gguf"), on_disk);
     {
         let mut w = f.world();
         w.size.insert(model_id.into(), CONTEXT);

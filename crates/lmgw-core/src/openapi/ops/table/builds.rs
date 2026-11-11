@@ -1,7 +1,9 @@
 //! `ops-builds`: container builds and the local podman image store
-//! (api-docs design §4.7, container-builds design §15). The 19 typed
-//! Backends ops: each takes an api-types `*Args` struct and answers an
-//! api-types response — `web/api.rs:1007-1038`, `ops/backends.rs:148-620`.
+//! (api-docs design §4.7, container-builds design §15), and the pinned
+//! engine release builds (`engine_releases`, `engine_fallback_clear`,
+//! Windows design §4.2). The 21 typed Backends ops: each takes an
+//! api-types `*Args` struct and answers an api-types response —
+//! `web/api.rs:1029-1082`, `ops/backends.rs:162-748`.
 
 use lmgw_api_types::builds as dto;
 
@@ -237,6 +239,49 @@ pub(super) const OPS: &[OpDoc] = &[
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<dto::ContainerImageTagArgs>()),
         response: Resp::Json(|g| g.root_schema_for::<dto::ContainerImageTagResponse>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "engine_releases",
+        tag: TAG,
+        summary: "The pinned engine release builds (Windows): the one this machine runs, what \
+                  is installed, upstream's newer releases",
+        description: None,
+        tool: None,
+        args: OpArgs::Struct(|g| {
+            g.root_schema_for::<lmgw_api_types::engine_releases::EngineReleasesArgs>()
+        }),
+        response: Resp::Json(|g| {
+            g.root_schema_for::<lmgw_api_types::engine_releases::EngineReleasesResponse>()
+        }),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "engine_fallback_clear",
+        tag: TAG,
+        summary: "Clear a pinned engine build's \"no kernel image\" mark (Windows), so the next \
+                  start may choose that CUDA build again",
+        description: Some(
+            "A CUDA build whose process ended on its own with ggml's \"CUDA error: no kernel \
+             image is available\" is marked, and its engine runs its Vulkan build from then on \
+             (Windows design §4.2). This removes the mark of one build; the answer is \
+             engine_releases' after the change. An unmarked build is an error.",
+        ),
+        tool: None,
+        args: OpArgs::Struct(|g| {
+            g.root_schema_for::<lmgw_api_types::engine_releases::EngineFallbackClearArgs>()
+        }),
+        response: Resp::Json(|g| {
+            g.root_schema_for::<lmgw_api_types::engine_releases::EngineReleasesResponse>()
+        }),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

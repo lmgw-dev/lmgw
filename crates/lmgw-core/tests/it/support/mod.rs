@@ -28,5 +28,8 @@ pub mod responses_wire;
 pub mod rust_source;
 pub mod scripted_pull;
 pub mod self_admin;
+// getsockopt on /proc/self/fd, TCP_USER_TIMEOUT.
+#[cfg(target_os = "linux")]
 pub mod sockopts;
+pub mod sparse;
 pub mod stored;

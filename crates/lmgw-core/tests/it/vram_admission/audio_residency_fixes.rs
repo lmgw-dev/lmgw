@@ -446,10 +446,10 @@ async fn tombstones_are_settled_with_the_trigger_off() {
 async fn an_eager_row_subtracts_its_weights_file_not_its_directory() {
     let f = fixture(10 * GIB, 6 * GIB, GIB, 0).await;
     let id = add_audio_model(&f, "tts", GIB, 3 * GIB, Some(false)).await;
-    std::fs::File::create(f._models_dir.path().join("tts").join("model-f16.gguf"))
-        .unwrap()
-        .set_len(2 * GIB)
-        .unwrap();
+    crate::support::sparse::create(
+        f._models_dir.path().join("tts").join("model-f16.gguf"),
+        2 * GIB,
+    );
     learn(&f, id, "tts", 3 * GIB).await;
     start_idle(&f, "tts").await;
 

@@ -10,7 +10,6 @@
 //! versions agree.
 
 use std::ffi::OsString;
-use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -163,8 +162,15 @@ pub(crate) const PROBE_WORDS: &str = "the graphics card check (lmgw --machine-pr
 /// Start the probe through `facts` and read its answer, within `limit` (the
 /// load timeout, named with its setting when it runs out).
 pub(crate) fn ask(facts: &dyn lmgw_machine::Facts, limit: Duration) -> Result<NvmlAnswer, String> {
+    // Windows has no `/proc`: the running program's own path (an update
+    // there replaces the file only once lmgw has exited).
+    #[cfg(windows)]
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("{PROBE_WORDS}: lmgw's own executable is not known: {e}"))?;
+    #[cfg(not(windows))]
+    let exe = std::path::PathBuf::from(SELF_EXE);
     let out = facts
-        .run_limited(Path::new(SELF_EXE), &[PROBE_FLAG, PROBE_NVML], limit)
+        .run_limited(&exe, &[PROBE_FLAG, PROBE_NVML], limit)
         .map_err(|e| super::gather::limited(PROBE_WORDS, &e, limit))?;
     let line = out
         .stdout
@@ -216,15 +222,18 @@ mod tests {
             assert_eq!(asked(&args(ordinary)), Asked::No, "{ordinary:?}");
         }
         // An argument that is not UTF-8 is no flag.
-        use std::os::unix::ffi::OsStringExt;
-        assert_eq!(asked(&[OsString::from_vec(vec![0xff])]), Asked::No);
-        assert_eq!(
-            asked(&[
-                OsString::from(PROBE_FLAG),
-                OsString::from_vec(vec![b'n', 0xff])
-            ]),
-            Asked::Usage
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert_eq!(asked(&[OsString::from_vec(vec![0xff])]), Asked::No);
+            assert_eq!(
+                asked(&[
+                    OsString::from(PROBE_FLAG),
+                    OsString::from_vec(vec![b'n', 0xff])
+                ]),
+                Asked::Usage
+            );
+        }
     }
 
     /// A probe that runs out of the load timeout is named as the check and
@@ -232,7 +241,13 @@ mod tests {
     #[test]
     fn a_probe_that_hangs_names_the_check_and_the_load_timeout() {
         let f = lmgw_machine::fake::FakeFacts::new();
-        f.program(SELF_EXE, |_| {
+        // The program `ask` starts on this system: lmgw's own path on
+        // Windows, which has no /proc.
+        #[cfg(windows)]
+        let exe = std::env::current_exe().unwrap();
+        #[cfg(not(windows))]
+        let exe = std::path::PathBuf::from(SELF_EXE);
+        f.program(&exe, |_| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "/proc/self/exe ran for 600.0 s without finishing and was stopped",

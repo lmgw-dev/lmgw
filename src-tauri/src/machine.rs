@@ -41,6 +41,11 @@
 //! [`machine_apply`] builds the real one ([`Real`]), and its spawn refuses
 //! in a debug build as well.
 
+/// The audit log's entry for a call (headless server design §5.8).
+mod audited;
+// The confirmation window is drawn on Linux only so far; its rules and
+// tests are portable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod confirm;
 mod follow;
 mod gates;
@@ -169,7 +174,9 @@ pub async fn machine_apply(
         app: app.clone(),
         state: state.inner().clone(),
     };
-    Ok(guarded(&BUSY, &world, &hash, &on_event).await)
+    let result = guarded(&BUSY, &world, &hash, &on_event).await;
+    audited::record(state.inner(), &hash, &result).await;
+    Ok(result)
 }
 
 /// [`apply`], once at a time per `flag`.

@@ -142,9 +142,11 @@ pub mod embedded;
 pub mod licence;
 pub mod params;
 mod split_set;
+mod tensor_list;
 mod tensors;
 
 pub use split_set::HeadTensors;
+pub use tensor_list::TensorList;
 
 #[doc(hidden)]
 pub mod synth;
@@ -1424,6 +1426,16 @@ pub struct ModelSummary {
     /// `<arch>.embedding_length_per_layer_input` (Gemma 4 E-models): every
     /// layer gets a per-layer input this wide, held through the whole graph.
     pub embedding_length_per_layer_input: Option<u64>,
+    /// `<arch>.attention.indexer.key_length`: the width of the key a
+    /// sparse-attention indexer caches per cell (Qwen3.8-Flash-Next's
+    /// `qwen4exp`, [`crate::vram::compute::qsa`]).
+    #[serde(skip)]
+    pub indexer_key_length: Option<u64>,
+    /// The smallest nonzero `<arch>.attention.compress_ratios` entry: the
+    /// blocks of cells that indexer scores ([`crate::vram::compute::qsa`]).
+    /// `None` without the array, or when it was not retained whole.
+    #[serde(skip)]
+    pub indexer_compress_ratio: Option<u64>,
     /// `<arch>.attention.shared_kv_layers`: the last this many layers reuse
     /// an earlier layer's KV cache instead of keeping their own (Gemma 4
     /// E-models; a Gemma 4 MTP assistant shares all of its layers with the
@@ -1454,6 +1466,12 @@ pub struct ModelSummary {
     /// [`Self::of_set`] took a split file's later parts in.
     #[serde(skip)]
     pub head_tensors: HeadTensors,
+    /// Every tensor's name and bytes, every part's once [`Self::of_set`]
+    /// took a split file's later parts in: what a chat row's footprint
+    /// matches llama.cpp's tensor overrides against
+    /// ([`crate::vram::plan::chat`]).
+    #[serde(skip)]
+    pub tensor_list: TensorList,
     /// Where this file's tensor data starts: its header's bytes, the
     /// alignment padding after it included (`GgufMeta::data_start`).
     #[serde(skip)]
@@ -1682,11 +1700,17 @@ impl ModelSummary {
                 })
             }),
             embedding_length_per_layer_input: meta.arch_u64("embedding_length_per_layer_input"),
+            indexer_key_length: meta.arch_u64("attention.indexer.key_length"),
+            indexer_compress_ratio: meta
+                .arch_get("attention.compress_ratios")
+                .and_then(GgufValue::as_u64_array)
+                .and_then(|r| r.into_iter().filter(|r| *r > 0).min()),
             shared_kv_layers: meta.arch_u64("attention.shared_kv_layers"),
             nextn_predict_layers: meta.arch_u64("nextn_predict_layers"),
             host_input_bytes: head_tensors.host_input_bytes(),
             input_tensors: InputTensors::of(meta),
             head_tensors,
+            tensor_list: TensorList::of(meta),
             header_bytes: meta.data_start,
             padding_bound: meta.tensor_count.saturating_mul(
                 meta.get("general.alignment")

@@ -29,17 +29,20 @@ use serde_json::{Map, Value};
 /// - `devices`: the device listener, where it listens, and how long a
 ///   pairing token and a device's certificate live (device link design
 ///   §9.1).
+/// - `accounts`: who signs in to the dashboard and for how long (headless
+///   server design §5, D17).
 ///
 /// None is among `lmgw__settings_set`'s fields; they are named here so a
 /// call that asks for one hears why, not that the tool does not know it.
 /// lmgw's CORS policy is fixed (`server.rs`), and the API keys are no
 /// setting: no self-admin tool writes them.
-pub const ACCESS_SETTINGS: [&str; 5] = [
+pub const ACCESS_SETTINGS: [&str; 6] = [
     "auth_enabled",
     "self_admin",
     "bind_addr",
     "agent_origin_suffix",
     "devices",
+    "accounts",
 ];
 
 /// Why the call `name(args)` may not run, from any caller: it names an

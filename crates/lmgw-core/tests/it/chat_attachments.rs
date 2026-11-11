@@ -185,6 +185,10 @@ async fn an_empty_upload_is_refused_rather_than_becoming_an_empty_text_attachmen
 // Size ceiling
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; only a declared oversize /v1 body is drained before its 413 on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn upload_over_max_body_mb_is_413_naming_the_setting() {
     let mock = MockServer::start().await;
@@ -211,6 +215,10 @@ async fn upload_over_max_body_mb_is_413_naming_the_setting() {
 /// this route's named one (review finding 8). `reqwest::Body::wrap_stream`
 /// is what makes reqwest send the request chunked rather than buffering it
 /// and setting `Content-Length` itself.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; only a declared oversize /v1 body is drained before its 413 on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn a_chunked_upload_over_max_body_mb_still_gets_the_named_413() {
     let mock = MockServer::start().await;

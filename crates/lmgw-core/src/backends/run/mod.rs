@@ -240,20 +240,23 @@ impl BuildSeams {
     }
 
     /// Where the machine-wide lock is: `$XDG_RUNTIME_DIR/lmgw-build.lock`,
-    /// else `/tmp/lmgw-build-<uid>.lock` ([`default_lock_path`]).
-    pub fn lock_path(&self) -> PathBuf {
+    /// else `/tmp/lmgw-build-<uid>.lock` ([`default_lock_path`]). Windows has
+    /// no uid and no such path yet: an error saying so.
+    pub fn lock_path(&self) -> Result<PathBuf, String> {
         if let Some(p) = self
             .lock_path
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
         {
-            return p;
+            return Ok(p);
         }
-        default_lock_path(
+        let uid =
+            real_uid().ok_or("the machine-wide build lock is not supported on Windows yet")?;
+        Ok(default_lock_path(
             std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
-            real_uid(),
-        )
+            uid,
+        ))
     }
 
     /// Where buildah keeps its `buildahNNN` scratch directories: `/var/tmp`.
@@ -382,6 +385,18 @@ pub struct Input {
     pub rebuild: bool,
 }
 
+/// Engine builds run in Podman with buildah, which lmgw drives on Linux
+/// only so far.
+#[cfg(unix)]
+fn platform_refusal() -> Option<String> {
+    None
+}
+
+#[cfg(not(unix))]
+fn platform_refusal() -> Option<String> {
+    Some("engine builds from git are not supported on Windows yet".to_string())
+}
+
 /// `build_run` (§15): start a run of build `build_id`. `rebuild` is **Rebuild
 /// anyway** — no short-circuit, and `--pull=newer`.
 ///
@@ -398,6 +413,9 @@ pub async fn start_run(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no build with id {build_id}"))?;
+    if let Some(why) = platform_refusal() {
+        return Err(why);
+    }
     let builds_dir = state.builds_dir();
     if let Some(why) = paths::tmpfs_refusal(&builds_dir) {
         return Err(why);
@@ -718,7 +736,7 @@ impl Execution {
 
     async fn acquire_lock(&mut self) -> Result<BuildLock, Stop> {
         let state = self.state();
-        let path = state.builds.lock_path();
+        let path = state.builds.lock_path()?;
         let mut waiting = false;
         loop {
             if let Some(lock) = BuildLock::try_acquire(&path)? {
@@ -1264,12 +1282,13 @@ impl Execution {
     fn prepare_scratch(&self, scratch: &Path) -> Result<(), String> {
         std::fs::create_dir_all(scratch)
             .map_err(|e| format!("could not create {}: {e}", scratch.display()))?;
-        let root = cache_mount_root(&self.state().builds.buildah_tmp(), real_uid());
+        let uid = real_uid().ok_or("buildah's cache root is not supported on Windows yet")?;
+        let root = cache_mount_root(&self.state().builds.buildah_tmp(), uid);
         std::fs::create_dir_all(&root)
             .map_err(|e| format!("could not create {}: {e}", root.display()))?;
         let link = scratch.join(root.file_name().unwrap_or_default());
         if link.symlink_metadata().is_err() {
-            std::os::unix::fs::symlink(&root, &link).map_err(|e| {
+            symlink_dir(&root, &link).map_err(|e| {
                 format!(
                     "could not link {} to buildah's cache root {}: {e}",
                     link.display(),
@@ -1601,11 +1620,36 @@ fn stale_work_entry(name: &str, instance: &str) -> bool {
     };
     let pid = rest.split('-').next().and_then(|p| p.parse::<i32>().ok());
     match pid {
-        // SAFETY: `kill(pid, 0)` sends nothing; it only asks whether the
-        // process exists.
-        Some(pid) if pid > 0 && !instance.is_empty() => (unsafe { libc::kill(pid, 0) }) != 0,
+        Some(pid) if pid > 0 && !instance.is_empty() => process_gone(pid),
         _ => false,
     }
+}
+
+#[cfg(unix)]
+fn process_gone(pid: i32) -> bool {
+    // SAFETY: `kill(pid, 0)` sends nothing; it only asks whether the
+    // process exists.
+    (unsafe { libc::kill(pid, 0) }) != 0
+}
+
+/// Whether a process runs is not read on Windows yet: none counts as gone,
+/// so its tree is left alone.
+#[cfg(not(unix))]
+fn process_gone(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_dir(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "linking buildah's cache root is not supported on Windows yet",
+    ))
 }
 
 /// Remove the tree at `dir`: plainly, on a blocking thread (a worktree is
@@ -1645,7 +1689,13 @@ pub async fn boot_sweep(state: &AppState) {
     if !dirs.iter().any(|d| d.is_dir()) {
         return;
     }
-    let lock_path = state.builds.lock_path();
+    let lock_path = match state.builds.lock_path() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("build boot sweep skipped: {e}");
+            return;
+        }
+    };
     let lock = match BuildLock::try_acquire(&lock_path) {
         Ok(Some(l)) => l,
         Ok(None) => {
@@ -1750,8 +1800,12 @@ mod tests {
             !stale_work_entry(&format!("check-ab12cd34-{me}-1-2"), i),
             "alive"
         );
-        assert!(
+        // Gone on Unix; on Windows whether a process runs is not read yet
+        // (engine builds are not there in this version, Windows design
+        // §4.5), so a check's tree is left alone.
+        assert_eq!(
             stale_work_entry("check-ab12cd34-2147483646-1-2", i),
+            cfg!(unix),
             "no such pid"
         );
         assert!(

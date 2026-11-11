@@ -51,6 +51,14 @@ pub(in crate::pages) const MACHINE_ANCHOR: &str = "machine";
 /// it has, and its VRAM budget.
 mod realtime;
 use realtime::{BudgetPanel, SpeechStyleField, TagHintField, VoiceField, WordsField};
+/// Settings → About (headless server design D20).
+mod about;
+/// What the page words differently in the server image: the pinned rows,
+/// the restart unit (headless server design §2.2, §6.2).
+mod deployment;
+use deployment::*;
+/// Settings → Network & access → Accounts (headless server design §5).
+mod accounts;
 /// The Chat's Voice group (chat-voice design §2.1).
 /// The Chat's picture and sound tools' default models (chat-media-tools
 /// design §3.8).
@@ -59,6 +67,8 @@ mod chat_profile;
 mod chat_voice;
 mod devices;
 mod read;
+/// Settings → Network & access → TLS (headless server design §4.7).
+mod tls;
 /// Settings → Realtime → WebRTC calls (calls design §9).
 mod webrtc;
 
@@ -66,6 +76,7 @@ mod controls;
 mod draft;
 mod explain;
 mod forge;
+mod headroom;
 mod render;
 mod rows;
 mod table;
@@ -83,8 +94,11 @@ mod tests;
 
 /// Every setting, in page order.
 fn fields() -> impl Iterator<Item = &'static Def> {
-    COMMON
+    COMMON[..2]
         .iter()
+        .chain(tls::TLS.iter())
+        .chain(accounts::ACCOUNTS.iter())
+        .chain(COMMON[2..].iter())
         .chain(CHAT.iter())
         .chain(AUX[..3].iter())
         .chain(AUX_DECISION.iter())
@@ -98,6 +112,7 @@ fn fields() -> impl Iterator<Item = &'static Def> {
         .chain(realtime::REALTIME.iter())
         .chain(webrtc::WEBRTC.iter())
         .chain(devices::DEVICES.iter())
+        .chain(about::ABOUT.iter())
 }
 
 // ---------------------------------------------------------------------------

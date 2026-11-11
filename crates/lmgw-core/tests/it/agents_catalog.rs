@@ -1567,6 +1567,7 @@ fn workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, root)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_mount_value_is_stored_canonical_and_the_rules_refuse_by_name() {
     let base = serve(AppState::init_for_tests().await.unwrap()).await;
@@ -1833,8 +1834,14 @@ async fn a_dead_mount_does_not_block_a_save_that_does_not_touch_it() {
 #[tokio::test]
 async fn an_imported_package_carrying_a_hostile_mount_value_is_refused() {
     let base = serve(AppState::init_for_tests().await.unwrap()).await;
-    let hostile =
-        mount_doc("notes-desk").replacen('{', "{\n  \"config_values\": { \"notes\": \"/\" },", 1);
+    // A filesystem's root, as a JSON string: `C:\` on Windows, where `/` is
+    // no absolute path.
+    let fs_root = serde_json::to_string(if cfg!(windows) { "C:\\" } else { "/" }).unwrap();
+    let hostile = mount_doc("notes-desk").replacen(
+        '{',
+        &format!("{{\n  \"config_values\": {{ \"notes\": {fs_root} }},"),
+        1,
+    );
     let (status, err) = import(&base, "", &hostile).await;
     assert_eq!(status, 400, "{err}");
     assert_eq!(err["code"], json!("mount_path_refused"), "{err}");
@@ -1851,8 +1858,12 @@ async fn an_imported_package_carrying_a_hostile_mount_value_is_refused() {
     let notes = root.join("Notes");
     std::fs::create_dir_all(&notes).unwrap();
     let fine = hostile.replace(
-        "\"notes\": \"/\"",
-        &format!("\"notes\": \"{}\"", notes.display()),
+        &format!("\"notes\": {fs_root}"),
+        // A JSON string: a Windows path's `\` is escaped.
+        &format!(
+            "\"notes\": {}",
+            serde_json::to_string(&notes.display().to_string()).unwrap()
+        ),
     );
     let (status, report) = import(&base, "", &fine).await;
     assert_eq!(status, 200, "{report}");

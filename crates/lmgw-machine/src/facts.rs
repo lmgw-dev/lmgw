@@ -7,9 +7,16 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+#[path = "facts/unix.rs"]
+mod sys;
+#[cfg(windows)]
+#[path = "facts/windows.rs"]
+mod sys;
 
 /// What a program printed and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -65,18 +72,31 @@ pub enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Meta {
     pub kind: Kind,
-    /// The permission bits and the setuid, setgid and sticky bits.
-    pub mode: u32,
-    pub uid: u32,
+    /// The POSIX mode and owner; `None` on a system that has neither
+    /// (Windows, whose owner and access are a SID and a DACL). A reader that
+    /// checks them treats `None` as a file that does not pass, never as one
+    /// that does.
+    pub posix: Option<Posix>,
     pub len: u64,
+    /// The inode; on Windows the NTFS file ID (the volume's 64-bit file
+    /// index), which is as stable and as unique within a volume.
     pub ino: u64,
     /// Modification time, nanoseconds since the epoch.
     pub mtime_ns: i128,
     /// Status change time, nanoseconds since the epoch: when the file was
     /// last written, renamed or had its times set. rpm sets an installed
     /// file's modification time to the one in the package, so this is when
-    /// the package put it there.
+    /// the package put it there. On Windows NTFS's change time, which moves
+    /// on the same events.
     pub ctime_ns: i128,
+}
+
+/// A file's POSIX mode and owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posix {
+    /// The permission bits and the setuid, setgid and sticky bits.
+    pub mode: u32,
+    pub uid: u32,
 }
 
 /// A file system's room, as `statvfs` gives it.
@@ -111,8 +131,9 @@ pub trait Facts: Send + Sync {
     fn list(&self, dir: &Path) -> io::Result<Vec<String>>;
     /// An environment variable of the process that reads.
     fn env(&self, name: &str) -> Option<String>;
-    /// The real user ID of the process that reads.
-    fn uid(&self) -> u32;
+    /// The real user ID of the process that reads; `None` on a system
+    /// without numeric user IDs (Windows).
+    fn uid(&self) -> Option<u32>;
     /// That user's name, as the system's user database gives it
     /// (`getpwuid`: `/etc/passwd`, and SSSD's or LDAP's accounts too, which
     /// are not in that file); `None` when it has no entry.
@@ -121,7 +142,8 @@ pub trait Facts: Send + Sync {
     /// `args`, in the C locale, with no input, and wait for it.
     fn run(&self, program: &Path, args: &[&str]) -> io::Result<CmdOut>;
     /// [`Self::run`], stopped when `limit` runs out: the program and every
-    /// process it started in its process group are killed, and the answer is
+    /// process it started in its process group are killed (on Windows only
+    /// the program itself, not yet what it started), and the answer is
     /// an error of kind [`io::ErrorKind::TimedOut`]. `limit` is the caller's,
     /// a bound the person can see and set (lmgw's model start passes its load
     /// timeout); this seam invents none.
@@ -227,40 +249,17 @@ pub const NVIDIA_CTK_ENV_PREFIX: &str = "NVIDIA_CTK_";
 /// sampling rate, not a bound.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
-fn meta_of(m: &std::fs::Metadata) -> Meta {
-    use std::os::unix::fs::MetadataExt;
-    let ft = m.file_type();
-    let kind = if ft.is_symlink() {
-        Kind::Symlink
-    } else if ft.is_dir() {
-        Kind::Dir
-    } else if ft.is_file() {
-        Kind::File
-    } else {
-        Kind::Other
-    };
-    Meta {
-        kind,
-        mode: m.mode() & 0o7777,
-        uid: m.uid(),
-        len: m.len(),
-        ino: m.ino(),
-        mtime_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
-        ctime_ns: i128::from(m.ctime()) * 1_000_000_000 + i128::from(m.ctime_nsec()),
-    }
-}
-
 impl Facts for SystemFacts {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
 
     fn stat(&self, path: &Path) -> io::Result<Meta> {
-        std::fs::metadata(path).map(|m| meta_of(&m))
+        sys::stat(path)
     }
 
     fn lstat(&self, path: &Path) -> io::Result<Meta> {
-        std::fs::symlink_metadata(path).map(|m| meta_of(&m))
+        sys::lstat(path)
     }
 
     fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
@@ -290,42 +289,12 @@ impl Facts for SystemFacts {
         std::env::var(name).ok()
     }
 
-    fn uid(&self) -> u32 {
-        // SAFETY: getuid has no preconditions and cannot fail.
-        unsafe { libc::getuid() }
+    fn uid(&self) -> Option<u32> {
+        sys::uid()
     }
 
     fn user_name(&self) -> Option<String> {
-        let uid = self.uid();
-        let mut buf = vec![0u8; 1024];
-        loop {
-            // SAFETY: an all-zero passwd is a valid value of the plain C
-            // struct; getpwuid_r writes only into it and into `buf`, whose
-            // length it is given, and `result` points at `pwd` or is null.
-            let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-            let mut result: *mut libc::passwd = std::ptr::null_mut();
-            let rc = unsafe {
-                libc::getpwuid_r(
-                    uid,
-                    &mut pwd,
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    &mut result,
-                )
-            };
-            // A buffer too small for the entry: a bigger one, until it fits.
-            if rc == libc::ERANGE {
-                buf.resize(buf.len() * 2, 0);
-                continue;
-            }
-            if rc != 0 || result.is_null() || pwd.pw_name.is_null() {
-                return None;
-            }
-            // SAFETY: on success pw_name points at a NUL-terminated string
-            // inside `buf`, which outlives this read.
-            let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
-            return Some(name.to_string_lossy().into_owned());
-        }
+        sys::user_name()
     }
 
     fn run(&self, program: &Path, args: &[&str]) -> io::Result<CmdOut> {
@@ -338,11 +307,9 @@ impl Facts for SystemFacts {
     }
 
     fn run_limited(&self, program: &Path, args: &[&str], limit: Duration) -> io::Result<CmdOut> {
-        use std::os::unix::process::CommandExt;
         let started = Instant::now();
         let deadline = started + limit;
-        // Its own process group, so a kill reaches whatever it started too.
-        let mut child = self.command(program, args).process_group(0).spawn()?;
+        let mut child = sys::spawn_killable(&mut self.command(program, args))?;
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
         loop {
@@ -355,7 +322,7 @@ impl Facts for SystemFacts {
             }
             let now = Instant::now();
             if now >= deadline {
-                kill_group(child);
+                sys::kill_all(child);
                 // The pipes' readers are left to end on their own: a process
                 // that left the group and holds a pipe must not hold this
                 // caller past its limit too.
@@ -377,7 +344,7 @@ impl Facts for SystemFacts {
     fn space(&self, path: &Path) -> io::Result<Space> {
         let mut first_error = None;
         for at in path.ancestors() {
-            match statvfs(at) {
+            match sys::space(at) {
                 Ok(space) => return Ok(space),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     first_error.get_or_insert(e);
@@ -393,26 +360,6 @@ impl Facts for SystemFacts {
     fn root_env(&self) -> Option<Arc<dyn Facts>> {
         (!self.root).then(|| Arc::new(Self::for_root(self.prepare)) as Arc<dyn Facts>)
     }
-}
-
-/// `statvfs(2)` of `path`.
-fn statvfs(path: &Path) -> io::Result<Space> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    // SAFETY: an all-zero statvfs is a valid value of the plain C struct,
-    // `c` is a NUL-terminated path that outlives the call, and statvfs
-    // writes only into the struct it is given.
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let frsize = st.f_frsize as u64;
-    Ok(Space {
-        free_bytes: (st.f_bavail as u64).saturating_mul(frsize),
-        total_bytes: (st.f_blocks as u64).saturating_mul(frsize),
-        fs_id: st.f_fsid as u64,
-    })
 }
 
 impl SystemFacts {
@@ -468,24 +415,75 @@ fn joined(reader: std::thread::JoinHandle<Vec<u8>>) -> String {
     String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
 }
 
-/// SIGKILL to `child`'s process group, reaped on a thread of its own.
-/// `try_wait` has just said it has not ended, so it is not reaped and its
-/// pid is still its own. Not reaped here: a program stuck in the kernel (an
-/// NVML call to a card that fell off the bus) ends only when that call
-/// returns, and the caller must not wait for it past its limit.
-fn kill_group(mut child: Child) {
-    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: `kill` takes two integers and touches no memory of ours;
-        // the group is the one `process_group(0)` made for this child.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
+// Windows' file facts and free space (facts/windows.rs).
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn stat_and_lstat_read_kind_size_id_and_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"twelve bytes").unwrap();
+        let f = SystemFacts::new();
+        let m = f.stat(&file).unwrap();
+        assert_eq!((m.kind, m.len, m.posix), (Kind::File, 12, None));
+        assert_ne!(m.ino, 0);
+        let modified = std::fs::metadata(&file)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i128;
+        assert_eq!(m.mtime_ns, modified);
+        assert!(m.ctime_ns >= m.mtime_ns);
+        assert_eq!(f.lstat(&file).unwrap(), m);
+        assert_eq!(f.stat(dir.path()).unwrap().kind, Kind::Dir);
+        // A junction is a link to lstat and its target to stat.
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("j");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(f.lstat(&link).unwrap().kind, Kind::Symlink);
+        // Followed, it is the directory; or Windows' redirection guard
+        // refuses to traverse a junction a standard user made
+        // (ERROR_UNTRUSTED_MOUNT_POINT, 448: seen on Windows 11 build 26100).
+        match f.stat(&link) {
+            Ok(through) => {
+                assert_eq!(through.kind, Kind::Dir);
+                assert_eq!(through.ino, f.stat(&real).unwrap().ino);
+            }
+            Err(e) => assert_eq!(
+                e.raw_os_error(),
+                Some(448),
+                "stat through the junction: {e}"
+            ),
         }
+        let e = f.stat(&dir.path().join("none")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
-    let _ = child.kill();
-    std::thread::spawn(move || child.wait());
+
+    /// A path not made yet is on its nearest existing ancestor's volume.
+    #[test]
+    fn the_space_of_a_path_not_made_yet_is_its_parents() {
+        let dir = std::env::temp_dir();
+        let f = SystemFacts::new();
+        let here = f.space(&dir).unwrap();
+        let later = f.space(&dir.join("not-made-yet/deeper")).unwrap();
+        assert_eq!(here.fs_id, later.fs_id);
+        assert!(here.total_bytes > 0 && here.free_bytes <= here.total_bytes);
+    }
 }
 
-#[cfg(test)]
+// The system's own programs (`/bin/sh`, `/usr/bin/id`) and its POSIX facts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -584,7 +582,10 @@ mod tests {
         let pwd = root_env.run(Path::new("/usr/bin/pwd"), &[]).unwrap();
         assert_eq!(pwd.stdout, "/\n");
         let id = root_env.run(Path::new("/usr/bin/id"), &["-u"]).unwrap();
-        assert_eq!(id.stdout.trim(), user.uid().to_string());
+        assert_eq!(
+            Some(id.stdout.trim().to_string()),
+            user.uid().map(|u| u.to_string())
+        );
         assert_eq!(root_env.uid(), user.uid());
         assert!(SystemFacts::for_root(None).root_env().is_none());
         assert!(root_env.root_env().is_none());

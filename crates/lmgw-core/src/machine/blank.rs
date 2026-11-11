@@ -40,8 +40,8 @@ impl Facts for Blank {
     fn env(&self, _name: &str) -> Option<String> {
         None
     }
-    fn uid(&self) -> u32 {
-        0
+    fn uid(&self) -> Option<u32> {
+        Some(0)
     }
     fn user_name(&self) -> Option<String> {
         None

@@ -3,6 +3,8 @@
 //! a fake `pdftotext`, a fake `pdftoppm` and the fake lmgw's chat route; and
 //! once end to end, with the real poppler tools, through the MCP face.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::sync::atomic::Ordering;

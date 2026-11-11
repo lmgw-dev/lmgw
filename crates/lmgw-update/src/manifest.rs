@@ -2,14 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The RPM artifact a manifest points at.
+/// A file a manifest points at: the RPM, or the Windows installer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpmArtifact {
-    /// File name, e.g. `lmgw-0.1.42-1.x86_64.rpm`.
+pub struct Artifact {
+    /// File name, e.g. `lmgw-0.1.42-1.x86_64.rpm` or `lmgw_0.1.42_x64-setup.exe`.
     pub file: String,
-    /// Direct download URL (generic-registry API path).
+    /// Direct download URL (generic-registry API path, or a release asset).
     pub url: String,
-    /// hex(sha256) of the RPM; verified after download when non-empty.
+    /// hex(sha256) of the file; verified after download when non-empty.
     #[serde(default)]
     pub sha256: String,
 }
@@ -22,7 +22,24 @@ pub struct ReleaseManifest {
     pub notes: String,
     #[serde(default)]
     pub pub_date: String,
-    pub rpm: RpmArtifact,
+    /// The RPM, which every release has.
+    pub rpm: Artifact,
+    /// The per-user NSIS installer for Windows x86-64, when the release has one. A release
+    /// whose Windows build failed has none, and a client that does not know the key ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsis: Option<Artifact>,
+}
+
+impl ReleaseManifest {
+    /// The installer this platform runs: the NSIS installer on Windows, `None` when the release
+    /// has none; the RPM everywhere else.
+    pub fn installer(&self) -> Option<&Artifact> {
+        if cfg!(windows) {
+            self.nsis.as_ref()
+        } else {
+            Some(&self.rpm)
+        }
+    }
 }
 
 /// A pending update: the running version plus the newer manifest.

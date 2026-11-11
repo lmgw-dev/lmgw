@@ -208,7 +208,11 @@ pub(crate) async fn hash_file(data_dir: &Path, id: &str) -> std::io::Result<Stri
     use std::io::Read as _;
     let p = path(data_dir, id);
     tokio::task::spawn_blocking(move || {
-        let mut f = File::open(&p)?;
+        // Windows syncs (FlushFileBuffers) only a handle open for writing.
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(cfg!(windows))
+            .open(&p)?;
         f.sync_all()?;
         let mut hasher = Sha256::new();
         let mut block = vec![0u8; 1 << 20];

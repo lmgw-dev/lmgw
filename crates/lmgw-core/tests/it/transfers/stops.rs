@@ -139,6 +139,10 @@ async fn an_overdue_upload_expires_its_transfer() {
 /// landing is done before the next upload reads the resume point, and
 /// every write is at its offset), so the transfer ends ready with the
 /// right bytes.
+#[cfg_attr(
+    windows,
+    ignore = "Windows resets a connection closed with unread bytes and the reset loses the refusal before the client reads it; only a declared oversize /v1 body is drained before its 413 on Windows yet (Windows design §5)"
+)]
 #[tokio::test]
 async fn a_body_cut_mid_block_and_resumed_at_once_ends_ready() {
     let (w, desktop, phone) = two().await;

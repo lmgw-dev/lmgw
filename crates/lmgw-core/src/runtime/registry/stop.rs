@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::owned::Down;
 use super::*;
+use crate::runtime::launcher::podman::rm_force_outcome;
 use crate::runtime::{container_name, Class};
 
 impl Registry {
@@ -176,58 +177,18 @@ impl Registry {
         }
     }
 
-    /// `podman stop` then `podman wait` on one container name; `Some` is what
-    /// went wrong. Shared by [`Self::stop`] and a climb's stop of the rung it
-    /// replaces, which logs a failure and starts the new rung anyway
-    /// (`--replace` collects the old container by name).
+    /// Take one container down and wait until it is gone, through the
+    /// launcher ([`Launcher::stop`](crate::runtime::launcher::Launcher::stop);
+    /// Podman: `podman stop` then `podman wait`); `Some` is what went wrong.
+    /// Shared by [`Self::stop`] and a climb's stop of the rung it replaces,
+    /// which logs a failure and starts the new rung anyway (the start under
+    /// the same name replaces the old container).
     pub(super) async fn stop_container(
         &self,
         name: &str,
         stop_timeout: Duration,
     ) -> Option<String> {
-        // Bounded too (2026-10-24): a podman that hangs on its own stop —
-        // a stuck storage lock — must not hold the stop's caller for good,
-        // the GPU hold's sweep under the settings lock among them. The grace
-        // `-t` gives, then `vram.unload_timeout_seconds`, as
-        // `remove_bounded`; the runner kills the child on drop.
-        let bound = Duration::from_secs(STOP_GRACE_SECONDS).saturating_add(stop_timeout);
-        let stop = tokio::time::timeout(
-            bound,
-            self.podman(&["stop", "-t", &STOP_GRACE_SECONDS.to_string(), name]),
-        )
-        .await;
-        let problem = match stop {
-            Err(_) => {
-                return Some(format!(
-                    "podman stop {name} did not return within {bound:?} (the stop grace plus the \
-                     unload timeout, {})",
-                    crate::config::UNLOAD_TIMEOUT_LABEL
-                ))
-            }
-            Ok(Ok(out)) if out.ok() => None,
-            // Already gone is the requested state, not a failure.
-            Ok(Ok(out)) if is_no_such_container(&out.stderr) => None,
-            Ok(Ok(out)) => Some(format!("podman stop: {}", out.stderr.trim())),
-            Ok(Err(e)) => Some(format!("podman stop could not be run: {e}")),
-        };
-        // `podman stop` returns when the signal has been delivered and the
-        // grace has elapsed; `wait` is what says the process is actually
-        // gone and its VRAM with it — the eviction path (§4) forwards on
-        // that fact. Bounded by the entry's `vram.unload_timeout_seconds`;
-        // the runner kills the child on drop, so a timeout leaks nothing.
-        let waited = tokio::time::timeout(stop_timeout, self.podman(&["wait", name])).await;
-        if problem.is_some() {
-            return problem;
-        }
-        match waited {
-            Ok(Ok(_)) => None,
-            Ok(Err(e)) => Some(format!("podman wait could not be run: {e}")),
-            Err(_) => Some(format!(
-                "container '{name}' was still running {stop_timeout:?} after podman stop (the \
-                 unload timeout, {})",
-                crate::config::UNLOAD_TIMEOUT_LABEL
-            )),
-        }
+        self.launcher.stop(name, stop_timeout).await
     }
 
     /// Stop every managed container (§3.4's graceful shutdown, and the ops
@@ -246,35 +207,14 @@ impl Registry {
         .collect()
     }
 
-    /// `podman stop -t <grace> <name>`, best effort and never fatal: the
-    /// caller is already returning a failure and this is hygiene on the way
-    /// out. "No such container" is the requested state, not a problem.
-    pub(super) async fn stop_quietly(&self, name: &str) {
-        match self
-            .podman(&["stop", "-t", &STOP_GRACE_SECONDS.to_string(), name])
-            .await
-        {
-            Ok(out) if out.ok() || is_no_such_container(&out.stderr) => {}
-            Ok(out) => tracing::warn!(container = %name, "podman stop: {}", out.stderr.trim()),
-            Err(e) => tracing::warn!(container = %name, "podman stop could not be run: {e}"),
-        }
-    }
-
-    /// `podman rm -f <name>`, treating "already gone" as done. Best-effort by
-    /// contract: every caller has already decided the container must not be
-    /// there, and a failure to remove it is reported, never retried into a
-    /// loop.
+    /// `podman rm -f <name>`, treating "already gone" as done — on Podman
+    /// directly, for the containers outside the launcher (the agents', MCP's,
+    /// a build's probe). A model's container is removed through the launcher.
+    /// Best-effort by contract: every caller has already decided the
+    /// container must not be there, and a failure to remove it is reported,
+    /// never retried into a loop.
     pub async fn rm_force(&self, name: &str) -> Result<(), String> {
-        match self.podman(&["rm", "-f", name]).await {
-            Ok(out) if out.ok() => Ok(()),
-            Ok(out) if is_no_such_container(&out.stderr) => Ok(()),
-            Ok(out) => Err(format!(
-                "podman rm -f {name} failed (exit {}): {}",
-                out.status,
-                out.stderr.trim()
-            )),
-            Err(e) => Err(format!("podman rm -f {name} could not be run: {e}")),
-        }
+        rm_force_outcome(name, self.podman(&["rm", "-f", name]).await)
     }
 
     /// Stop one model's container and make sure the container object is gone
@@ -297,7 +237,7 @@ impl Registry {
     ) -> Result<(), RuntimeError> {
         let stopped = self.stop(class, model_id, force).await;
         let name = container_name(container_prefix, class, model_id);
-        if let Err(e) = self.rm_force(&name).await {
+        if let Err(e) = self.launcher.remove(&name).await {
             tracing::warn!(container = %name, "{e}");
         }
         stopped

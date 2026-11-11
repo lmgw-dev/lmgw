@@ -129,7 +129,9 @@ fn identity_in_effect() -> Option<&'static str> {
 
 /// Remove the identity variables this process set from a child's
 /// environment: a child that is not lmgw's audio (see the module docs for
-/// the children that are not scrubbed).
+/// the children that are not scrubbed). Not used on Windows, which hands
+/// links to the shell (main.rs, `xdg_open`).
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn scrub_identity_env(cmd: &mut std::process::Command) {
     for k in SET_BY_US.get().map(Vec::as_slice).unwrap_or_default() {
         cmd.env_remove(k);

@@ -26,8 +26,14 @@ pub type Identity = (CertificateDer<'static>, PrivateKeyDer<'static>);
 
 /// The ports this process has claimed through [`free_port`]; the abstract
 /// sockets in it are the claims, released when the process ends.
+#[cfg(target_os = "linux")]
 static CLAIMS: std::sync::Mutex<Vec<std::os::unix::net::UnixListener>> =
     std::sync::Mutex::new(Vec::new());
+
+/// The same on Windows: the named mutexes, whose handles Windows closes when
+/// the process ends.
+#[cfg(windows)]
+static CLAIMS: std::sync::Mutex<Vec<PortMutex>> = std::sync::Mutex::new(Vec::new());
 
 /// A port free on both loopback addresses now, for TCP and for UDP (the
 /// calls' device socket group binds the device listener's addresses and
@@ -37,11 +43,11 @@ static CLAIMS: std::sync::Mutex<Vec<std::os::unix::net::UnixListener>> =
 /// under test binds its own. So the port comes from below the kernel's
 /// ephemeral range, where a `bind(0)` of any test never lands, and it is
 /// claimed across processes (nextest runs each test in its own) by an
-/// abstract unix socket named after the port, held until this process
-/// ends: two `free_port` callers never get the same number. The port is
-/// also checked free on the four loopback sockets when claimed.
+/// abstract unix socket named after the port (a named mutex on Windows),
+/// held until this process ends: two `free_port` callers never get the same
+/// number. The port is also checked free on the four loopback sockets when
+/// claimed.
 pub fn free_port() -> u16 {
-    use std::os::linux::net::SocketAddrExt;
     const FIRST: u16 = 20_000;
     const LAST: u16 = 32_000;
     let span = u32::from(LAST - FIRST);
@@ -56,9 +62,7 @@ pub fn free_port() -> u16 {
         % span;
     for i in 0..span {
         let port = FIRST + ((start + i) % span) as u16;
-        let name = format!("lmgw-test-port-{port}");
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
-        let Ok(claim) = std::os::unix::net::UnixListener::bind_addr(&addr) else {
+        let Some(claim) = claim(port) else {
             continue;
         };
         let tcp4 = std::net::TcpListener::bind(("127.0.0.1", port));
@@ -78,10 +82,90 @@ pub fn free_port() -> u16 {
             // No IPv6 loopback: the device listener serves 127.0.0.1 alone.
             _ => {}
         }
-        CLAIMS.lock().unwrap().push(claim);
+        keep(claim);
         return port;
     }
     panic!("no port in {FIRST}..{LAST} free on both loopback addresses, TCP and UDP");
+}
+
+/// The abstract unix socket that claims `port` across processes; `None`
+/// when another process holds it.
+#[cfg(target_os = "linux")]
+fn claim(port: u16) -> Option<std::os::unix::net::UnixListener> {
+    use std::os::linux::net::SocketAddrExt;
+    let name = format!("lmgw-test-port-{port}");
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+    std::os::unix::net::UnixListener::bind_addr(&addr).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn keep(claim: std::os::unix::net::UnixListener) {
+    CLAIMS.lock().unwrap().push(claim);
+}
+
+/// A named mutex's handle, closed when dropped: a claim whose port then
+/// fails the bind check is let go at once.
+#[cfg(windows)]
+struct PortMutex(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: a kernel handle is usable from any thread; this one is only held
+// and closed.
+#[cfg(windows)]
+unsafe impl Send for PortMutex {}
+
+#[cfg(windows)]
+impl Drop for PortMutex {
+    fn drop(&mut self) {
+        // SAFETY: opened by `claim`, closed once, here.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// On Windows the claim is a named mutex in the `Global\` namespace (so it
+/// reaches another logon session's tests too), whose handle this process
+/// keeps: Windows closes it when the process ends, and the name is gone with
+/// the last handle. `None` when it exists already, also when another
+/// account made it and its DACL keeps this one out (`ERROR_ACCESS_DENIED`).
+#[cfg(windows)]
+fn claim(port: u16) -> Option<PortMutex> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name: Vec<u16> = format!("Global\\lmgw-test-port-{port}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: `name` is NUL-terminated; no security attributes, not owned.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    // SAFETY: read right after the call, on its thread.
+    let code = unsafe { GetLastError() };
+    if handle.is_null() {
+        assert_eq!(
+            code,
+            ERROR_ACCESS_DENIED,
+            "free_port's claim of {port}: CreateMutexW failed: {}",
+            std::io::Error::from_raw_os_error(code as i32)
+        );
+        return None;
+    }
+    let mutex = PortMutex(handle);
+    (code != ERROR_ALREADY_EXISTS).then_some(mutex)
+}
+
+#[cfg(windows)]
+fn keep(claim: PortMutex) {
+    CLAIMS.lock().unwrap().push(claim);
+}
+
+/// Another Unix (macOS) has no abstract sockets: the claim is not built
+/// there yet, and a suite that asks for one says so.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn claim(_port: u16) -> Option<std::convert::Infallible> {
+    panic!("free_port's cross-process claim is not built for this system yet");
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn keep(claim: std::convert::Infallible) {
+    match claim {}
 }
 
 /// A device row and its certificate.

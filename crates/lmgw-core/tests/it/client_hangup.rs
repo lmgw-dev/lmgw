@@ -39,6 +39,8 @@ use crate::common::{self, Gw};
 use crate::support::gpu_world::{Gpu, GIB};
 
 mod audio;
+// Reads TCP_USER_TIMEOUT off its sockets.
+#[cfg(target_os = "linux")]
 mod device;
 mod finished;
 mod responses;

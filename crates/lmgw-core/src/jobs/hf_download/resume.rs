@@ -62,7 +62,7 @@ pub(super) async fn hash_prefix(
     let mut file = tokio::task::spawn_blocking(move || std::fs::File::open(path))
         .await
         .map_err(|e| format!("reading {}: {e}", tmp.display()))?
-        .map_err(&what)?;
+        .map_err(what)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; HASH_STEP.min(have as usize)];
     let mut done = 0u64;
@@ -80,7 +80,7 @@ pub(super) async fn hash_prefix(
         })
         .await
         .map_err(|e| format!("reading {}: {e}", tmp.display()))?
-        .map_err(&what)?;
+        .map_err(what)?;
         (file, hasher, buf) = (f, h, b);
         done += n as u64;
         ctx.progress(JobProgress {

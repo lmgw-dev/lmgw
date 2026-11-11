@@ -143,8 +143,8 @@ fn only_refusals_of_the_audio_go_again_as_the_transcript() {
         GatewayError::VramTooLarge {
             model: "gemma".into(),
             need: "1".into(),
-            headroom: "0".into(),
             capacity: "1".into(),
+            hint: String::new(),
         },
         GatewayError::Unsupported("another facet".into()),
         GatewayError::InvalidRequest {

@@ -152,6 +152,8 @@ pub enum WebRtcGroup {
     /// The plain listener's: stock clients.
     #[default]
     Plain,
+    /// The TLS listener's: stock clients over `https`.
+    Tls,
     /// The device listener's: paired devices.
     Devices,
 }

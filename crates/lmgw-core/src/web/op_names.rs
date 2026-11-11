@@ -7,14 +7,14 @@
 //! property of three `match` statements rather than something a doc — or a
 //! test — could read.
 //!
-//! These four lists are that vocabulary, made explicit: `tests/it`'s
-//! `op_names_match_the_dispatcher_arms` scans the three dispatchers' source
+//! These five lists are that vocabulary, made explicit: `tests/it`'s
+//! `op_names_match_the_dispatcher_arms` scans the four dispatchers' source
 //! and asserts the arms equal these lists, both ways, so the two cannot
 //! drift. [`is_op`] is the gate `op()` checks *before* it looks at its own
 //! arms (§4.7): a name not listed here is unreachable, and adding an op means
 //! adding it here, which is what forces it into the docs.
 
-/// The 67 arms of [`super::api::op`]'s own `match` — everything dispatched
+/// The 68 arms of [`super::api::op`]'s own `match` — everything dispatched
 /// there directly.
 pub const MAIN_OPS: &[&str] = &[
     "upstream_set",
@@ -44,6 +44,7 @@ pub const MAIN_OPS: &[&str] = &[
     "hf_set",
     "container",
     "hold_set",
+    "headroom_forget",
     "machine_check",
     "machine_settings_fit",
     "audio_catalog",
@@ -70,6 +71,8 @@ pub const MAIN_OPS: &[&str] = &[
     "container_images",
     "container_image_delete",
     "container_image_tag",
+    "engine_releases",
+    "engine_fallback_clear",
     "build_updates_check",
     "container_image_pull",
     "container_image_pull_status",
@@ -125,29 +128,49 @@ pub const KEY_OPS: &[&str] = &[
     "device_ca_rotate",
 ];
 
+/// The account ops (headless server design §5.6), dispatched to
+/// `super::accounts::account_op`.
+pub const ACCOUNT_OPS: &[&str] = &[
+    "account_list",
+    "account_create",
+    "account_set",
+    "account_delete",
+    "account_password_link",
+    "account_password_set",
+    "account_sessions",
+    "session_end",
+    "account_login_link",
+    "accounts_switch",
+    "audit_list",
+];
+
 /// The dashboard's settings save — special-cased in `op()` for the same
 /// reason the agent and key ops are (its own refusal shape), but a list of
 /// one so [`all`] has nowhere else to special-case it.
 pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 
 /// Every op name, in list order — `MAIN_OPS`, then `AGENT_OPS`, `KEY_OPS`,
-/// `SETTINGS_OPS`. 96 in total (§4.7, plus the benchmark design's seven,
+/// `ACCOUNT_OPS`, `SETTINGS_OPS`. 110 in total (§4.7, plus the benchmark design's seven,
 /// §8.1, `voice_transcribe`, audio-class gap 5, the Voices lab's two, the realtime design's
 /// `realtime_budget`, §12, the device link's four, §9.4, and
 /// `image_upscaler_add`, chat-media-tools §9, `upstream_quota_clear`,
 /// openai egress design §14.6, and `machine_check` and
 /// `machine_settings_fit`, machine-check design §4.2, and `model_find`,
-/// `model_get`, `model_fit_again` and `model_get_status`, find-a-model design §9.1).
+/// `model_get`, `model_fit_again` and `model_get_status`, find-a-model design §9.1, and
+/// the ten account ops, headless server design §5.6, and `audit_list`, §5.8, and
+/// `engine_releases` and `engine_fallback_clear`, Windows design §4.2, and
+/// `headroom_forget`, per-model containers §4).
 pub fn all() -> impl Iterator<Item = &'static str> {
     MAIN_OPS
         .iter()
         .chain(AGENT_OPS.iter())
         .chain(KEY_OPS.iter())
+        .chain(ACCOUNT_OPS.iter())
         .chain(SETTINGS_OPS.iter())
         .copied()
 }
 
-/// Is `name` one of the 96? What `op()` checks before it looks at its own
+/// Is `name` one of the 110? What `op()` checks before it looks at its own
 /// arms (§4.7): unlisted means unreachable, whatever a `match` arm below it
 /// might otherwise have answered.
 pub fn is_op(name: &str) -> bool {
@@ -171,9 +194,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_four_lists_are_96_names_with_no_duplicate() {
+    fn the_five_lists_are_110_names_with_no_duplicate() {
         let all: Vec<&str> = all().collect();
-        assert_eq!(all.len(), 96, "{all:#?}");
+        assert_eq!(all.len(), 110, "{all:#?}");
         let set: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), all.len(), "a name appears in more than one list");
     }

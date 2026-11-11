@@ -208,7 +208,8 @@ fn conf_dirs() -> Vec<PathBuf> {
 }
 
 /// Whether [`VAR`] is `1` now, which is what GTK 3 tests: the file dialogs
-/// go through the portal.
+/// go through the portal. Read by the Linux Save As dialog only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn in_use() -> bool {
     std::env::var(VAR).is_ok_and(|v| v == "1")
 }
@@ -235,7 +236,9 @@ pub(crate) fn apply() -> &'static str {
 }
 
 /// Remove [`VAR`] from a child's environment when this process set it: what
-/// `xdg-open` starts is not lmgw's window.
+/// `xdg-open` starts is not lmgw's window. Not used on Windows, which hands
+/// links to the shell (main.rs, `xdg_open`).
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn scrub(cmd: &mut std::process::Command) {
     if SET_BY_US.get().copied().unwrap_or(false) {
         cmd.env_remove(VAR);

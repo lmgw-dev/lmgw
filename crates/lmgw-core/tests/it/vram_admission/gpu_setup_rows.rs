@@ -19,9 +19,9 @@ use lmgw_core::runtime::Class;
 use lmgw_core::vram::Target;
 use lmgw_machine::CmdOut;
 
-use super::gpu_setup::{
-    ask, driver_updated, from_the_cloud, h, not_ready, verdict, world, RESTART,
-};
+#[cfg(unix)]
+use super::gpu_setup::verdict;
+use super::gpu_setup::{ask, driver_updated, from_the_cloud, h, not_ready, world, RESTART};
 use super::*;
 use crate::support::device_pair::op;
 use crate::support::fallbacks::set_fallback;
@@ -263,6 +263,7 @@ async fn managed(machine: &Machine) -> (Gpu, Gw, tempfile::TempDir) {
 /// A folder of lmgw's that others may write into: blamed, answered by the
 /// fallback, and never swapped for — nothing the swap reads changes when
 /// it is fixed — so the first request after the fix starts the model.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_folder_that_is_not_private_is_not_swapped_for() {
     use std::os::unix::fs::PermissionsExt;

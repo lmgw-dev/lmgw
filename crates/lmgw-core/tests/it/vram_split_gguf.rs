@@ -46,7 +46,7 @@ fn write(root: &Path, rel: &str, h: &synth::Header) -> u64 {
 fn part(root: &Path, rel: &str, len: u64) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+    crate::support::sparse::create(&path, len);
 }
 
 fn chat_row(gguf_path: &str, n_gpu_layers: Option<i64>) -> LocalModel {
@@ -93,6 +93,47 @@ async fn a_split_chat_model_is_charged_every_part_and_a_single_file_is_unchanged
     assert_eq!(split.kv_cache_bytes, one.kv_cache_bytes);
     assert_eq!(split.compute_bytes, one.compute_bytes);
     assert_eq!(split.total_bytes, one.total_bytes + 8 * MIB);
+}
+
+/// `n_cpu_moe` keeps the routed experts of the first N layers off the card
+/// wherever a part of the set holds them: the tensors of every part are
+/// matched, the untied head in the last part keeps `token_embd` on the host,
+/// and a shared expert stays on the card.
+#[tokio::test]
+async fn n_cpu_moe_takes_the_experts_off_the_card_from_every_part() {
+    const KIB: u64 = 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let models = dir.path().display().to_string();
+    let mut p1 = chat_header();
+    p1.u32("split.count", 3)
+        .tensor_sized("token_embd.weight", 64 * KIB)
+        .tensor_sized("blk.0.ffn_up_exps.weight", 100 * KIB)
+        .tensor_sized("blk.0.ffn_down_exps.weight", 100 * KIB);
+    let mut p2 = synth::Header::default();
+    p2.tensor_sized("blk.1.ffn_up_exps.weight", 200 * KIB)
+        .tensor_sized("blk.1.ffn_up_shexp.weight", 30 * KIB)
+        .tensor_sized("blk.2.ffn_up_exps.weight", 300 * KIB);
+    let mut p3 = synth::Header::default();
+    p3.tensor_sized("blk.3.ffn_up_exps.weight", 400 * KIB)
+        .tensor_sized("output.weight", 50 * KIB);
+    let total = write(dir.path(), PART1, &p1)
+        + write(dir.path(), PART2, &p2)
+        + write(dir.path(), PART3, &p3);
+    let plans = PlanCache::default();
+
+    let plain = plans.local(&models, &chat_row(PART1, None)).await;
+    assert_eq!(plain.weights_bytes, total - 64 * KIB, "{plain:?}");
+
+    let mut row = chat_row(PART1, None);
+    row.params.n_cpu_moe = Some(2);
+    let fp = plans.local(&models, &row).await;
+    assert_eq!(fp.weights_bytes, total - 64 * KIB - 400 * KIB, "{fp:?}");
+    let note = fp.note.as_deref().unwrap_or_default();
+    assert!(note.contains("by --n-cpu-moe 2"), "{note}");
+
+    row.params.n_cpu_moe = Some(3);
+    let fp = plans.local(&models, &row).await;
+    assert_eq!(fp.weights_bytes, total - 64 * KIB - 700 * KIB, "{fp:?}");
 }
 
 #[tokio::test]

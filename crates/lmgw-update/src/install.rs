@@ -1,7 +1,8 @@
 //! The install step: `/usr/bin/pkexec /usr/bin/dnf install -y <rpm>`, and
 //! whether this host can run it at all.
 //!
-//! Self-install is RPM-only. The same binary built and run on a host without
+//! This is the Linux step; Windows runs its NSIS installer ([`crate::nsis`]).
+//! The same binary built and run on a host without
 //! `dnf` (Arch, an AppImage) has nothing to hand the package to, so a caller
 //! gates its whole install path on [`can_self_install`] — and says where to
 //! get the new version instead of offering a button whose only outcome is
@@ -122,7 +123,10 @@ mod tests {
     #[test]
     fn availability_reads_the_two_paths_the_install_runs() {
         // The availability check and the install command name the same two absolute paths,
-        // not a bare name that a PATH lookup would resolve.
+        // not a bare name that a PATH lookup would resolve. Absolute on Unix: a path
+        // without a drive is not absolute on Windows, where neither file exists and
+        // `can_self_install` is false (the Windows update path is the installer's, WP7).
+        #[cfg(unix)]
         for p in [PKEXEC, DNF] {
             assert!(Path::new(p).is_absolute(), "{p} is not absolute");
         }

@@ -64,12 +64,10 @@ fn lay_out(root: &Path) {
         let path = root.join(REPO).join(&file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &header).unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len(size)
-            .unwrap();
+        crate::support::sparse::set_len(
+            &std::fs::OpenOptions::new().write(true).open(&path).unwrap(),
+            size,
+        );
     }
 }
 

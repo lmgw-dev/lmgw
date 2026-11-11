@@ -206,9 +206,7 @@ fn host_pid(name: &str) -> Option<u32> {
 
 /// What the driver lists for a container's processes right now.
 fn container_bytes(probe: &NvmlProbe, root: u32) -> Option<u64> {
-    let pids: Vec<u32> = std::iter::once(root)
-        .chain(ProcFs::default().descendants(root))
-        .collect();
+    let pids: Vec<u32> = ProcFs::default().tree_of(root).ok()?;
     let listed = probe.processes(&pids, &[]).ok()?;
     let mine: Vec<_> = listed.iter().filter(|p| pids.contains(&p.pid)).collect();
     (!mine.is_empty()).then(|| mine.iter().filter_map(|p| p.bytes).sum())

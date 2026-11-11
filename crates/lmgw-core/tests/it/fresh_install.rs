@@ -9,6 +9,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use lmgw_core::config::deployment::Deployment;
 use lmgw_core::config::{dev_models_dir_refusal, Settings};
 use lmgw_core::hf::{self, TARGETS};
 use lmgw_core::state::fresh_install::{self, default_models_dir};
@@ -26,7 +27,9 @@ fn json(s: &Settings) -> serde_json::Value {
 async fn a_new_data_dir_gets_a_models_dir_per_class_under_itself() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("lmgw");
-    let db = fresh_install::open_db(&data, false).await.unwrap();
+    let db = fresh_install::open_db(&data, false, Deployment::Desktop)
+        .await
+        .unwrap();
     let s = store::load_settings(&db).await.unwrap();
     for t in TARGETS {
         let want = default_models_dir(&data, t);
@@ -52,7 +55,12 @@ async fn a_new_data_dir_gets_a_models_dir_per_class_under_itself() {
         .await
         .unwrap();
     assert!(
-        raw.contains(&default_models_dir(&data, "audio").display().to_string()),
+        // As a JSON string: a Windows path's `\` is escaped there.
+        raw.contains(
+            serde_json::to_string(&default_models_dir(&data, "audio").display().to_string())
+                .unwrap()
+                .trim_matches('"')
+        ),
         "{raw}"
     );
     // The settings whose empty value means something keep it.
@@ -63,7 +71,9 @@ async fn a_new_data_dir_gets_a_models_dir_per_class_under_itself() {
     db.close().await;
 
     // The next start is not a fresh install any more, and changes nothing.
-    let db = fresh_install::open_db(&data, false).await.unwrap();
+    let db = fresh_install::open_db(&data, false, Deployment::Desktop)
+        .await
+        .unwrap();
     assert_eq!(json(&store::load_settings(&db).await.unwrap()), json(&s));
 }
 
@@ -81,7 +91,9 @@ async fn an_existing_install_keeps_its_settings() {
         db.close().await;
         s
     };
-    let db = fresh_install::open_db(&data, false).await.unwrap();
+    let db = fresh_install::open_db(&data, false, Deployment::Desktop)
+        .await
+        .unwrap();
     let s = store::load_settings(&db).await.unwrap();
     assert_eq!(json(&s), json(&saved));
     assert!(
@@ -100,7 +112,9 @@ async fn an_existing_database_without_saved_settings_stays_as_it_is() {
         .unwrap()
         .close()
         .await;
-    let db = fresh_install::open_db(&data, false).await.unwrap();
+    let db = fresh_install::open_db(&data, false, Deployment::Desktop)
+        .await
+        .unwrap();
     let row: Option<String> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'settings'")
             .fetch_optional(&db)
@@ -154,7 +168,7 @@ async fn the_boot_of_a_new_data_dir_stores_and_creates_the_four_dirs() {
 async fn a_dev_instance_in_ram_gets_no_models_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("dev-in-ram");
-    let db = fresh_install::open_db_judged(&data, true, |_| true)
+    let db = fresh_install::open_db_judged(&data, true, Deployment::Desktop, |_| true)
         .await
         .unwrap();
     let row: Option<String> =
@@ -177,7 +191,7 @@ async fn a_dev_instance_in_ram_gets_no_models_dirs() {
     for (name, dev, in_ram) in [("dev-on-disk", true, false), ("prod-in-ram", false, true)] {
         let data = dir.path().join(name);
         let judge: fn(&Path) -> bool = if in_ram { |_| true } else { |_| false };
-        let db = fresh_install::open_db_judged(&data, dev, judge)
+        let db = fresh_install::open_db_judged(&data, dev, Deployment::Desktop, judge)
             .await
             .unwrap();
         let s = store::load_settings(&db).await.unwrap();
@@ -201,7 +215,9 @@ async fn a_dev_data_dir_on_tmpfs_is_asked_for_real() {
         return; // no tmpfs to put a data dir on, on this box
     }
     let dir = tempfile::tempdir_in(shm).unwrap();
-    let db = fresh_install::open_db(dir.path(), true).await.unwrap();
+    let db = fresh_install::open_db(dir.path(), true, Deployment::Desktop)
+        .await
+        .unwrap();
     let s = store::load_settings(&db).await.unwrap();
     for t in TARGETS {
         assert!(hf::models_dir_for_target(&s, t).is_empty(), "{t}");

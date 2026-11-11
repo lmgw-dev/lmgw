@@ -4,8 +4,9 @@
 //! `devices` settings class and the status block's trust half.
 //!
 //! No test here reaches the desktop's Secret Service: each uses
-//! `MemoryWrapStore`, or a gateway's own default, which answers as a
-//! headless start does.
+//! `MemoryWrapStore`, a gateway's own default, which answers as a headless
+//! start does, or the server image's secret read from a test's own file
+//! (`wrap_secret`).
 
 mod ca;
 mod handshake;
@@ -14,6 +15,8 @@ mod leaf;
 mod rotation;
 mod settings;
 mod status;
+mod wrap_secret;
+mod wrap_secret_start;
 
 use std::path::Path;
 use std::sync::Arc;

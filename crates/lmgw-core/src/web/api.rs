@@ -161,13 +161,17 @@ async fn vram(State(st): State<SharedState>) -> Response {
 
 async fn connect(State(st): State<SharedState>) -> Json<dto::ConnectInfo> {
     let snap = st.snapshot();
-    let bases = crate::net::reachable_urls(&snap.settings.bind_addr)
-        .into_iter()
-        .map(|r| dto::BaseUrl {
-            url: r.url,
-            label: r.label,
-        })
-        .collect();
+    let bases = crate::net::connect_bases(
+        &snap.settings,
+        snap.serving_tls.as_ref(),
+        st.deployment().is_container(),
+    )
+    .into_iter()
+    .map(|r| dto::BaseUrl {
+        url: r.url,
+        label: r.label,
+    })
+    .collect();
     let models = snap
         .exposed_models()
         .into_iter()
@@ -439,6 +443,10 @@ pub(crate) struct RungPlanQuery {
     mmproj_path: Option<String>,
     draft_gguf_path: Option<String>,
     n_gpu_layers: Option<i64>,
+    /// The base row's `n_cpu_moe` and `moe_cache_mib`: the experts every
+    /// rung keeps in host memory, and their cache on the card.
+    n_cpu_moe: Option<i64>,
+    moe_cache_mib: Option<i64>,
 }
 
 async fn ladder_rung_plan(
@@ -456,6 +464,8 @@ async fn ladder_rung_plan(
                 mmproj_path: q.mmproj_path.as_deref(),
                 draft_gguf_path: q.draft_gguf_path.as_deref(),
                 n_gpu_layers: q.n_gpu_layers,
+                n_cpu_moe: q.n_cpu_moe,
+                moe_cache_mib: q.moe_cache_mib,
             },
         )
         .await,
@@ -702,8 +712,12 @@ fn arg_str<'a>(args: &'a Args, key: &str) -> Option<&'a str> {
 async fn op(
     State(st): State<SharedState>,
     Path(name): Path<String>,
+    ctx: Option<axum::Extension<crate::proxy::RequestCtx>>,
+    conn: super::session::ConnInfo,
+    headers: axum::http::HeaderMap,
     super::op_body::OpBody(args): super::op_body::OpBody,
 ) -> Response {
+    let ctx = ctx.map(|axum::Extension(c)| c).unwrap_or_default();
     use super::op_names;
     use crate::ops::{self, patch_from_args};
     // The op plane's vocabulary, made explicit (api-docs design §4.7): a name
@@ -732,14 +746,22 @@ async fn op(
     // code: an owner row's refusals are `refuse_owner`, not `ops_result`'s
     // flat `400 op_failed` for a malformed argument.
     if op_names::KEY_OPS.contains(&name.as_str()) {
-        return match super::api_settings::key_op(&st, &name, args).await {
+        return match super::api_settings::key_op(&st, &ctx.principal, &name, args).await {
             Ok(v) => Json(v).into_response(),
             Err(refusal) => refusal.into_response(),
         };
     }
+    // The account ops (headless server design §5.6): their own codes, and
+    // `accounts_switch` answers with a cookie.
+    if op_names::ACCOUNT_OPS.contains(&name.as_str()) {
+        return super::accounts::account_op(&st, &ctx, &conn, &headers, &name, Value::Object(args))
+            .await;
+    }
     // The dashboard's settings save, for the same reason: `agent_origin_suffix`
     // has a refusal of its own (`origin_suffix_shadows_gateway`, origins §4.1),
-    // so has a dev instance's `container_prefix` (`dev_production_prefix`), and
+    // so has a dev instance's `container_prefix` (`dev_production_prefix`) and
+    // a setting the server's container pins (`setting_pinned`, headless server
+    // design §2.2, which `settings_set` below answers with too), and
     // everything else it answers is still the flat `op_failed`.
     if name == "settings_set_full" {
         return match patch_from_args(Some(args)) {
@@ -782,8 +804,10 @@ async fn op(
             }
             Err(e) => Err(e),
         },
+        // A pinned field is refused with `setting_pinned`, as the full save
+        // refuses it (headless server design §2.2).
         "settings_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::settings_set(&st, p).await),
+            Ok(p) => return refused(ops::settings_set(&st, p).await),
             Err(e) => Err(e),
         },
         "aux_model_set" => match patch_from_args(Some(args)) {
@@ -961,6 +985,13 @@ async fn op(
             Some(active) => return refused(ops::hold_set(&st, active).await),
             None => Err("pass active: true or false".into()),
         },
+        // Forget auto headroom's learned growth (per-model containers §4,
+        // "Headroom"): Settings' confirmed button. The answer is what the
+        // headroom is now.
+        "headroom_forget" => {
+            let res = st.vram.forget_growth(&st.db).await;
+            ops::backends::to_json(res.map(|()| st.vram.headroom_now(&st.snapshot())))
+        }
         // The machine check (machine-check design §4.2): read-only; the
         // fix runs only from the app's own window, never from a route.
         "machine_check" => typed(args, |a| crate::machine::op(&st, a)).await,
@@ -1043,6 +1074,10 @@ async fn op(
             typed(args, |a| ops::backends::container_image_delete(&st, a)).await
         }
         "container_image_tag" => typed(args, |a| ops::backends::container_image_tag(&st, a)).await,
+        "engine_releases" => typed(args, |a| ops::backends::engine_releases(&st, a)).await,
+        "engine_fallback_clear" => {
+            typed(args, |a| ops::backends::engine_fallback_clear(&st, a)).await
+        }
         // Update detection (container-builds §8): "Check now", and "Pull
         // update" for a registry image. Neither recreates a container.
         "build_updates_check" => typed(args, |a| ops::backends::build_updates_check(&st, a)).await,
@@ -1727,6 +1762,7 @@ const RATE_TICK: std::time::Duration = std::time::Duration::from_millis(500);
 async fn events(
     State(st): State<SharedState>,
     served: Option<axum::Extension<crate::server::ServedAt>>,
+    ctx: Option<axum::Extension<crate::proxy::RequestCtx>>,
 ) -> Sse<impl Stream<Item = Result<SseFrame, String>>> {
     fn frame<T: serde::Serialize>(event: &str, data: &T) -> Result<SseFrame, String> {
         Ok(SseFrame::default()
@@ -1874,5 +1910,16 @@ async fn events(
     // Ends when the server stops: the page reconnects to the next one.
     let at = served.map(|axum::Extension(at)| at);
     let stream = crate::server::until_stopped(&st.stops, at, stream, None);
+    // Ends with its credential (headless server design §5.2): a sign-out,
+    // a session ended from the Accounts card, a disabled account, a rotated
+    // or deleted key. A last `revoked` frame says why; the page signs in
+    // again.
+    let watch = ctx.and_then(|axum::Extension(ctx)| crate::devices::watch(&st, &ctx));
+    let stream = crate::devices::until_revoked(stream, watch, |r| {
+        Some(frame(
+            "revoked",
+            &lmgw_api_types::StreamRevoked { message: r.message },
+        ))
+    });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

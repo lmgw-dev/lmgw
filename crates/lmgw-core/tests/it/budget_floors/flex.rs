@@ -126,7 +126,7 @@ async fn it_passes_without_a_budget_or_with_a_flex_row() {
 }
 
 /// A budgeted key on a cloud model with no price at all is refused, flex
-/// or not (decision 24, replacing the draft call that let it pass).
+/// or not (decision 24, replacing the earlier decision that let it pass).
 #[tokio::test]
 async fn a_budgeted_key_on_an_unpriced_model_is_refused() {
     let (m, state, gw) =

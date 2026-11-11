@@ -1469,10 +1469,7 @@ async fn the_pinned_reranker_and_ingest_count_never_swap_on_outside_use() {
 
     // A rerank row with its own fallback.
     f.world().size.insert("rank-model".into(), 3 * GIB);
-    std::fs::File::create(f._models_dir.path().join("rank-model.gguf"))
-        .unwrap()
-        .set_len(3 * GIB)
-        .unwrap();
+    crate::support::sparse::create(f._models_dir.path().join("rank-model.gguf"), 3 * GIB);
     store::insert_aux_model(
         &f.state.db,
         &NewAuxModel {

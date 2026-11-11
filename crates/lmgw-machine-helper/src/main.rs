@@ -4,14 +4,21 @@
 //! environment, D60) and acts through the real host; everything it decides
 //! is in the library, where the tests reach it with fakes.
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
 use std::io::Write;
 
+#[cfg(target_os = "linux")]
 use lmgw_machine::helper::{Event, Exit};
+#[cfg(target_os = "linux")]
 use lmgw_machine::SystemFacts;
+#[cfg(target_os = "linux")]
 use lmgw_machine_helper::stdout::Queued;
+#[cfg(target_os = "linux")]
 use lmgw_machine_helper::{real, Caller};
 
+#[cfg(target_os = "linux")]
 fn main() {
     // Before anything else: pkexec runs the helper in root's home, or with
     // `--keep-cwd` in the directory of whoever asked, and nothing the helper
@@ -46,4 +53,10 @@ fn main() {
     // What the reader takes now goes out; the journal has the rest.
     out.settle();
     std::process::exit(exit.code());
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("lmgw-machine-helper runs on Linux only (not on Windows yet)");
+    std::process::exit(1);
 }

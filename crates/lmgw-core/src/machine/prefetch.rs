@@ -18,7 +18,11 @@
 //!   `nmcli -t -f GENERAL.METERED device show <device>` within the load
 //!   timeout) — "yes", guessed or not, skips the whole pre-fetch with a log
 //!   line saying so; anything it cannot tell counts as not metered, and the
-//!   log says why. A switch to turn the pre-fetch off is not built yet.
+//!   log says why. A switch to turn the pre-fetch off is not built yet. In
+//!   the server image the probe is not run at all (headless server design
+//!   §7): the image has no NetworkManager and the container's routes are
+//!   not the host's, so whether the connection is metered is not known, the
+//!   pre-fetch goes ahead, and the first turn to `ready` logs that once.
 //! - **How:** each image is asked of podman (`podman image exists`, bounded
 //!   as a model download asks it, `web::hf::engine::within`); one that is
 //!   there is left alone, one podman cannot say anything about is left
@@ -31,6 +35,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use lmgw_machine::Facts;
@@ -165,6 +170,9 @@ fn metered(f: &dyn Facts, limit: Duration) -> Metered {
 /// through (module doc), asked of the state's machine within the load
 /// timeout on the blocking pool.
 pub async fn connection_metered(state: &SharedState) -> Metered {
+    if state.deployment().is_container() {
+        return Metered::Unknown(super::container::METERED_NOT_CHECKED.into());
+    }
     let (f, limit) = (
         state.machine.facts(),
         crate::runtime::cdi::load_timeout(state),
@@ -178,13 +186,31 @@ pub async fn connection_metered(state: &SharedState) -> Metered {
 /// (module doc), and say what was done about each image that was not here
 /// — or that nothing was fetched on a metered connection.
 pub(super) async fn run(state: &SharedState) -> Vec<Prefetched> {
+    if state.deployment().is_container() {
+        if !state.machine.metered_said.swap(true, Ordering::SeqCst) {
+            tracing::info!(
+                "the machine check is ready; whether the connection is metered is not known \
+                 ({}), so the engine pre-fetch goes ahead (said once)",
+                super::container::METERED_NOT_CHECKED
+            );
+        }
+    } else if let Some(metered) = metered_skip(state).await {
+        return vec![metered];
+    }
+    fetch(state).await
+}
+
+/// The metered check before the pre-fetch, said in the log: what the
+/// pre-fetch did instead when the connection is metered, `None` when it
+/// goes ahead.
+async fn metered_skip(state: &SharedState) -> Option<Prefetched> {
     match connection_metered(state).await {
         Metered::Yes(how) => {
             tracing::info!(
                 "the machine check is ready; the engine pre-fetch is skipped: metered connection \
                  ({how}) — each model's first start downloads its engine"
             );
-            return vec![Prefetched::Metered { how }];
+            return Some(Prefetched::Metered { how });
         }
         Metered::No => {}
         Metered::Unknown(why) => tracing::info!(
@@ -192,6 +218,11 @@ pub(super) async fn run(state: &SharedState) -> Vec<Prefetched> {
              so it counts as not metered and the engine pre-fetch goes ahead"
         ),
     }
+    None
+}
+
+/// The pulls themselves (module doc).
+async fn fetch(state: &SharedState) -> Vec<Prefetched> {
     let mut out = Vec::new();
     for image in wanted(state) {
         match within(PRESENCE_BOUND, &image, pull::presence(state, &image)).await {

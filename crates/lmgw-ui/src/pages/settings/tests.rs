@@ -470,3 +470,113 @@ fn the_smart_turn_table_and_the_limits_are_judged_as_wholes() {
     let judged = judged_keys(&["bind_addr".to_string()]);
     assert_eq!(judged.into_iter().collect::<Vec<_>>(), ["bind_addr"]);
 }
+
+/// The settings answer's `pinned` list locks its rows (headless server
+/// design §2.2): the row's sentence is found by its key, and nothing else
+/// is pinned.
+#[test]
+fn a_pinned_setting_is_found_by_its_key() {
+    let data = json!({
+        "pinned": [
+            {"setting": "bind_addr", "variable": "LMGW_BIND_ADDR", "source": "variable",
+             "why": "Set by this server's container (LMGW_BIND_ADDR)."},
+            {"setting": "realtime.webrtc_port", "variable": "LMGW_WEBRTC_PORT",
+             "source": "kept", "why": "Kept as stored; LMGW_WEBRTC_PORT is not set on this start."},
+        ]
+    });
+    assert_eq!(
+        pinned_why_in(&data, "realtime.webrtc_port").as_deref(),
+        Some("Kept as stored; LMGW_WEBRTC_PORT is not set on this start.")
+    );
+    assert!(pinned_why_in(&data, "bind_addr").is_some());
+    assert_eq!(pinned_why_in(&data, "retention_days"), None);
+    assert_eq!(pinned_why_in(&json!({}), "bind_addr"), None);
+    // Both are rows of this table, of a kind `def_view` locks.
+    for key in ["bind_addr", "realtime.webrtc_port"] {
+        let d = fields().find(|d| d.key == key).unwrap();
+        assert!(matches!(d.ctl, Ctl::Mono | Ctl::OptIntRange(..)), "{key}");
+    }
+}
+
+/// "restart to apply" is the tray's Restart gateway: shown on the desktop,
+/// not in the server image (headless server design §6.2); other units stay.
+#[test]
+fn the_restart_unit_is_the_desktops() {
+    let desktop = json!({"deployment": "desktop"});
+    let container = json!({"deployment": "container"});
+    assert_eq!(unit_shown(RESTART_UNIT, Some(&desktop)), RESTART_UNIT);
+    assert_eq!(unit_shown(RESTART_UNIT, None), RESTART_UNIT);
+    assert_eq!(unit_shown(RESTART_UNIT, Some(&container)), "");
+    assert_eq!(unit_shown("MiB", Some(&container)), "MiB");
+    let bind = fields().find(|d| d.key == "bind_addr").unwrap();
+    assert_eq!(bind.unit, RESTART_UNIT);
+}
+
+#[test]
+fn about_says_what_runs() {
+    use lmgw_api_types::Deployment;
+    assert_eq!(
+        about::runs_as(Deployment::Desktop, false),
+        "this computer's desktop app"
+    );
+    assert_eq!(
+        about::runs_as(Deployment::Desktop, true),
+        "a dev instance on this computer"
+    );
+    assert_eq!(
+        about::runs_as(Deployment::Container, false),
+        "the server image's container"
+    );
+}
+
+/// A copy's row on Settings → About (headless server design ruling 14):
+/// binary units, the time in UTC, the database and the migration step it
+/// was made before.
+#[test]
+fn a_migration_copy_reads_as_its_size_time_and_step() {
+    let c = lmgw_api_types::MigrationCopy {
+        file: "lmgw-0101-0102.sqlite".into(),
+        path: "/data/backups/lmgw-0101-0102.sqlite".into(),
+        database: "lmgw.sqlite".into(),
+        from: 101,
+        to: 102,
+        bytes: 3 * 1024 * 1024 / 2,
+        made_at: "2026-11-08 10:00:00".into(),
+    };
+    assert_eq!(
+        about::copy_line(&c),
+        "1.5 MiB, made 2026-11-08 10:00:00 UTC, lmgw.sqlite before migration 0101 → 0102"
+    );
+    let unknown = lmgw_api_types::MigrationCopy {
+        made_at: String::new(),
+        ..c
+    };
+    assert_eq!(
+        about::copy_line(&unknown),
+        "1.5 MiB, lmgw.sqlite before migration 0101 → 0102"
+    );
+}
+
+/// The TLS rows (headless server design §4.7): each key the server image
+/// pins is a row the pinned list can lock, and the listener's own settings
+/// say they apply at the next start on the desktop.
+#[test]
+fn the_tls_rows_are_the_settings_the_image_pins() {
+    for key in [
+        "tls.cert_path",
+        "tls.key_path",
+        "tls.listen",
+        "public_url",
+        "realtime.webrtc_tls_port",
+    ] {
+        let d = fields()
+            .find(|d| d.key == key)
+            .unwrap_or_else(|| panic!("{key}"));
+        assert!(matches!(d.ctl, Ctl::Mono | Ctl::OptIntRange(..)), "{key}");
+    }
+    for key in ["tls.cert_path", "tls.key_path", "tls.listen"] {
+        let d = fields().find(|d| d.key == key).unwrap();
+        assert_eq!(d.unit, RESTART_UNIT, "{key}");
+        assert_eq!((d.cat, d.group), ("network", "tls"), "{key}");
+    }
+}

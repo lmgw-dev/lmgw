@@ -652,6 +652,7 @@ mod tests {
     /// one whose link stays in the models dir is a file there; one into a
     /// store outside it (a Hugging Face cache blob) dangles there, however
     /// it resolves on the host, and so does a dangling one.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_gguf_is_counted_as_the_container_sees_it() {
         let models = tempfile::tempdir().unwrap();

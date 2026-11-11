@@ -77,6 +77,9 @@ pub(super) struct World {
     pub(super) pids: HashMap<String, u32>,
     /// Bytes held by a process lmgw does not own — a game, the desktop.
     pub(super) outside: u64,
+    /// Model id -> what `podman logs` prints for its container. Absent: the
+    /// generic answer every other command gets.
+    pub(super) logs: HashMap<String, String>,
     /// Models whose process the fake driver leaves out of its list: a
     /// CPU-only row, or a driver that has not caught up with a start.
     pub(super) unlisted: HashSet<String>,
@@ -90,6 +93,10 @@ pub(super) struct World {
     /// Images `podman image exists` says are not on the machine
     /// (machine-check design §5); every other image is there.
     pub(super) missing_images: HashSet<String>,
+    /// The llama-server `--help` the images answer has no `--fit`
+    /// (ik_llama.cpp, an older build): VRAM admission charges a row as
+    /// written (`vram::fit_vocab`).
+    pub(super) llama_without_fit: bool,
     /// Images podman fails to say anything about: `podman image exists`
     /// exits 125, as on a storage it cannot read.
     pub(super) unknown_images: HashSet<String>,

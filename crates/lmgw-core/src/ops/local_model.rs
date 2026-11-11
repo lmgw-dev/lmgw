@@ -49,6 +49,12 @@ pub struct LocalModelPatch {
     pub ctx_size: Option<i64>,
     pub n_predict: Option<i64>,
     pub n_gpu_layers: Option<i64>,
+    /// `--n-cpu-moe`: keep the routed experts of a mixture-of-experts
+    /// model's first N layers in host memory. 0 or more.
+    pub n_cpu_moe: Option<i64>,
+    /// `--moe-cache-mib`: a cache on the card, in MiB, for the most used of
+    /// the experts kept in host memory. 0 or more.
+    pub moe_cache_mib: Option<i64>,
     pub threads: Option<i64>,
     pub batch_size: Option<i64>,
     pub ubatch_size: Option<i64>,
@@ -171,6 +177,17 @@ fn overlay_params(
     set!(ctx_size);
     set!(n_predict);
     set!(n_gpu_layers);
+    if p.n_cpu_moe.is_some_and(|n| n < 0) {
+        return Err(
+            "n_cpu_moe must be 0 or more: the number of layers whose experts stay in host memory"
+                .into(),
+        );
+    }
+    set!(n_cpu_moe);
+    if p.moe_cache_mib.is_some_and(|n| n < 0) {
+        return Err("moe_cache_mib must be 0 or more: a cache size in MiB".into());
+    }
+    set!(moe_cache_mib);
     set!(threads);
     set!(batch_size);
     set!(ubatch_size);
@@ -231,6 +248,8 @@ fn overlay_params(
             "ctx_size" => base.ctx_size = None,
             "n_predict" => base.n_predict = None,
             "n_gpu_layers" => base.n_gpu_layers = None,
+            "n_cpu_moe" => base.n_cpu_moe = None,
+            "moe_cache_mib" => base.moe_cache_mib = None,
             "threads" => base.threads = None,
             "batch_size" => base.batch_size = None,
             "ubatch_size" => base.ubatch_size = None,
@@ -340,7 +359,7 @@ pub async fn local_model_get(
         }
         let snap = state.snapshot();
         if matches!(class, None | Some(Class::Image)) {
-            if let Some(v) = image_model_get(&snap, state, id, model_id)? {
+            if let Some(v) = image_model_get(&snap, state, id, model_id).await? {
                 return Ok(dto::LocalModelRead::Image(v));
             }
         }
@@ -442,7 +461,13 @@ pub async fn local_model_get(
     // enabled, so a disabled entry still shows what enabling it would
     // produce, and with a placeholder port because the real one is allocated
     // per start (§3.5).
-    let command_line = command_line_preview(state, Class::Chat, &m.model_id);
+    // Where VRAM admission fits it in llama.cpp's `--fit` place, the
+    // placement is rendered too, and said: the running container's, else
+    // what a start on this card as last read gets (`vram::partial::llama`).
+    let (fitted, fit_said) = super::local_model_fit::fitted(state, &m.model_id).await;
+    let mut advisories = advisories;
+    advisories.extend(fit_said);
+    let command_line = command_line_preview_at(state, Class::Chat, &m.model_id, 0, fitted);
     let rungs_detail = ladder_rungs_detail(state, &models_dir, m).await;
 
     let licence = crate::modelinfo::licence::of_file(state, &models_dir, &m.gguf_path).await;
@@ -510,7 +535,7 @@ pub async fn local_model_get(
 /// would answer "could not render the command line: Read-only file system"
 /// to a question about flags.
 pub(super) fn command_line_preview(state: &SharedState, class: Class, model_id: &str) -> String {
-    command_line_preview_at(state, class, model_id, 0)
+    command_line_preview_at(state, class, model_id, 0, None)
 }
 
 /// [`command_line_preview`], for a chosen rung (ladder design §6, §8 WP6) —
@@ -522,6 +547,7 @@ fn command_line_preview_at(
     class: Class,
     model_id: &str,
     rung: usize,
+    fitted: Option<argv::Fitted>,
 ) -> String {
     if class == Class::Audio {
         return "audio.cpp is configured by the server.json mounted at /config, not by \
@@ -559,6 +585,7 @@ fn command_line_preview_at(
             // the login session ends.
             let globals = crate::runtime::cdi::podman_globals(state, &spec.extra_run_args);
             spec.set_globals(globals);
+            spec.fitted = fitted;
             argv::command_line(&spec)
         }
         Err(e) => format!("could not render the command line: {e}"),
@@ -608,7 +635,13 @@ async fn ladder_rungs_detail(
                     ctx_size: r.ctx_size,
                     per_slot_ctx,
                     switchover,
-                    command_line: command_line_preview_at(state, Class::Chat, &m.model_id, r.index),
+                    command_line: command_line_preview_at(
+                        state,
+                        Class::Chat,
+                        &m.model_id,
+                        r.index,
+                        None,
+                    ),
                 }
             })
             .collect(),
@@ -845,6 +878,18 @@ pub async fn local_model_set(
 ) -> Result<dto::LocalModelSaved, String> {
     // From the rows the checks read to the commit (§14.2).
     let routing = state.routing_write().await;
+    local_model_set_holding(state, routing, p).await
+}
+
+/// [`local_model_set`] for a caller that already holds the routing-write
+/// lock (`routing`), so what it read under the lock before stays true
+/// through the commit: Get it settles a new row's id under it (D28,
+/// `jobs::model_get::set_up`). Let go once the snapshot is published.
+pub async fn local_model_set_holding(
+    state: &SharedState,
+    routing: tokio::sync::OwnedMutexGuard<()>,
+    p: LocalModelPatch,
+) -> Result<dto::LocalModelSaved, String> {
     let all = store::list_local_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;

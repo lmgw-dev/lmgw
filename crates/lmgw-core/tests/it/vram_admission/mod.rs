@@ -65,14 +65,29 @@ mod dev_image_start;
 mod engine_download;
 mod engine_download_turns;
 mod engine_download_waits;
+// They state a Linux machine (sysfs, rpm, Podman, CDI) through the fake facts
+// and need its check `ready`; Windows' check reads the computer's own adapters
+// (`machine::windows_check`, tested in the crate), so it cannot be stated.
+// The pre-fetch is of Podman images too.
+#[cfg(unix)]
 mod engine_prefetch;
 mod engine_with_model_download;
 mod fallback_chain;
 mod gate_follows_running_container;
 mod gpu_hold;
+// They state a Linux machine (sysfs, rpm, Podman, CDI) through the fake facts
+// and need its check `ready`; Windows' check reads the computer's own adapters
+// (`machine::windows_check`, tested in the crate), so it cannot be stated.
+#[cfg(unix)]
 mod gpu_setup;
+// As gpu_setup, whose world it uses.
+#[cfg(unix)]
 mod gpu_setup_rows;
+// As gpu_setup, whose world it uses.
+#[cfg(unix)]
 mod gpu_setup_stamp;
+mod image_partial_bounds;
+mod image_partial_fit;
 mod image_pipeline_peak;
 mod in_flight_claim;
 mod ladder_admission;
@@ -81,6 +96,9 @@ mod ladder_local_model_test;
 mod ladder_review_fixes;
 mod ladder_wp4;
 mod live_frame;
+mod llama_fit;
+mod llama_fit_headroom;
+mod llama_fit_review;
 mod open_ended_upstream;
 mod outside_vram_decision;
 mod outside_vram_fallback;

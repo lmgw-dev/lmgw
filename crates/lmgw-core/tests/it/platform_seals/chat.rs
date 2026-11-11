@@ -206,7 +206,7 @@ fn shape(body: &Value) -> Vec<String> {
 /// A plain reply answered as `[reasoning, message, reasoning, message]` (a
 /// GPT-5.3-codex commentary) keeps each seal where its item stood in the
 /// reply's text, and replays in the order answered, not both items ahead of
-/// one text (WP8 review W-N4, draft call 5).
+/// one text (WP8 review W-N4, decision 5).
 #[tokio::test]
 async fn a_reply_answered_between_messages_replays_in_that_order() {
     let (mock, state, gw, up) = platform(|req: &Request| {

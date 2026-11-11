@@ -16,8 +16,8 @@ use crate::catalog::CatalogEntry;
 use crate::model_ops::ContainerStatusRow;
 
 mod audio_placement;
-mod aux;
 mod aux_fields;
+mod aux_models;
 pub(super) mod aux_plan;
 mod aux_save;
 pub(super) mod fit_again;
@@ -28,7 +28,7 @@ use crate::widgets::{
     use_toasts, ImageClass, ImagePicker, MenuItem, Modal, ModalFooter, ModalSize, ModelPicker,
     RowMenu, Select,
 };
-pub use aux::AuxEditor;
+pub use aux_models::AuxEditor;
 
 fn num_field<T: std::str::FromStr>(label: &str, raw: &str) -> Result<Option<T>, String> {
     let raw = raw.trim();

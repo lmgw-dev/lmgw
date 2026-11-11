@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use crate::config::{AuxBackend, AuxKind};
 
-use super::mount_path;
+use super::EngineView;
 
 /// One aux row's flag inputs, borrowed out of [`super::LlamaArgs::Aux`].
 pub(super) struct AuxFlags<'a> {
@@ -27,7 +27,12 @@ pub(super) struct AuxFlags<'a> {
 
 /// Emit the aux kind flag (+ pooling for embedders), mirroring the deleted
 /// `render_aux_preset`'s claims exactly, then the row's fields.
-pub(super) fn push_aux_flags(out: &mut Vec<String>, f: AuxFlags<'_>, taken: &mut BTreeSet<String>) {
+pub(super) fn push_aux_flags(
+    out: &mut Vec<String>,
+    f: AuxFlags<'_>,
+    taken: &mut BTreeSet<String>,
+    view: &EngineView,
+) {
     // Both kind flags are claimed in every section, not just this section's
     // own: a stale `--reranking` left in an embedder's freeform args would
     // otherwise flip it into a reranker, and llama-server answers
@@ -73,7 +78,10 @@ pub(super) fn push_aux_flags(out: &mut Vec<String>, f: AuxFlags<'_>, taken: &mut
     value("ctx-size", f.ctx_size.map(|c| c.to_string()));
     value("ubatch-size", f.ubatch_size.map(|n| n.to_string()));
     value("batch-size", f.batch_size.map(|n| n.to_string()));
-    let mmproj = f.mmproj_path.filter(|p| !p.is_empty()).map(mount_path);
+    let mmproj = f
+        .mmproj_path
+        .filter(|p| !p.is_empty())
+        .map(|p| view.model_path(p));
     let projector = mmproj.is_some();
     value("mmproj", mmproj);
     value(

@@ -172,13 +172,63 @@ pub struct SettingsFull {
     /// The device listener and the bounds of its trust (Settings → Network
     /// & access → Devices, device link design §9.1).
     pub devices: crate::device_link::DevicesSettings,
+    /// The main listener's TLS (Settings → Network & access → TLS,
+    /// headless server design §4).
+    pub tls: crate::TlsSettings,
+    /// The TLS listener's state and its certificate (D8).
+    pub tls_status: crate::TlsStatus,
+    /// The one public origin (D9); empty = derived from the TLS listener,
+    /// else from `bind_addr`.
+    pub public_url: String,
+    /// The base URL people and other machines are handed now: `public_url`,
+    /// else the TLS listener's, else the plain listener's.
+    pub public_base_url: String,
+    /// Proxy mode's trusted peers (§4.5), addresses and CIDR networks as
+    /// stored (`127.0.0.1/32`); empty = off.
+    pub trusted_proxies: Vec<String>,
+    /// Proxy mode as it runs: the first peers, its warnings, the refusals.
+    pub proxy_status: crate::ProxyStatus,
+    /// "Agent pages are unreachable from other machines" (D27): set while
+    /// other machines reach this dashboard and the agent origin suffix is
+    /// `localhost`.
+    pub agent_origin_remote_warning: Option<String>,
+    /// Accounts (Settings → Network & access → Accounts, headless server
+    /// design §5): `accounts.session_days`, and the switch's state with
+    /// the counts it names.
+    pub accounts: AccountsSettingsDto,
+    pub accounts_status: crate::AccountsStatus,
     pub api_keys: Vec<ApiKeyRow>,
     pub data_dir: String,
     pub version: String,
+    /// Where this lmgw runs (headless server design D2).
+    pub deployment: Deployment,
+    /// A dev instance (`LMGW_DEV`, a debug build of the tray app, the
+    /// headless runner): Settings → About says so beside the deployment.
+    pub dev: bool,
+    /// The settings this server's container sets from its environment
+    /// (§2.2), shown read-only; empty on the desktop.
+    pub pinned: Vec<PinnedSetting>,
+    /// The quit's length against the unit's stop timeout (D20), in
+    /// container mode only; Settings → About shows it.
+    pub stop_budget: Option<StopBudget>,
+    /// A newer lmgw than this server runs (§6.3, ruling 13): in container
+    /// mode, from the background check while `update_check_enabled` is on,
+    /// or from an explicit `update_check`; Settings → About shows it.
+    pub update_notice: Option<UpdateNotice>,
+    /// The database copies container starts made before they migrated
+    /// (ruling 14, §6.4), newest first; empty on the desktop, which makes
+    /// none. Settings → About lists them with their sizes.
+    pub migration_copies: Vec<MigrationCopy>,
+    /// What of the backups folder cannot be read, in words (the folder, or
+    /// an entry in it): the copies it hides are missing from
+    /// `migration_copies`. `None` when everything was read.
+    pub migration_copies_error: Option<String>,
     /// This machine's CPUs, read once (a derived fact, never settable): the
     /// thread count an audio row switched to the CPU runs with when it names
     /// none.
     pub host_cpu: HostCpu,
+    /// What VRAM admission's headroom is now and where it comes from.
+    pub headroom_now: HeadroomNow,
 }
 
 /// This machine's CPUs (reported as `host_cpu`).
@@ -214,6 +264,11 @@ pub struct HoldSettingsDto {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VramSettingsDto {
     pub enabled: bool,
+    /// How the headroom is set: learned from this machine (`auto`, the
+    /// default) or `headroom_mb` as written (`fixed`).
+    pub headroom_mode: HeadroomMode,
+    /// The fixed headroom in MiB: the headroom in `fixed` mode, and in
+    /// `auto` mode until enough has been learned (`headroom_now`).
     pub headroom_mb: u64,
     /// `0` = the device's real total, as the driver reports it (NVML on
     /// NVIDIA, amdgpu sysfs on AMD).
@@ -230,6 +285,72 @@ pub struct VramSettingsDto {
 
 fn default_fallback_on_external() -> bool {
     true
+}
+
+/// How VRAM admission's headroom is set (per-model containers §4, "Headroom").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum HeadroomMode {
+    /// Learned: the largest growth of other programs' GPU memory seen on
+    /// this machine, plus a margin for each model still starting or not
+    /// measured yet. The fixed value until enough has been learned.
+    #[default]
+    Auto,
+    /// `headroom_mb` as written, for everything.
+    Fixed,
+}
+
+/// What VRAM admission keeps free now and why (`GET /api/settings-full`'s
+/// `headroom_now`, `lmgw__settings`' `vram.headroom`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HeadroomNow {
+    pub mode: HeadroomMode,
+    /// What is kept free for other programs' growth now, in bytes.
+    pub bytes: u64,
+    /// The auto value is in use: learned, with the margin per starting or
+    /// unmeasured model on top. False in `fixed` mode and while learning.
+    pub learned_in_use: bool,
+    /// The largest growth of other programs' GPU memory seen in the window,
+    /// in bytes; `None` where nothing could be measured (no per-process
+    /// GPU figures).
+    pub learned_bytes: Option<u64>,
+    /// When other programs grew by `learned_bytes`: the hour, in the
+    /// machine's local time (`YYYY-MM-DD HH:00`), so the owner can tell what
+    /// taught it (a game, a render).
+    pub learned_at: Option<String>,
+    /// What other programs hold at rest, in bytes: the lowest reading of the
+    /// window. A model is judged too large for the card against the card
+    /// less this and its margin, never against the learned growth.
+    pub at_rest_bytes: Option<u64>,
+    /// Hours of the window with readings, and how many auto needs.
+    pub hours_seen: u64,
+    pub hours_needed: u64,
+    /// The window, in days.
+    pub window_days: u64,
+    /// How often other programs' use is read, in seconds.
+    pub sample_seconds: u64,
+    /// The margin a model gets while it starts or is not measured yet, per
+    /// class, with its source.
+    pub margins: Vec<HeadroomMargin>,
+    /// The whole of it in one sentence, as Settings shows it.
+    pub sentence: String,
+}
+
+/// One class's margin for a model still starting or not measured yet.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HeadroomMargin {
+    /// `chat`, `aux`, `image` or `audio`.
+    pub class: String,
+    /// The margin in bytes (audio: at least this; as much as its estimate
+    /// where that is more).
+    pub bytes: u64,
+    /// Where the figure comes from.
+    pub source: String,
 }
 
 /// The chat/aux *class* settings.
@@ -340,6 +461,18 @@ pub struct ImageSettings {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AccountsSettingsDto {
+    /// The desktop's switch (written only by `accounts_switch`).
+    pub enabled: bool,
+    /// A session's lifetime in days.
+    pub session_days: u32,
+    /// How many days the audit log keeps an entry; 0 keeps every entry.
+    pub audit_days: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApiKeyRow {
