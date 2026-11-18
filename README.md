@@ -31,8 +31,9 @@ works remotely from a browser too.
 
 The project site is at [lmgw-dev.github.io](https://lmgw-dev.github.io/). lmgw
 also has clients of its own: [Kai](https://github.com/lmgw-dev/kai) for the
-Plasma desktop and [Kai mobile](https://github.com/lmgw-dev/kai-mobile) for
-Android (see [Paired devices and clients](#paired-devices-and-clients)).
+Plasma desktop, [Kai mobile](https://github.com/lmgw-dev/kai-mobile) for
+Android and [Inkference](https://github.com/lmgw-dev/inkference) for Firefox
+(see [Paired devices and clients](#paired-devices-and-clients)).
 
 ## Screenshots
 
@@ -278,7 +279,7 @@ get a secure context, see [docs/accounts.md](docs/accounts.md).
 
 ### Paired devices and clients
 
-Two apps are lmgw's own clients. They use the OpenAI-compatible routes where
+Three apps are lmgw's own clients. They use the OpenAI-compatible routes where
 those fit and lmgw's own API (the Chat feed, the device link, calls bound to a
 Chat thread) where they need more:
 
@@ -289,8 +290,16 @@ Chat thread) where they need more:
 - **[Kai mobile](https://github.com/lmgw-dev/kai-mobile)** is the Android
   client, a native app (Kotlin and Compose around a Rust core), first released
   alongside lmgw 0.5.0. It follows the Chat feed.
+- **[Inkference](https://github.com/lmgw-dev/inkference)** is a Firefox
+  extension, [on addons.mozilla.org](https://addons.mozilla.org/firefox/addon/inkference/).
+  A sidebar chats with your models and can read and operate the page; right-click
+  actions summarize, explain, translate or read a selection aloud through
+  audio.cpp. Its AI dark mode asks a model to design a theme for each site, then
+  measures whether the text on it is still readable. It reaches lmgw over the
+  OpenAI-compatible routes with a gateway key rather than the device link, and
+  the dark mode works with no model at all.
 
-Both pair over the device link. Open **Pair a device…** on the Devices card
+Kai and Kai mobile pair over the device link. Open **Pair a device…** on the Devices card
 (**Usage → Keys & budgets**) and choose the address the device should use (this
 computer, the LAN or WireGuard); if the device listener is off, pairing turns it
 on (it can also be switched under **Settings → Network & access → Devices**).
