@@ -3,8 +3,8 @@
 #
 # Usage: scripts/release.sh <X.Y.Z> [notes-file]
 #
-# Sets the version in Cargo.toml ([workspace.package]), src-tauri/tauri.conf.json and
-# Cargo.lock, commits "release X.Y.Z" on main and tags that commit. The tag's message becomes
+# Sets the version in Cargo.toml ([workspace.package]), src-tauri/tauri.conf.json,
+# packaging/arch/PKGBUILD (pkgrel back to 1) and Cargo.lock, commits "release X.Y.Z" on main and tags that commit. The tag's message becomes
 # the GitHub release notes, Markdown with wrapped lines joined (ci/unwrap-notes.awk): the
 # notes file when given, else git opens your editor. When the tree already carries the
 # version (the first release), it only tags. Then publish:
@@ -35,8 +35,10 @@ if [[ "$current" != "$version" ]]; then
     cur="${current//./\\.}"
     sed -i -E "s/^version = \"$cur\"/version = \"$version\"/" Cargo.toml
     sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*)\"$cur\"/\1\"$version\"/" src-tauri/tauri.conf.json
+    sed -i -E "s/^pkgver=$cur\$/pkgver=$version/; s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
     cargo update --workspace --offline --quiet
-    git commit -q -m "release $version" -- Cargo.toml Cargo.lock src-tauri/tauri.conf.json
+    git commit -q -m "release $version" -- Cargo.toml Cargo.lock src-tauri/tauri.conf.json \
+        packaging/arch/PKGBUILD
 fi
 
 if [[ -n "$notes" ]]; then

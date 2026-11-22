@@ -12,15 +12,46 @@ values; none of it needs a code change.
 
 ---
 
-## 1. Install (there is no Arch package)
+## 1. Install
 
-CI builds an RPM, so on Arch you build from source. Tauri v2's Linux
-dependencies plus the Rust toolchain:
+Every release from 0.8.0 on carries an Arch package next to the RPM. Bring the
+system up to date first (Arch supports no partial upgrades, and a stale package
+database makes pacman fetch versions the mirrors no longer have), then install
+it:
+
+```sh
+sudo pacman -Syu
+sudo pacman -U ./lmgw-*-x86_64.pkg.tar.zst
+```
+
+It pulls in `podman`, `polkit`, `poppler` and the webview libraries itself;
+`passt` (§2) is an optional dependency. If the upgrade brought a new kernel,
+reboot before the first model starts: rootless Podman cannot load `tun` and
+`overlay` for a kernel whose modules are gone.
+
+### Building the package yourself
+
+`packaging/arch/PKGBUILD` is the release's own recipe and builds any tagged
+version, with the trunk and tauri-cli releases CI pins:
+
+```sh
+sudo pacman -S --needed base-devel git rust rust-wasm
+cd packaging/arch && makepkg -si
+```
+
+The release profile links with fat LTO in one codegen unit, which peaks at
+about 5 GiB for the final `lmgw` crate. On an 8 GiB laptop, close the browser
+and build with `CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_LTO=thin makepkg -si`.
+
+### Building from a checkout
+
+For a development tree without packaging, Tauri v2's Linux dependencies plus
+the Rust toolchain:
 
 ```sh
 sudo pacman -S --needed base-devel git curl wget file openssl pkgconf \
                         webkit2gtk-4.1 gtk3 libsoup3 librsvg \
-                        libappindicator-gtk3 rustup
+                        libayatana-appindicator rustup
 rustup default stable
 rustup target add wasm32-unknown-unknown       # the dashboard is a Leptos WASM app
 cargo install tauri-cli --version '^2.0' --locked
@@ -54,8 +85,9 @@ default — every URL below assumes that.
 **Updates.** The in-app updater installs an RPM with `pkexec dnf`, which your
 machine does not have. lmgw checks for this: the background poll will not
 open a dialog it cannot act on, and the tray's "Check for Updates…" tells you a
-version exists and that you have to rebuild. `git pull && cargo tauri build` is
-the update path. Turn the check off entirely in **Settings → Tokens & updates** if you
+version exists and that you have to update yourself: install the new
+release's Arch package with `pacman -U`, or rebuild (`makepkg -si` for the
+package, `git pull && cargo tauri build` for a checkout). Turn the check off entirely in **Settings → Tokens & updates** if you
 would rather not hear about it.
 
 **Webview.** The `__NV_DISABLE_EXPLICIT_SYNC=1` workaround lmgw sets is for an

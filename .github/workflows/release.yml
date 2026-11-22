@@ -24,6 +24,12 @@
 # ci/build-windows.ps1; `publish-windows` (contents: write, no checkout) checks
 # it against the tag, uploads it to the release and adds it to the release's
 # latest.json as its `nsis` entry. The installer is not signed yet. Not run yet.
+#
+# The Arch Linux package follows the same pattern: `arch` (contents: read)
+# builds packaging/arch/PKGBUILD with makepkg in an Arch container, beside the
+# RPM build; `publish-arch` (contents: write, no checkout) checks the package
+# against the tag and its .sha256 and uploads both. It is not in latest.json:
+# the in-app updater installs RPMs only.
 name: Release
 
 on:
@@ -233,6 +239,89 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  arch:
+    name: Arch Linux package
+    # Beside the RPM build rather than after it, and published by a job of its
+    # own: an Arch failure never holds back the RPM's release.
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      # Arch's own registry, for the same reason the build job avoids Docker Hub.
+      image: registry.archlinux.org/archlinux/archlinux-docker:base-devel
+    # The same cold LTO build as the RPM's.
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Check the tag name
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$RELEASE_TAG' is not a release tag (v<X.Y.Z>)"
+            exit 1
+          fi
+      - name: Install checkout tools
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Mark the workspace a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # A dispatch can name a tag from before the PKGBUILD: nothing to build then.
+      - name: Check the PKGBUILD against the tag
+        id: pkgbuild
+        run: |
+          p=packaging/arch/PKGBUILD
+          if [[ ! -f "$p" ]]; then
+            echo "::notice::${RELEASE_TAG} has no $p: no Arch package for it"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pkgver="$(sed -n 's/^pkgver=//p' "$p")"
+          [[ "v$pkgver" == "$RELEASE_TAG" ]] \
+            || { echo "::error::$p says pkgver=$pkgver, the tag $RELEASE_TAG (scripts/release.sh sets both)"; exit 1; }
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+      # makepkg -s would want sudo for the builder; root installs the PKGBUILD's
+      # dependencies instead, read from the PKGBUILD itself.
+      - name: Install the build dependencies
+        if: steps.pkgbuild.outputs.build == 'true'
+        run: |
+          (source packaging/arch/PKGBUILD
+           pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}")
+
+      # makepkg refuses to run as root.
+      - name: Build the package
+        if: steps.pkgbuild.outputs.build == 'true'
+        run: |
+          useradd -m builder
+          chown -R builder: packaging/arch
+          cd packaging/arch
+          sudo -u builder --preserve-env=CARGO_TERM_COLOR,CARGO_INCREMENTAL makepkg --noconfirm
+
+      - name: Stage the package
+        if: steps.pkgbuild.outputs.build == 'true'
+        run: |
+          version="${RELEASE_TAG#v}"
+          shopt -s nullglob
+          pkgs=(packaging/arch/lmgw-"${version}"-*-x86_64.pkg.tar.zst)
+          ((${#pkgs[@]} == 1)) || { echo "::error::expected one package of $version, found: ${pkgs[*]}"; exit 1; }
+          mkdir arch
+          cp "${pkgs[0]}" arch/
+          (cd arch && sha256sum -- *.pkg.tar.zst > "$(basename "${pkgs[0]}").sha256")
+      - uses: actions/upload-artifact@v7
+        if: steps.pkgbuild.outputs.build == 'true'
+        with:
+          name: arch
+          path: arch/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish
     needs: build
@@ -423,3 +512,53 @@ jobs:
           # The installer first, then the manifest that names its sha256.
           gh release upload "$TAG" "windows/$FILE" --clobber
           gh release upload "$TAG" latest.json --clobber
+
+  publish-arch:
+    name: Publish the Arch Linux package
+    # After the release exists; a failed or skipped Arch build skips this, and
+    # the release stays without the package.
+    needs: [publish, arch]
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload assets
+    timeout-minutes: 15
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    # As `publish`: no checkout, nothing of the build but its artifact.
+    steps:
+      - uses: actions/download-artifact@v8
+        id: download
+        # The arch job hands on nothing for a tag without a PKGBUILD.
+        continue-on-error: true
+        with:
+          name: arch
+          path: arch
+
+      - name: Check the package against the tag and its checksum
+        if: steps.download.outcome == 'success'
+        id: pkg
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "$TAG is no v<X.Y.Z> tag"
+          version="${BASH_REMATCH[1]}"
+          shopt -s nullglob
+          pkgs=(arch/*.pkg.tar.zst)
+          ((${#pkgs[@]} == 1)) || fail "the Arch build handed on ${#pkgs[@]} packages"
+          file="${pkgs[0]#arch/}"
+          [[ "$file" =~ ^lmgw-${version//./\\.}-[0-9]+-x86_64\.pkg\.tar\.zst$ ]] \
+            || fail "$file is not an Arch package of lmgw $version"
+          files="$(cd arch && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          [[ "$files" == "$(printf '%s\n' "$file" "$file.sha256" | LC_ALL=C sort)" ]] \
+            || fail "the Arch build handed on other files than $file and its .sha256: $files"
+          [[ -f "arch/$file" && ! -L "arch/$file" ]] || fail "$file is not a plain file"
+          (cd arch && sha256sum --check --strict -- "$file.sha256") || fail "$file does not match its .sha256"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - name: Upload it
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.pkg.outputs.file }}
+        run: gh release upload "$TAG" "arch/$FILE" "arch/$FILE.sha256" --clobber

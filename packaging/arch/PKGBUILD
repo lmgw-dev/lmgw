@@ -1,0 +1,101 @@
+# Arch Linux package for the lmgw desktop app.
+#
+# Installs the same files as the RPM (see ci/rpm-allowlist.toml): the app in
+# /usr/bin, the root helper at the path polkit's policy and lmgw-machine name
+# (/usr/libexec/lmgw, hard-wired, so not /usr/lib), the polkit policy, the
+# desktop entry, the hicolor icons and the third-party licences.
+#
+# trunk and tauri-cli are the prebuilt releases ci/install-build-deps.sh pins,
+# with the same hashes, so this package is built with the tools the RPM is.
+# A bump there is a bump here.
+#
+# pkgver is the release's: scripts/release.sh sets it with the other versions,
+# and the release workflow's `arch` job refuses a tag it does not match.
+#
+# Build from a release tag:   cd packaging/arch && makepkg -si
+pkgname=lmgw
+pkgver=0.7.0
+pkgrel=1
+pkgdesc='Local model gateway: your GPU behind OpenAI- and Anthropic-compatible APIs'
+arch=('x86_64')
+url='https://github.com/lmgw-dev/lmgw'
+license=('MIT')
+depends=(
+  'gcc-libs' 'glibc' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'cairo' 'pango'
+  'gdk-pixbuf2' 'glib2' 'opus'
+  'libayatana-appindicator' # tray icon, loaded at runtime
+  'polkit'                  # starts lmgw-machine-helper
+  'podman'                  # every local model runs in its own container
+  'git'                     # engine builds from git refs
+  'poppler'                 # pdftotext for knowledge bases (poppler-utils on Fedora)
+)
+optdepends=(
+  'passt: pasta, rootless podman default network'
+  'vulkan-icd-loader: Vulkan engine images on AMD and Intel GPUs'
+  'nvidia-container-toolkit: CUDA engine images on NVIDIA GPUs'
+)
+makedepends=('git' 'rust' 'rust-wasm' 'curl')
+options=('!lto' '!debug')
+_trunk_ver=0.21.14
+_tauri_cli_ver=2.12.0
+source=(
+  "$pkgname::git+$url.git#tag=v$pkgver"
+  "trunk-$_trunk_ver.tar.gz::https://github.com/trunk-rs/trunk/releases/download/v$_trunk_ver/trunk-x86_64-unknown-linux-gnu.tar.gz"
+  "cargo-tauri-$_tauri_cli_ver.tgz::https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$_tauri_cli_ver/cargo-tauri-x86_64-unknown-linux-gnu.tgz"
+  'lmgw.desktop'
+)
+noextract=("trunk-$_trunk_ver.tar.gz" "cargo-tauri-$_tauri_cli_ver.tgz")
+sha256sums=('SKIP'
+            'f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b'
+            '8544e19c4312f653e80f92241ee4212b4d928ad33461bfb1d2997c52560c418f'
+            'SKIP')
+
+prepare() {
+  mkdir -p tools
+  tar -xzf "trunk-$_trunk_ver.tar.gz" -C tools trunk
+  tar -xzf "cargo-tauri-$_tauri_cli_ver.tgz" -C tools cargo-tauri
+
+  cd "$pkgname"
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+  cargo fetch --locked --target wasm32-unknown-unknown
+}
+
+build() {
+  cd "$pkgname"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export PATH="$srcdir/tools:$PATH"
+  # Panic locations would otherwise carry the build directory (the cargo home
+  # sits under it), which makepkg reports as a reference to $srcdir.
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+
+  # lmgw-core embeds crates/lmgw-ui/dist, so the dashboard comes first.
+  (cd crates/lmgw-ui && trunk build --release)
+  [[ -f crates/lmgw-ui/dist/index.html ]] || { echo 'trunk produced no dist/index.html' >&2; return 1; }
+
+  cargo build --release --locked -p lmgw-machine-helper
+  cargo tauri build --no-bundle -- --locked
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 target/release/lmgw "$pkgdir/usr/bin/lmgw"
+  install -Dm755 target/release/lmgw-machine-helper \
+    "$pkgdir/usr/libexec/lmgw/lmgw-machine-helper"
+  install -Dm644 crates/lmgw-machine-helper/polkit/io.github.lmgw-dev.lmgw.machine-setup.policy \
+    -t "$pkgdir/usr/share/polkit-1/actions"
+
+  install -Dm644 "$srcdir/lmgw.desktop" -t "$pkgdir/usr/share/applications"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/lmgw.png"
+
+  local lic="$pkgdir/usr/share/licenses/$pkgname" rt=crates/lmgw-core/assets/realtime
+  install -Dm644 LICENSE.md "$lic/LICENSE"
+  install -Dm644 "$rt/LICENSE-onnxruntime" "$lic/onnxruntime/LICENSE"
+  install -Dm644 "$rt/ThirdPartyNotices-onnxruntime.txt" "$lic/onnxruntime/ThirdPartyNotices.txt"
+  install -Dm644 "$rt/LICENSE-silero" "$lic/silero-vad/LICENSE"
+  install -Dm644 "$rt/LICENSE-smart-turn" "$lic/smart-turn/LICENSE"
+  install -Dm644 "$rt/LICENSE-whisper" "$lic/smart-turn/LICENSE-whisper"
+}

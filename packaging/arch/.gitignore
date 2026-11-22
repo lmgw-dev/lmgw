@@ -1,0 +1,7 @@
+# makepkg output and downloads
+/src/
+/pkg/
+/lmgw/
+*.pkg.tar.zst
+*.tar.gz
+*.tgz

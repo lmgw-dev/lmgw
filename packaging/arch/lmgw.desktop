@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=lmgw
+Comment=Local model gateway
+Exec=lmgw
+Icon=lmgw
+StartupWMClass=lmgw
+Terminal=false
+Categories=Development;Utility;

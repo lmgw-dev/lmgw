@@ -168,6 +168,17 @@ install them, unless you switch that off under **Settings → Tokens & updates**
 Some releases also carry an AppImage. It's built on current Fedora and needs a
 glibc at least that recent. On anything older, build from source.
 
+On Arch Linux, take the `lmgw-*-x86_64.pkg.tar.zst` from the same release
+instead:
+
+```sh
+sudo pacman -Syu && sudo pacman -U ./lmgw-*-x86_64.pkg.tar.zst
+```
+
+The in-app updater installs RPMs only, so on Arch it tells you about a new
+release and you install that release's package yourself.
+[docs/amd-arch.md](docs/amd-arch.md) covers the rest of the Arch setup.
+
 For a server without a desktop there is a Podman image instead, started by a
 rootless Quadlet unit, with sign-in accounts and native TLS. It ships as an
 OCI archive; [docs/server.md](docs/server.md) covers installing and running it.
