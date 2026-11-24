@@ -1,0 +1,79 @@
+[package]
+name = "lmgw-doc-reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lmgw's document reader: the parsers of untrusted HTML, EPUB, e-mail, legacy Excel and image files and the decoding of PDF page renders, in a process of their own"
+
+# The reader executable (document-conversion design §5.2, §14 WP4 review
+# round), installed beside lmgw (`/usr/libexec/lmgw/lmgw-doc-reader` in the
+# RPM, beside `lmgw-server` in the server image) and started only by the
+# gateway through `extract/convert/run.rs`: a file on stdin, one framed answer
+# on stdout ([`wire`]), under a timeout, an address-space limit and an output
+# bound, in a process group of its own.
+#
+# Everything that parses an untrusted file with a third-party crate lives in
+# the binary's modules, so the gateway links none of it: lmgw-core depends on
+# this package's library, which holds the wire types and the charset decoding
+# only. No network client, no async runtime, no C library.
+
+[lib]
+name = "lmgw_doc_reader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lmgw-doc-reader"
+path = "src/main.rs"
+
+[dependencies]
+# The answer's header. The versions the workspace uses.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# A page's or a message body's charset.
+encoding_rs = "0.8"
+# HTML to markdown, on html5ever 0.40 (the gateway's own tree has 0.38
+# through another crate; this one is linked into the reader alone).
+# Apache-2.0.
+htmd = "0.6"
+# The parse bounded by its nesting before htmd builds its tree
+# (`html/depth.rs`): the html5ever htmd itself is built on, no other crate.
+# MIT OR Apache-2.0.
+html5ever = "0.40"
+# E-mail (`full_encoding`: the CJK and other charsets, through encoding_rs).
+# Apache-2.0 OR MIT.
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
+# Legacy .xls (BIFF5/8); `dates` for its date cells through chrono. MIT.
+# calamine has no feature that leaves its xlsx/ods readers out, so it brings
+# zip 9 and quick-xml 0.42 whatever is asked of it. The EPUB reader below
+# shares its zip; it reads XML with the gateway's quick-xml 0.41 (0.42 changed
+# the event types to text), so the reader links two quick-xml versions until
+# the gateway's own readers move to 0.42.
+calamine = { version = "0.38", default-features = false, features = ["dates"] }
+# (`std`: a date cell's formatting. Named here, not left to the workspace's
+# unified features: ci/build.sh builds this package alone.)
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
+# A picture's size and, when a page has to be turned, its grey pixels; a TIFF
+# page by page (a fax's CCITT pages through `fax`). MIT OR Apache-2.0.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw", "fax", "jpeg"] }
+# A PDF page's pictures cut out of poppler's PNG render and written as PNGs
+# (`Op::Crop`, picture export): the decoder `image` uses, already in the lock.
+# MIT OR Apache-2.0.
+png = { version = "0.18.1", default-features = false }
+
+# setrlimit and close_range: the reader confines itself before it reads.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
+
+[dev-dependencies]
+# A PNG's checksum in a test file. Already in the lock.
+crc32fast = "1"
+
+# One integration-test binary. Its being here is also what makes cargo build
+# the executable for every `cargo test --workspace`, where lmgw-core's tests
+# look for it beside their own binary.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

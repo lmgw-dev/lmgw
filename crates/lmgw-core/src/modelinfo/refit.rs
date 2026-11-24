@@ -29,7 +29,7 @@
 
 use serde_json::{json, Map, Value};
 
-use lmgw_api_types::model_find::{FileFit, FitMark, FitMeasure, FitNote, PlanFit};
+use lmgw_api_types::model_find::{FileFit, FitMark, FitMeasure, FitNote, GetLayout, PlanFit};
 use lmgw_api_types::model_get::FitChange;
 
 use super::fit::{self, CardNow};
@@ -79,12 +79,17 @@ fn plans_as_aux(class: Class, files: &PlanFiles) -> bool {
 }
 
 /// Get it's plan and fit (module doc) of the downloaded `rel` in `class`'s
-/// models dir, by `measure`.
+/// models dir, by `measure`; `layout` the way the person chose where Get it
+/// asked (device-ledger design WP12): `split` and `experts_in_ram` keep the
+/// plan's full context (lmgw splits a row that sets its context where no
+/// card holds it), `experts_in_ram` with every layer's routed experts in
+/// RAM; `one_card` and none fit the context to one card.
 pub async fn for_get(
     state: &SharedState,
     class: Class,
     rel: &str,
     measure: FitMeasure,
+    layout: Option<GetLayout>,
 ) -> Result<Fitted, String> {
     let snap = state.snapshot();
     let files = files_of(state, class, rel).await?;
@@ -105,6 +110,9 @@ pub async fn for_get(
                 .collect()
         })
         .unwrap_or_default();
+    if let Some(l @ (GetLayout::Split | GetLayout::ExpertsInRam)) = layout {
+        return full_context(state, &snap, class, &files, plan, params, fit, warnings, l).await;
+    }
     if fit.mark != FitMark::FitsShorter {
         return Ok(Fitted {
             plan,
@@ -139,6 +147,69 @@ pub async fn for_get(
         params,
         fit,
         note,
+        warnings,
+    })
+}
+
+/// Get it's plan at its full context, as the person chose (`split` or
+/// `experts_in_ram`, [`for_get`]): the context set to the plan's, which
+/// makes the row one lmgw splits where no card holds it; with its experts
+/// in RAM, `n_cpu_moe` over every layer, and the fit and the plan's warning
+/// of that.
+#[allow(clippy::too_many_arguments)]
+async fn full_context(
+    state: &SharedState,
+    snap: &crate::config::Snapshot,
+    class: Class,
+    files: &PlanFiles,
+    plan: Value,
+    mut params: Map<String, Value>,
+    fit: FileFit,
+    mut warnings: Vec<String>,
+    layout: GetLayout,
+) -> Result<Fitted, String> {
+    if plans_as_aux(class, files) {
+        return Err(format!(
+            "{} is an aux model, which runs on one card: Get it sets it up on one card              (layout one_card)",
+            files.rel
+        ));
+    }
+    if let Some(ctx) = params
+        .get("ctx_size")
+        .and_then(Value::as_u64)
+        .or(files.summary.context_length)
+    {
+        params.insert("ctx_size".into(), json!(ctx));
+    }
+    let mut fit = fit;
+    if layout == GetLayout::ExpertsInRam {
+        let layers = files.summary.block_count.unwrap_or(0);
+        if layers == 0 || !crate::vram::plan::chat::fit::has_experts(&files.summary) {
+            return Err(format!(
+                "{} is not a mixture-of-experts model: it has no experts to keep in RAM",
+                files.rel
+            ));
+        }
+        // The plan's own warning was of the experts on the card.
+        let before = Sizer::chat(files, &params);
+        if let Some(w) = plan_fit::warning(state, snap, &before).await {
+            warnings.retain(|x| *x != w);
+        }
+        params.insert("n_cpu_moe".into(), json!(layers));
+        let sizer = Sizer::chat(files, &params);
+        if let Some(w) = plan_fit::warning(state, snap, &sizer).await {
+            warnings.push(w);
+        }
+        let card = CardNow::of(state, snap)
+            .await
+            .map(|c| c.beside_itself(snap, files.found_in, &files.rel));
+        fit = fit::fit(files, &sizer, card.as_ref(), fit.measure);
+    }
+    Ok(Fitted {
+        plan,
+        params,
+        fit,
+        note: None,
         warnings,
     })
 }
@@ -218,6 +289,8 @@ const MOVED: [&str; 3] = ["ctx_size", "ubatch_size", "batch_size"];
 /// "Fit again" of the `class` row `model_id` (module doc).
 pub async fn for_row(state: &SharedState, class: Class, model_id: &str) -> Result<Refit, String> {
     let snap = state.snapshot();
+    // A chat row's own arguments: admission sizes the row with them.
+    let mut args: Vec<String> = Vec::new();
     let (row_id, rel, mut params) = match class {
         Class::Chat => {
             let row = snap
@@ -229,6 +302,7 @@ pub async fn for_row(state: &SharedState, class: Class, model_id: &str) -> Resul
                 .ok()
                 .and_then(|v| v.as_object().cloned())
                 .unwrap_or_default();
+            args = row.args.clone();
             (row.id, row.gguf_path.clone(), params)
         }
         Class::Aux => {
@@ -269,7 +343,8 @@ pub async fn for_row(state: &SharedState, class: Class, model_id: &str) -> Resul
         .map(|n| n.measure)
         .unwrap_or(FitMeasure::Beside);
     let files = files_of(state, class, &rel).await?;
-    let card = CardNow::of(state, &snap)
+    // The cards admission may put the row on: its pin's (§8).
+    let card = CardNow::for_row(state, &snap, class, model_id)
         .await
         .map(|c| c.beside_itself(&snap, class, &files.rel));
     // Searched up to the trained context, whatever the row has now: a card
@@ -287,7 +362,7 @@ pub async fn for_row(state: &SharedState, class: Class, model_id: &str) -> Resul
     }
     let sizer = match plans_as_aux(class, &files) {
         true => Sizer::aux(&files, &sized),
-        false => Sizer::chat(&files, &sized),
+        false => Sizer::chat_row(&files, &sized, &args),
     };
     let fit = fit::fit(&files, &sizer, card.as_ref(), measure);
     let (changes, note) = match (fit.mark, fit.ctx) {

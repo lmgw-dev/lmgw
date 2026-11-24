@@ -48,19 +48,24 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use super::audio_spec::{
-    field_spec, fmt_ms, is_openai_shaped, multipart_preview, speech_body, task_body, task_fields,
-    task_label, time_text, timeline_rate, transcription_body, SpeechForm, Widget, GROUPS, TASKS,
+    field_spec, field_words, fmt_ms, is_openai_shaped, multipart_preview, speech_body, task_body,
+    task_fields, task_label, time_text, timeline_rate, transcription_body, SpeechForm, Widget,
+    GROUPS, TASKS,
 };
 use super::audio_stream::{read_sse, AudioEvent, StreamAcc};
-use super::lab_frame::{Check, Fname, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
+use super::lab_frame::{Check, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
 use super::lab_history::{ExportMenu, HistoryList, LabHistory};
-use super::lab_presets::PresetsCard;
+use super::lab_presets::PresetsMenu;
+use super::lab_rows::{FilePick, PromptField};
 use crate::catalog::CatalogEntry;
 use crate::fmt::fmt_bytes;
 use crate::scope::Latest;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
-use crate::widgets::{use_toasts, ConfirmButton, Explain, ModelPicker, Select, Toasts};
+use crate::widgets::{
+    use_toasts, ActionRow, AudioPlayer, ComboRow, ConfirmButton, EntryRow, Explain, Ico, Icon,
+    ModelPicker, PrefGroup, Select, StackRow, SwitchRow, TextRow, Toasts,
+};
 use lmgw_api_types::lab_store::{LabKind, LabPresetBody, LabPresetKind};
 
 /// A kept run's card.
@@ -1060,6 +1065,9 @@ pub fn AudioLab() -> impl IntoView {
     let preset_load = Callback::new(move |b: LabPresetBody| kept::preset_load(lab, b));
     view! {
         <LabFrame
+            title="Audio lab"
+            glyph=Ico::Wave
+            empty="Every run lands here, newest first, and stays on the server until you delete it: one from its card, or all with Clear."
             persist="audio-lab.library"
             side_label="Voice library"
             side_badge=Signal::derive(move || {
@@ -1067,10 +1075,9 @@ pub fn AudioLab() -> impl IntoView {
                 if n == 0 { String::new() } else { n.to_string() }
             })
             side=move || view! { <VoiceLibrary lab=lab on_reload=load_clips toasts=toasts/> }
+            model=move || view! { <ModelPicker value=lab.alias entries=entries status=lab.list/> }
             head=move || {
                 view! {
-                    <span class="lab-label">"Model"</span>
-                    <ModelPicker value=lab.alias entries=entries status=lab.list/>
                     // Which family (the `options` keys that apply) and whether
                     // it streams: what the old head said and the picker does
                     // not (par:PAR-8).
@@ -1099,7 +1106,6 @@ pub fn AudioLab() -> impl IntoView {
                                 }
                             })
                     }}
-                    <span class="lab-label">"Task"</span>
                     <TaskMenu
                         value=lab.task_sel
                         groups=task_groups
@@ -1120,7 +1126,10 @@ pub fn AudioLab() -> impl IntoView {
                             <span class="mono-sm">"via /v1/tasks/run"</span>
                         </label>
                     </Show>
-                    <span class="spacer"></span>
+                }
+            }
+            actions=move || {
+                view! {
                     {move || {
                         // A start waiting for its download (machine-check
                         // design §5): that is what the first run waits for.
@@ -1151,23 +1160,8 @@ pub fn AudioLab() -> impl IntoView {
                         }
                         .into_any()
                     }}
-                    <button
-                        class="btn ghost"
-                        title="Reload the served model list and the voice library"
-                        on:click=move |_| {
-                            load_models();
-                            load_clips();
-                        }
-                    >
-                        "Reload"
-                    </button>
-                }
-            }
-            form=move || {
-                view! {
-                    <Notices lab=lab on_retry=load_models/>
                     <Show when=move || !lab.use_generic() && lab.task() == "tts">
-                        <PresetsCard
+                        <PresetsMenu
                             lab=LabKind::Audio
                             kind=LabPresetKind::AudioSettings
                             title="Speech presets"
@@ -1175,6 +1169,22 @@ pub fn AudioLab() -> impl IntoView {
                             on_load=preset_load
                         />
                     </Show>
+                    <button
+                        class="icon-btn lab-reload"
+                        title="Reload the served model list and the voice library"
+                        aria-label="Reload"
+                        on:click=move |_| {
+                            load_models();
+                            load_clips();
+                        }
+                    >
+                        <Icon ico=Ico::Refresh/>
+                    </button>
+                }
+            }
+            form=move || {
+                view! {
+                    <Notices lab=lab on_retry=load_models/>
                     {move || {
                         if lab.use_generic() {
                             view! { <GenericPanel lab=lab/> }.into_any()
@@ -1184,7 +1194,7 @@ pub fn AudioLab() -> impl IntoView {
                             view! { <AsrPanel lab=lab/> }.into_any()
                         }
                     }}
-                    <details class="card req-card">
+                    <details class="req-card">
                         <summary>
                             "Request — "
                             <span class="mono-sm">{move || lab.endpoint()}</span>
@@ -1340,7 +1350,7 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
             ListStatus::Failed(e) => {
                 view! {
                     <div class="notice err">
-                        {format!("⚠ The audio model list did not load: {e}")}
+                        {format!("The audio model list did not load: {e}")}
                         " "
                         <button class="btn ghost sm" on:click=move |_| on_retry()>
                             "Retry"
@@ -1411,103 +1421,75 @@ fn TtsPanel(lab: Lab) -> impl IntoView {
         ]
     });
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Text"</h3>
-            <textarea
-                class="input ta"
-                placeholder="Text to synthesize…"
-                prop:value=move || f.input.get()
-                on:input=move |ev| f.input.set(event_target_value(&ev))
-            ></textarea>
-        </div>
+        <PromptField title="Text" value=f.input placeholder="Text to synthesize…"/>
 
-        <div class="card">
-            <h3 class="lab-h3">"Voice"</h3>
-            <div class="field-grid">
-                <div class="field">
-                    <label>"Built-in voice / preset"</label>
-                    <Select value=f.voice options=voice_opts placeholder="(none)"/>
-                </div>
-                <div class="field">
-                    <label>"Reference clip"</label>
-                    <Select value=f.voice_ref options=clip_opts placeholder="(none)"/>
-                </div>
-            </div>
-            <div class="field" style="margin-top:10px">
-                <label>"Instructions — delivery/style guidance, where the model takes it"</label>
-                <input
-                    class="input"
-                    placeholder="e.g. read this slowly and warmly"
-                    prop:value=move || f.instructions.get()
-                    on:input=move |ev| f.instructions.set(event_target_value(&ev))
-                />
-            </div>
-            <div class="field" style="margin-top:10px">
-                <label>"Reference text — the transcript of the reference clip"</label>
-                <input
-                    class="input"
-                    placeholder="What the reference clip says"
-                    prop:value=move || f.reference_text.get()
-                    on:input=move |ev| f.reference_text.set(event_target_value(&ev))
-                />
-            </div>
-            <VoiceListNote lab=lab/>
-            <HeldNote lab=lab/>
-            <MissingVoices lab=lab/>
-            <Show when=move || {
-                lab.voice_list.get() == VoiceList::Loaded && lab.voices.with(voices::no_built_in)
-            }>
-                <p class="dim mini-note">
-                    "This model reports no built-in voices, so cloning families need a reference clip. "
-                    "Upload one on the right — it is written to the audio models dir, which the container sees read-only at "
-                    <span class="mono-sm">"/models/voices"</span> "."
-                </p>
+        <PrefGroup title="Voice">
+            <ComboRow title="Built-in voice or preset" value=f.voice options=voice_opts placeholder="(none)"/>
+            <ComboRow title="Reference clip" value=f.voice_ref options=clip_opts placeholder="(none)"/>
+            <EntryRow
+                title="Instructions"
+                sub="Delivery or style guidance, where the model takes it"
+                value=f.instructions
+                placeholder="e.g. read this slowly and warmly"
+                wide=true
+            />
+            <EntryRow
+                title="Reference text"
+                sub="The transcript of the reference clip"
+                value=f.reference_text
+                placeholder="What the reference clip says"
+                wide=true
+            />
+        </PrefGroup>
+        <VoiceListNote lab=lab/>
+        <HeldNote lab=lab/>
+        <MissingVoices lab=lab/>
+        <Show when=move || {
+            lab.voice_list.get() == VoiceList::Loaded && lab.voices.with(voices::no_built_in)
+        }>
+            <p class="dim mini-note">
+                "This model reports no built-in voices, so cloning families need a reference clip. "
+                "Upload one on the right — it is written to the audio models dir, which the container sees read-only at "
+                <span class="mono-sm">"/models/voices"</span> "."
+            </p>
+        </Show>
+
+        <PrefGroup title="Synthesis">
+            <EntryRow title="Seed" value=f.seed placeholder="model default"/>
+            <EntryRow title="Max tokens" value=f.max_tokens placeholder="model default"/>
+            <EntryRow title="Speed" value=f.speed placeholder="1.0 · model default"/>
+            <EntryRow title="Language" value=f.language placeholder="model default"/>
+            <ComboRow
+                title="Response format"
+                value=f.response_format
+                options=format_opts
+                placeholder="wav (default)"
+            />
+            <Show when=move || lab.streaming_model()>
+                <SwitchRow title="Stream" sub="Server-sent events carrying PCM" value=f.stream/>
             </Show>
-        </div>
+        </PrefGroup>
+        <Show when=move || f.stream.get()>
+            <PrefGroup
+                title="PCM stream"
+                desc="A PCM stream carries no format header, so these values are a declaration, not a measurement — they only decide how the received bytes are wrapped for playback. Getting them wrong yields audio at the wrong pitch, not an error."
+            >
+                <EntryRow title="Sample rate" value=f.pcm_rate placeholder="24000"/>
+                <EntryRow title="Channels" value=f.pcm_channels placeholder="1"/>
+                <ComboRow title="Bit depth" value=f.pcm_bits options=bits_opts placeholder="16 (s16le)"/>
+            </PrefGroup>
+        </Show>
 
-        <div class="card">
-            <h3 class="lab-h3">"Synthesis"</h3>
-            <div class="field-grid">
-                <TextField label="Seed" sig=f.seed placeholder="model default"/>
-                <TextField label="Max tokens" sig=f.max_tokens placeholder="model default"/>
-                <TextField label="Speed" sig=f.speed placeholder="1.0 · model default"/>
-                <TextField label="Language" sig=f.language placeholder="model default"/>
-                <div class="field">
-                    <label>"Response format"</label>
-                    <Select value=f.response_format options=format_opts placeholder="wav (default)"/>
-                </div>
-                <Show when=move || lab.streaming_model()>
-                    <CheckField label="Stream (SSE, pcm)" sig=f.stream/>
-                </Show>
-            </div>
-            <Show when=move || f.stream.get()>
-                <div class="field-grid" style="margin-top:10px">
-                    <TextField label="PCM sample rate" sig=f.pcm_rate placeholder="24000"/>
-                    <TextField label="PCM channels" sig=f.pcm_channels placeholder="1"/>
-                    <div class="field">
-                        <label>"PCM bit depth"</label>
-                        <Select value=f.pcm_bits options=bits_opts placeholder="16 (s16le)"/>
-                    </div>
-                </div>
-                <p class="dim mini-note">
-                    "A PCM stream carries no format header, so these values are a declaration, not a measurement — "
-                    "they only decide how the received bytes are wrapped for playback. Getting them wrong yields audio at the wrong pitch, not an error."
-                </p>
-            </Show>
-        </div>
-
-        <div class="card">
-            <h3 class="lab-h3">"Advanced parameters"</h3>
-            <div class="field">
-                <label>"options (JSON) — passed through to the model family"</label>
-                <textarea
-                    class="input ta mono"
-                    placeholder=r#"{"temperature": 0.8, "top_p": 0.9}"#
-                    prop:value=move || f.options.get()
-                    on:input=move |ev| f.options.set(event_target_value(&ev))
-                ></textarea>
-            </div>
-        </div>
+        <PrefGroup title="Advanced parameters">
+            <TextRow
+                mono=true
+                title="Options"
+                sub="JSON passed through to the model family"
+                wire="options"
+                value=f.options
+                placeholder=r#"{"temperature": 0.8, "top_p": 0.9}"#
+            />
+        </PrefGroup>
     }
 }
 
@@ -1515,115 +1497,109 @@ fn TtsPanel(lab: Lab) -> impl IntoView {
 fn AsrPanel(lab: Lab) -> impl IntoView {
     let f = lab.form;
     let upload = move || f.asr_source.get() == "upload";
+    let file_sub = move || {
+        let name = f.asr_file_name.get();
+        if name.is_empty() {
+            "No file chosen".to_string()
+        } else {
+            name
+        }
+    };
+    let pick = Callback::new(move |ev: web_sys::Event| {
+        let el: web_sys::HtmlInputElement = event_target(&ev);
+        let file = el.files().and_then(|l| l.get(0));
+        // A kept upload still being fetched is not put over the file
+        // picked by hand.
+        f.asr_reads.next();
+        f.asr_file_name
+            .set(file.as_ref().map(|x| x.name()).unwrap_or_default());
+        f.asr_file.set_value(file);
+    });
+    let desc = move || {
+        if upload() {
+            "Uploaded bytes go through the gateway's multipart re-encode — the same path an OpenAI Whisper client takes."
+        } else {
+            ""
+        }
+    };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Audio"</h3>
-            <div class="row">
+        <PrefGroup title="Audio" desc=desc>
+            <ActionRow title="Source" sub=move || if upload() { "A file, sent as multipart" } else { "A path on the server, sent as JSON" }>
                 <div class="seg">
                     <button
                         class="seg-btn"
                         class:active=move || upload()
+                        title="Upload a file (multipart)"
                         on:click=move |_| f.asr_source.set("upload".into())
                     >
-                        "Upload a file (multipart)"
+                        "Upload"
                     </button>
                     <button
                         class="seg-btn"
                         class:active=move || !upload()
+                        title="A server-side path (JSON)"
                         on:click=move |_| f.asr_source.set("path".into())
                     >
-                        "Server-side path (JSON)"
+                        "Server path"
                     </button>
                 </div>
-                <div class="field" style="min-width:160px">
-                    <label>"Language"</label>
-                    <input
-                        class="input"
-                        placeholder="auto"
-                        prop:value=move || f.language.get()
-                        on:input=move |ev| f.language.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
+            </ActionRow>
             <Show
                 when=upload
                 fallback=move || {
                     view! {
-                        <div class="field" style="margin-top:10px">
-                            <label>"Path as the container sees it"</label>
-                            <input
-                                class="input mono"
-                                placeholder="/models/voices/clip.wav"
-                                prop:value=move || f.asr_path.get()
-                                on:input=move |ev| f.asr_path.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div class="row" style="margin-top:8px">
-                            <For each=move || lab.clips.get() key=|c| c.name.clone() let:c>
-                                {
-                                    let path = c.server_path.clone();
-                                    view! {
-                                        <button
-                                            class="btn ghost mono-sm"
-                                            on:click=move |_| f.asr_path.set(path.clone())
-                                        >
-                                            {c.name.clone()}
-                                        </button>
-                                    }
-                                }
-                            </For>
-                        </div>
+                        <EntryRow
+                            title="Path as the container sees it"
+                            value=f.asr_path
+                            placeholder="/models/voices/clip.wav"
+                            mono=true
+                            wide=true
+                        />
+                        <Show when=move || !lab.clips.with(Vec::is_empty)>
+                            <StackRow title="From the voice library">
+                                <div class="row clip-picks">
+                                    <For each=move || lab.clips.get() key=|c| c.name.clone() let:c>
+                                        {
+                                            let path = c.server_path.clone();
+                                            view! {
+                                                <button
+                                                    class="btn sm mono-sm"
+                                                    on:click=move |_| f.asr_path.set(path.clone())
+                                                >
+                                                    {c.name.clone()}
+                                                </button>
+                                            }
+                                        }
+                                    </For>
+                                </div>
+                            </StackRow>
+                        </Show>
                     }
                 }
             >
-                <div class="field" style="margin-top:10px">
-                    <label>"File"</label>
-                    <input
-                        class="input file"
-                        type="file"
-                        accept="audio/*"
-                        on:change=move |ev| {
-                            let el: web_sys::HtmlInputElement = event_target(&ev);
-                            let file = el.files().and_then(|l| l.get(0));
-                            // A kept upload still being fetched is not put
-                            // over the file picked by hand.
-                            f.asr_reads.next();
-                            f.asr_file_name
-                                .set(file.as_ref().map(|x| x.name()).unwrap_or_default());
-                            f.asr_file.set_value(file);
-                        }
-                    />
-                </div>
-                {move || {
-                    let name = f.asr_file_name.get();
-                    (!name.is_empty())
-                        .then(|| view! { <p class="mono-sm dim al-file">{format!("file: {name}")}</p> })
-                }}
-                <p class="dim mini-note">
-                    "Uploaded bytes go through the gateway's multipart re-encode — the same path an OpenAI Whisper client takes."
-                </p>
+                <ActionRow title="File" sub=file_sub>
+                    <FilePick accept="audio/*" title="Pick the audio to transcribe" on_file=pick/>
+                </ActionRow>
             </Show>
+            <EntryRow title="Language" value=f.language placeholder="auto"/>
             // Streaming rides the multipart route only, so the toggle is not
             // offered for a server-side path (where it would silently do nothing).
             <Show when=move || lab.streaming_model() && upload() && !f.asr_details.get()>
-                <div style="margin-top:10px">
-                    <CheckField label="Stream the transcript (SSE, upload only)" sig=f.asr_stream/>
-                </div>
+                <SwitchRow title="Stream the transcript" sub="Server-sent events; an upload only" value=f.asr_stream/>
             </Show>
             <Show when=move || !f.asr_stream.get()>
-                <div style="margin-top:10px">
-                    <CheckField
-                        label="Detailed result (words, segments, speaker turns)"
-                        sig=f.asr_details
-                    />
-                </div>
+                <SwitchRow
+                    title="Detailed result"
+                    sub="Words, segments and speaker turns"
+                    value=f.asr_details
+                />
             </Show>
-            <Explain summary="The details come from the model, not from the route." persist="audio-lab.explain.details">
-                "A model that does not align words or separate speakers answers with text and "
-                "timing either way. Streaming and details are exclusive — a transcript delta has "
-                "nowhere to carry them."
-            </Explain>
-        </div>
+        </PrefGroup>
+        <Explain summary="The details come from the model, not from the route." persist="audio-lab.explain.details">
+            "A model that does not align words or separate speakers answers with text and "
+            "timing either way. Streaming and details are exclusive — a transcript delta has "
+            "nowhere to carry them."
+        </Explain>
         <Explain summary="Live microphone transcription is not offered here." persist="audio-lab.explain.live">
             "It is a different route ("
             <span class="mono-sm">"/v1/audio/transcriptions/live"</span>
@@ -1635,89 +1611,56 @@ fn AsrPanel(lab: Lab) -> impl IntoView {
 #[component]
 fn GenericPanel(lab: Lab) -> impl IntoView {
     let f = lab.form;
-    let wide = move || {
+    let by = move |pick: fn(Widget) -> bool| {
         task_fields(&lab.task())
             .iter()
-            .filter(|n| {
-                matches!(
-                    field_spec(n).map(|s| s.widget),
-                    Some(Widget::Textarea) | Some(Widget::Clip)
-                )
-            })
+            .filter(|n| field_spec(n).is_some_and(|s| pick(s.widget)))
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
     };
-    let narrow = move || {
-        task_fields(&lab.task())
-            .iter()
-            .filter(|n| {
-                matches!(
-                    field_spec(n).map(|s| s.widget),
-                    Some(Widget::Text) | Some(Widget::Int) | Some(Widget::Float)
-                )
-            })
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-    };
-    let flags = move || {
-        task_fields(&lab.task())
-            .iter()
-            .filter(|n| field_spec(n).map(|s| s.widget) == Some(Widget::Bool))
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-    };
+    let wide = move || by(|w| matches!(w, Widget::Textarea | Widget::Clip));
+    let narrow = move || by(|w| matches!(w, Widget::Text | Widget::Int | Widget::Float));
+    let flags = move || by(|w| w == Widget::Bool);
     view! {
-        <div class="card">
-            <h3 class="lab-h3">{move || format!("{} — request", task_label(&lab.task()))}</h3>
-            <div class="field-stack">
-                <For each=wide key=|n| n.clone() let:name>
-                    <FieldView name=name lab=lab/>
-                </For>
-            </div>
-            <div class="field-grid" style="margin-top:10px">
-                <For each=narrow key=|n| n.clone() let:name>
-                    <FieldView name=name lab=lab/>
-                </For>
-            </div>
-            <div class="row" style="margin-top:10px">
-                <For each=flags key=|n| n.clone() let:name>
-                    <FieldView name=name lab=lab/>
-                </For>
-            </div>
+        <PrefGroup title=move || format!("{} request", task_label(&lab.task()))>
+            <For each=wide key=|n| n.clone() let:name>
+                <FieldView name=name lab=lab/>
+            </For>
+            <For each=narrow key=|n| n.clone() let:name>
+                <FieldView name=name lab=lab/>
+            </For>
+            <For each=flags key=|n| n.clone() let:name>
+                <FieldView name=name lab=lab/>
+            </For>
             <Show when=move || task_fields(&lab.task()).is_empty()>
-                <p class="dim mini-note">
-                    "No field list for this task — use the overrides box below; the request object is passed through untouched."
-                </p>
+                <StackRow>
+                    <span class="dim">
+                        "No field list for this task — use the overrides below; the request object is passed through untouched."
+                    </span>
+                </StackRow>
             </Show>
-        </div>
+        </PrefGroup>
 
-        <div class="card">
-            <h3 class="lab-h3">"Request overrides"</h3>
-            <div class="field">
-                <label>
-                    "JSON merged into " <span class="mono-sm">"request"</span>
-                    " last — reaches fields with no widget"
-                </label>
-                <textarea
-                    class="input ta mono"
-                    placeholder=r#"{"options": {"num_inference_steps": 10}}"#
-                    prop:value=move || f.task_json.get()
-                    on:input=move |ev| f.task_json.set(event_target_value(&ev))
-                ></textarea>
-            </div>
+        <PrefGroup title="Request overrides">
+            <TextRow
+                mono=true
+                title="Overrides"
+                sub="JSON merged into request last — it reaches fields with no row above"
+                value=f.task_json
+                placeholder=r#"{"options": {"num_inference_steps": 10}}"#
+            />
             <Show when=move || lab.streaming_model()>
-                <div style="margin-top:10px">
-                    <CheckField
-                        label="Use /v1/tasks/stream (buffered event list)"
-                        sig=f.task_stream
-                    />
-                </div>
+                <SwitchRow
+                    title="Use /v1/tasks/stream"
+                    sub="A buffered event list"
+                    value=f.task_stream
+                />
             </Show>
-        </div>
+        </PrefGroup>
     }
 }
 
-/// One widget for a `/v1/tasks/run` request field. `clip` fields get the
+/// One row for a `/v1/tasks/run` request field. `clip` fields get the
 /// voice-library picker *and* a free-text path, because audio.cpp resolves them
 /// on its own filesystem and a clip may live outside the library.
 #[component]
@@ -1727,33 +1670,29 @@ fn FieldView(name: String, lab: Lab) -> impl IntoView {
     };
     let f = lab.form;
     let key = name.clone();
-    let label = view! {
-        <label>
-            {spec.label} " " <Fname name=spec.name/>
-        </label>
-    };
+    let (label, hint) = field_words(&lab.task(), spec);
     if spec.widget == Widget::Bool {
+        // A local switch mirrored into the map, one way and guarded.
+        let on = RwSignal::new(
+            f.task_flags
+                .get_untracked()
+                .get(&key)
+                .copied()
+                .unwrap_or(false),
+        );
         let k = key.clone();
-        let checked = move || f.task_flags.get().get(&k).copied().unwrap_or(false);
-        let k = key.clone();
-        return view! {
-            <label class="check">
-                <input
-                    type="checkbox"
-                    prop:checked=checked
-                    on:change=move |ev| {
-                        let on = event_target_checked(&ev);
-                        f.task_flags.update(|m| {
-                            m.insert(k.clone(), on);
-                        });
-                    }
-                />
-                <span>
-                    {spec.label} " " <Fname name=spec.name/>
-                </span>
-            </label>
-        }
-        .into_any();
+        Effect::new(move |_| {
+            let v = on.get();
+            let same = f
+                .task_flags
+                .with_untracked(|m| m.get(&k).copied().unwrap_or(false) == v);
+            if !same {
+                f.task_flags.update(|m| {
+                    m.insert(k.clone(), v);
+                });
+            }
+        });
+        return view! { <SwitchRow title=label wire=spec.name value=on/> }.into_any();
     }
 
     // A local mirror per field keeps typing cheap and lets the clip picker and
@@ -1779,21 +1718,17 @@ fn FieldView(name: String, lab: Lab) -> impl IntoView {
         }
     });
 
-    let placeholder = if spec.hint.is_empty() {
+    // The hint (allowed values, the default) is the row's subtitle, which
+    // wraps, so it is always shown in full; the placeholder stays short.
+    let placeholder = if hint.is_empty() || hint.contains("blank") {
         "model default"
     } else {
-        spec.hint
+        ""
     };
+    let sub = hint;
     match spec.widget {
         Widget::Textarea => view! {
-            <div class="field">
-                {label}
-                <textarea
-                    class="input ta"
-                    prop:value=move || local.get()
-                    on:input=move |ev| local.set(event_target_value(&ev))
-                ></textarea>
-            </div>
+            <TextRow title=label wire=spec.name value=local/>
         }
         .into_any(),
         Widget::Clip => {
@@ -1803,66 +1738,25 @@ fn FieldView(name: String, lab: Lab) -> impl IntoView {
                     .collect::<Vec<_>>()
             });
             view! {
-                <div class="field">
-                    {label}
+                <StackRow title=label wire=spec.name>
                     <div class="clip-row">
                         <Select value=local options=clip_opts placeholder="(none)"/>
                         <input
                             class="input mono"
+                            aria-label=format!("{label} path")
                             placeholder="/models/voices/clip.wav"
                             prop:value=move || local.get()
                             on:input=move |ev| local.set(event_target_value(&ev))
                         />
                     </div>
-                </div>
+                </StackRow>
             }
             .into_any()
         }
         _ => view! {
-            <div class="field">
-                {label}
-                <input
-                    class="input"
-                    placeholder=placeholder
-                    prop:value=move || local.get()
-                    on:input=move |ev| local.set(event_target_value(&ev))
-                />
-            </div>
+            <EntryRow title=label sub=sub wire=spec.name value=local placeholder=placeholder/>
         }
         .into_any(),
-    }
-}
-
-#[component]
-fn TextField(
-    label: &'static str,
-    sig: RwSignal<String>,
-    #[prop(default = "")] placeholder: &'static str,
-) -> impl IntoView {
-    view! {
-        <div class="field">
-            <label>{label}</label>
-            <input
-                class="input"
-                placeholder=placeholder
-                prop:value=move || sig.get()
-                on:input=move |ev| sig.set(event_target_value(&ev))
-            />
-        </div>
-    }
-}
-
-#[component]
-fn CheckField(label: &'static str, sig: RwSignal<bool>) -> impl IntoView {
-    view! {
-        <label class="check">
-            <input
-                type="checkbox"
-                prop:checked=move || sig.get()
-                on:change=move |ev| sig.set(event_target_checked(&ev))
-            />
-            <span>{label}</span>
-        </label>
     }
 }
 
@@ -1902,7 +1796,7 @@ fn RunCard(
                 {live
                     .then(|| {
                         view! {
-                            <span class="chip live">
+                            <span class="chip info" data-state="running">
                                 <i class="dot"></i>
                                 "running…"
                             </span>
@@ -1943,7 +1837,7 @@ fn result_body(
         .clone()
         .filter(|_| r.tracks.is_empty() && r.text.is_empty() && !has_timeline);
     view! {
-        {(!error.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {error}")}</div> })}
+        {(!error.is_empty()).then(|| view! { <div class="notice err">{error}</div> })}
         {r
             .tracks
             .iter()
@@ -1953,7 +1847,7 @@ fn result_body(
                         .then(|| {
                             view! { <div class="track-name">{t.id.clone()}</div> }
                         })}
-                    <audio controls src=t.url.clone()></audio>
+                    <AudioPlayer src=Some(t.url.clone())/>
                     <div class="row">
                         <a class="btn ghost sm" href=t.url.clone() download=t.name.clone()>
                             {format!("Save {}…", t.name)}
@@ -2341,26 +2235,25 @@ fn VoiceLibrary(
                     }
                 }
             }}
-            <div class="field">
-                <label>"Upload clips"</label>
-                <input
-                    class="input file"
-                    type="file"
+            <div class="row vl-lib-head">
+                <FilePick
                     accept="audio/*"
-                    multiple
-                    disabled=move || lab.uploading.get()
-                    on:change=upload
+                    label="Upload clips…"
+                    title="Upload reference clips into the audio models dir"
+                    multiple=true
+                    disabled=Signal::derive(move || lab.uploading.get())
+                    on_file=Callback::new(upload)
                 />
+                <Show when=move || lab.uploading.get()>
+                    <span class="chip info">
+                        <i class="dot"></i>
+                        "uploading…"
+                    </span>
+                </Show>
             </div>
-            <Show when=move || lab.uploading.get()>
-                <div class="chip live">
-                    <i class="dot"></i>
-                    "uploading…"
-                </div>
-            </Show>
             {move || {
                 let e = lab.clips_err.get();
-                (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
+                (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
             }}
             <div class="clip-list">
                 <Show
@@ -2380,15 +2273,17 @@ fn VoiceLibrary(
                             let text_sig = RwSignal::new(c.transcript.clone());
                             let voice = c.voice.clone();
                             view! {
+                                <div class="clip-entry">
                                 <div class="clip-item" title=c.server_path.clone()>
-                                    <span class="n">{c.name.clone()}</span>
+                                    <span class="n" title=c.name.clone()>{c.name.clone()}</span>
                                     <span class="dim mono-sm">{fmt_bytes(c.size)}</span>
                                     <button
-                                        class="btn ghost"
+                                        class="icon-btn sm"
                                         title="Preview"
+                                        aria-label="Preview"
                                         on:click=move |_| lab.preview_clip.set(Some(n2.clone()))
                                     >
-                                        "▸"
+                                        <Icon ico=Ico::Play/>
                                     </button>
                                     <button
                                         class="btn ghost sm"
@@ -2401,7 +2296,8 @@ fn VoiceLibrary(
                                         "ASR"
                                     </button>
                                     <ConfirmButton
-                                        label="✕"
+                                        label=""
+                                        icon=|| view! { <Icon ico=Ico::Trash/> }
                                         confirm="Delete?"
                                         class="btn ghost sm del"
                                         title="Delete this clip"
@@ -2411,7 +2307,9 @@ fn VoiceLibrary(
                                 <div class="clip-text">
                                     <input
                                         class="input mono-sm"
-                                        placeholder="what this clip says (prompt_text)"
+                                        aria-label="What this clip says"
+                                        title="prompt_text: what this clip says"
+                                        placeholder="What this clip says"
                                         prop:value=move || text_sig.get()
                                         on:input=move |ev| text_sig.set(event_target_value(&ev))
                                         on:change=move |_| save_text(
@@ -2419,6 +2317,7 @@ fn VoiceLibrary(
                                             text_sig.get_untracked(),
                                         )
                                     />
+                                </div>
                                 </div>
                             }
                         }
@@ -2430,26 +2329,25 @@ fn VoiceLibrary(
                     .get()
                     .map(|name| {
                         view! {
-                            <audio
-                                controls
-                                autoplay
-                                src=format!("/audio-lab/api/refs/{}", enc(&name))
-                            ></audio>
+                            <AudioPlayer
+                                src=Some(format!("/audio-lab/api/refs/{}", enc(&name)))
+                                autoplay=true
+                            />
                         }
                     })
             }}
             <Show when=move || transcribing.get().is_some()>
-                <div class="chip live">
+                <div class="chip info">
                     <i class="dot"></i>
                     "transcribing…"
                 </div>
             </Show>
-            <div class="row" style="margin-top:auto">
-                <button class="btn ghost" on:click=move |_| on_reload()>
+            <div class="row lab-help-foot">
+                <button class="btn flat sm" on:click=move |_| on_reload()>
                     "Refresh"
                 </button>
                 <button
-                    class="btn ghost"
+                    class="btn flat sm"
                     title="Transcribe every clip without a transcript, with the speech-to-text \
                            model of Settings → Runtimes → Audio → Clip transcripts"
                     disabled=move || transcribing.get().is_some()

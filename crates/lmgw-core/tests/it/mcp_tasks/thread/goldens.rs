@@ -94,6 +94,7 @@ async fn seeded(kind: UpstreamKind, protocol: Protocol) -> (MockServer, SharedSt
                 id: "call_1".into(),
                 name: "desktop__build".into(),
                 args: json!({}),
+                cache_control: None,
             }],
         },
         Message {
@@ -103,6 +104,7 @@ async fn seeded(kind: UpstreamKind, protocol: Protocol) -> (MockServer, SharedSt
                 name: Some("desktop__build".into()),
                 content: ToolResultBlock::one("started, job t1"),
                 is_error: false,
+                cache_control: None,
             }],
         },
     ];

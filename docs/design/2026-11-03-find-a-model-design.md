@@ -165,7 +165,7 @@ owner on 2026-11-03 and ruled on 2026-11-04 (each below says how). D175 to D179 
   marks follow from it. Getting a model stays possible without an answer.
 - **D10 — The GPU hold doesn't change the marks.** It adds one line *(revised after review: it
   says where to resume)*: "lmgw is paused on the graphics card right now. The model answers once
-  you resume it: the HOLD button at the foot of the sidebar, or the tray menu's GPU hold." lmgw
+  you resume it: the On hold pill at the foot of the sidebar, or the tray menu's GPU hold." lmgw
   never releases the hold for this.
 - **D11 — A machine check that isn't `ready` doesn't block "Get it".** A download needs no
   graphics card. The card shows the machine check's line, and the first message then meets the

@@ -23,6 +23,11 @@ pub fn App() -> impl IntoView {
     crate::widgets::image_picker::provide_image_list();
     // The window width and the sidebar rail it can force.
     let sidebar = crate::shell::provide_sidebar();
+    // The window's own frame (LMGW_WINDOW=csd): where the header bars put
+    // the window buttons. Nothing in a browser or in KWin's frame.
+    crate::frame::provide_frame();
+    // Dark or light, for Settings and the main menu alike.
+    crate::theme::provide_theme();
     // The chart tooltip is `position: fixed`, and the content pane is a size
     // container, which makes it the containing block of every fixed
     // descendant — so the one tooltip lives out here, beside the toasts.
@@ -69,44 +74,66 @@ pub fn App() -> impl IntoView {
                                 <Routes fallback=pages::NotFound>
                                     <Route path=path!("") view=pages::Overview/>
                                     <Route path=path!("chat") view=crate::chat_host::ChatRoute/>
-                                    <Route path=path!("chat/profiles") view=pages::ChatProfiles/>
+                                    <Route path=path!("chat/profiles/:sel?") view=pages::ChatProfiles/>
                                     <Route path=path!("audio-lab") view=pages::AudioLab/>
                                     <Route path=path!("image-lab") view=pages::ImageLab/>
                                     <Route path=path!("decision-lab") view=pages::DecisionLab/>
                                     <Route path=path!("decision-lab/batches/:id") view=pages::DecisionBatch/>
+                                    <Route path=path!("documents-lab") view=pages::DocumentsLab/>
                                     <Route path=path!("voice-lab") view=pages::VoiceLab/>
-                                    <Route path=path!("agents") view=pages::Agents/>
-                                    <Route path=path!("agents/:id/:tab?") view=pages::AgentDetailPage/>
+                                    // One route for the list and the selected agent's
+                                    // tabs (`/agents/<id>`, `/agents/<id>/runs`): the
+                                    // page stays mounted while the selection moves.
+                                    <Route path=path!("agents/:id?/:tab?") view=pages::Agents/>
                                     // The Workflows surface became the agent catalog
                                     // (agent-catalog §6); old deep links land there.
                                     <Route path=path!("workflows") view=pages::WorkflowsMoved/>
-                                    <Route path=path!("models") view=pages::Models/>
+                                    // Before the Models route, which would read
+                                    // `catalog` and `find` as a class.
                                     <Route path=path!("models/catalog") view=pages::ModelCatalogPage/>
                                     <Route path=path!("models/find") view=pages::ModelFindPage/>
-                                    <Route path=path!("models/local/:id") view=pages::LocalModelEdit/>
+                                    // One route for the list and every selection
+                                    // (`/models/local/7`, `/models/aux/2`, …): the
+                                    // page stays mounted while the selection moves.
+                                    <Route path=path!("models/:class?/:id?") view=pages::Models/>
                                     <Route path=path!("downloads") view=pages::Downloads/>
-                                    <Route path=path!("backends/:tab?") view=pages::Backends/>
-                                    <Route path=path!("benchmarks") view=pages::Benchmarks/>
-                                    <Route path=path!("docs/:tab?") view=pages::Docs/>
-                                    <Route path=path!("knowledge") view=pages::Knowledge/>
-                                    <Route path=path!("knowledge/:id/:tab?") view=pages::KnowledgeDetail/>
-                                    <Route path=path!("upstreams") view=pages::Upstreams/>
-                                    <Route path=path!("api-reference") view=pages::ApiReference/>
+                                    <Route path=path!("backends/:tab?/:id?") view=pages::Backends/>
+                                    <Route path=path!("benchmarks/:run?") view=pages::Benchmarks/>
+                                    // `/docs/<tab>`, and a selected corpus at `/docs/corpora/<id>`.
+                                    <Route path=path!("docs/:tab?/:id?") view=pages::Docs/>
+                                    // One route for the list and the selected base's tabs
+                                    // (`/knowledge/<id>`, `/knowledge/<id>/search`): the page
+                                    // stays mounted while the selection moves.
+                                    <Route path=path!("knowledge/:id?/:tab?") view=pages::Knowledge/>
+                                    // The list and every selection (`/upstreams/3`, `/upstreams/new`).
+                                    <Route path=path!("upstreams/:id?") view=pages::Upstreams/>
+                                    <Route path=path!("api-reference/:op?") view=pages::ApiReference/>
                                     // `mcp-servers`, not `mcp`: `/mcp` is the northbound MCP protocol
                                     // endpoint, so a reload on that path would hit JSON-RPC, not the SPA.
-                                    <Route path=path!("mcp-servers") view=pages::McpServers/>
-                                    <Route path=path!("traffic") view=pages::Traffic/>
-                                    <Route path=path!("traffic/conversations") view=pages::TrafficConversations/>
+                                    <Route path=path!("mcp-servers/:id?/:label?") view=pages::McpServers/>
+                                    // Before Requests, which would read `conversations`
+                                    // as a row; each keeps its page mounted while its
+                                    // selection (the path's last part) moves.
+                                    <Route path=path!("traffic/conversations/:chain?") view=pages::TrafficConversations/>
+                                    <Route path=path!("traffic/:log?") view=pages::Traffic/>
                                     <Route path=path!("usage") view=pages::Usage/>
-                                    <Route path=path!("usage/keys") view=pages::UsageKeys/>
+                                    // One page for the list and the selected key
+                                    // (`/usage/keys/7`).
+                                    <Route path=path!("usage/keys/:id?") view=pages::UsageKeys/>
                                     <Route path=path!("usage/prices") view=pages::UsagePrices/>
                                     <Route path=path!("wiring") view=pages::Wiring/>
                                     <Route path=path!("settings/:cat?") view=pages::Settings/>
+                                    // A debug build's sample of the shared widgets;
+                                    // a release build answers it as not found.
+                                    <Route path=path!("dev/components") view=pages::Components/>
                                 </Routes>
                             }
                         }
                     >
-                        <crate::session::LoginCard/>
+                        <div class="login-route">
+                            <crate::widgets::HeadBar title="Sign in"/>
+                            <crate::session::LoginCard/>
+                        </div>
                     </Show>
                 </main>
             </div>

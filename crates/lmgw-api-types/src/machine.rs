@@ -345,6 +345,10 @@ pub enum MachineCause {
     /// the card is on the bus and its driver runs on the host, and the
     /// container has no `/dev/nvidiactl` (headless server design §7).
     CardNotPassedIn,
+    /// The server image's container has the NVIDIA card's device nodes, and
+    /// the host's SELinux policy keeps the container's type from them
+    /// (`stat` on `/dev/nvidiactl` fails with "Permission denied").
+    CardDeniedBySelinux,
     /// NVIDIA's container toolkit is not installed.
     ToolkitMissing,
     /// The toolkit comes from Fedora's retired package.

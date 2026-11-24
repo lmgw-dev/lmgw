@@ -1,6 +1,7 @@
 //! Ingress round-trips (§15): OpenAI-in and Anthropic-in → IR →
 //! re-serialized out, plus stream-encoder framing.
 
+use lmgw_core::config::Protocol;
 use lmgw_core::ingress::{anthropic, openai, ClientProto};
 use lmgw_core::ir::*;
 use serde_json::json;
@@ -58,7 +59,7 @@ fn openai_parses_tools_and_tool_results() {
     assert_eq!(ir.tool_choice, Some(ToolChoice::Auto));
     assert!(matches!(
         &ir.messages[1].content[0],
-        ContentPart::ToolUse { id, name, args }
+        ContentPart::ToolUse { id, name, args, .. }
             if id == "call_1" && name == "get_weather" && args["city"] == "Berlin"
     ));
     assert!(matches!(
@@ -141,11 +142,11 @@ fn openai_parses_image_parts() {
     let ir = openai::parse_chat_request(&body).unwrap();
     let parts = &ir.messages[0].content;
     assert!(
-        matches!(&parts[1], ContentPart::Image { mime, source: ImageSource::Base64 { data } }
+        matches!(&parts[1], ContentPart::Image { mime, source: ImageSource::Base64 { data }, .. }
         if mime == "image/png" && data == "AAAA")
     );
     assert!(
-        matches!(&parts[2], ContentPart::Image { mime, source: ImageSource::Url { url } }
+        matches!(&parts[2], ContentPart::Image { mime, source: ImageSource::Url { url }, .. }
         if mime == "image/jpeg" && url.ends_with("cat.jpg"))
     );
 }
@@ -204,6 +205,7 @@ fn openai_serializes_completion_with_tool_calls() {
             id: "call_9".into(),
             name: "f".into(),
             args: json!({"x": 1}),
+            cache_control: None,
         }],
         reasoning: String::new(),
         finish_reason: FinishReason::ToolUse,
@@ -280,6 +282,7 @@ fn anthropic_serializes_completion() {
                 id: "tu_2".into(),
                 name: "f".into(),
                 args: json!({"a": true}),
+                cache_control: None,
             },
         ],
         reasoning: "let me think".into(),
@@ -325,7 +328,11 @@ fn collect_sse_events(raw: &str) -> Vec<(Option<String>, String)> {
 /// A two-token answer whose upstream reported usage before its stop, run
 /// through the OpenAI encoder: the JSON chunks, and whether `[DONE]` ended it.
 fn openai_stream_with_usage(include_usage: bool) -> (Vec<serde_json::Value>, bool) {
-    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-z", include_usage);
+    let mut enc = ClientProto::OpenaiChat.new_stream_encoder(
+        "alias-z",
+        include_usage,
+        Protocol::OpenaiCompatible,
+    );
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::TextDelta("Hel".into())));
@@ -394,7 +401,11 @@ fn openai_stream_encoder_sends_no_usage_chunk_unasked() {
 
 #[test]
 fn anthropic_stream_encoder_event_sequence() {
-    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-a", false);
+    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder(
+        "alias-a",
+        false,
+        Protocol::OpenaiCompatible,
+    );
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::TextDelta("Hi".into())));
@@ -456,7 +467,8 @@ fn anthropic_stream_encoder_event_sequence() {
 
 #[test]
 fn openai_stream_encoder_forwards_reasoning() {
-    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-r", false);
+    let mut enc =
+        ClientProto::OpenaiChat.new_stream_encoder("alias-r", false, Protocol::OpenaiCompatible);
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::ReasoningDelta("Th".into())));
@@ -484,7 +496,11 @@ fn openai_stream_encoder_forwards_reasoning() {
 
 #[test]
 fn anthropic_stream_encoder_maps_reasoning_to_thinking() {
-    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-r", false);
+    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder(
+        "alias-r",
+        false,
+        Protocol::OpenaiCompatible,
+    );
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::ReasoningDelta("pondering".into())));
@@ -943,6 +959,7 @@ fn cached_usage() -> Usage {
         completion_tokens: Some(42),
         cached_input_tokens: Some(800),
         cache_write_tokens: Some(100),
+        cache_write_1h_tokens: None,
         reasoning_tokens: None,
     }
 }

@@ -1,5 +1,8 @@
 [
  {
+  "js": "'README demo threads (scripts/readme-demo.sh): four new chats with the demo chat model, one prompt each, every reply waited for and checked. @CHAT_MODEL@ is README_CHAT_MODEL (ui-drive.py --var CHAT_MODEL=...).'"
+ },
+ {
   "size": "1536x864"
  },
  {
@@ -9,10 +12,13 @@
   "wait": 1.0
  },
  {
-  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+  "js": "(()=>{window.__prevT = new URLSearchParams(location.search).get('t'); const b=[...document.querySelectorAll('.chat-list-new, .chat-empty .btn.primary')].filter(b=>b.offsetParent); b[0].click(); return b.length})()"
  },
  {
-  "wait": 1.2
+  "until": "(()=>{const t = new URLSearchParams(location.search).get('t'); return !!t && t !== window.__prevT && !!document.querySelector('textarea.composer-input') && document.querySelectorAll('.msg-user-text').length === 0})()",
+  "timeout": 10,
+  "label": "a new, empty thread is open (not the one before it)",
+  "abort": true
  },
  {
   "click": "button.mp-btn"
@@ -21,17 +27,17 @@
   "wait": 0.6
  },
  {
-  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
-  "label": "model gemma4-26b-a4b offered"
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^@CHAT_MODEL@(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "the demo chat model is offered",
+  "abort": true
  },
  {
   "wait": 0.6
  },
  {
-  "key": "Escape"
- },
- {
-  "wait": 0.3
+  "expect": "/^@CHAT_MODEL@(\\s|$)/.test(document.querySelector('button.mp-btn').innerText.trim())",
+  "label": "the thread uses the demo chat model",
+  "abort": true
  },
  {
   "click": "textarea.composer-input"
@@ -43,20 +49,33 @@
   "key": "Enter"
  },
  {
-  "wait": 4
+  "until": "!!document.querySelector('.composer-send[aria-label=Stop]') || [...document.querySelectorAll('.msg-assistant')].some(m => m.innerText.trim().length > 0)",
+  "timeout": 180,
+  "label": "the reply started (the first one waits for the model to load)",
+  "abort": true
  },
  {
-  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
-  "timeout": 300
+  "until": "!document.querySelector('.composer-send[aria-label=Stop]')",
+  "timeout": 180,
+  "label": "the reply finished (a reply still streaming here ends the demo: the next prompt would land beside it)",
+  "abort": true
  },
  {
-  "wait": 2
+  "expect": "(()=>{const m=[...document.querySelectorAll('.msg-assistant')].pop(); const t=m ? (m.querySelector('.md')?.innerText || '').trim() : ''; return !!t && !/^\\u26a0|\\n\\u26a0 |\\u23f9 stopped/.test(t) && !m.querySelector('.chat-gpu-setup')})()",
+  "label": "the reply is an answer, not an error (⚠), a stop note (⏹) or the graphics-card setup card",
+  "abort": true
  },
  {
-  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+  "wait": 1.5
  },
  {
-  "wait": 1.2
+  "js": "(()=>{window.__prevT = new URLSearchParams(location.search).get('t'); const b=[...document.querySelectorAll('.chat-list-new, .chat-empty .btn.primary')].filter(b=>b.offsetParent); b[0].click(); return b.length})()"
+ },
+ {
+  "until": "(()=>{const t = new URLSearchParams(location.search).get('t'); return !!t && t !== window.__prevT && !!document.querySelector('textarea.composer-input') && document.querySelectorAll('.msg-user-text').length === 0})()",
+  "timeout": 10,
+  "label": "a new, empty thread is open (not the one before it)",
+  "abort": true
  },
  {
   "click": "button.mp-btn"
@@ -65,17 +84,17 @@
   "wait": 0.6
  },
  {
-  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
-  "label": "model gemma4-26b-a4b offered"
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^@CHAT_MODEL@(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "the demo chat model is offered",
+  "abort": true
  },
  {
   "wait": 0.6
  },
  {
-  "key": "Escape"
- },
- {
-  "wait": 0.3
+  "expect": "/^@CHAT_MODEL@(\\s|$)/.test(document.querySelector('button.mp-btn').innerText.trim())",
+  "label": "the thread uses the demo chat model",
+  "abort": true
  },
  {
   "click": "textarea.composer-input"
@@ -87,20 +106,33 @@
   "key": "Enter"
  },
  {
-  "wait": 4
+  "until": "!!document.querySelector('.composer-send[aria-label=Stop]') || [...document.querySelectorAll('.msg-assistant')].some(m => m.innerText.trim().length > 0)",
+  "timeout": 180,
+  "label": "the reply started",
+  "abort": true
  },
  {
-  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
-  "timeout": 300
+  "until": "!document.querySelector('.composer-send[aria-label=Stop]')",
+  "timeout": 180,
+  "label": "the reply finished (a reply still streaming here ends the demo: the next prompt would land beside it)",
+  "abort": true
  },
  {
-  "wait": 2
+  "expect": "(()=>{const m=[...document.querySelectorAll('.msg-assistant')].pop(); const t=m ? (m.querySelector('.md')?.innerText || '').trim() : ''; return !!t && !/^\\u26a0|\\n\\u26a0 |\\u23f9 stopped/.test(t) && !m.querySelector('.chat-gpu-setup')})()",
+  "label": "the reply is an answer, not an error (⚠), a stop note (⏹) or the graphics-card setup card",
+  "abort": true
  },
  {
-  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+  "wait": 1.5
  },
  {
-  "wait": 1.2
+  "js": "(()=>{window.__prevT = new URLSearchParams(location.search).get('t'); const b=[...document.querySelectorAll('.chat-list-new, .chat-empty .btn.primary')].filter(b=>b.offsetParent); b[0].click(); return b.length})()"
+ },
+ {
+  "until": "(()=>{const t = new URLSearchParams(location.search).get('t'); return !!t && t !== window.__prevT && !!document.querySelector('textarea.composer-input') && document.querySelectorAll('.msg-user-text').length === 0})()",
+  "timeout": 10,
+  "label": "a new, empty thread is open (not the one before it)",
+  "abort": true
  },
  {
   "click": "button.mp-btn"
@@ -109,17 +141,17 @@
   "wait": 0.6
  },
  {
-  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
-  "label": "model gemma4-26b-a4b offered"
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^@CHAT_MODEL@(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "the demo chat model is offered",
+  "abort": true
  },
  {
   "wait": 0.6
  },
  {
-  "key": "Escape"
- },
- {
-  "wait": 0.3
+  "expect": "/^@CHAT_MODEL@(\\s|$)/.test(document.querySelector('button.mp-btn').innerText.trim())",
+  "label": "the thread uses the demo chat model",
+  "abort": true
  },
  {
   "click": "textarea.composer-input"
@@ -131,20 +163,33 @@
   "key": "Enter"
  },
  {
-  "wait": 4
+  "until": "!!document.querySelector('.composer-send[aria-label=Stop]') || [...document.querySelectorAll('.msg-assistant')].some(m => m.innerText.trim().length > 0)",
+  "timeout": 180,
+  "label": "the reply started",
+  "abort": true
  },
  {
-  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
-  "timeout": 300
+  "until": "!document.querySelector('.composer-send[aria-label=Stop]')",
+  "timeout": 180,
+  "label": "the reply finished (a reply still streaming here ends the demo: the next prompt would land beside it)",
+  "abort": true
  },
  {
-  "wait": 2
+  "expect": "(()=>{const m=[...document.querySelectorAll('.msg-assistant')].pop(); const t=m ? (m.querySelector('.md')?.innerText || '').trim() : ''; return !!t && !/^\\u26a0|\\n\\u26a0 |\\u23f9 stopped/.test(t) && !m.querySelector('.chat-gpu-setup')})()",
+  "label": "the reply is an answer, not an error (⚠), a stop note (⏹) or the graphics-card setup card",
+  "abort": true
  },
  {
-  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+  "wait": 1.5
  },
  {
-  "wait": 1.2
+  "js": "(()=>{window.__prevT = new URLSearchParams(location.search).get('t'); const b=[...document.querySelectorAll('.chat-list-new, .chat-empty .btn.primary')].filter(b=>b.offsetParent); b[0].click(); return b.length})()"
+ },
+ {
+  "until": "(()=>{const t = new URLSearchParams(location.search).get('t'); return !!t && t !== window.__prevT && !!document.querySelector('textarea.composer-input') && document.querySelectorAll('.msg-user-text').length === 0})()",
+  "timeout": 10,
+  "label": "a new, empty thread is open (not the one before it)",
+  "abort": true
  },
  {
   "click": "button.mp-btn"
@@ -153,17 +198,17 @@
   "wait": 0.6
  },
  {
-  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
-  "label": "model gemma4-26b-a4b offered"
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^@CHAT_MODEL@(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "the demo chat model is offered",
+  "abort": true
  },
  {
   "wait": 0.6
  },
  {
-  "key": "Escape"
- },
- {
-  "wait": 0.3
+  "expect": "/^@CHAT_MODEL@(\\s|$)/.test(document.querySelector('button.mp-btn').innerText.trim())",
+  "label": "the thread uses the demo chat model",
+  "abort": true
  },
  {
   "click": "textarea.composer-input"
@@ -175,13 +220,23 @@
   "key": "Enter"
  },
  {
-  "wait": 4
+  "until": "!!document.querySelector('.composer-send[aria-label=Stop]') || [...document.querySelectorAll('.msg-assistant')].some(m => m.innerText.trim().length > 0)",
+  "timeout": 180,
+  "label": "the reply started",
+  "abort": true
  },
  {
-  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
-  "timeout": 300
+  "until": "!document.querySelector('.composer-send[aria-label=Stop]')",
+  "timeout": 180,
+  "label": "the reply finished (a reply still streaming here ends the demo: the next prompt would land beside it)",
+  "abort": true
  },
  {
-  "wait": 2
+  "expect": "(()=>{const m=[...document.querySelectorAll('.msg-assistant')].pop(); const t=m ? (m.querySelector('.md')?.innerText || '').trim() : ''; return !!t && !/^\\u26a0|\\n\\u26a0 |\\u23f9 stopped/.test(t) && !m.querySelector('.chat-gpu-setup')})()",
+  "label": "the reply is an answer, not an error (⚠), a stop note (⏹) or the graphics-card setup card",
+  "abort": true
+ },
+ {
+  "wait": 1.5
  }
 ]

@@ -8,7 +8,8 @@
 //! other route, the row the request names (an op's [`super::redact::
 //! identity`] arguments, another route's path), the settings fields a
 //! settings op asked for ([`super::redact::patch_fields`]) or, for any
-//! other request, the ones it changed, and the answer's status.
+//! other request, the ones it changed, what the handler adds of its own
+//! ([`super::Detail`]), and the answer's status.
 //!
 //! Left to other writers: `/mcp/admin` (one route for reads and writes, so
 //! the self-admin dispatcher writes its writing calls with the tool's name)
@@ -177,6 +178,9 @@ pub(crate) async fn run(
         None => (req, Map::new()),
     };
     let resp = next.run(req).await;
+    if let Some(super::Detail(detail)) = resp.extensions().get::<super::Detail>() {
+        target.extend(detail.clone());
+    }
     let after = state.snapshot();
     if !before.accounts_on && !after.accounts_on {
         return resp;

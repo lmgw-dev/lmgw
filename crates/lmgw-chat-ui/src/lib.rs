@@ -12,7 +12,8 @@
 //!   keeps the open thread ([`ChatLocation`]), whether the session is locked,
 //!   its live updates ([`ChatLive`]), its preview frame ([`PreviewFrame`]),
 //!   voice ([`ChatVoice`], or none), the base its assets are served under,
-//!   and the machine check's surfaces ([`ChatMachine`], or none);
+//!   the machine check's surfaces ([`ChatMachine`], or none) and its window
+//!   buttons ([`ChatWindow`], or none);
 //! - the kit's toasts (`lmgw_ui_kit::widgets::ToastHost`, rendered before the
 //!   Chat) and its dirty guard (`widgets::dirty_guard::provide_dirty_guard`,
 //!   with `DirtyGuardHost` for its question);
@@ -43,6 +44,8 @@ mod chat_bytes;
 mod chat_export;
 /// Chat folders: sidebar grouping, drag-and-drop, folder settings.
 mod chat_folders;
+/// The page's own turn while it streams, kept beyond the page.
+mod chat_inflight;
 /// Knowledge bases in the Chat: settings section, `#` picker, chips.
 mod chat_knowledge;
 /// The Chat's live updates, from the source its host hands it (the
@@ -102,5 +105,5 @@ pub use chat::Chat;
 pub use chat_markdown::md_to_html;
 pub use host::{
     provide_chat_host, ChatAddress, ChatHost, ChatLive, ChatLocation, ChatMachine, ChatOrigin,
-    ChatVoice, PreviewFrame,
+    ChatVoice, ChatWindow, PreviewFrame,
 };

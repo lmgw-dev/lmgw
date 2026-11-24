@@ -11,14 +11,20 @@
 # installer's version; a newer one (a later pipeline published first) is left
 # alone, with a log line. Runs after `publish`, so the RPM's manifest is there.
 #
+# `arch`: the same for the Arch Linux package the arch job built (dist-arch/:
+# the package, its .sha256 and arch.json, from ci/build-arch.sh), added to the
+# published latest.json as its `arch` entry. The in-app updater installs RPMs only: it
+# ignores that entry, so the package is for people to install themselves.
+#
 # Usage: bash ci/publish.sh            the RPM and latest.json
 #        bash ci/publish.sh windows    the Windows installer, then latest.json again
+#        bash ci/publish.sh arch       the Arch package, then latest.json again
 set -euo pipefail
 
 mode="${1:-rpm}"
 case "$mode" in
-  rpm | windows) ;;
-  *) echo "publish.sh: unknown mode '$mode' (none for the RPM, or 'windows')" >&2; exit 2 ;;
+  rpm | windows | arch) ;;
+  *) echo "publish.sh: unknown mode '$mode' (none for the RPM, 'windows' or 'arch')" >&2; exit 2 ;;
 esac
 
 base="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/lmgw"
@@ -107,7 +113,8 @@ if [[ "$mode" == windows ]]; then
   version="$(jq -er .version "$m")" || fail "$m has no version"
   file="$(jq -er .file "$m")" || fail "$m names no installer"
   sha="$(jq -er .sha256 "$m")" || fail "$m has no sha256"
-  [[ "$file" == "lmgw_${version}_x64-setup.exe" && "$file" =~ ^lmgw_[0-9.+]+_x64-setup\.exe$ ]] \
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?$ \
+    && "$file" == "lmgw_${version}_x64-setup.exe" ]] \
     || fail "$m names $file, not lmgw ${version}'s installer"
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "$m's sha256 is not 64 hex digits: $sha"
   [[ -f "dist-windows/$file" && ! -L "dist-windows/$file" ]] || fail "dist-windows/$file is not a plain file"
@@ -131,6 +138,42 @@ if [[ "$mode" == windows ]]; then
     '.nsis = {file: $file, url: $url, sha256: $sha}' "$published" > dist-windows/latest.json
   upload dist-windows/latest.json "$latest_url"
   echo "Published the lmgw ${version} installer for Windows"
+  exit 0
+fi
+
+if [[ "$mode" == arch ]]; then
+  fail() { echo "publish.sh arch: $*" >&2; exit 1; }
+  m=dist-arch/arch.json
+  [[ -f "$m" ]] || fail "the arch job handed on no $m"
+  version="$(jq -er .version "$m")" || fail "$m has no version"
+  file="$(jq -er .file "$m")" || fail "$m names no package"
+  sha="$(jq -er .sha256 "$m")" || fail "$m has no sha256"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?$ \
+    && "$file" == "lmgw-${version}-1-x86_64.pkg.tar.zst" ]] \
+    || fail "$m names $file, not lmgw ${version}'s Arch package"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "$m's sha256 is not 64 hex digits: $sha"
+  [[ -f "dist-arch/$file" && ! -L "dist-arch/$file" ]] || fail "dist-arch/$file is not a plain file"
+  have="$(sha256sum "dist-arch/$file" | cut -d' ' -f1)"
+  [[ "$have" == "$sha" ]] || fail "$file's sha256 is $have, $m says $sha"
+  [[ -f "dist-arch/$file.sha256" && "$(cat "dist-arch/$file.sha256")" == "$sha  $file" ]] \
+    || fail "dist-arch/$file.sha256 is not '$sha  $file'"
+  url="${base}/${version}/${file}"
+  upload "dist-arch/${file}" "$url"
+  upload "dist-arch/${file}.sha256" "${url}.sha256"
+  published="$(mktemp)"
+  if ! fetch_published "$latest_url" "$published"; then
+    echo "Skipping latest.json: none is published yet, so there is no ${version} to add the package to"
+    exit 0
+  fi
+  current="$(jq -er .version "$published")" || fail "the published manifest has no readable version"
+  if [[ "$current" != "$version" ]]; then
+    echo "Skipping latest.json: the published one is ${current}, this package ${version}"
+    exit 0
+  fi
+  jq --arg file "$file" --arg url "$url" --arg sha "$sha" \
+    '.arch = {file: $file, url: $url, sha256: $sha}' "$published" > dist-arch/latest.json
+  upload dist-arch/latest.json "$latest_url"
+  echo "Published the lmgw ${version} package for Arch Linux"
   exit 0
 fi
 

@@ -189,6 +189,7 @@ impl Blamed {
                     | C::DriverNotRunning { .. }
                     | C::DriverLibrariesMissing
                     | C::CardNotPassedIn
+                    | C::CardDeniedBySelinux
                     | C::DriverUnreadable { .. }
                     | C::NvmlFailed { .. }
                     | C::ToolkitMissing
@@ -208,7 +209,12 @@ impl Blamed {
 fn see_there(cause: Option<&MachineCause>, plan: bool) -> bool {
     use MachineCause as C;
     match cause {
-        Some(C::NoNvidiaDriver { .. } | C::DriverLibrariesMissing | C::CardNotPassedIn) => true,
+        Some(
+            C::NoNvidiaDriver { .. }
+            | C::DriverLibrariesMissing
+            | C::CardNotPassedIn
+            | C::CardDeniedBySelinux,
+        ) => true,
         Some(C::DriverNotRunning { secure_boot }) => *secure_boot,
         Some(
             C::ToolkitMissing
@@ -387,7 +393,8 @@ mod tests {
 
         let toolkit = item(
             MachineItemId::CardForModels,
-            "One piece is missing so models can use the graphics card. lmgw can set it up.",
+            "The NVIDIA Container Toolkit is missing: models can't use the graphics card without \
+             it. lmgw can set it up.",
             Some(MachineCause::ToolkitMissing),
         );
         let b = Blame::from_parts(None, Some(&toolkit), true, true);
@@ -423,13 +430,14 @@ mod tests {
         );
         assert_eq!(
             words(
-                "One piece is missing so models can use the graphics card. lmgw can set it up.",
+                "The NVIDIA Container Toolkit is missing: models can't use the graphics card without \
+                 it. lmgw can set it up.",
                 Some(MachineCause::ToolkitMissing),
                 true
             ),
-            "could not start on the graphics card of the computer lmgw runs on. One piece is \
-             missing so models can use the graphics card. lmgw can set it up. Open lmgw there \
-             to see what to do."
+            "could not start on the graphics card of the computer lmgw runs on. The NVIDIA \
+             Container Toolkit is missing: models can't use the graphics card without it. lmgw \
+             can set it up. Open lmgw there to see what to do."
         );
         assert_eq!(
             words(

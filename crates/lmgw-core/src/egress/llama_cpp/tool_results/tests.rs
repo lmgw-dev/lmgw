@@ -32,6 +32,7 @@ fn image(mime: &str, data: &str) -> ToolResultBlock {
     ToolResultBlock::Image {
         mime: mime.into(),
         data: data.into(),
+        cache_control: None,
     }
 }
 
@@ -416,6 +417,7 @@ fn chat_body_renders_by_the_routes_decision() {
                 name: None,
                 content: vec![text("chart:"), image("image/png", PNG)],
                 is_error: false,
+                cache_control: None,
             }],
         }],
         params: Params::default(),
@@ -429,6 +431,7 @@ fn chat_body_renders_by_the_routes_decision() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let content = |decision: Option<LlamaRoute>| {
         let mut up = crate::config::Snapshot::default().router_upstream();

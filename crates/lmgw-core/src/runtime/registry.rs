@@ -63,7 +63,7 @@ use crate::sdcpp_caps::SdcppCaps;
 mod climb;
 mod ownership;
 
-pub use admission_grant::{is_unheld_note, LlamaPlacement, PartialGrant, Staged};
+pub use admission_grant::{is_unheld_note, LlamaPlacement, Moved, PartialGrant, Staged};
 use climb::ClimbMark;
 pub use climb::{
     ClaimStatus, ClimbRun, ClimbStart, ClimbStatus, ClimbTicket, DrainEnd, Marked, PhaseWait,
@@ -76,6 +76,7 @@ mod admission_grant;
 mod caps_seen;
 mod command;
 mod decision_route;
+mod draft_type;
 mod errors;
 mod for_tests;
 mod freeable;
@@ -105,6 +106,7 @@ pub use errors::RuntimeError;
 pub use freeable::Freeable;
 pub use inputs::{AcquireSpec, StartSpec};
 pub use llama_props::{unknown_until, LlamaEntry, Refresh};
+pub(crate) use podman_ops::help_unread;
 pub use raii::AcquireGuard;
 pub use reconcile::{PsEntry, ReconcileReport};
 use state::{next_generation, Entry, Key, Phase};
@@ -197,6 +199,13 @@ pub struct Registry {
     /// invalidation step anyone has to remember; [`Registry::forget_help`]
     /// exists to drop an entry, not to keep one correct.
     help: Mutex<HashMap<String, String>>,
+    /// Whether each image reference's llama-server lists `draft-simple`
+    /// among `--spec-type`'s values, as its `--help` last read said
+    /// ([`Registry::with_draft_type`]); refreshed by every [`Registry::help_text`]
+    /// read, so a reference retagged under a running lmgw is right again at
+    /// its next start. For the reads that cannot ask podman (the editor's
+    /// command line).
+    draft_simple: Mutex<HashMap<String, bool>>,
     /// `sd-server --help`, parsed, per **image ID** — the image class's twin
     /// of [`Self::help`], keyed the same way for the same reason, and cached
     /// for one more: the probe needs the GPU device attached (§12.7), so it is

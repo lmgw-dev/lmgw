@@ -50,7 +50,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use super::nvml::ProcessMemory;
+use super::nvml::{DeviceId, DeviceProcesses};
 
 // ---------------------------------------------------------------------------
 // The process tree
@@ -574,15 +574,18 @@ impl PidCache {
     /// registered here has it, as its root or in its remembered tree
     /// ([`Self::remember`]); a retired generation's PIDs never protect
     /// against their own tombstones.
+    ///
+    /// What they hold is answered per device (device-ledger design §2.3): a
+    /// tombstone the driver lists on a device without a figure makes that
+    /// device's figure unknown, and the other devices' stay known.
     pub fn settle(
         &mut self,
-        processes: &[ProcessMemory],
+        devices: &[DeviceProcesses],
         asked: &HashSet<u32>,
         current: &[u32],
         reused: &HashSet<u32>,
-    ) -> Result<u64, String> {
-        let listed: HashMap<u32, Option<u64>> =
-            processes.iter().map(|p| (p.pid, p.bytes)).collect();
+    ) -> Vec<CardHeld> {
+        let listed: HashSet<u32> = DeviceProcesses::all(devices).map(|p| p.pid).collect();
         let registered = self.registered_pids();
         let current: HashSet<u32> = current
             .iter()
@@ -592,24 +595,36 @@ impl PidCache {
         self.tombstones.retain(|t| {
             !current.contains(&t.pid)
                 && !reused.contains(&t.pid)
-                && (listed.contains_key(&t.pid) || !asked.contains(&t.pid))
+                && (listed.contains(&t.pid) || !asked.contains(&t.pid))
         });
-        let mut total: u64 = 0;
-        for t in &self.tombstones {
-            match listed.get(&t.pid) {
-                // Not asked about in this pass.
-                None => {}
-                Some(Some(b)) => total = total.saturating_add(*b),
-                Some(None) => {
-                    return Err(format!(
-                        "{} was stopped and the driver still lists its process {} without \
-                         saying how much it holds",
-                        t.label, t.pid
-                    ))
+        devices
+            .iter()
+            .map(|d| {
+                let mut total: u64 = 0;
+                let mut unknown = None;
+                for t in &self.tombstones {
+                    // Not on this device, or not asked about in this pass.
+                    let Some(p) = d.processes.iter().find(|p| p.pid == t.pid) else {
+                        continue;
+                    };
+                    match p.bytes {
+                        Some(b) => total = total.saturating_add(b),
+                        None => {
+                            unknown = Some(format!(
+                                "{} was stopped and the driver still lists its process {} \
+                                 without saying how much it holds",
+                                t.label, t.pid
+                            ));
+                            break;
+                        }
+                    }
                 }
-            }
-        }
-        Ok(total)
+                CardHeld {
+                    device: d.device.clone(),
+                    bytes: unknown.map_or(Ok(total), Err),
+                }
+            })
+            .collect()
     }
 }
 
@@ -629,57 +644,166 @@ pub fn reused(tombstones: &[Tombstone], tree: &dyn ProcTree) -> HashSet<u32> {
         .collect()
 }
 
-/// lmgw's share held by its registered containers: every member's processes
-/// as the driver lists them.
+/// What lmgw's processes hold on one device (device-ledger design §2.3).
+/// `Err` when the driver lists one of them there without a figure: that
+/// device's split is unknown, the other devices' are not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardHeld {
+    pub device: DeviceId,
+    pub bytes: Result<u64, String>,
+}
+
+/// Every device's figure, or the first device's reason why its figure is
+/// unknown: where one sum over the devices is wanted, one unknown device
+/// makes it unknown.
+pub fn every_card(cards: Vec<CardHeld>) -> Result<Vec<(DeviceId, u64)>, String> {
+    cards
+        .into_iter()
+        .map(|c| c.bytes.map(|b| (c.device, b)))
+        .collect()
+}
+
+/// lmgw's share held by its registered containers, per device: every
+/// member's processes as the driver lists them there.
 ///
-/// `Err` names the first member that cannot be attributed — none of its
-/// processes is listed (a CPU-only row, a container that died, a driver that
-/// has not caught up with a fresh start), or one is listed without a figure.
-/// Either way the share would be a guess, and a low guess is exactly the
-/// wrong direction (module docs).
-pub fn members_share(members: &[Member], processes: &[ProcessMemory]) -> Result<u64, String> {
-    let listed: HashMap<u32, Option<u64>> = processes.iter().map(|p| (p.pid, p.bytes)).collect();
-    let mut total: u64 = 0;
-    for m in members {
-        let mut found = false;
-        for pid in &m.pids {
-            match listed.get(pid) {
-                None => {}
-                Some(Some(b)) => {
-                    found = true;
-                    total = total.saturating_add(*b);
-                }
-                Some(None) => {
-                    return Err(format!(
-                        "{} is not attributed: the driver lists its process {pid} without \
-                         saying how much memory it holds",
-                        m.label
-                    ))
+/// `Err` names the first member that cannot be attributed to any device:
+/// none of its processes is listed on any (a CPU-only row, a container that
+/// died, a driver that has not caught up with a fresh start). A process
+/// listed on a device without a figure makes that device's figure unknown
+/// ([`CardHeld`]). Either way the share would be a guess, and a low guess
+/// is exactly the wrong direction (module docs).
+pub fn members_share(
+    members: &[Member],
+    devices: &[DeviceProcesses],
+) -> Result<Vec<CardHeld>, String> {
+    let listed: HashSet<u32> = DeviceProcesses::all(devices).map(|p| p.pid).collect();
+    if let Some(m) = members
+        .iter()
+        .find(|m| !m.pids.iter().any(|pid| listed.contains(pid)))
+    {
+        return Err(format!(
+            "{} is not attributed: the driver lists none of its processes ({}) — a \
+             model running without the GPU, or a container that is gone",
+            m.label,
+            m.pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(devices
+        .iter()
+        .map(|d| {
+            let on: HashMap<u32, Option<u64>> =
+                d.processes.iter().map(|p| (p.pid, p.bytes)).collect();
+            let mut total: u64 = 0;
+            for m in members {
+                for pid in &m.pids {
+                    match on.get(pid) {
+                        None => {}
+                        Some(Some(b)) => total = total.saturating_add(*b),
+                        Some(None) => {
+                            return CardHeld {
+                                device: d.device.clone(),
+                                bytes: Err(format!(
+                                    "{} is not attributed: the driver lists its process {pid} \
+                                     without saying how much memory it holds",
+                                    m.label
+                                )),
+                            }
+                        }
+                    }
                 }
             }
-        }
-        if !found {
-            return Err(format!(
-                "{} is not attributed: the driver lists none of its processes ({}) — a \
-                 model running without the GPU, or a container that is gone",
-                m.label,
-                m.pids
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
-    Ok(total)
+            CardHeld {
+                device: d.device.clone(),
+                bytes: Ok(total),
+            }
+        })
+        .collect())
+}
+
+/// What one member's processes hold on the cards the driver lists any of
+/// them on (device-ledger design §10, WP2): its generation, and per card, in
+/// the driver's order, the sum there — `None` where one of them is listed
+/// there without a figure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberCards {
+    pub generation: u64,
+    pub cards: Vec<(DeviceId, Option<u64>)>,
+}
+
+/// Every member's [`MemberCards`], in the members' order. A member the
+/// driver lists on no card has none.
+pub fn members_on_cards(members: &[Member], devices: &[DeviceProcesses]) -> Vec<MemberCards> {
+    members
+        .iter()
+        .map(|m| MemberCards {
+            generation: m.generation,
+            cards: devices
+                .iter()
+                .filter_map(|d| {
+                    let listed: Vec<Option<u64>> = d
+                        .processes
+                        .iter()
+                        .filter(|p| m.pids.contains(&p.pid))
+                        .map(|p| p.bytes)
+                        .collect();
+                    let bytes = listed
+                        .iter()
+                        .try_fold(0u64, |sum, b| b.map(|b| sum.saturating_add(b)));
+                    (!listed.is_empty()).then(|| (d.device.clone(), bytes))
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::vram::ProcessMemory;
+
     fn pm(pid: u32, bytes: Option<u64>) -> ProcessMemory {
         ProcessMemory { pid, bytes }
+    }
+
+    fn id(n: u32) -> DeviceId {
+        DeviceId(format!("GPU-{n}"))
+    }
+
+    /// One card listing `list`: the machine every test before the device
+    /// ledger stated.
+    fn one(list: &[ProcessMemory]) -> Vec<DeviceProcesses> {
+        vec![DeviceProcesses {
+            device: id(0),
+            processes: list.to_vec(),
+        }]
+    }
+
+    /// The cards' sum, unknown when one card's is.
+    fn summed(cards: Vec<CardHeld>) -> Result<u64, String> {
+        every_card(cards).map(|c| c.iter().map(|(_, b)| *b).sum())
+    }
+
+    /// [`members_share`] on one card, summed.
+    fn share_one(members: &[Member], list: &[ProcessMemory]) -> Result<u64, String> {
+        members_share(members, &one(list)).and_then(summed)
+    }
+
+    impl PidCache {
+        /// [`PidCache::settle`] on one card, summed.
+        fn settle_one(
+            &mut self,
+            list: &[ProcessMemory],
+            asked: &HashSet<u32>,
+            current: &[u32],
+            reused: &HashSet<u32>,
+        ) -> Result<u64, String> {
+            summed(self.settle(&one(list), asked, current, reused))
+        }
     }
 
     fn c(generation: u64, model: &str) -> Container {
@@ -860,7 +984,7 @@ mod tests {
         // The driver still lists its child: still lmgw's.
         let all = HashSet::from([11, 12, 22]);
         let listed = [pm(12, Some(500)), pm(22, Some(100)), pm(900, Some(7))];
-        assert_eq!(cache.settle(&listed, &all, &[], &none()), Ok(500));
+        assert_eq!(cache.settle_one(&listed, &all, &[], &none()), Ok(500));
         assert_eq!(
             cache.tombstone_pids(),
             vec![12],
@@ -869,12 +993,12 @@ mod tests {
 
         // Gone from the list: dropped for good, even if the PID came back.
         assert_eq!(
-            cache.settle(&[pm(22, Some(100))], &all, &[], &none()),
+            cache.settle_one(&[pm(22, Some(100))], &all, &[], &none()),
             Ok(0)
         );
         assert!(cache.tombstone_pids().is_empty());
         assert_eq!(
-            cache.settle(&[pm(12, Some(500))], &all, &[], &none()),
+            cache.settle_one(&[pm(12, Some(500))], &all, &[], &none()),
             Ok(0)
         );
 
@@ -888,7 +1012,7 @@ mod tests {
         );
         cache.plan(&[], Fill::Verdict);
         assert!(cache
-            .settle(&[pm(33, None)], &HashSet::from([33]), &[], &none())
+            .settle_one(&[pm(33, None)], &HashSet::from([33]), &[], &none())
             .unwrap_err()
             .contains("chat/x"));
     }
@@ -924,9 +1048,9 @@ mod tests {
         let listed = [pm(11, Some(300)), pm(12, Some(500))];
         let asked = HashSet::from([11, 12]);
         cache.remember(&members);
-        assert_eq!(members_share(&members, &listed), Ok(800));
+        assert_eq!(share_one(&members, &listed), Ok(800));
         assert_eq!(
-            cache.settle(&listed, &asked, &[11, 12], &none()),
+            cache.settle_one(&listed, &asked, &[11, 12], &none()),
             Ok(0),
             "12 is b's now: counted once, as b's"
         );
@@ -964,7 +1088,7 @@ mod tests {
         let listed = [pm(11, Some(300)), pm(12, Some(500)), pm(22, Some(100))];
         let asked = HashSet::from([11, 12, 22]);
         assert_eq!(
-            cache.settle(&listed, &asked, &measured.pids, &none()),
+            cache.settle_one(&listed, &asked, &measured.pids, &none()),
             Ok(800),
             "a's processes are still lmgw's"
         );
@@ -972,7 +1096,7 @@ mod tests {
         pids.sort();
         assert_eq!(pids, vec![11, 12], "the stale measurement dropped none");
         // `b`'s own PID among `current` is no tombstone and drops none.
-        assert_eq!(cache.settle(&listed, &asked, &[22], &none()), Ok(800));
+        assert_eq!(cache.settle_one(&listed, &asked, &[22], &none()), Ok(800));
     }
 
     /// Two retired generations measured one PID at different start times
@@ -1093,7 +1217,7 @@ mod tests {
         assert_eq!(reused, HashSet::from([11]));
         let listed = [pm(11, Some(7)), pm(22, Some(500)), pm(33, Some(40))];
         let asked = HashSet::from([11, 22, 33, 44]);
-        assert_eq!(cache.settle(&listed, &asked, &[], &reused), Ok(540));
+        assert_eq!(cache.settle_one(&listed, &asked, &[], &reused), Ok(540));
         let mut pids = cache.tombstone_pids();
         pids.sort();
         assert_eq!(pids, vec![22, 33]);
@@ -1122,7 +1246,7 @@ mod tests {
         assert_eq!(cache.tombstone_pids(), vec![22]);
         // amdgpu's answer for what this pass asked: `b`'s process is gone.
         assert_eq!(
-            cache.settle(&[pm(11, Some(10))], &asked, &[], &none()),
+            cache.settle_one(&[pm(11, Some(10))], &asked, &[], &none()),
             Ok(0)
         );
         assert!(cache.tombstone_pids().is_empty(), "asked and not listed");
@@ -1135,10 +1259,13 @@ mod tests {
             &live(&[3]),
         );
         cache.plan(&[], Fill::Verdict);
-        assert_eq!(cache.settle(&[], &HashSet::from([11]), &[], &none()), Ok(0));
+        assert_eq!(
+            cache.settle_one(&[], &HashSet::from([11]), &[], &none()),
+            Ok(0)
+        );
         assert_eq!(cache.tombstone_pids(), vec![33], "not asked: kept");
         assert_eq!(
-            cache.settle(&[pm(33, Some(500))], &HashSet::from([33]), &[], &none()),
+            cache.settle_one(&[pm(33, Some(500))], &HashSet::from([33]), &[], &none()),
             Ok(500)
         );
     }
@@ -1231,8 +1358,8 @@ mod tests {
             // Outside: the compositor.
             pm(5, Some(400)),
         ];
-        assert_eq!(members_share(&members, &listed), Ok(1310));
-        assert_eq!(members_share(&[], &listed), Ok(0));
+        assert_eq!(share_one(&members, &listed), Ok(1310));
+        assert_eq!(share_one(&[], &listed), Ok(0));
     }
 
     /// A member none of whose processes the driver lists — a CPU-only row —
@@ -1240,7 +1367,7 @@ mod tests {
     #[test]
     fn an_unlisted_member_is_named() {
         let members = [member(1, "a", &[11]), member(2, "cpu-only", &[22, 23])];
-        let err = members_share(&members, &[pm(11, Some(10))]).unwrap_err();
+        let err = share_one(&members, &[pm(11, Some(10))]).unwrap_err();
         assert!(
             err.contains("chat/cpu-only") && err.contains("22, 23"),
             "{err}"
@@ -1249,7 +1376,135 @@ mod tests {
 
     #[test]
     fn a_member_the_driver_cannot_size_is_named() {
-        let err = members_share(&[member(1, "a", &[11])], &[pm(11, None)]).unwrap_err();
+        let err = share_one(&[member(1, "a", &[11])], &[pm(11, None)]).unwrap_err();
         assert!(err.contains("chat/a") && err.contains("11"), "{err}");
+    }
+
+    /// Device-ledger design §2.3: the share per card. A member on one card
+    /// only is attributed there; a process listed on a card without a
+    /// figure makes that card's figure unknown, and the other card's stays
+    /// known.
+    #[test]
+    fn the_share_is_per_card_and_an_unsized_process_blinds_only_its_card() {
+        let members = [member(1, "a", &[11, 12]), member(2, "b", &[22])];
+        let cards = vec![
+            DeviceProcesses {
+                device: id(0),
+                processes: vec![pm(11, Some(10)), pm(5, Some(400))],
+            },
+            DeviceProcesses {
+                device: id(1),
+                processes: vec![pm(11, Some(20)), pm(12, Some(1000)), pm(22, Some(300))],
+            },
+        ];
+        assert_eq!(
+            members_share(&members, &cards),
+            Ok(vec![
+                CardHeld {
+                    device: id(0),
+                    bytes: Ok(10)
+                },
+                CardHeld {
+                    device: id(1),
+                    bytes: Ok(1320)
+                },
+            ])
+        );
+        assert_eq!(members_share(&members, &cards).and_then(summed), Ok(1330));
+
+        let mut blind = cards.clone();
+        blind[1].processes[2] = pm(22, None);
+        let got = members_share(&members, &blind).unwrap();
+        assert_eq!(got[0].bytes, Ok(10), "card 0 stays known");
+        let err = got[1].bytes.clone().unwrap_err();
+        assert!(err.contains("chat/b") && err.contains("22"), "{err}");
+        assert_eq!(summed(got).unwrap_err(), err, "the sum is unknown");
+
+        // Listed nowhere at all: not attributable to any card.
+        let err = members_share(&[member(3, "c", &[33])], &cards).unwrap_err();
+        assert!(err.contains("chat/c"), "{err}");
+    }
+
+    /// Device-ledger design §10 (WP2): each member's own cards, with what
+    /// its processes hold on each — a split model on both of its cards, a
+    /// card that lists none of a member's processes not among its cards,
+    /// and a card that lists one without a figure unknown for that member
+    /// alone.
+    #[test]
+    fn each_member_has_its_own_cards() {
+        let members = [
+            member(1, "a", &[11, 12]),
+            member(2, "b", &[22]),
+            member(3, "c", &[33]),
+        ];
+        let cards = vec![
+            DeviceProcesses {
+                device: id(0),
+                processes: vec![pm(11, Some(10)), pm(5, Some(400))],
+            },
+            DeviceProcesses {
+                device: id(1),
+                processes: vec![pm(11, Some(20)), pm(12, Some(1000)), pm(22, None)],
+            },
+        ];
+        assert_eq!(
+            members_on_cards(&members, &cards),
+            vec![
+                MemberCards {
+                    generation: 1,
+                    cards: vec![(id(0), Some(10)), (id(1), Some(1020))],
+                },
+                MemberCards {
+                    generation: 2,
+                    cards: vec![(id(1), None)],
+                },
+                MemberCards {
+                    generation: 3,
+                    cards: vec![],
+                },
+            ]
+        );
+    }
+
+    /// A tombstone per card: what it still holds on each, and a card that
+    /// lists it without a figure unknown on its own.
+    #[test]
+    fn tombstones_settle_per_card() {
+        let mut cache = PidCache::default();
+        let plan = cache.plan(&[c(1, "a")], Fill::Verdict);
+        cache.record(
+            &plan.inspect,
+            &Ok(HashMap::from([("lmgw-chat-a".into(), 11)])),
+            &live(&[1]),
+        );
+        cache.plan(&[], Fill::Verdict);
+        assert_eq!(cache.tombstone_pids(), vec![11]);
+        let asked = HashSet::from([11]);
+        let cards = |second: Option<u64>| {
+            vec![
+                DeviceProcesses {
+                    device: id(0),
+                    processes: vec![pm(11, Some(100))],
+                },
+                DeviceProcesses {
+                    device: id(1),
+                    processes: vec![pm(11, second)],
+                },
+                DeviceProcesses {
+                    device: id(2),
+                    processes: vec![pm(7, Some(5))],
+                },
+            ]
+        };
+        let got = cache.settle(&cards(Some(40)), &asked, &[], &none());
+        assert_eq!(
+            got.iter().map(|c| c.bytes.clone()).collect::<Vec<_>>(),
+            vec![Ok(100), Ok(40), Ok(0)]
+        );
+        let got = cache.settle(&cards(None), &asked, &[], &none());
+        assert_eq!(got[0].bytes, Ok(100));
+        assert!(got[1].bytes.as_ref().unwrap_err().contains("chat/a"));
+        assert_eq!(got[2].bytes, Ok(0));
+        assert_eq!(cache.tombstone_pids(), vec![11], "still listed: kept");
     }
 }

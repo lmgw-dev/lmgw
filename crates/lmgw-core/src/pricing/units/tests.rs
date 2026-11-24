@@ -541,6 +541,7 @@ fn a_token_only_sheet_prices_exactly_as_before_whatever_the_quantities() {
                             completion,
                             cached_in,
                             cache_write,
+                            cache_write_1h: None,
                             reasoning: r,
                         };
                         for p in &sheets {
@@ -575,6 +576,7 @@ fn the_token_part_is_todays_function() {
         completion: Some(10),
         cached_in: Some(800_000),
         cache_write: Some(100_000),
+        cache_write_1h: None,
         reasoning: None,
     };
     for p in [None, Some(claude_ish()), Some(Prices::default())] {

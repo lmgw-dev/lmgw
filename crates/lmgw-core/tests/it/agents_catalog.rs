@@ -150,7 +150,7 @@ async fn a_missing_server_label_imports_with_a_warning_and_requires_ok_false() {
         warnings[1]
             .as_str()
             .unwrap()
-            .contains("apply may not run a model turn"),
+            .contains("Apply may not run a model turn"),
         "{report}"
     );
     // The report names the alternatives, and the install hint rides along for

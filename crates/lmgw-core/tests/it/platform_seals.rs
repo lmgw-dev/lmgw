@@ -127,6 +127,7 @@ pub(crate) fn sealed_record(up: &Up) -> String {
                     id: "c1".into(),
                     name: "stub__echo".into(),
                     args: serde_json::json!({"text": "hi"}),
+                    cache_control: None,
                 },
             ],
         },
@@ -137,6 +138,7 @@ pub(crate) fn sealed_record(up: &Up) -> String {
                 name: None,
                 content: ToolResultBlock::one("hi"),
                 is_error: false,
+                cache_control: None,
             }],
         },
     ];

@@ -88,7 +88,7 @@ pub(in crate::pages) fn HistoryList(
             Load::Failed(e) => {
                 view! {
                     <div class="notice err">
-                        {format!("⚠ The history did not load: {e}")}
+                        {format!("The history did not load: {e}")}
                         " "
                         <button class="btn ghost sm" on:click=move |_| history.reload()>
                             "Retry"

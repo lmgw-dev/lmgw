@@ -264,6 +264,13 @@ pub fn record_detached(state: &SharedState, entry: Entry) {
     });
 }
 
+/// What a handler adds to its request's entry, as a response extension
+/// the gate's writer reads ([`at_gate`]): what the request did that its
+/// arguments do not say, such as the figure a reset dropped. Merged over
+/// the target the arguments gave.
+#[derive(Debug, Clone, Default)]
+pub struct Detail(pub Map<String, Value>);
+
 /// Whether the log is written now: wherever accounts are on.
 pub fn on(state: &SharedState) -> bool {
     state.snapshot().accounts_on

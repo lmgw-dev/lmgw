@@ -84,11 +84,14 @@ pub fn SubNav(#[prop(into)] tabs: Signal<Vec<NavTab>>) -> impl IntoView {
             <For each=move || tabs.get() key=|t| (t.href.clone(), t.count.clone(), t.tone) let:t>
                 {
                     let base = t.href.clone();
+                    // A tab can bring a query of its own (the list's search
+                    // a detail's tabs carry); it is matched by its path.
+                    let path = base.split('?').next().unwrap_or_default().to_string();
                     // The tab of the page being shown stays bare: the router
                     // marks it current by comparing the path.
                     let href = move || {
-                        if loc.pathname.with(|p| *p == base) {
-                            base.clone()
+                        if loc.pathname.with(|p| *p == path) {
+                            path.clone()
                         } else {
                             crate::url_state::with_last_query(&base)
                         }

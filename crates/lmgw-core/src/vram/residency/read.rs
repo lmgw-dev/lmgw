@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::state::SharedState;
 
 use super::super::attribution::{self, Fill, Member};
-use super::super::nvml::ProcessMemory;
+use super::super::nvml::DeviceProcesses;
 use super::super::scheduler::CONTROL_TIMEOUT;
 use super::super::VramScheduler;
 
@@ -117,10 +117,10 @@ impl VramScheduler {
     }
 }
 
-/// The bytes the driver lists for `pids`.
-pub(super) fn own_share(pids: &[u32], listed: &[ProcessMemory]) -> Result<Option<u64>, String> {
+/// The bytes the driver lists for `pids`, on every device together.
+pub(super) fn own_share(pids: &[u32], listed: &[DeviceProcesses]) -> Result<Option<u64>, String> {
     let mut total: Option<u64> = None;
-    for p in listed.iter().filter(|p| pids.contains(&p.pid)) {
+    for p in DeviceProcesses::all(listed).filter(|p| pids.contains(&p.pid)) {
         let bytes = p.bytes.ok_or_else(|| {
             format!(
                 "the driver lists its process {} without saying how much memory it holds",

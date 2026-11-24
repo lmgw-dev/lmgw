@@ -64,10 +64,37 @@ pub(super) fn answer_label(model: Option<&str>, answered_by: Option<&str>) -> Op
     }
 }
 
+/// What the meta line says about the answering model: the fallback form
+/// always, a plain alias only when it is not the thread's own (the header
+/// already names that one).
+pub(super) fn answer_note(
+    model: Option<&str>,
+    answered_by: Option<&str>,
+    thread_model: &str,
+) -> Option<String> {
+    let label = answer_label(model, answered_by)?;
+    let model = model.filter(|m| !m.is_empty());
+    let by = answered_by.filter(|m| !m.is_empty());
+    let fallback = matches!((model, by), (Some(m), Some(b)) if b != m);
+    (fallback || label != thread_model).then_some(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lmgw_api_types::chat_frames::DoneSaved;
+
+    #[test]
+    fn the_meta_line_names_a_model_only_when_it_adds_something() {
+        assert_eq!(answer_note(Some("a"), None, "a"), None);
+        assert_eq!(answer_note(Some("a"), Some("a"), "a"), None);
+        assert_eq!(answer_note(Some("a"), None, "b").as_deref(), Some("a"));
+        assert_eq!(
+            answer_note(Some("a"), Some("c"), "a").as_deref(),
+            Some("c (fallback for a)")
+        );
+        assert_eq!(answer_note(None, None, "a"), None);
+    }
 
     #[test]
     fn labels_the_answering_model() {

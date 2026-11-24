@@ -3,7 +3,7 @@
 //! and whether upstream has published a newer Windows release than lmgw's
 //! pin (from the same check as the registry images, **Check now** in the
 //! page's head). Shown where lmgw starts its engines as native processes;
-//! on Linux the engines are the Images tab's.
+//! on Linux the engines are the Local images entry's.
 //!
 //! The builds are installed by a model's first start (download, digest
 //! check, unpack); the tab has no install button yet. A CUDA build marked
@@ -106,7 +106,7 @@ pub fn ReleasesTab() -> impl IntoView {
     view! {
         <Show when=move || !native()>
             <div class="notice row">
-                "lmgw runs its engines as containers here (the Images tab); the pinned Windows \
+                "lmgw runs its engines as containers here (the Local images entry); the pinned Windows \
                  release builds are not used on this platform."
             </div>
         </Show>
@@ -165,7 +165,7 @@ fn ReleasesTable() -> impl IntoView {
                     }
                 })
         }}
-        <div class="fill-pane card pad0">
+        <div class="card pad0 bk-box">
             <table class="data bk-releases">
                 <thead>
                     <tr>

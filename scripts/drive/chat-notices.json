@@ -1,0 +1,107 @@
+[
+ {
+  "js": "'An attached MCP server that cannot be reached: the turn goes on without it, and its notice is a block of its own above the reply, never in the reply text: while the model reads its prompt, while its tokens stream, after the reply is stored, and in the thread read again later. Needs the mock with a slow prefill (ECHO=1 PREFILL_DELAY=5 STREAM_DELAY=0.5 scripts/mock-openai.py PORT), the fake-echo alias, and two MCP servers: notes (scripts/mock-mcp.py over stdio) and down (http://127.0.0.1:9/mcp, nothing listening); scripts/chat-drives.sh sets them up. Writes one thread and its two messages.'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.notices.tid'); (async () => { const j = (u, b) => fetch(u, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(b)}); const t = await (await j('/chat/api/threads', {model_alias: 'fake-echo', kind: 'chat'})).json(); await j(`/chat/api/threads/${t.id}/settings`, {mcp_tools: [{server_label: 'down'}, {server_label: 'notes'}]}); localStorage.setItem('lmgw.notices.tid', String(t.id)); })(); return 'creating a thread with two servers'; })()"
+ },
+ {
+  "until": "localStorage.getItem('lmgw.notices.tid')",
+  "timeout": 15,
+  "label": "a thread with the two servers"
+ },
+ {
+  "js": "(location.assign('/chat?t=' + localStorage.getItem('lmgw.notices.tid')), 'opening it')"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "until": "new URLSearchParams(location.search).get('t') === localStorage.getItem('lmgw.notices.tid') && !!document.querySelector('.composer-input') && document.querySelectorAll('.chat-col .msg-item').length === 0",
+  "timeout": 15,
+  "label": "the empty thread is open"
+ },
+ {
+  "js": "(() => { const ta = document.querySelector('.composer-input'); ta.value = 'hello there'; ta.dispatchEvent(new Event('input', {bubbles: true})); return 'typed'; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { document.querySelector('.composer-send.primary').click(); return 'sent'; })()"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); if (!l) return false; const n = [...l.querySelectorAll('.msg-notices .msg-notice')]; const md = l.querySelector('.md').textContent; return n.length === 1 && n[0].textContent.includes(\"MCP server 'down'\") && !md.includes('MCP server') && !md.includes('\\u26a0') && n[0].compareDocumentPosition(l.querySelector('.md')) === Node.DOCUMENT_POSITION_FOLLOWING; })()",
+  "timeout": 10,
+  "label": "while the model reads its prompt: the notice is its own block above the reply"
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return l.querySelector('.md').textContent.trim() === '' && !!l.querySelector('.caret'); })()",
+  "label": "the reply has no words yet and streams"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l.querySelector('.caret') && l.querySelector('.md').textContent.trim().startsWith('Echo:'); })()",
+  "timeout": 20,
+  "label": "the tokens stream into the reply"
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); if (!l) return false; const n = [...l.querySelectorAll('.msg-notices .msg-notice')]; const md = l.querySelector('.md').textContent; return n.length === 1 && n[0].textContent.includes(\"MCP server 'down'\") && !md.includes('MCP server') && !md.includes('\\u26a0') && n[0].compareDocumentPosition(l.querySelector('.md')) === Node.DOCUMENT_POSITION_FOLLOWING; })()",
+  "label": "while the tokens stream: the reply text starts with them, the notice stays apart"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !l.querySelector('.caret') && !!l.dataset.mid && l.querySelector('.md').textContent.trim() === 'Echo: hello there'; })()",
+  "timeout": 30,
+  "label": "the reply is stored"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); if (!l) return false; const n = [...l.querySelectorAll('.msg-notices .msg-notice')]; const md = l.querySelector('.md').textContent; return n.length === 1 && n[0].textContent.includes(\"MCP server 'down'\") && !md.includes('MCP server') && !md.includes('\\u26a0') && n[0].compareDocumentPosition(l.querySelector('.md')) === Node.DOCUMENT_POSITION_FOLLOWING; })()",
+  "label": "after the generation: the notice stays with its reply"
+ },
+ {
+  "expect": "!document.querySelector('.toast.err, .toast-err')",
+  "label": "a notice is no failure toast"
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(() => { history.pushState(null, '', '/chat?t=' + localStorage.getItem('lmgw.notices.tid')); dispatchEvent(new PopStateEvent('popstate')); return 'opened'; })()"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && l.querySelector('.md').textContent.trim() === 'Echo: hello there'; })()",
+  "timeout": 15,
+  "label": "the thread opened again"
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); if (!l) return false; const n = [...l.querySelectorAll('.msg-notices .msg-notice')]; const md = l.querySelector('.md').textContent; return n.length === 1 && n[0].textContent.includes(\"MCP server 'down'\") && !md.includes('MCP server') && !md.includes('\\u26a0') && n[0].compareDocumentPosition(l.querySelector('.md')) === Node.DOCUMENT_POSITION_FOLLOWING; })()",
+  "label": "left and opened again: the notice is still there"
+ },
+ {
+  "js": "(location.reload(), 'reloading')"
+ },
+ {
+  "wait": 3
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && l.querySelector('.md').textContent.trim() === 'Echo: hello there'; })()",
+  "timeout": 20,
+  "label": "the thread after a reload"
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); if (!l) return false; const n = [...l.querySelectorAll('.msg-notices .msg-notice')]; const md = l.querySelector('.md').textContent; return n.length === 1 && n[0].textContent.includes(\"MCP server 'down'\") && !md.includes('MCP server') && !md.includes('\\u26a0') && n[0].compareDocumentPosition(l.querySelector('.md')) === Node.DOCUMENT_POSITION_FOLLOWING; })()",
+  "label": "after a reload: the notice is still there"
+ },
+ {
+  "expect": "(async () => { const d = await (await fetch('/chat/api/threads/' + localStorage.getItem('lmgw.notices.tid'))).json(); const a = d.messages.find(m => m.role === 'assistant'); return a.content === 'Echo: hello there' && a.notices.length === 1 && a.notices[0].server_label === 'down' && a.notices[0].code === 'tool_failed'; })()",
+  "label": "stored with the reply: its label and code"
+ }
+]

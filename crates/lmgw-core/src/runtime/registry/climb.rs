@@ -37,6 +37,7 @@ use super::{
 };
 use crate::runtime::container_name;
 use crate::runtime::descriptor::{file_name, RungCharge, RungPos};
+use crate::vram::CardCharge;
 
 // ---------------------------------------------------------------------------
 // What the entry and the views carry
@@ -758,6 +759,16 @@ impl ClimbTicket {
         }
     }
 
+    /// [`Self::start`] on other cards than the running rung's
+    /// (device-ledger design §5.6): `cards` becomes the entry's charge on
+    /// the cards, which the new container is handed and records.
+    pub fn start_on(self, spec: StartSpec, cards: CardCharge) -> Option<ClimbRun> {
+        match self.start_with(spec, Some(cards), |_, _| None) {
+            ClimbStart::Started(run) => Some(run),
+            ClimbStart::Gone | ClimbStart::Refused(_) => None,
+        }
+    }
+
     /// [`Self::start`], unless `refuse` — asked under the same map lock hold
     /// that claims the start, so nothing can change what it judged before the
     /// claim lands — names a reason not to: a guest's climb's last look at
@@ -765,8 +776,19 @@ impl ClimbTicket {
     /// 89). Refused, nothing was started and the ticket is dropped, which
     /// clears the mark: the running rung serves on.
     pub(super) fn start_unless(
+        self,
+        spec: StartSpec,
+        refuse: impl FnOnce(&Registry, &Entry) -> Option<&'static str>,
+    ) -> ClimbStart {
+        self.start_with(spec, None, refuse)
+    }
+
+    /// [`Self::start_unless`], with the cards the new container goes on
+    /// where they are not the running rung's (`cards`).
+    fn start_with(
         mut self,
         spec: StartSpec,
+        cards: Option<CardCharge>,
         refuse: impl FnOnce(&Registry, &Entry) -> Option<&'static str>,
     ) -> ClimbStart {
         let charge = spec.runtime.rung_charge();
@@ -799,6 +821,7 @@ impl ClimbTicket {
             e.served = false;
             e.adopted = false;
             e.admission_note = None;
+            e.moved = false;
             e.state = RuntimeState::Starting;
             e.host_port = 0;
             e.gate = None;
@@ -806,6 +829,21 @@ impl ClimbTicket {
             e.capabilities = None;
             e.llama = None;
             e.charge = charge;
+            if let Some(c) = cards {
+                e.card_charge = Some(c);
+            }
+            // A split is the running rung's (device-ledger design §7.2,
+            // WP6): its layer counts are not the new rung's. The new rung
+            // goes on the same cards as a group, the engine splitting it.
+            if e.card_charge
+                .as_ref()
+                .is_some_and(|c| c.split_parts().is_some())
+            {
+                e.card_charge = e.card_charge.as_ref().map(|c| c.with_total(c.total()));
+            }
+            if let Some(l) = e.grant.as_mut().and_then(|g| g.llama.as_mut()) {
+                l.split = None;
+            }
             e.started_at = Instant::now();
             e.stop_timeout = spec.stop_timeout;
             e.sends.send_replace(0);

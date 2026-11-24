@@ -165,7 +165,7 @@ fn RunRow(b: BatchView, p: Progress) -> impl IntoView {
     view! {
         <A href=format!("/decision-lab/batches/{}", b.id) attr:class="dl-runrow">
             <span class="dl-runrow-head">
-                <b class="n">{format!("#{} · {set}", b.id)}</b>
+                <b class="n" title=format!("#{} · {set}", b.id)>{format!("#{} · {set}", b.id)}</b>
                 <span class=format!("{class} sm")>{text}</span>
             </span>
             <span class="mini-note dim dl-runrow-sub" title=format!("{} · {}", b.model, b.source_name)>

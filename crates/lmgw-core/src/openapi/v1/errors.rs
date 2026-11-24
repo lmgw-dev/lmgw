@@ -35,6 +35,9 @@ pub(crate) fn register(g: &mut SchemaGenerator, dialect: Dialect) -> Schema {
         Dialect::JsonRpc => jsonrpc_error(g),
         Dialect::Dashboard => api_error(g),
         Dialect::Lab => g.subschema_for::<lmgw_api_types::audio_lab::LabError>(),
+        Dialect::DoclingServe => {
+            g.subschema_for::<lmgw_api_types::documents::docling::DoclingError>()
+        }
     };
     debug_assert_eq!(
         schema
@@ -109,7 +112,11 @@ fn anthropic_error(g: &mut SchemaGenerator) -> Schema {
                             not_found_error, permission_error, overloaded_error, api_error."},
                         "message": {"type": "string"}
                     }
-                }
+                },
+                "request_id": {"type": "string", "description": "The Anthropic model's own \
+                    request id (req_…), when the error is its upstream's answer and it sent one; \
+                    the request-id header carries it too. lmgw makes no request id of its own \
+                    yet."}
             }
         }),
     )

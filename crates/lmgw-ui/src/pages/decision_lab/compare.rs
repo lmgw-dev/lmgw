@@ -65,50 +65,53 @@ pub(super) fn CompareCard(lab: Lab) -> impl IntoView {
         }
     };
     view! {
-        <div class="card dl-compare">
+        <section class="pref-group lab-card dl-compare">
             <h3 class="lab-h3">"Compare and perturb"</h3>
-            <div class="dl-also">
-                <span class="lab-label">"Also ask on"</span>
-                <For each=move || lab.compare.get() key=|m| m.clone() let:m>
-                    {
-                        let name = m.clone();
-                        view! {
-                            <span class="chip dl-model-chip" title=m.clone()>
-                                <span class="n">{m.clone()}</span>
-                                <button
-                                    type="button"
-                                    class="chip-x"
-                                    title="Do not ask this model"
-                                    on:click=move |_| lab.compare.update(|v| v.retain(|x| *x != name))
-                                >
-                                    "✕"
-                                </button>
-                            </span>
+            <div class="boxed lab-box">
+                <div class="dl-also">
+                    <span class="lab-label">"Also ask on"</span>
+                    <For each=move || lab.compare.get() key=|m| m.clone() let:m>
+                        {
+                            let name = m.clone();
+                            view! {
+                                <span class="chip dl-model-chip" title=m.clone()>
+                                    <span class="n" title=m.clone()>{m.clone()}</span>
+                                    <button
+                                        type="button"
+                                        class="chip-x"
+                                        title="Do not ask this model"
+                                        aria-label="Do not ask this model"
+                                        on:click=move |_| lab.compare.update(|v| v.retain(|x| *x != name))
+                                    >
+                                        <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
+                                    </button>
+                                </span>
+                            }
                         }
-                    }
-                </For>
-                <span class="dl-add-model">
-                    <ModelPicker value=add entries=list status=status empty_label="Add model"/>
-                </span>
+                    </For>
+                    <span class="dl-add-model">
+                        <ModelPicker value=add entries=list status=status empty_label="Add model"/>
+                    </span>
+                </div>
+                <div class="dl-perturb">
+                    <span class="lab-label">"Perturb"</span>
+                    {check(
+                        lab.no_descriptions,
+                        "descriptions dropped",
+                        "Every choice description sent as null, and no noul criteria",
+                    )}
+                    {check(lab.reversed, "order reversed", "Each choice question's options in reverse")}
+                </div>
+                <p class="mini-note dim">
+                    {move || {
+                        if off() {
+                            format!("Perturb is off: {PERTURB_WITH_OVERRIDE}.")
+                        } else {
+                            "Score levels, noul and the question order are never perturbed: reversing a scale inverts it, and the question order is the answer order.".to_string()
+                        }
+                    }}
+                </p>
             </div>
-            <div class="dl-perturb">
-                <span class="lab-label">"Perturb"</span>
-                {check(
-                    lab.no_descriptions,
-                    "descriptions dropped",
-                    "Every choice description sent as null, and no noul criteria",
-                )}
-                {check(lab.reversed, "order reversed", "Each choice question's options in reverse")}
-            </div>
-            <p class="mini-note dim">
-                {move || {
-                    if off() {
-                        format!("Perturb is off: {PERTURB_WITH_OVERRIDE}.")
-                    } else {
-                        "Score levels, noul and the question order are never perturbed: reversing a scale inverts it, and the question order is the answer order.".to_string()
-                    }
-                }}
-            </p>
-        </div>
+        </section>
     }
 }

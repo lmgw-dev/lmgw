@@ -262,7 +262,7 @@ pub(super) fn TileRow(
                     {move || {
                         let r = series.data.get();
                         match r.as_ref().and_then(|r| r.p95_total_ms) {
-                            Some(_) => format!("{} ms", p95.get().round()),
+                            Some(_) => super::cards_traffic::latency_text(p95.get()),
                             None => "—".to_string(),
                         }
                     }}
@@ -274,7 +274,7 @@ pub(super) fn TileRow(
                     {move || {
                         let r = series.data.get();
                         let f = |v: Option<f64>| {
-                            v.map(|v| format!("{} ms", v.round())).unwrap_or_else(|| "—".into())
+                            v.map(super::cards_traffic::latency_text).unwrap_or_else(|| "—".into())
                         };
                         format!(
                             "p50 {} · TTFB p95 {}",

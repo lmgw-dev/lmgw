@@ -9,7 +9,7 @@
   "js": "location.pathname"
  },
  {
-  "js": "(() => { const el = [...document.querySelectorAll('.page .field input.input')].find(i => (i.type==='text'||i.type==='number') && !i.disabled && i.checkVisibility()); if (!el) return null; el.focus(); el.select(); return el.closest('.field').querySelector('label').innerText; })()"
+  "js": "(() => { const el = [...document.querySelectorAll('.set-scroll .prow input.prow-entry')].find(i => !i.disabled && i.checkVisibility()); if (!el) return null; el.focus(); el.select(); return el.closest('.prow').querySelector('.prow-title').innerText; })()"
  },
  {
   "type": "77"
@@ -18,7 +18,7 @@
   "wait": 0.4
  },
  {
-  "expect": "document.querySelector('.save-bar.dirty')",
+  "expect": "document.querySelector('.save-toast.show')",
   "label": "the draft is dirty"
  },
  {
@@ -42,11 +42,11 @@
   "label": "A: a Settings category tab does not ask"
  },
  {
-  "expect": "document.querySelector('.save-bar.dirty')",
+  "expect": "document.querySelector('.save-toast.show')",
   "label": "A: the draft survives the tab switch"
  },
  {
-  "click": ".save-bar .btn.ghost"
+  "click": ".save-toast .btn:not(.suggested)"
  },
  {
   "wait": 0.3
@@ -58,7 +58,7 @@
   "go": "/settings"
  },
  {
-  "js": "(() => { const el = [...document.querySelectorAll('.page .field input.input')].find(i => (i.type==='text'||i.type==='number') && !i.disabled && i.checkVisibility()); el.focus(); el.select(); return true; })()"
+  "js": "(() => { const el = [...document.querySelectorAll('.set-scroll .prow input.prow-entry')].find(i => !i.disabled && i.checkVisibility()); el.focus(); el.select(); return true; })()"
  },
  {
   "type": "77"
@@ -89,5 +89,41 @@
  {
   "expect": "location.pathname === '/models'",
   "label": "B: Leave and discard goes to Models"
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "go": "/settings/retention"
+ },
+ {
+  "js": "(() => { const el = [...document.querySelectorAll('.set-scroll .prow input.spin-field')].find(i => !i.disabled && i.checkVisibility()); if (!el) return null; el.focus(); el.select(); return el.closest('.prow').querySelector('.prow-title').innerText; })()"
+ },
+ {
+  "type": "7"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.save-toast.show')",
+  "label": "C: a number typed and not left makes the draft dirty"
+ },
+ {
+  "go": "/models"
+ },
+ {
+  "expect": "location.pathname.startsWith('/settings') && [...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on Settings'))",
+  "label": "C: sidebar Models asks about a typed, unblurred number"
+ },
+ {
+  "click": "dialog[open] .btn.danger"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "location.pathname === '/models'",
+  "label": "C: Leave and discard goes to Models"
  }
 ]

@@ -57,7 +57,10 @@ async fn the_headline_is_the_problem_that_decided_the_verdict() {
     .await;
     let c = w.check().await;
     assert_eq!(c.verdict, MachineVerdict::NeedsFix, "{c:#?}");
-    assert_eq!(c.headline, item(&c, MachineItemId::CardForModels).sentence);
+    assert_eq!(
+        c.headline,
+        "One piece is missing so models can use the graphics card."
+    );
     // The detail gives the NVIDIA values as the switch would write them,
     // not AMD's document.
     let fit = item(&c, MachineItemId::SettingsFit);
@@ -187,5 +190,8 @@ async fn another_repository_offering_the_toolkit_is_installed_from() {
     };
     assert!(why.contains("(vendor-toolkit)"), "{why}");
     assert_eq!(c.verdict, MachineVerdict::NeedsSteps);
-    assert_eq!(c.headline, toolkit.sentence);
+    assert_eq!(
+        c.headline,
+        "One piece is missing so models can use the graphics card."
+    );
 }

@@ -17,6 +17,14 @@ pub(crate) const NATIVE_HELP: &str = "this lmgw starts its engines as native pro
      have no container image to read the flags from, and reading the native build's own --help \
      is not built yet";
 
+/// What [`Registry::help_text`] says when it could not read `image`'s
+/// `llama-server --help`, `why` being the reason. "Get it" puts its engine
+/// download's own sentence in `why`'s place when the image never arrived
+/// (`jobs::model_get`).
+pub(crate) fn help_unread(image: &str, why: &str) -> String {
+    format!("could not read llama-server --help from image '{image}': {why}")
+}
+
 impl Registry {
     /// Is a container for this model in the map (in any state)?
     pub fn contains(&self, class: Class, model_id: &str) -> bool {
@@ -129,7 +137,10 @@ impl Registry {
                 return;
             }
             e.in_flight = e.in_flight.saturating_sub(1);
-            if stamp {
+            // The claim of a moved model's own start leaves its age as it
+            // was (device-ledger design §6.2): only a request's claim,
+            // which ends the move (`acquire_as`), makes it younger.
+            if stamp && !e.moved {
                 e.last_used = Instant::now();
                 // A request ran on it (`Entry::served`).
                 if sent && e.state == RuntimeState::Ready {
@@ -189,9 +200,7 @@ impl Registry {
             // A native llama-server has no image to read, and no read of the
             // native executable's own `--help` is built yet (Windows design
             // §4.2): say that, not why a podman run would fail.
-            return Err(format!(
-                "could not read llama-server --help from image '{image}': {NATIVE_HELP}"
-            ));
+            return Err(help_unread(image, NATIVE_HELP));
         }
         let facts = self.image_facts(image).await;
         if let Ok(f) = &facts {
@@ -202,6 +211,7 @@ impl Registry {
                 .get(&f.id)
                 .cloned()
             {
+                self.note_draft_simple(image, &cached);
                 return Ok(cached);
             }
         }
@@ -211,8 +221,7 @@ impl Registry {
         let args = vec!["--help".to_string()];
         // `--help` needs the GPU libraries, never a device ([`HIDE_GPUS`]).
         let extra_run_args = &without_gpus(extra_run_args);
-        let fail =
-            |why: String| format!("could not read llama-server --help from image '{image}': {why}");
+        let fail = |why: String| help_unread(image, &why);
         let candidates = llama_server_candidates(entrypoint.as_deref());
         // Kept apart, because they mean different things: a candidate that is
         // not in the image says nothing, one that is there and failed (a
@@ -236,6 +245,7 @@ impl Registry {
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(id, out.stdout.clone());
                 }
+                self.note_draft_simple(image, &out.stdout);
                 return Ok(out.stdout);
             }
             let text = format!("{}\n{}", out.stdout, out.stderr);

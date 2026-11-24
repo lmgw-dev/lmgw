@@ -1328,8 +1328,14 @@ pub struct ModelSummary {
     /// `<arch>.context_length` — the model's trained maximum, which is the
     /// real ceiling callers should size context against.
     pub context_length: Option<u64>,
-    /// `<arch>.block_count` — transformer layers.
+    /// `<arch>.block_count` — transformer layers, as stored in the file. A
+    /// looped model runs some of them more than once ([`Self::layer_loop`]).
     pub block_count: Option<u64>,
+    /// `<arch>.loop.start` / `.end` / `.count`: the stored layers
+    /// `start..end` run `count` times per token, each pass with a KV cache
+    /// (and recurrent state) of its own. `None` for a model that runs each
+    /// layer once.
+    pub layer_loop: Option<LayerLoop>,
     pub embedding_length: Option<u64>,
     /// `<arch>.feed_forward_length`; the largest layer's when the header
     /// gives one per layer (ModernBERT-style). Sizes an encoder's compute
@@ -1348,6 +1354,8 @@ pub struct ModelSummary {
     /// (`--n-gpu-layers 0`, [`crate::vram::compute`]). Of a split file, the
     /// whole set's once [`Self::of_set`] read its later parts.
     pub output_head_bytes: Option<u64>,
+    /// `<arch>.attention.head_count`; the largest layer's when the header
+    /// gives one per layer (Inkling 2), the widest query a layer reads.
     pub head_count: Option<u64>,
     /// `<arch>.attention.head_count_kv` — KV heads (< `head_count` for GQA),
     /// the term that dominates KV-cache size.
@@ -1436,6 +1444,11 @@ pub struct ModelSummary {
     /// `None` without the array, or when it was not retained whole.
     #[serde(skip)]
     pub indexer_compress_ratio: Option<u64>,
+    /// `<arch>.attention.relative_length`: the attention adds a learned
+    /// relative-position bias, which llama.cpp materializes per head over a
+    /// stream's cells for every token of the batch (Inkling 2,
+    /// [`crate::vram::compute::chat`]).
+    pub attention_relative_length: Option<u64>,
     /// `<arch>.attention.shared_kv_layers`: the last this many layers reuse
     /// an earlier layer's KV cache instead of keeping their own (Gemma 4
     /// E-models; a Gemma 4 MTP assistant shares all of its layers with the
@@ -1660,6 +1673,7 @@ impl ModelSummary {
             file_type_id,
             context_length: meta.arch_u64("context_length"),
             block_count: meta.arch_u64("block_count"),
+            layer_loop: LayerLoop::of(meta),
             embedding_length: meta.arch_u64("embedding_length"),
             feed_forward_length: largest(meta.arch_get("feed_forward_length")),
             deepstack_layers: meta.arch_u64("n_deepstack_layers"),
@@ -1667,7 +1681,7 @@ impl ModelSummary {
                 .get("tokenizer.ggml.tokens")
                 .and_then(GgufValue::array_len),
             output_head_bytes: head_tensors.output_head_bytes(),
-            head_count: meta.arch_u64("attention.head_count"),
+            head_count: largest(meta.arch_get("attention.head_count")),
             head_count_kv: heads_kv.and_then(GgufValue::as_u64),
             head_count_kv_per_layer: heads_kv.and_then(GgufValue::as_u64_array),
             key_length: meta.arch_u64("attention.key_length"),
@@ -1705,6 +1719,7 @@ impl ModelSummary {
                 .arch_get("attention.compress_ratios")
                 .and_then(GgufValue::as_u64_array)
                 .and_then(|r| r.into_iter().filter(|r| *r > 0).min()),
+            attention_relative_length: meta.arch_u64("attention.relative_length"),
             shared_kv_layers: meta.arch_u64("attention.shared_kv_layers"),
             nextn_predict_layers: meta.arch_u64("nextn_predict_layers"),
             host_input_bytes: head_tensors.host_input_bytes(),
@@ -1750,6 +1765,77 @@ impl ModelSummary {
             split_no: meta.u64("split.no"),
             split_count: meta.u64("split.count"),
             file_size: meta.file_size,
+        }
+    }
+}
+
+/// A looped model's loop core, from llama.cpp's architecture-neutral
+/// `<arch>.loop.start` / `.end` / `.count` keys (gguf-py `Keys.Loop`): the
+/// stored layers `start..end` run `count` times per token. llama.cpp gives
+/// every pass after the first cache slots of its own, `count − 1` copies of
+/// the core appended after the stored layers, each copying the per-layer
+/// shape (KV heads, sliding window or not, recurrent or not) of the layer it
+/// repeats (`llama_model_inkling2_loop::load_arch_hparams`, b12611). So a
+/// cache is sized over the stored layers plus `count − 1` more passes over
+/// the core ([`Self::weighted`]). A variable loop (`loop.varying`) runs at
+/// most `count` passes and has its slots allocated for all of them, so it
+/// is sized the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LayerLoop {
+    pub start: u64,
+    pub end: u64,
+    pub count: u64,
+}
+
+impl LayerLoop {
+    /// The header's loop, `None` when it states none or one llama.cpp would
+    /// refuse to load (an empty core, a core past `block_count`, no passes).
+    fn of(meta: &GgufMeta) -> Option<Self> {
+        let start = meta.arch_u64("loop.start")?;
+        let end = meta.arch_u64("loop.end")?;
+        let count = meta.arch_u64("loop.count")?;
+        let layers = meta.arch_u64("block_count")?;
+        (start < end && end <= layers && count >= 1).then_some(Self { start, end, count })
+    }
+
+    /// The cache slots of `layers` stored layers: each stored layer once,
+    /// plus every pass after the first over the core.
+    pub fn cache_layers(&self, layers: u64) -> u64 {
+        self.extra_passes()
+            .saturating_mul(self.end - self.start)
+            .saturating_add(layers)
+    }
+
+    fn extra_passes(&self) -> u64 {
+        self.count.saturating_sub(1)
+    }
+
+    /// A per-layer count `f(a, b)` over the stored layers `a..b`, with the
+    /// part of `a..b` inside the core counted once for every pass after the
+    /// first as well. `f` must be additive over adjacent ranges, which every
+    /// "how many of these layers" count is; an empty range costs nothing.
+    pub fn weighted(&self, a: u64, b: u64, f: impl Fn(u64, u64) -> Option<u64>) -> Option<u64> {
+        let once = if a < b { f(a, b)? } else { 0 };
+        let (ca, cb) = (a.max(self.start), b.min(self.end));
+        let core = if ca < cb { f(ca, cb)? } else { 0 };
+        once.checked_add(core.checked_mul(self.extra_passes())?)
+    }
+}
+
+impl ModelSummary {
+    /// [`LayerLoop::weighted`] when the model loops, else `f(a, b)` itself:
+    /// a per-layer count over the stored layers `a..b` as the cache counts
+    /// them.
+    pub fn loop_weighted(
+        &self,
+        a: u64,
+        b: u64,
+        f: impl Fn(u64, u64) -> Option<u64>,
+    ) -> Option<u64> {
+        match &self.layer_loop {
+            Some(l) => l.weighted(a, b, f),
+            None if a < b => f(a, b),
+            None => Some(0),
         }
     }
 }
@@ -1971,6 +2057,10 @@ impl GgufSummaryCache {
 ///   [`NUMERIC_ARRAY_RETAIN`]) is not usable as a stride, so it is ignored
 ///   and all layers count as full attention.
 ///
+/// A looped model ([`ModelSummary::layer_loop`]) keeps a cache per pass: the
+/// layers of its loop core count once for every pass, each classified as
+/// the stored layer it repeats.
+///
 /// `bits_per_element` comes from the cache type: 16 for `f16`/`bf16`, 8 for
 /// `q8_0`, 5 for `q5_1`, 4 for `q4_0`. **Treat the result as a lower bound for
 /// the quantized types**: `q8_0` and friends store a per-block scale (and
@@ -1995,9 +2085,14 @@ pub fn kv_cache_bytes(s: &ModelSummary, ctx: u64, bits_per_element: u32) -> Opti
         Some(elems.checked_mul(u64::from(bits_per_element))?.div_ceil(8))
     };
 
+    // Every count below is over a range of stored layers, so a looped model
+    // (`layer_loop`) counts its core once per pass.
+    let count = |f: &dyn Fn(u64, u64) -> Option<u64>| s.loop_weighted(0, layers, f);
+
     if let Some(n) = s.full_attention_interval.filter(|n| *n > 1) {
-        let full_layers = layers / n;
-        let linear_layers = layers - full_layers;
+        // Layer i is full attention when (i + 1) is a multiple of n.
+        let full_layers = count(&|a, b| Some(b / n - a / n))?;
+        let linear_layers = count(&|a, b| Some(b - a))? - full_layers;
         let attn = bytes_of(
             full_layers
                 .checked_mul(ctx)?
@@ -2023,31 +2118,41 @@ pub fn kv_cache_bytes(s: &ModelSummary, ctx: u64, bits_per_element: u32) -> Opti
         if heads.len() as u64 != layers {
             return None;
         }
-        let mut elems = 0u64;
-        for (i, &h) in heads.iter().enumerate() {
-            let (tokens, span) = if is_swa(i) {
-                (swa_tokens, span_swa)
-            } else {
-                (ctx, span_full)
-            };
-            elems = elems.checked_add(h.checked_mul(span)?.checked_mul(tokens)?)?;
-        }
+        // Bounded: the array matched block_count.
+        let elems = count(&|a, b| {
+            let mut elems = 0u64;
+            for (i, &h) in heads.iter().enumerate().take(b as usize).skip(a as usize) {
+                let (tokens, span) = if is_swa(i) {
+                    (swa_tokens, span_swa)
+                } else {
+                    (ctx, span_full)
+                };
+                elems = elems.checked_add(h.checked_mul(span)?.checked_mul(tokens)?)?;
+            }
+            Some(elems)
+        })?;
         return bytes_of(elems);
     }
 
     // Uniform heads: the same classification, closed-form over layer counts —
     // never a loop over `block_count`, which is attacker-controlled input.
     let heads_kv = s.head_count_kv?;
-    let swa_layers = match (&s.sliding_window_layers, s.sliding_window_pattern) {
-        (Some(w), _) if w.len() as u64 == layers => w.iter().filter(|&&b| b).count() as u64,
-        (_, Some(n))
-            if n > 1 && !s.sliding_window_pattern_is_array && s.sliding_window.is_some() =>
-        {
-            layers - layers / n
-        }
-        _ => 0,
+    let swa_in = |a: u64, b: u64| -> Option<u64> {
+        Some(match (&s.sliding_window_layers, s.sliding_window_pattern) {
+            (Some(w), _) if w.len() as u64 == layers => {
+                w[a as usize..b as usize].iter().filter(|&&b| b).count() as u64
+            }
+            (_, Some(n))
+                if n > 1 && !s.sliding_window_pattern_is_array && s.sliding_window.is_some() =>
+            {
+                (b - a) - (b / n - a / n)
+            }
+            _ => 0,
+        })
     };
-    let full_elems = (layers - swa_layers)
+    let swa_layers = count(&swa_in)?;
+    let all_layers = count(&|a, b| Some(b - a))?;
+    let full_elems = (all_layers - swa_layers)
         .checked_mul(ctx)?
         .checked_mul(heads_kv.checked_mul(span_full)?)?;
     let swa_elems = swa_layers

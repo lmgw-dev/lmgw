@@ -39,6 +39,11 @@ pub enum ChatEvent {
         message: String,
         code: Option<String>,
     },
+    /// An `error` frame about an MCP label the thread or its folder
+    /// attached that offered the turn no tools (`ErrorFrame::label_notice`):
+    /// the turn goes on without it. Said as its own block beside the reply,
+    /// never in its text, and stored with it.
+    Notice(frames::LabelNotice),
     /// A newer turn of the thread (or a rewrite of its history) stopped this
     /// reply — not a failure, and it is not saved.
     Superseded,
@@ -97,6 +102,9 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
                     code: v.get("code").and_then(|c| c.as_str()).map(str::to_string),
                     ..Default::default()
                 });
+            if let Some(notice) = e.label_notice() {
+                return Some(ChatEvent::Notice(notice));
+            }
             match e.code.as_deref() {
                 Some("superseded") => ChatEvent::Superseded,
                 Some("not_saved") => ChatEvent::NotSaved(e.message),
@@ -238,6 +246,36 @@ mod tests {
         assert!(matches!(
             frame("error", json!({"message": "m", "code": "not_saved"})),
             Some(ChatEvent::NotSaved(_))
+        ));
+    }
+
+    #[test]
+    fn an_attached_labels_error_frame_is_a_notice_not_a_failure() {
+        let notice = frame(
+            "error",
+            json!({"message": "MCP server 'kai': device 'desk' is offline",
+                   "code": "tool_offline", "server_label": "kai"}),
+        );
+        match notice {
+            Some(ChatEvent::Notice(n)) => {
+                assert_eq!(n.server_label, "kai");
+                assert_eq!(n.code, frames::LabelCode::Offline);
+                assert_eq!(n.message, "MCP server 'kai': device 'desk' is offline");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A label code with no label, or a label with another code, is a
+        // failure as before.
+        assert!(matches!(
+            frame("error", json!({"message": "m", "code": "tool_offline"})),
+            Some(ChatEvent::Error { .. })
+        ));
+        assert!(matches!(
+            frame(
+                "error",
+                json!({"message": "m", "code": "gpu_hold", "server_label": "kai"})
+            ),
+            Some(ChatEvent::Error { .. })
         ));
     }
 }

@@ -64,6 +64,14 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// A file name as `-F name=@…` reads it: in double quotes, so `;` and `,`
+/// stay part of the name, with `"` and `\` escaped by a backslash (curl's
+/// own rule for a quoted form value).
+fn form_file_name(name: &str) -> String {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 /// Double-quote the URL the way §6.9's worked example shows it.
 fn dq(s: &str) -> String {
     let escaped = s
@@ -182,10 +190,16 @@ pub fn curl_command(p: &Prepared, origin: &str) -> String {
                         } else {
                             value.clone()
                         };
-                        lines.push(format!("  -F {}", sq(&format!("{name}={v}"))));
+                        // `--form-string`: `-F` would read a value that starts
+                        // with `<` or `@` (a `page_break` of `<!-- page -->`)
+                        // as a file to send.
+                        lines.push(format!("  --form-string {}", sq(&format!("{name}={v}"))));
                     }
                     MultipartPart::File(field, file_name) => {
-                        lines.push(format!("  -F {}", sq(&format!("{field}=@{file_name}"))));
+                        lines.push(format!(
+                            "  -F {}",
+                            sq(&format!("{field}=@{}", form_file_name(file_name)))
+                        ));
                     }
                 }
             }
@@ -301,8 +315,86 @@ mod tests {
             secret_props: vec![],
         });
         let cmd = curl_command(&p, "http://x");
-        assert!(cmd.contains("-F 'model=mock-tts'"));
-        assert!(cmd.contains("-F 'file=@clip.wav'"));
+        assert!(cmd.contains("--form-string 'model=mock-tts'"));
+        assert!(cmd.contains("-F 'file=@\"clip.wav\"'"));
+    }
+
+    /// The text goes to the real `curl` against a loopback listener: a value
+    /// starting with `<` or `@` is sent as text, and a file name with `;`,
+    /// `,`, `"` or `\` is read as that one file. Skipped where `curl` or
+    /// `sh` is missing.
+    #[test]
+    fn the_command_survives_values_and_names_curl_would_misread() {
+        use std::io::{Read, Write};
+        let have = |c: &str| {
+            std::process::Command::new(c)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !have("curl") || !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("lmgw-curl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["a;b,c.pdf", "q\"u\\o.txt"];
+        for (i, n) in names.iter().enumerate() {
+            std::fs::write(dir.join(n), format!("CONTENT-{i}")).unwrap();
+        }
+        let p = base(Body::Multipart {
+            parts: vec![
+                MultipartPart::Field("page_break".into(), "<!-- page -->".into()),
+                MultipartPart::Field("note".into(), "@not-a-file".into()),
+                MultipartPart::File("file".into(), names[0].into()),
+                MultipartPart::File("file".into(), names[1].into()),
+            ],
+            secret_props: vec![],
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmd = curl_command(&p, &format!("http://127.0.0.1:{port}"));
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Until the closing boundary (`--\r\n`) has come.
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+                if got.ends_with(b"--\r\n") {
+                    break;
+                }
+            }
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            String::from_utf8_lossy(&got).to_string()
+        });
+        let ran = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{cmd} --max-time 10"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let sent = server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            ran.status.success(),
+            "{cmd}\n{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(
+            sent.contains("name=\"page_break\"\r\n\r\n<!-- page -->\r\n"),
+            "{sent}"
+        );
+        assert!(sent.contains("\r\n\r\n@not-a-file\r\n"), "{sent}");
+        assert!(sent.contains("filename=\"a;b,c.pdf\""), "{sent}");
+        assert!(
+            sent.contains("CONTENT-0") && sent.contains("CONTENT-1"),
+            "{sent}"
+        );
     }
 
     #[test]

@@ -52,8 +52,6 @@
 .mc-fold { font-size: var(--fs-sm); color: var(--text-2); margin-top: 4px; min-width: 0; }
 .mc-fold > summary { cursor: pointer; list-style: none; display: inline-block; }
 .mc-fold > summary::-webkit-details-marker { display: none; }
-.mc-fold > summary::before { content: "▸ "; color: var(--text-3); font-size: 10px; }
-.mc-fold[open] > summary::before { content: "▾ "; }
 .mc-fold > summary:hover { color: var(--text); }
 .mc-fold[open] > summary { margin-bottom: 4px; }
 .mc-lines { margin: 0; padding: 0 0 0 14px; list-style: none; font-family: var(--mono);
@@ -61,8 +59,8 @@
 .mc-lines li + li { margin-top: 2px; }
 
 /* the plan block and the progress view */
-.mc-plan, .mc-run { border: 1px solid var(--border); border-left: 3px solid var(--accent);
-  border-radius: 8px; background: var(--bg1); padding: 12px 14px;
+.mc-plan, .mc-run { border: 0; border-radius: var(--r-item); background: var(--surface-hi);
+  padding: 12px 14px;
   display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .mc-plan h4, .mc-run h4 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
 .mc-plan > p { margin: 0; line-height: 1.5; color: var(--text); }
@@ -73,7 +71,7 @@
 .mc-acts { display: flex; justify-content: flex-start; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .mc-elsewhere { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--accent-bg);
   color: var(--text); font-weight: 500; line-height: 1.45; }
-.mc-code { margin: 0; padding: 8px 10px; background: var(--bg0); border: 1px solid var(--border);
+.mc-code { margin: 0; padding: 8px 10px; background: var(--well); border: 0;
   border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--text);
   white-space: pre-wrap; overflow-wrap: anywhere; }
 .mc-cmd.note { color: var(--text-2); font-family: var(--sans); font-style: italic; margin: 2px 0; }
@@ -117,7 +115,7 @@
 .mc-run-step.failed .mc-step-n { background: var(--err); border-color: var(--err); color: var(--accent-ink); }
 .mc-run-step.waiting .mc-step-label { color: var(--text-2); }
 .mc-run-step.failed .mc-step-note { color: var(--err); }
-.mc-out { padding: 8px 10px; background: var(--bg0); border: 1px solid var(--border);
+.mc-out { padding: 8px 10px; background: var(--well); border: 0;
   border-radius: 6px; font: 12px/1.45 var(--mono); color: var(--text);
   white-space: pre-wrap; overflow-wrap: anywhere; }
 .mc-line.err { color: var(--text-2); }
@@ -125,19 +123,19 @@
 .mc-line.note { color: var(--text-2); font-style: italic; }
 
 /* an answer: the setup's, the switch's, an error */
-.mc-note { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px;
-  background: var(--surface); line-height: 1.5; display: flex; flex-direction: column; gap: 4px;
+.mc-note { border: 0; border-radius: var(--r-item); padding: 10px 14px;
+  background: var(--surface-hi); line-height: 1.5; display: flex; flex-direction: column; gap: 4px;
   min-width: 0; overflow-wrap: anywhere; }
 .mc-note > div:first-child { color: var(--text); font-weight: 500; }
-.mc-note.ok { border-color: var(--ok); background: var(--ok-bg); }
-.mc-note.warn { border-color: var(--amber); background: var(--amber-bg); }
-.mc-note.err { border-color: var(--err); background: var(--err-bg); }
+.mc-note.ok > div:first-child { color: var(--ok); }
+.mc-note.warn > div:first-child { color: var(--amber); }
+.mc-note.err > div:first-child { color: var(--err); }
 /* nothing wrong, nothing done: a plain note (review M5) */
 .mc-note.plain > div:first-child, .mc-note.plain { font-weight: 400; }
 .mc-note .mc-lines { padding-left: 0; font-family: var(--sans); font-size: var(--fs-sm); }
 
 /* the settings switch's confirm */
-.mc-fit { border: 1px solid var(--border); border-radius: 8px; background: var(--bg1);
+.mc-fit { border: 0; border-radius: var(--r-item); background: var(--surface-hi);
   padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
   min-width: 0; }
 .mc-fit.done { border: 0; background: none; padding: 0; }
@@ -190,8 +188,8 @@
 .mc-banner { flex: none; display: flex; align-items: center; gap: 8px;
   align-self: center; width: calc(100% - 2 * var(--chat-side, 22px)); max-width: 110ch;
   margin: 8px var(--chat-side, 22px) 0;
-  padding: 5px 8px 5px 10px; border: 1px solid var(--amber); border-radius: 8px;
-  background: var(--amber-bg); color: var(--text); font-size: 13px; line-height: 1.4;
+  padding: 5px 8px 5px 10px; border: 0; border-radius: 8px;
+  background: var(--surface-hi); color: var(--text); font-size: 13px; line-height: 1.4;
   min-width: 0; }
 .mc-banner > .mc-mark { flex: none; width: 18px; height: 18px; font-size: 11px; margin: 0; }
 /* the sentence and its link wrap as one run of text beside the mark */

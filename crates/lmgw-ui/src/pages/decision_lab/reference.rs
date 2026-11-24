@@ -26,8 +26,8 @@ pub(super) fn Reference(lab: Lab) -> impl IntoView {
                     .iter()
                     .map(|l| {
                         let what = match l.applies_to {
-                            DecisionMeasure::StateAndQuestion => "the state and one question",
-                            DecisionMeasure::OptionSpan => "the option span",
+                            DecisionMeasure::StateAndQuestion => "The state and one question",
+                            DecisionMeasure::OptionSpan => "The option span",
                         };
                         let n = l
                             .tokens
@@ -51,19 +51,19 @@ pub(super) fn Reference(lab: Lab) -> impl IntoView {
                         view! {
                             <div class="caps">
                                 <div class="caps-row">
-                                    <span class="k">"batch"</span>
+                                    <span class="k">"Batch"</span>
                                     <span class="v mono-sm">
                                         {format!("{} ({})", f.batch, f.batch_source.label())}
                                     </span>
                                 </div>
                                 <div class="caps-row">
-                                    <span class="k">"ctx_size"</span>
+                                    <span class="k" title="ctx_size">"Context size"</span>
                                     <span class="v mono-sm">
                                         {f.ctx_size.map(|c| c.to_string()).unwrap_or_else(|| "default".into())}
                                     </span>
                                 </div>
                                 <div class="caps-row">
-                                    <span class="k">"n_ctx_slot"</span>
+                                    <span class="k" title="n_ctx_slot, from the running server">"Context per slot"</span>
                                     <span class="v mono-sm">
                                         {f
                                             .n_ctx_slot
@@ -72,7 +72,7 @@ pub(super) fn Reference(lab: Lab) -> impl IntoView {
                                     </span>
                                 </div>
                                 <div class="caps-row">
-                                    <span class="k">"threads"</span>
+                                    <span class="k">"Threads"</span>
                                     <span class="v mono-sm">
                                         {f
                                             .threads_in_effect

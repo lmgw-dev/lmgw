@@ -5,17 +5,41 @@
    Long names and lines wrap, never scroll sideways. Nothing fades: WebKitGTK
    blanks an element one frame after an opacity transition ends. */
 
-.mf { display: flex; flex-direction: column; gap: 12px; max-width: 760px; min-width: 0; }
+.mf { display: flex; flex-direction: column; gap: 14px; max-width: 760px; min-width: 0; }
 .mf.compact { gap: 8px; max-width: none; }
+/* The box and card, and the two lists: one column; two in a wide page (below). */
+.mf-main, .mf-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.mf.compact > :is(.mf-main, .mf-side) { gap: 8px; }
+/* The page: search first, one centred column (modern design WP8). */
+.find-page .page-body { padding-top: 28px; }
+.find-page .mf { margin: 0 auto; }
+/* From 1600px of pane, the two lists sit in a second column beside the card. */
+@container pane (width >= 1600px) {
+  .find-page .mf { max-width: 1480px; display: grid; align-items: start; column-gap: 32px;
+    grid-template-columns: minmax(0, 760px) minmax(0, 1fr); }
+}
 
-/* the box */
+/* the box: a rounded search field with its glyph, Find the suggested pill */
 .mf-box { display: flex; gap: 8px; align-items: center; }
-.mf-input { flex: 1 1 auto; min-width: 0; }
-.mf-hint { margin: 0; font-size: var(--fs-sm); line-height: 1.5; max-width: 62ch; }
+.mf-search { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px;
+  height: 40px; padding: 0 14px; border-radius: 999px; background: var(--field);
+  color: var(--text-2); }
+.mf-search:focus-within { outline: 2px solid var(--focus); outline-offset: -1px; }
+.mf-search svg.i { flex: none; width: 16px; height: 16px; }
+.mf-input { flex: 1 1 auto; min-width: 0; height: 100%; border: 0; padding: 0; background: none;
+  outline: none; color: var(--text); font: 400 15px var(--sans); }
+.mf-input::placeholder { color: var(--text-3); }
+.mf-input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+.mf-box .mf-find { height: 40px; padding-inline: 20px; border-radius: 999px; }
+.compact .mf-search, .compact .mf-box .mf-find { height: 34px; }
+.mf-hint { margin: 0 4px; font-size: var(--fs-sm); line-height: 1.5; max-width: 62ch; }
 .mf-notice { line-height: 1.5; }
+.notice.mf-notice { max-width: none; }
 
 /* the card */
-.mf-card { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; min-width: 0; }
+.mf-card { display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; min-width: 0; }
+.mf-card.card { border: 0; border-radius: var(--r-box);
+  box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); }
 .compact .mf-card { padding: 10px 12px; }
 .mf-card-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 2px; }
 .mf-title { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline;
@@ -33,9 +57,40 @@
 .mf-metered { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .mf-card .mc-banner.in-card { margin: 2px 0; }
 
+/* The fit over the cards (device-ledger design WP12): Min. cards, Free VRAM
+   and the experts in RAM as chips with a tick, "!" or a cross; the figures
+   per card in a fold (the card) or the tooltip (the file list's row). */
+.fs-signals { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.fs-signals.compact { flex: none; flex-wrap: nowrap; gap: 4px; }
+.fs-badge { gap: 5px; white-space: nowrap; max-width: 100%; }
+.fs-signals.compact .fs-badge { height: 20px; padding: 0 7px; font-size: 11px; max-width: 220px; }
+.fs-badge .fs-key { color: var(--text-2); font-weight: 500; }
+.fs-badge .fs-val { overflow: hidden; text-overflow: ellipsis; }
+.fs-ico { flex: none; }
+/* A file list's row wraps its badges under the name before it cuts the name. */
+.wiz-file:has(.fs-signals) { flex-wrap: wrap; }
+.wiz-file:has(.fs-signals) .wiz-name { flex: 1 1 24ch; min-width: 0; overflow-wrap: anywhere; }
+svg.i.fs-ico { width: 12px; height: 12px; stroke-width: 2.6; }
+.fs-glyph { display: inline-flex; align-items: center; justify-content: center; width: 12px;
+  font-weight: 700; font-size: 11px; line-height: 1; }
+.fs-ctx { font-size: var(--fs-sm); white-space: nowrap; }
+.fs-fold { margin-top: 0; }
+.fs-fold > summary { cursor: pointer; color: var(--text-2); font-size: var(--fs-sm); }
+.fs-fold > summary:hover { color: var(--text); }
+.fs-fold-body { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 2px 14px;
+  font-size: var(--fs-sm); line-height: 1.5; }
+.fs-fold-body p { margin: 0; overflow-wrap: anywhere; }
+.fs-cards ul { margin: 2px 0 0; padding-left: 18px; }
+.fs-cards li { overflow-wrap: anywhere; }
+
+/* Get it asks (WP12): the ways it can set the file up, none chosen. */
+.mf-signals { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mf-layouts .mf-choice { align-items: center; }
+.mf-layouts .mf-choice-name { flex-basis: 100%; }
+
 /* D9's question */
-.mf-ask { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px;
-  background: var(--surface-hi); }
+.mf-ask { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  border-radius: var(--r-item); background: var(--ctl); }
 .mf-ask-row { gap: 6px 8px; }
 .mf-ask-gb { width: 72px; }
 .mf-ask-confirm { flex-basis: 100%; font-size: var(--fs-sm); color: var(--text-2); }
@@ -55,29 +110,37 @@
 
 /* the actions, the progress and the end */
 .mf-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px;
-  padding-top: 10px; border-top: 1px solid var(--border); }
+  padding-top: 12px; border-top: 1px solid var(--divider); }
 .mf-actions > .dim { font-size: var(--fs-sm); min-width: 0; }
 .mf-spacer { flex: 1 1 auto; }
 .mf-progress, .mf-ready { display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
-  padding-top: 10px; border-top: 1px solid var(--border); }
+  padding-top: 10px; border-top: 1px solid var(--divider); }
 .mf-progress > .mf-actions, .mf-ready > .mf-actions { border-top: 0; padding-top: 0; margin-top: 2px; }
 .mf-stage { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
 .mf-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .mf-file { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); min-width: 0; }
 .mf-file-name { flex: 1 1 auto; min-width: 0; font-family: var(--mono); overflow-wrap: anywhere; }
-.mf-bar { flex: none; width: 140px; height: 6px; border-radius: 3px; background: var(--surface-hi);
+.mf-bar { flex: none; width: 140px; height: 5px; border-radius: 999px; background: var(--ctl);
   overflow: hidden; }
+/* Get it on its way: lmgw may read the file's header first (WP12). */
+.mf-starting { align-items: center; gap: 10px; }
+.mf-wait { flex: none; width: 140px; }
 .mf-bar-fill { display: block; height: 100%; background: var(--accent); }
 .mf-ready-for { font-weight: 500; }
 
 /* the lists */
 .mf-list { display: flex; flex-direction: column; gap: 6px; }
-.mf-list > .mini-head { margin: 4px 0 0; }
-.mf-choices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.mf-choice { width: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
-  padding: 6px 10px; border: 1px solid transparent; border-radius: 8px; background: none;
-  color: var(--text); font: inherit; text-align: left; cursor: pointer; }
-.mf-choice:hover:not(:disabled) { background: var(--surface-hi); border-color: var(--border); }
+.mf-list > .mini-head { margin: 8px 2px 0; font-size: 14px; font-weight: 600; color: var(--text); }
+/* The other choices: a boxed list of rows, a hairline between them. */
+.mf-choices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+  background: var(--surface); border-radius: var(--r-box); overflow: hidden;
+  box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); }
+.mf-choices > li + li { border-top: 1px solid var(--divider); }
+.mf-choice { width: 100%; min-height: 44px; display: flex; flex-wrap: wrap; align-items: baseline;
+  align-content: center; gap: 2px 10px; padding: 7px 14px; border: 0; border-radius: 0;
+  background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.mf-choice:hover:not(:disabled) { background: var(--hover); }
+.mf-choice:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .mf-choice:disabled { cursor: default; opacity: .6; }
 .mf-choice-name { font-weight: 500; overflow-wrap: anywhere; }
 .mf-choice-detail { font-size: var(--fs-sm); }

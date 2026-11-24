@@ -54,6 +54,15 @@ fn opt(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// What blocks a save, and which row says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Problem {
+    Name(String),
+    Examples(String),
+    Block(String),
+    Style(String),
+}
+
 impl Form {
     /// The form of a stored profile (or of a new one: `None`).
     pub fn of(p: Option<&Profile>) -> Self {
@@ -138,28 +147,49 @@ impl Form {
         }
     }
 
-    /// What blocks a save, as sentences. The server's own checks (taken
-    /// names, unknown aliases) come back as its refusal.
-    pub fn problems(&self) -> Vec<String> {
+    /// What blocks a save, as sentences, each with the row it belongs to
+    /// ([`Problem`]). The server's own checks (taken names, unknown
+    /// aliases) come back as its refusal.
+    pub fn problems(&self) -> Vec<Problem> {
         let mut out = Vec::new();
         if let Some(n) = name_problem(&self.name) {
-            out.push(n);
+            out.push(Problem::Name(n));
         }
-        for (i, e) in self.examples.iter().enumerate() {
-            if e.user.trim().is_empty() != e.reply.trim().is_empty() {
-                out.push(format!(
-                    "example {}: both the user's line and the reply are needed",
-                    i + 1
-                ));
-            }
+        for t in self.example_problems() {
+            out.push(Problem::Examples(t));
         }
-        if self.mode() == BlockMode::Own && self.block_text.trim().is_empty() {
-            out.push("voice block: write it, or pick \"none\" for no block".to_string());
+        if let Some(t) = self.block_problem() {
+            out.push(Problem::Block(t));
         }
-        if self.style_mode == StyleMode::Own && self.speech_style.trim().is_empty() {
-            out.push("speech style: write it, or pick \"inherit\" or \"none\"".to_string());
+        if let Some(t) = self.style_problem() {
+            out.push(Problem::Style(t));
         }
         out
+    }
+
+    /// One sentence per half-filled example.
+    pub fn example_problems(&self) -> Vec<String> {
+        self.examples
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.user.trim().is_empty() != e.reply.trim().is_empty())
+            .map(|(i, _)| {
+                format!(
+                    "Example {}: both the user's line and the reply are needed",
+                    i + 1
+                )
+            })
+            .collect()
+    }
+
+    pub fn block_problem(&self) -> Option<String> {
+        (self.mode() == BlockMode::Own && self.block_text.trim().is_empty())
+            .then(|| "Write the voice block, or pick None for no block".to_string())
+    }
+
+    pub fn style_problem(&self) -> Option<String> {
+        (self.style_mode == StyleMode::Own && self.speech_style.trim().is_empty())
+            .then(|| "Write the speech style, or pick Inherit or None".to_string())
     }
 
     /// The create body for a new profile.
@@ -230,17 +260,17 @@ impl Form {
 pub fn name_problem(name: &str) -> Option<String> {
     let t = name.trim();
     if t.is_empty() {
-        Some("name: a profile needs a name".to_string())
+        Some("A profile needs a name".to_string())
     } else if t.eq_ignore_ascii_case(RESERVED_NAME) {
-        Some("name: \"Default\" is no profile (it is what a thread has without one)".to_string())
+        Some("\"Default\" is no profile (it is what a thread has without one)".to_string())
     } else {
         None
     }
 }
 
-/// What deleting would clear, for the armed button ("used by 2 threads and
-/// the folder 'Assistant'"). Empty usage says so, so the question is still
-/// asked about something.
+/// What deleting would clear, as the sentence the delete dialog asks with
+/// ("Used by 2 threads and the folder 'Assistant': they go back to none.").
+/// Empty usage says so, so the question is still asked about something.
 pub fn delete_question(used: &UsedBy, is_default: bool, builtin: bool) -> String {
     let mut parts = Vec::new();
     if used.threads > 0 {
@@ -264,12 +294,12 @@ pub fn delete_question(used: &UsedBy, is_default: bool, builtin: bool) -> String
         parts.push("the Chat setting for new threads".to_string());
     }
     let mut q = if parts.is_empty() {
-        "Delete? nothing uses it".to_string()
+        "Nothing uses it.".to_string()
     } else {
-        format!("Delete? used by {}; they go back to none", join_and(&parts))
+        format!("Used by {}: they go back to none.", join_and(&parts))
     };
     if builtin {
-        q.push_str(" (it can be added back)");
+        q.push_str(" It can be added back.");
     }
     q
 }
@@ -401,6 +431,10 @@ mod tests {
         assert_eq!(f.wire_block(), Some("Short.".into()));
         f.block_text = " ".into();
         assert_eq!(f.problems().len(), 2); // no name, empty own block
+        assert_eq!(
+            f.problems()[1],
+            Problem::Block("Write the voice block, or pick None for no block".into())
+        );
     }
 
     #[test]
@@ -463,11 +497,16 @@ mod tests {
         assert_eq!(f.wire_examples().len(), 1);
         f.examples.push(ex("only a question", " "));
         assert_eq!(f.problems().len(), 1);
-        assert!(f.problems()[0].contains("example 3"));
+        assert!(
+            matches!(&f.problems()[0], Problem::Examples(t) if t.starts_with("Example 3:")),
+            "{:?}",
+            f.problems()
+        );
     }
 
     #[test]
     fn names_refuse_empty_and_default_in_any_case() {
+        assert_eq!(name_problem("").as_deref(), Some("A profile needs a name"));
         assert!(name_problem("  ").is_some());
         assert!(name_problem("DeFault").is_some());
         assert!(name_problem("Defaults").is_none());
@@ -497,9 +536,12 @@ mod tests {
         let q = delete_question(&used, false, false);
         assert_eq!(
             q,
-            "Delete? used by 2 threads and the folder 'Assistant'; they go back to none"
+            "Used by 2 threads and the folder 'Assistant': they go back to none."
         );
-        assert!(delete_question(&UsedBy::default(), false, false).contains("nothing uses it"));
+        assert_eq!(
+            delete_question(&UsedBy::default(), false, false),
+            "Nothing uses it."
+        );
         let q = delete_question(
             &UsedBy {
                 threads: 1,
@@ -509,7 +551,7 @@ mod tests {
             true,
         );
         assert!(q.contains("1 thread and the Chat setting"), "{q}");
-        assert!(q.ends_with("(it can be added back)"));
+        assert!(q.ends_with(" It can be added back."));
     }
 
     #[test]

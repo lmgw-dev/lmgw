@@ -1,0 +1,299 @@
+[
+ {
+  "js": "'Traffic and Conversations as lists beside the opened record (modern design WP10), on the faked request log and conversations of scripts/drive/records-fake.js: the status page beside the list at a wide window, a click opens a request at its path, the arrows move the selection, an error opens with its message, a request the list does not hold opens by its id (a deep link) and an answer for one no longer opened is dropped, the model search (/ focuses, Esc clears) narrows the list and keeps the opened request, the filters popover (errors only lights its button and filters the list, Clear filters), Load older appends and pauses the live tail, Resume, the Requests and Conversations switch, the old ?chain= link landing on the chain path, a conversation with its turns and what it waits for, Delete asking first (Keep it), and the narrow window (one pane at a time, the back button). Nothing is written: the fake answers the reads, and the only write it could reach (Delete) is cancelled. Run: scripts/ui-drive.py scripts/drive/traffic-split.json --init-script scripts/drive/records-fake.js --dsf 1.25 --token-file <dir>.token --base http://<addr>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.traffic.list.width'); localStorage.removeItem('lmgw.ui.conversations.list.width'); localStorage.setItem('lmgw.ui.pagesize.traffic', '50'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/traffic?fake-records=1"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow[data-key=\"/traffic/9300\"]')",
+  "timeout": 15,
+  "label": "the list has the newest faked request"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; window.__groups = () => [...document.querySelectorAll('.mdetail-pane .pref-group > .pref-head h2')].map(h => h.textContent); window.__rows = () => [...document.querySelectorAll('.mlist .lrow')]; 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.traffic-split:not(.narrow)') && document.querySelector('.tr-status') && __sel().length === 0",
+  "label": "wide: nothing opened shows the status page beside the list"
+ },
+ {
+  "expect": "__rows().length === 50 && document.querySelector('.mlist .list-head') && /50 rows · live tail keeps 50/.test(document.querySelector('.mlist-head .sub').textContent)",
+  "label": "the list shows the 50 newest under their day's heading, and says the tail keeps 50"
+ },
+ {
+  "shot": "traffic-status"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/traffic/9300\"]"
+ },
+ {
+  "until": "location.pathname === '/traffic/9300' && __h1() === 'demo-chat'",
+  "timeout": 5,
+  "label": "a click opens the request at its path, its name in the hero"
+ },
+ {
+  "expect": "JSON.stringify(__groups()) === JSON.stringify(['Request', 'Answer', 'Tokens and cost']) && __sel()[0] === '/traffic/9300'",
+  "label": "the opened request is its fields as boxed groups, its row selected"
+ },
+ {
+  "shot": "traffic-row"
+ },
+ {
+  "key": "ArrowDown",
+  "n": 3
+ },
+ {
+  "until": "location.pathname === '/traffic/9297' && __groups()[0] === 'Error'",
+  "timeout": 5,
+  "label": "the arrows move the selection; a failed request opens with its error first"
+ },
+ {
+  "expect": "/did not answer/.test(document.querySelector('.mdetail-pane pre.code-block.err').textContent) && document.querySelector('.mlist .lrow.sel .dot.err')",
+  "label": "the error's message is a code block, the failed row has the red dot"
+ },
+ {
+  "shot": "traffic-error"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "type": "coder"
+ },
+ {
+  "until": "/alias_q=coder/.test(location.search) && __rows().length > 0 && __rows().every(r => r.querySelector('.lrow-name').textContent.includes('coder'))",
+  "timeout": 5,
+  "label": "the model search narrows the list (a beat after the typing)"
+ },
+ {
+  "expect": "location.pathname === '/traffic/9297' && __groups()[0] === 'Error'",
+  "label": "the opened request stays open while the filter moves"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!/alias_q/.test(location.search) && __rows().length === 50",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "click": ".tr-filter-btn"
+ },
+ {
+  "until": "document.querySelector('.tr-filters-pop .tr-filters')",
+  "timeout": 3,
+  "label": "the filters open in a popover"
+ },
+ {
+  "click": ".tr-filters .prow.action .switch"
+ },
+ {
+  "until": "/errors_only=true/.test(location.search) && __rows().length > 0 && __rows().every(r => r.querySelector('.lrow-state').textContent.startsWith('503'))",
+  "timeout": 5,
+  "label": "Errors only lists the failed requests alone"
+ },
+ {
+  "expect": "document.querySelector('.tr-filter-btn.on')",
+  "label": "a filter set in the popover lights its button"
+ },
+ {
+  "shot": "traffic-filters"
+ },
+ {
+  "click": ".tr-filters-foot .btn"
+ },
+ {
+  "until": "!/errors_only/.test(location.search) && __rows().length === 50 && !document.querySelector('.tr-filter-btn.on')",
+  "timeout": 5,
+  "label": "Clear filters puts the whole log back"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/traffic/9001"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; window.__groups = () => [...document.querySelectorAll('.mdetail-pane .pref-group > .pref-head h2')].map(h => h.textContent); window.__rows = () => [...document.querySelectorAll('.mlist .lrow')]; 'helpers'"
+ },
+ {
+  "until": "__h1() === 'cloud-demo/large' && __sel().length === 0",
+  "timeout": 8,
+  "label": "a deep link to a request the list does not hold opens it by its id"
+ },
+ {
+  "js": "window.__recordsFakeHold = { logs: 1500 }; 'hold'"
+ },
+ {
+  "go": "/traffic/9002",
+  "via": "history"
+ },
+ {
+  "go": "/traffic/9300",
+  "via": "history"
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "expect": "location.pathname === '/traffic/9300' && __h1() === 'demo-chat'",
+  "label": "an answer for a request no longer opened is dropped"
+ },
+ {
+  "js": "window.__recordsFakeHold = {}; 'released'"
+ },
+ {
+  "click": ".mlist-foot .btn"
+ },
+ {
+  "until": "__rows().length === 100 && /paused/.test(document.querySelector('.mlist-head .sub').textContent)",
+  "timeout": 5,
+  "label": "Load older appends the next page and pauses the live tail"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mlist .list-head')].length >= 1",
+  "label": "the day headings stay"
+ },
+ {
+  "click": ".mlist-head .actions .icon-btn[aria-label=\"Resume\"]"
+ },
+ {
+  "until": "__rows().length === 50 && /live tail keeps 50/.test(document.querySelector('.mlist-head .sub').textContent)",
+  "timeout": 5,
+  "label": "Resume reads the head again"
+ },
+ {
+  "click": ".mlist-switch a[href^=\"/traffic/conversations\"]"
+ },
+ {
+  "until": "location.pathname === '/traffic/conversations' && document.querySelectorAll('.mlist .lrow').length === 3",
+  "timeout": 5,
+  "label": "the switch goes to Conversations, the stored chains as rows"
+ },
+ {
+  "nav": "/traffic?alias=demo-chat&fake-records=1"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow[data-key^=\"/traffic/9\"]')",
+  "timeout": 15,
+  "label": "a link's alias filter lists its requests"
+ },
+ {
+  "click": ".mlist .lrow"
+ },
+ {
+  "until": "/^\\/traffic\\/\\d+$/.test(location.pathname) && location.search.includes('alias=demo-chat')",
+  "timeout": 5,
+  "label": "an opened request keeps the filter in its address"
+ },
+ {
+  "click": ".mlist-switch a[href^=\"/traffic/conversations\"]"
+ },
+ {
+  "until": "location.pathname === '/traffic/conversations' && document.querySelectorAll('.mlist .lrow').length > 0",
+  "timeout": 5,
+  "label": "Conversations from an opened request"
+ },
+ {
+  "click": ".mlist .lrow"
+ },
+ {
+  "until": "location.pathname.startsWith('/traffic/conversations/')",
+  "timeout": 5,
+  "label": "a conversation opened"
+ },
+ {
+  "click": ".mlist-switch a[href^=\"/traffic\"]:not([href^=\"/traffic/conversations\"])"
+ },
+ {
+  "until": "location.pathname === '/traffic' && location.search.includes('alias=demo-chat')",
+  "timeout": 5,
+  "label": "back on Requests the filter the list was left with is still there"
+ },
+ {
+  "nav": "/traffic/conversations?chain=resp_demo_chain_beta"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; window.__groups = () => [...document.querySelectorAll('.mdetail-pane .pref-group > .pref-head h2')].map(h => h.textContent); window.__rows = () => [...document.querySelectorAll('.mlist .lrow')]; 'helpers'"
+ },
+ {
+  "until": "location.pathname === '/traffic/conversations/resp_demo_chain_beta' && !location.search.includes('chain=') && document.querySelectorAll('.conv-detail .pref-group').length === 3",
+  "timeout": 8,
+  "label": "the old ?chain= link lands on the chain's path: its facts and a group per turn"
+ },
+ {
+  "expect": "/Awaiting approval: demo_tool_delete/.test(document.querySelector('.conv-detail').textContent) && document.querySelector('.mlist .lrow.sel .dot.warn')",
+  "label": "a chain blocked on an approval says what it waits for"
+ },
+ {
+  "shot": "conversations-chain"
+ },
+ {
+  "click": ".mdetail-head .actions button[title=\"More\"]"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".menu-item",
+  "nth": 0
+ },
+ {
+  "until": "document.querySelector('dialog[open]') && /Delete this conversation/.test(document.querySelector('dialog[open]').textContent)",
+  "timeout": 3,
+  "label": "Delete asks first"
+ },
+ {
+  "click": "dialog[open] .btn.ghost"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]') && location.pathname === '/traffic/conversations/resp_demo_chain_beta'",
+  "timeout": 3,
+  "label": "Keep it leaves the conversation as it is"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/traffic"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; window.__groups = () => [...document.querySelectorAll('.mdetail-pane .pref-group > .pref-head h2')].map(h => h.textContent); window.__rows = () => [...document.querySelectorAll('.mlist .lrow')]; 'helpers'"
+ },
+ {
+  "until": "document.querySelector('.traffic-split.narrow') && __rows().length === 50",
+  "timeout": 8,
+  "label": "narrow: the list alone"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.mdetail-pane')).display === 'none'",
+  "label": "narrow: the detail is hidden while nothing is opened"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/traffic/9299\"]"
+ },
+ {
+  "until": "location.pathname === '/traffic/9299' && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[aria-label=\"Back to the requests\"]')",
+  "timeout": 5,
+  "label": "narrow: a row opens the detail alone, with a back button"
+ },
+ {
+  "shot": "traffic-narrow-detail"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[aria-label=\"Back to the requests\"]"
+ },
+ {
+  "until": "location.pathname === '/traffic' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the list"
+ }
+]

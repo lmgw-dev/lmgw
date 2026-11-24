@@ -12,6 +12,8 @@ THINKING_BUDGET = 1024
 
 
 def new(system=None):
+    """`system` is a string, or a list of system blocks (the prompt_cache scenario's marked
+    prefix), sent as given."""
     return {"system": system, "messages": []}
 
 
@@ -77,6 +79,8 @@ def _turn(data):
     t.reasoning = any(b.get("type") in ("thinking", "redacted_thinking") for b in blocks)
     u = data.get("usage") or {}
     t.usage = {"in": u.get("input_tokens") or 0, "out": u.get("output_tokens") or 0}
+    t.raw_usage = dict(u)
+    t.start_usage = data.get("_start_usage")
     # Replay the content as received, as `messages.append({"role": "assistant", "content": msg.content})`.
     t.replay = [{"role": "assistant", "content": [{k: v for k, v in b.items() if k != "citations" or v}
                                                   for b in blocks]}]

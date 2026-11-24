@@ -1,12 +1,14 @@
 // Desktop shell: when the UI runs inside the lmgw Tauri webview, mark the page
-// so app.css can follow the desktop (its fonts), give the clickable parts the
+// (app.css draws its own scrollbars there), give the clickable parts the
 // desktop's arrow cursor, and tell the shell when the app has drawn itself.
 // No-op in ordinary LAN browsers.
 //
-// The window is decorated: KWin draws the title bar, the window buttons and
-// the resize borders, so nothing here wires window controls, edge resizing or
-// a drag region. The right-click menu is trimmed in the shell
-// (src-tauri/src/context_menu.rs), on WebKit's own menu.
+// The window's frame is the shell's business: KWin's title bar by default,
+// or with LMGW_WINDOW=csd the shell's own frame, whose script
+// (src-tauri/src/window_chrome/page.js) wires the header bars and the window
+// buttons the app draws (crate::frame). Nothing here does. The right-click
+// menu is trimmed in the shell (src-tauri/src/context_menu.rs), on WebKit's
+// own menu.
 (function () {
   "use strict";
   const internals = window.__TAURI_INTERNALS__;

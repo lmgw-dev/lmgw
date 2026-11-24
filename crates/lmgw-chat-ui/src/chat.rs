@@ -7,8 +7,17 @@
 mod composer;
 /// The thread settings drawer: its draft, a save applied, the drawer.
 mod drawer;
+/// The conversation's header bar: the thread's title, its model, its marks
+/// and actions, the window's buttons.
+mod head;
 /// The thread list: dated groups, the filter, folders and pins.
 mod list;
+/// The thread list's head actions: New chat and the list's menu.
+mod list_head;
+/// The thread list's arrow keys.
+mod list_keys;
+/// A reply's markdown written node by node (WebKitGTK moved the pane).
+mod morph;
 /// One message of the transcript, and the stats row under a reply.
 mod msg_view;
 /// The narrow layout: the side panels as drawers below 520 px.
@@ -25,6 +34,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::chat::{Ack, ContinueState, MessageTask, ThreadTask};
 use lmgw_api_types::chat_approvals::ApprovalRequest;
+use lmgw_api_types::chat_frames::LabelNotice;
 use lmgw_api_types::chat_threads::{AttachmentMeta, SettingsAck, TitleRequest};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,11 +50,10 @@ use super::chat_folders::{
     self, FolderDialogs, FolderEnv, FolderHeader, FolderInfo, FolderRow, NoFolderZone,
 };
 use super::chat_knowledge::{
-    apply_kb, kb_badge, KbButton, KbChip, KbDraft, KbDraftChips, KbPick, KbPopover, KbUi,
+    apply_kb, KbButton, KbChip, KbDraft, KbDraftChips, KbPick, KbPopover, KbUi,
 };
 use super::chat_media;
-use super::chat_reasoning::reasoning_badge;
-use super::chat_reply::{answer_label, UNSAVED_NOTE};
+use super::chat_reply::UNSAVED_NOTE;
 use super::chat_retrieval::{cite_html, cite_target, KbContext, RetrievalView};
 use super::chat_sampling::{self, SamplingDraft, SamplingText};
 use super::chat_search::{install_reveal, MessageHits};
@@ -62,8 +71,8 @@ pub(crate) use list::{matches_query, matches_query_in, parse_utc_ts, thread_row,
 use lmgw_ui_kit::scope::{Latest, Scope};
 pub use lmgw_ui_kit::widgets::tool_picker::ThreadMcp;
 use lmgw_ui_kit::widgets::{
-    use_dirty_guard, use_slash_focus, use_toasts, Drawer, MenuItem, Modal, ModalSize, ModelPicker,
-    RowMenu, Side, SplitPane,
+    use_dirty_guard, use_slash_focus, use_toasts, Drawer, MenuItem, Modal, ModalSize, RowMenu,
+    Side, SplitPane,
 };
 pub(super) use open::Opener;
 use open::{Landed, OpenEnv};
@@ -144,12 +153,15 @@ pub struct ChatThread {
 }
 
 /// `GET /chat/api/threads[?archived=1]`: the list plus how many threads sit
-/// in the *other* view, so the toolbar toggle can say "Archived (n)" without
-/// a second round trip.
+/// in each view (`active_count`, `archived_count`), so the toolbar toggle can
+/// say "Archived (n)" without a second round trip.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ThreadsResponse {
     pub(super) threads: Vec<ChatThread>,
     pub(super) archived_count: i64,
+    /// How many stored threads are active, in every mode; 0 from a gateway
+    /// that does not send it yet.
+    pub(super) active_count: i64,
     /// The in-memory temporary chats, in every mode (chat-complete §7).
     pub(super) temporary: Vec<ChatThread>,
     /// Every folder with its thread counts, in every mode (§5).
@@ -173,6 +185,9 @@ pub(super) struct MsgRow {
     /// A reply a fallback that cannot see answered: what it got in the
     /// images' place, in a sentence.
     pub(super) images_note: Option<String>,
+    /// A reply's notices: the attached labels that offered its turn no
+    /// tools, as the turn said them (stored with the reply).
+    pub(super) notices: Vec<LabelNotice>,
     pub(super) attachments: Vec<AttachmentMeta>,
     /// A user message's own knowledge bases and what they retrieved.
     pub(super) kb_refs: Vec<i64>,
@@ -251,6 +266,11 @@ pub(super) struct Msg {
     /// A fallback that cannot see answered: what it got in the images'
     /// place (`done.images_note`, stored with the reply).
     pub(super) images_note: RwSignal<Option<String>>,
+    /// The attached labels that offered the turn no tools (an unreachable
+    /// MCP server, an offline device): the stream's `error` frames about
+    /// them, stored with the reply. Said as their own block above the
+    /// reply's text, never in it.
+    pub(super) notices: RwSignal<Vec<LabelNotice>>,
     /// The reply was not stored (`done.saved` false): dimmed, Copy only.
     pub(super) unsaved: RwSignal<bool>,
     /// How the turn was spoken (chat-voice §3).
@@ -283,6 +303,7 @@ pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
         model: RwSignal::new(None),
         answered_by: RwSignal::new(None),
         images_note: RwSignal::new(None),
+        notices: RwSignal::new(Vec::new()),
         unsaved: RwSignal::new(false),
         voice: RwSignal::new(None),
         origin: RwSignal::new(None),

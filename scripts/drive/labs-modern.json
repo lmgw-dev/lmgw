@@ -1,0 +1,303 @@
+[
+ {
+  "js": "'The labs in the modern design (WP5), on made-up data: the header bar (the title, the model picker as its subtitle, the actions as icon buttons, the presets popover), the form column as preference groups with the prompt as a rounded field, the results head and its cards (scripts/drive/lab-fake.js answers the Image, Decision and Voices labs history, the Decision lab models and the Voices lab rounds), the reference panels opened from their rails, the narrow window Form and Results toggle, and the light theme. It starts nothing and writes nothing (presets are only opened, never saved): safe to run with the GPU hold on. Run: scripts/ui-drive.py scripts/drive/labs-modern.json --dsf 1.25 --block-writes --init-script scripts/drive/lab-fake.js --token-file <dir>.token --base http://<addr> --podman-guard <prefix> --shots <dir>'"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'dark'); localStorage.removeItem('lmgw.ui.side.image-lab.pipeline'); localStorage.removeItem('lmgw.ui.side.decision-lab.reference'); 'reset'"
+ },
+ {
+  "size": "1536x864"
+ },
+ {
+  "nav": "/image-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelector('.lab-shell > .page-head .sub-view .mp-btn') && document.querySelectorAll('.il-group').length === 2",
+  "timeout": 20,
+  "label": "image: the head has its model picker as the subtitle, the faked history has two cards"
+ },
+ {
+  "expect": "document.querySelector('.lab-shell > .page-head h1').textContent === 'Image lab' && document.querySelector('.lab-shell > .page-head .actions .lp-btn') && document.querySelector('.lab-shell > .page-head .actions .lab-reload svg.i')",
+  "label": "image: the presets and Reload are the header's icon buttons"
+ },
+ {
+  "expect": "document.querySelector('.lab-form textarea.lab-prompt-field') && document.querySelectorAll('.lab-form .pref-group .prow').length >= 8 && [...document.querySelectorAll('.lab-form .prow-title')].some(t => t.textContent.startsWith('CFG scale') && t.querySelector('.fname'))",
+  "label": "image: the prompt is a rounded field, the parameters are rows naming their request field"
+ },
+ {
+  "expect": "document.querySelector('.results-head .results-title .count').textContent === '2' && document.querySelector('.results-head .lh-export .icon-btn') && document.querySelector('.results-head .confirm .btn')",
+  "label": "image: the results head counts the runs, Save is an icon menu, Clear is there"
+ },
+ {
+  "shot": "image-dark"
+ },
+ {
+  "click": ".lab-shell > .page-head .lp-btn"
+ },
+ {
+  "until": "document.querySelector('.lp-pop .lp-new .lp-name') && document.querySelector('.lp-pop .lp-title').textContent === 'Prompt presets'",
+  "timeout": 10,
+  "label": "image: the presets open as a popover with the field to save the form"
+ },
+ {
+  "shot": "image-presets"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "click": ".lab-shell .dock-rail"
+ },
+ {
+  "until": "document.querySelector('.lab-shell .dock-side .lab-help .pref-group')",
+  "timeout": 10,
+  "label": "image: the pipeline panel opens from its rail with its groups"
+ },
+ {
+  "shot": "image-pipeline"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/decision-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelectorAll('.dl-group').length === 2 && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')",
+  "timeout": 20,
+  "label": "decision: two cards and the model's facts as header pills"
+ },
+ {
+  "expect": "document.querySelector('.lab-form .dl-setcard.pref-group > .boxed') && document.querySelector('.lab-form .dl-questions.pref-group > .boxed') && document.querySelector('.dl-group .dl-matrix')",
+  "label": "decision: the cards are preference groups, a two-cell ask shows its matrix"
+ },
+ {
+  "shot": "decision-dark"
+ },
+ {
+  "click": ".lab-shell .dock-rail"
+ },
+ {
+  "until": "document.querySelector('.lab-shell .dock-side .dl-ref .caps')",
+  "timeout": 10,
+  "label": "decision: the reference panel opens with the model's facts"
+ },
+ {
+  "shot": "decision-reference"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/voice-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelectorAll('.vl-cand').length === 3",
+  "timeout": 20,
+  "label": "voices: the faked round shows its three candidates"
+ },
+ {
+  "expect": "document.querySelector('.lab-form textarea.lab-prompt-field.vl-text') && document.querySelector('.lab-form .vl-clone.pref-group > .boxed')",
+  "label": "voices: the sentence is a rounded field, the cloning check a group"
+ },
+ {
+  "click": ".lab-shell > .page-head .mp-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "type": "supertonic"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.lab-form textarea.vl-desc') && [...document.querySelectorAll('.lab-form .prow-title')].some(t => t.textContent.startsWith('First seed'))",
+  "timeout": 10,
+  "label": "voices: a model's facts (faked: a voice-design model) shape the form: its description and the first seed"
+ },
+ {
+  "shot": "voices-dark"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "until": "document.querySelector('.lab-form .pref-group .prow')",
+  "timeout": 20,
+  "label": "audio: the form is preference rows"
+ },
+ {
+  "shot": "audio-dark"
+ },
+ {
+  "click": ".lab-shell > .page-head .mp-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "type": "supertonic"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('supertonic') && document.querySelector('.lab-shell > .page-head .lp-btn') && [...document.querySelectorAll('.lab-form .pref-head h2')].some(h => h.textContent === 'Synthesis')",
+  "timeout": 10,
+  "label": "audio: a speech model's form: the text, the voice and synthesis groups, and the presets in the header"
+ },
+ {
+  "shot": "audio-tts"
+ },
+ {
+  "click": ".lab-shell .dock-rail"
+ },
+ {
+  "until": "document.querySelector('.lab-shell .dock-side .clip-list')",
+  "timeout": 10,
+  "label": "audio: the voice library opens from its rail"
+ },
+ {
+  "shot": "audio-library"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "click": ".lab-shell > .page-head .mp-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "type": "canary"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('canary') && document.querySelector('.lab-form .file-pick')",
+  "timeout": 10,
+  "label": "audio: a speech-to-text model's form picks its file from a row's button"
+ },
+ {
+  "shot": "audio-asr"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.lab-seg')).display !== 'none' && getComputedStyle(document.querySelector('.lab-results')).display === 'none'",
+  "label": "narrow: one column, the Form and Results toggle shows"
+ },
+ {
+  "click": ".lab-seg .seg-btn",
+  "nth": 1
+ },
+ {
+  "until": "getComputedStyle(document.querySelector('.lab-results')).display !== 'none' && getComputedStyle(document.querySelector('.lab-form')).display === 'none'",
+  "timeout": 5,
+  "label": "narrow: Results shows the history alone"
+ },
+ {
+  "shot": "audio-narrow-results"
+ },
+ {
+  "nav": "/decision-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelector('.dl-facts-btn') && getComputedStyle(document.querySelector('.dl-facts-btn')).display !== 'none'",
+  "timeout": 20,
+  "label": "narrow decision: the facts fold into the header's Facts button"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.lab-shell > .page-head .dl-facts-inline')).display === 'none' && document.querySelector('.lab-shell > .page-head').getBoundingClientRect().height <= 64",
+  "label": "narrow decision: the header keeps one line"
+ },
+ {
+  "click": ".dl-facts-btn"
+ },
+ {
+  "until": "document.querySelectorAll('.dl-facts-pop .dl-fact').length >= 5",
+  "timeout": 5,
+  "label": "narrow decision: Facts opens the pills in a popover"
+ },
+ {
+  "shot": "decision-narrow-facts"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/audio-lab"
+ },
+ {
+  "until": "document.querySelector('.lab-seg')",
+  "timeout": 20
+ },
+ {
+  "click": ".lab-seg .seg-btn",
+  "nth": 0
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'light'); 'light'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/image-lab?fake-lab=all"
+ },
+ {
+  "until": "document.documentElement.dataset.theme === 'light'",
+  "timeout": 10,
+  "label": "the light theme is on"
+ },
+ {
+  "until": "document.querySelectorAll('.il-group').length === 2",
+  "timeout": 20,
+  "label": "image (light): the cards"
+ },
+ {
+  "shot": "image-light"
+ },
+ {
+  "nav": "/decision-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelectorAll('.dl-group').length === 2",
+  "timeout": 20,
+  "label": "decision (light): the cards"
+ },
+ {
+  "shot": "decision-light"
+ },
+ {
+  "nav": "/voice-lab?fake-lab=all"
+ },
+ {
+  "until": "document.querySelectorAll('.vl-cand').length === 3",
+  "timeout": 20,
+  "label": "voices (light): the candidates"
+ },
+ {
+  "shot": "voices-light"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'dark'); sessionStorage.removeItem('lmgw.fake.lab'); 'back to dark, fake off'"
+ }
+]

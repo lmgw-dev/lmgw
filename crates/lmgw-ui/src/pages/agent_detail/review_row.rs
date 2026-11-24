@@ -58,7 +58,7 @@ pub(super) fn RunStrip(ctx: RunCtx) -> impl IntoView {
                 {head}
                 {move || {
                     run.result
-                        .with(|r| r.as_ref().and_then(|r| cost_text(r, &currency.get_value())))
+                        .with(|r| r.as_ref().and_then(|r| currency.with(|c| cost_text(r, c))))
                         .map(|c| {
                             let tip = c.clone();
                             view! { <span class="dim mono-sm run-cost" title=tip>{c}</span> }
@@ -232,11 +232,14 @@ pub(super) fn MountSummary(
     });
     view! {
         <Show when=move || declared.get()>
-            <div class="dim mono-sm" style="margin-top:10px">
-                <For each=move || lines.get() key=|l: &String| l.clone() let:line>
-                    <div>{line}</div>
-                </For>
-                <div>{KEEP_ID_NOTE}</div>
+            <div class="prow mount-summary">
+                <div class="prow-text">
+                    <span class="prow-title">"Mounts"</span>
+                    <For each=move || lines.get() key=|l: &String| l.clone() let:line>
+                        <span class="prow-sub mono-sm">{line}</span>
+                    </For>
+                    <span class="prow-sub">{KEEP_ID_NOTE}</span>
+                </div>
             </div>
         </Show>
     }
@@ -265,14 +268,17 @@ pub(super) fn ReviewHead(
                 // The wrapping column takes what the others leave. (No
                 // percentage here: a fixed table reads a `calc()` mixing one
                 // as `auto`.)
-                let style = match w.get(i).copied().unwrap_or(ColumnFit::Wrap) {
+                let fit = w.get(i).copied().unwrap_or(ColumnFit::Wrap);
+                let style = match fit {
                     ColumnFit::Fit(n) | ColumnFit::Clip(n) => {
                         Some(format!("width:calc({n}ch + 22px)"))
                     }
                     ColumnFit::Date => Some(format!("width:calc({DATE_WIDTH}ch + 22px)")),
                     ColumnFit::Wrap => None,
                 };
-                (c, style)
+                // A clipped column narrows further in a narrow review
+                // (app.css), so the one being read keeps room to wrap in.
+                (c, style, matches!(fit, ColumnFit::Clip(_)))
             })
             .collect::<Vec<_>>()
     });
@@ -296,7 +302,7 @@ pub(super) fn ReviewHead(
                 // Keyed on the width too: a run that brings longer values
                 // re-lays the column out.
                 <For each=move || columns.get() key=|c| c.clone() let:c>
-                    <th style=c.1>{c.0}</th>
+                    <th style=c.1 class:clip-col=c.2>{c.0}</th>
                 </For>
                 <For each=move || editable.get() key=|f| f.clone() let:f>
                     <th class="review-edit">{f}</th>

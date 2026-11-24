@@ -242,11 +242,12 @@ fn confirmation(from: &Saved, to: &Wanted, now: &DeviceListenerStatus) -> Vec<St
     }
     if moves && running {
         out.push(format!(
-            "This ends the device listener's {} open connection(s), {} request(s) in flight \
-             among them (feeds end), and its {} realtime session(s) or turn(s); device calls \
-             close as at a stop, and their UDP sockets move with it. The plain listener's \
-             connections are untouched.",
-            now.connections, now.requests, now.sessions
+            "This ends the device listener's {}, {} in flight among them (feeds end), and its \
+             {}; device calls close as at a stop, and their UDP sockets move with it. The plain \
+             listener's connections are untouched.",
+            crate::fmt::count_of(now.connections as usize, "open connections"),
+            crate::fmt::count_of(now.requests as usize, "requests"),
+            crate::fmt::count_of(now.sessions as usize, "realtime sessions"),
         ));
     }
     out
@@ -255,14 +256,14 @@ fn confirmation(from: &Saved, to: &Wanted, now: &DeviceListenerStatus) -> Vec<St
 /// The listener's state, in a line.
 fn state_line(s: &Option<DeviceListenerStatus>) -> (String, &'static str) {
     match s {
-        None => ("reading…".into(), "off"),
+        None => ("Reading…".into(), "off"),
         Some(s) => match s.state {
-            DeviceListenerState::Off => ("off".into(), "off"),
+            DeviceListenerState::Off => ("Off".into(), "off"),
             DeviceListenerState::Listening => {
                 let mut line = format!(
-                    "listening on {} · {} connection(s)",
+                    "Listening on {} · {}",
                     s.urls.join(" and "),
-                    s.connections
+                    crate::fmt::count_of(s.connections as usize, "connections")
                 );
                 // Where the bound on connections that have not authenticated
                 // bites, it shows.
@@ -276,7 +277,10 @@ fn state_line(s: &Option<DeviceListenerStatus>) -> (String, &'static str) {
                 (line, tone)
             }
             DeviceListenerState::Error => (
-                format!("not serving: {}", s.error.clone().unwrap_or_default()),
+                s.error
+                    .clone()
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or_else(|| "Not serving.".to_string()),
                 "warn",
             ),
         },
@@ -386,7 +390,7 @@ pub(super) fn ListenerPanel(page: Page, id: String, hidden: Signal<bool>) -> imp
                     prop:checked=move || on.get()
                     on:change=move |ev| on.set(event_target_checked(&ev))
                 />
-                " on"
+                "On"
             </label>
             <Select value=scope options=scopes/>
             <input
@@ -396,25 +400,29 @@ pub(super) fn ListenerPanel(page: Page, id: String, hidden: Signal<bool>) -> imp
                 prop:value=move || addr.get()
                 on:input=move |ev| addr.set(event_target_value(&ev))
             />
-            <span class="dim">"port"</span>
+            <span class="dim">"Port"</span>
             <input
-                class="input mono"
+                class="input mono set-port"
                 inputmode="numeric"
                 prop:value=move || port.get()
                 on:input=move |ev| port.set(event_target_value(&ev))
             />
-            <button
-                class="btn sm"
-                disabled=move || busy.get() || !changed.get()
-                title=move || match edit.get() {
-                    Err(e) => e,
-                    Ok(_) => "Asks first, then turns on, moves or stops the device listener".into(),
-                }
-                on:click=move |_| confirm.set(true)
-            >
-                {move || if busy.get() { "Working…" } else { "Apply…" }}
-            </button>
-            <span class="applies-now">"applies now"</span>
+            <span class="set-apply">
+                <button
+                    class="btn sm"
+                    disabled=move || busy.get() || !changed.get()
+                    title=move || match edit.get() {
+                        Err(e) => e,
+                        Ok(_) => {
+                            "Asks first, then turns on, moves or stops the device listener".into()
+                        }
+                    }
+                    on:click=move |_| confirm.set(true)
+                >
+                    {move || if busy.get() { "Working…" } else { "Apply…" }}
+                </button>
+                <span class="applies-now">"applies now"</span>
+            </span>
         </div>
         <Modal open=confirm title="Device listener">
             {move || {
@@ -467,8 +475,8 @@ mod tests {
         let text = confirmation(&running, &widened, &now(3)).join(" ");
         assert!(text.contains("every network address"), "{text}");
         assert!(text.contains("1025–65535"), "the exposure is named: {text}");
-        assert!(text.contains("3 open connection(s)"), "{text}");
-        assert!(text.contains("2 realtime session(s)"), "{text}");
+        assert!(text.contains("3 open connections"), "{text}");
+        assert!(text.contains("2 realtime sessions"), "{text}");
         assert!(text.contains("plain listener's"), "{text}");
 
         // Turned on where it was saved wide but off: the exposure is named.
@@ -493,7 +501,7 @@ mod tests {
         let stop = wanted(false, "loopback", "", "8788").unwrap();
         let text = confirmation(&running, &stop, &now(1)).join(" ");
         assert!(text.contains("turns off"), "{text}");
-        assert!(text.contains("1 open connection(s)"), "{text}");
+        assert!(text.contains("1 open connection"), "{text}");
     }
 
     #[test]

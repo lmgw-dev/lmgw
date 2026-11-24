@@ -20,7 +20,11 @@
 //!   sibling's admission cannot evict a stage that has just loaded, since a
 //!   claimed model is never a victim. If it does not, each of those stages
 //!   says `skipped: does_not_fit` with the sizes, and the group is warmed in
-//!   Background instead — into room there is, evicting nothing.
+//!   Background instead — into room there is, evicting nothing. On a
+//!   machine of several cards the check is the models placed in turn, each
+//!   on the card `place` gives it beside the ones before it and what other
+//!   programs hold there (device-ledger design §3.1, `place::in_turn`): a
+//!   group spread over several cards fits.
 //! - **A stage never waits on its own group** ([`super::kept`]). The check
 //!   works on estimates, which are lower bounds, and on the card as it was:
 //!   a stage still waiting for admission that cannot get room beside the
@@ -240,6 +244,7 @@ async fn does_not_fit(state: &SharedState, models: &[Warm]) -> Option<(GroupSize
         return None;
     }
     let mut seen: Vec<Target> = Vec::new();
+    let mut sized: Vec<(Target, crate::vram::Footprint)> = Vec::new();
     let mut parts = Vec::new();
     let mut total = 0u64;
     for m in models {
@@ -264,10 +269,17 @@ async fn does_not_fit(state: &SharedState, models: &[Warm]) -> Option<(GroupSize
             t.model_id,
             fmt_bytes(fp.total_bytes)
         ));
-        seen.push(t);
+        seen.push(t.clone());
+        sized.push((t, fp));
     }
     if seen.len() < 2 {
         return None;
+    }
+    // On a machine of several cards each model is placed in turn
+    // (device-ledger design §3.1): the group fits where every model finds a
+    // card, spread over several or not.
+    if let Some(g) = state.vram.place_group(state, &snap, &sized).await {
+        return on_cards(&g, &sized, &parts);
     }
     let room = state.vram.group_capacity(state, &snap).await?;
     let outside = room.outside.unwrap_or(0);
@@ -295,4 +307,63 @@ async fn does_not_fit(state: &SharedState, models: &[Warm]) -> Option<(GroupSize
         capacity_bytes: usable,
     };
     Some((sizes, message))
+}
+
+/// [`does_not_fit`] on a machine of several cards: `sized` placed in turn
+/// on the cards beside what is not lmgw's there now (`g`,
+/// `VramScheduler::place_group`); `None` where every model finds a card.
+/// `parts`: each model and its size, in words.
+fn on_cards(
+    g: &crate::vram::place::in_turn::GroupPlaced,
+    sized: &[(Target, crate::vram::Footprint)],
+    parts: &[String],
+) -> Option<(GroupSizes, String)> {
+    let (cards, placed) = (&g.cards, &g.now);
+    let short = placed.iter().position(|p| p.card.is_none())?;
+    let needed = sized
+        .iter()
+        .zip(placed)
+        .map(|((_, fp), p)| {
+            fp.total_bytes
+                .saturating_add(p.engine)
+                .saturating_add(p.keep)
+        })
+        .fold(0u64, u64::saturating_add);
+    let usable = cards.usable(true);
+    let beside: Vec<String> = sized
+        .iter()
+        .zip(placed)
+        .filter_map(|((t, _), p)| {
+            let on = p.label.as_ref()?;
+            Some(format!("{}/{} on {on}", t.class.as_str(), t.model_id))
+        })
+        .collect();
+    let (t, _) = &sized[short];
+    let outside = cards.outside_sum();
+    let held = if outside > 0 {
+        format!(", {} of them held outside lmgw now", fmt_bytes(outside))
+    } else {
+        String::new()
+    };
+    let message = format!(
+        "these models do not fit on the graphics cards together: {} — placed one by one, {}/{} \
+         finds no card with room{}; lmgw may use {} of the {} cards{held} — each is warmed only \
+         into room there is, evicting nothing, so they cannot evict each other",
+        parts.join(" + "),
+        t.class.as_str(),
+        t.model_id,
+        match beside.is_empty() {
+            true => String::new(),
+            false => format!(" beside {}", crate::vram::place::in_words(&beside)),
+        },
+        fmt_bytes(usable),
+        cards.devices.len(),
+    );
+    Some((
+        GroupSizes {
+            needed_bytes: needed,
+            capacity_bytes: usable,
+        },
+        message,
+    ))
 }

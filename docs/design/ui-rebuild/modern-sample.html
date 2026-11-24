@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<!-- lmgw: a mockup of the Models page in a modern desktop design language (macOS / libadwaita style).
+     Local file, open it directly; no network, the fonts are the system's.
+     App mode: inside the shell's own window frame (a debug build with LMGW_WINDOW_DEMO=1,
+     scripts/csd-spike.sh --demo) the fake desktop goes, the window fills the viewport, the real frame draws
+     the shadow, outline and corners, and the window buttons and headers drive the real window
+     (src-tauri/src/window_chrome.rs, the page's contract). -->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>lmgw: modern mockup</title>
+<style>
+:root {
+  --font: "Adwaita Sans", "Inter", "Noto Sans", system-ui, sans-serif;
+  --mono: "Adwaita Mono", "Noto Sans Mono", monospace;
+  --r-win: 14px;
+  --r-item: 8px;
+  --r-box: 12px;
+  --head-h: 48px;
+  --sidebar-w: 232px;
+  --list-w: 400px;
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+  --backdrop: radial-gradient(1200px 700px at 20% 10%, #24425f 0%, transparent 60%),
+              radial-gradient(1000px 800px at 90% 90%, #3a2b4d 0%, transparent 55%), #10151b;
+  --win-shadow: 0 0 0 1px rgba(0,0,0,.75), 0 18px 60px rgba(0,0,0,.55), 0 4px 14px rgba(0,0,0,.35);
+  --win-hilite: inset 0 0 0 1px rgba(255,255,255,.07);
+  --sidebar: #2a2d31;
+  --view: #1e2023;
+  --pane: #222428;
+  --card: #2c2f33;
+  --card-line: rgba(255,255,255,.06);
+  --hover: rgba(255,255,255,.055);
+  --select: rgba(255,255,255,.10);
+  --divider: rgba(255,255,255,.07);
+  --fg: #e9ebee;
+  --fg-2: #a6acb3;
+  --fg-3: #737a82;
+  --ctl: rgba(255,255,255,.08);
+  --ctl-hover: rgba(255,255,255,.13);
+  --field: rgba(255,255,255,.07);
+  --accent: #3daee9;
+  --accent-ink: #08131c;
+  --accent-soft: rgba(61,174,233,.18);
+  --focus: rgba(61,174,233,.55);
+  --ok: #4cc26b;
+  --warn: #e8a33d;
+  --err: #f0625a;
+  --popover: #33363b;
+  --pop-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 10px 30px rgba(0,0,0,.45);
+  --toast: #3a3d42;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --backdrop: radial-gradient(1200px 700px at 20% 10%, #b9d3ea 0%, transparent 60%),
+              radial-gradient(1000px 800px at 90% 90%, #d9cbe6 0%, transparent 55%), #e7ebef;
+  --win-shadow: 0 0 0 1px rgba(0,0,0,.14), 0 18px 60px rgba(20,30,40,.22), 0 4px 14px rgba(20,30,40,.10);
+  --win-hilite: none;
+  --sidebar: #ebecee;
+  --view: #ffffff;
+  --pane: #f7f8f9;
+  --card: #ffffff;
+  --card-line: rgba(0,0,0,.09);
+  --hover: rgba(0,0,0,.04);
+  --select: rgba(0,0,0,.075);
+  --divider: rgba(0,0,0,.08);
+  --fg: #1f2328;
+  --fg-2: #5e6670;
+  --fg-3: #8a929b;
+  --ctl: rgba(0,0,0,.06);
+  --ctl-hover: rgba(0,0,0,.10);
+  --field: rgba(0,0,0,.055);
+  --accent: #2b7bc0;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(43,123,192,.13);
+  --focus: rgba(43,123,192,.5);
+  --ok: #1f8a43;
+  --warn: #b5650d;
+  --err: #c63b32;
+  --popover: #ffffff;
+  --pop-shadow: 0 0 0 1px rgba(0,0,0,.10), 0 10px 30px rgba(20,30,40,.18);
+  --toast: #2b2e33;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--backdrop); font-family: var(--font); color: var(--fg);
+  font-size: 14px; line-height: 1.35; -webkit-font-smoothing: antialiased;
+  overflow: hidden; user-select: none; cursor: default;
+}
+button { font: inherit; color: inherit; border: 0; background: none; cursor: default; }
+input { font: inherit; color: inherit; }
+svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
+        stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- the window ---------- */
+.window {
+  position: absolute; inset: 44px 56px 64px 56px; display: flex; overflow: hidden;
+  border-radius: var(--r-win); box-shadow: var(--win-shadow); background: var(--view);
+  zoom: var(--scale, 1.25);
+}
+.window::after { content: ""; position: absolute; inset: 0; border-radius: inherit;
+                 box-shadow: var(--win-hilite); pointer-events: none; z-index: 50; }
+body.maximized .window { inset: 0; border-radius: 0; box-shadow: none; }
+body.maximized .window::after { display: none; }
+
+.headerbar { height: var(--head-h); flex: none; display: flex; align-items: center; gap: 6px;
+             padding: 0 8px; position: relative; z-index: 2; transition: box-shadow .15s; }
+.headerbar.scrolled { box-shadow: 0 1px 0 var(--divider); }
+.headerbar .title { font-weight: 600; font-size: 15px; }
+.headerbar .subtitle { font-size: 12px; color: var(--fg-2); }
+.spacer { flex: 1; }
+
+.icon-btn { width: 34px; height: 34px; border-radius: var(--r-item); display: grid; place-items: center;
+            color: var(--fg); }
+.icon-btn:hover { background: var(--hover); }
+.icon-btn:active { background: var(--select); }
+.icon-btn.on { background: var(--select); }
+
+.btn { height: 32px; padding: 0 12px; border-radius: var(--r-item); background: var(--ctl);
+       display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+.btn:hover { background: var(--ctl-hover); }
+.btn.flat { background: none; }
+.btn.flat:hover { background: var(--hover); }
+.btn.suggested { background: var(--accent); color: var(--accent-ink); }
+.btn.suggested:hover { filter: brightness(1.08); }
+.btn.destructive { color: var(--err); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* window controls, GNOME-style, on the right as KDE has them */
+.wctl { display: flex; gap: 10px; margin-left: 10px; padding-right: 4px; }
+.wctl button { width: 24px; height: 24px; border-radius: 50%; background: var(--ctl);
+               display: grid; place-items: center; }
+.wctl button:hover { background: var(--ctl-hover); }
+.wctl svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
+
+/* ---------- sidebar ---------- */
+.sidebar { width: var(--sidebar-w); flex: none; background: var(--sidebar); display: flex;
+           flex-direction: column; transition: margin-left .2s ease; }
+body.no-sidebar .sidebar { margin-left: calc(-1 * var(--sidebar-w)); }
+.sidebar .headerbar .title { flex: 1; text-align: center; }
+.nav { flex: 1; overflow-y: auto; padding: 2px 10px 10px; }
+.nav-label { font-size: 12px; font-weight: 600; color: var(--fg-3); padding: 14px 10px 4px; }
+.nav-item { width: 100%; height: 34px; display: flex; align-items: center; gap: 10px;
+            padding: 0 10px; border-radius: var(--r-item); text-align: left; }
+.nav-item svg.i { color: var(--fg-2); }
+.nav-item:hover { background: var(--hover); }
+.nav-item.sel { background: var(--select); font-weight: 500; }
+.nav-item.sel svg.i { color: var(--fg); }
+.nav-item .count { margin-left: auto; font-size: 12px; color: var(--fg-3); }
+.nav-item.child { padding-left: 36px; height: 30px; font-size: 13.5px; }
+.sidebar-foot { box-shadow: 0 -1px 0 var(--divider); padding: 12px 14px 14px; display: grid; gap: 10px; font-size: 12.5px; color: var(--fg-2); }
+.gpu-row { display: grid; gap: 6px; }
+.gpu-row .line { display: flex; justify-content: space-between; }
+.bar { height: 5px; border-radius: 3px; background: var(--ctl); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.foot-row { display: flex; align-items: center; justify-content: space-between; }
+.live { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---------- list pane ---------- */
+.main { flex: 1; display: flex; min-width: 0; background: var(--view); }
+.list-pane { width: var(--list-w); flex: none; display: flex; flex-direction: column; min-width: 280px; }
+.list-pane .headerbar { padding-left: 14px; }
+.list-pane .headtext { display: grid; line-height: 1.2; }
+.filter-btn { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-2); font-size: 12px;
+              padding: 1px 4px 1px 0; border-radius: 5px; }
+.filter-btn:hover { color: var(--fg); }
+.filter-btn svg.i { width: 12px; height: 12px; }
+.search { margin: 2px 12px 8px; height: 34px; border-radius: var(--r-item); background: var(--field);
+          display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--fg-2); }
+.search:focus-within { outline: 2px solid var(--focus); outline-offset: -1px; }
+.search input { flex: 1; border: 0; background: none; outline: none; min-width: 0; color: var(--fg); }
+.search input::placeholder { color: var(--fg-3); }
+.search .clear { display: none; width: 20px; height: 20px; border-radius: 50%; place-items: center; }
+.search.has .clear { display: grid; }
+.search .clear:hover { background: var(--hover); }
+.list { flex: 1; overflow-y: auto; padding: 0 8px 12px; outline: none; }
+.group-h { position: sticky; top: 0; background: var(--view); z-index: 1; font-size: 12px;
+           font-weight: 600; color: var(--fg-3); padding: 12px 10px 5px; display: flex; gap: 6px; }
+.group-h .n { font-weight: 400; }
+.row { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 8px 10px 9px;
+       border-radius: var(--r-item); }
+.row:hover { background: var(--hover); }
+.row.sel { background: var(--select); }
+.list:focus .row.sel { background: var(--accent-soft); }
+.list:focus-visible { outline: none; }
+.nav, .list, .inspector .scroll { scrollbar-width: thin; scrollbar-color: var(--ctl-hover) transparent; }
+.row .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .meta { grid-column: 1 / -1; font-size: 12.5px; color: var(--fg-2); overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+.row.off .name, .row.off .meta { color: var(--fg-3); }
+.state { font-size: 12px; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); flex: none; }
+.dot.run { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.dot.start { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.dot.stop { background: none; box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.dot.cloud { background: var(--accent); }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+.empty { padding: 40px 20px; text-align: center; color: var(--fg-3); }
+
+.handle { width: 1px; flex: none; background: var(--divider); position: relative; }
+.handle::before { content: ""; position: absolute; inset: 0 -4px; cursor: col-resize; z-index: 3; }
+body.dragging, body.dragging * { cursor: col-resize !important; }
+
+/* ---------- inspector ---------- */
+.inspector { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--pane); position: relative; }
+.inspector .scroll { flex: 1; overflow-y: auto; }
+.page { max-width: 660px; margin: 0 auto; padding: 8px 28px 96px; }
+.hero { display: flex; gap: 14px; align-items: flex-start; margin: 6px 0 22px; }
+.hero .glyph { width: 44px; height: 44px; border-radius: 11px; display: grid; place-items: center;
+               background: var(--accent-soft); color: var(--accent); flex: none; }
+.hero .glyph svg.i { width: 22px; height: 22px; }
+.hero h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; line-height: 1.2; word-break: break-all; }
+.hero .sub { color: var(--fg-2); font-size: 13px; }
+.hero .chips { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--ctl); color: var(--fg-2);
+        display: inline-flex; align-items: center; gap: 6px; }
+.chip.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.chip.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+
+.group { margin: 0 0 22px; break-inside: avoid; }
+/* a wide detail pane flows its groups into two columns instead of clamping to one */
+.inspector .scroll { container-type: inline-size; }
+@container (min-width: 1000px) {
+  .page.auto { max-width: 1180px; columns: 2; column-gap: 28px; }
+  .page.auto .hero { column-span: all; }
+}
+.group > h2 { font-size: 13px; font-weight: 600; margin: 0 0 7px 2px; }
+.group > p.desc { font-size: 12.5px; color: var(--fg-2); margin: -4px 0 8px 2px; }
+.box { background: var(--card); border-radius: var(--r-box); box-shadow: 0 0 0 1px var(--card-line); overflow: hidden; }
+[data-theme="light"] .box { box-shadow: 0 0 0 1px var(--card-line), 0 1px 2px rgba(0,0,0,.04); }
+.prow { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 8px 14px; }
+.prow + .prow { border-top: 1px solid var(--divider); }
+.prow .txt { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.prow .t { font-size: 14px; }
+.prow .s { font-size: 12.5px; color: var(--fg-2); }
+.prow.dirty .t::after { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                        background: var(--accent); margin-left: 7px; vertical-align: middle; }
+.prow.action { cursor: default; }
+.prow.action:hover { background: var(--hover); }
+.prow.danger .t { color: var(--err); }
+.prow .value { color: var(--fg-2); font-size: 13.5px; }
+
+/* switch */
+.switch { width: 42px; height: 24px; border-radius: 12px; background: var(--ctl-hover); position: relative;
+          flex: none; transition: background .15s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+                 border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: left .15s; }
+.switch.on { background: var(--accent); }
+.switch.on::after { left: 21px; }
+/* spin */
+.spin { display: flex; align-items: center; gap: 4px; }
+.spin input { width: 92px; height: 32px; border-radius: var(--r-item); border: 0; background: var(--field);
+              text-align: right; padding: 0 10px; font-variant-numeric: tabular-nums; outline: none; }
+.spin input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.spin .unit { color: var(--fg-3); font-size: 12.5px; width: 46px; }
+.spin .unit:empty { visibility: hidden; }
+.spin button { width: 30px; height: 30px; border-radius: 50%; background: var(--ctl); display: grid; place-items: center; }
+.spin button:hover { background: var(--ctl-hover); }
+.spin button svg.i { width: 13px; height: 13px; stroke-width: 2.2; }
+/* dropdown */
+.dd { height: 32px; padding: 0 8px 0 12px; border-radius: var(--r-item); display: inline-flex; align-items: center;
+      gap: 6px; color: var(--fg); max-width: 270px; }
+.dd:hover { background: var(--hover); }
+.dd span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd svg.i { width: 14px; height: 14px; color: var(--fg-2); }
+
+/* popover */
+.popover { position: fixed; z-index: 100; background: var(--popover); border-radius: 12px; box-shadow: var(--pop-shadow);
+           padding: 6px; min-width: 200px; display: none; zoom: var(--scale, 1.25); }
+.popover.open { display: block; animation: pop .12s ease-out; }
+@keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98) } }
+.popover button { width: 100%; height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px;
+                  border-radius: 7px; text-align: left; }
+.popover button:hover, .popover button.kb { background: var(--hover); }
+.popover button .chk { width: 16px; color: var(--accent); }
+.popover button .n { margin-left: auto; color: var(--fg-3); font-size: 12px; }
+.popover hr { border: 0; border-top: 1px solid var(--divider); margin: 5px 4px; }
+
+/* toast */
+.toast { position: absolute; left: 50%; bottom: 22px; transform: translate(-50%, 16px); opacity: 0;
+         pointer-events: none; transition: all .18s ease; background: var(--toast); color: #f1f3f5;
+         border-radius: 999px; padding: 6px 6px 6px 18px; display: flex; align-items: center; gap: 10px;
+         box-shadow: 0 6px 24px rgba(0,0,0,.35); font-size: 13.5px; white-space: nowrap; z-index: 5; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast .btn { height: 30px; border-radius: 999px; background: rgba(255,255,255,.1); color: #f1f3f5; }
+.toast .btn:hover { background: rgba(255,255,255,.17); }
+.toast .btn.suggested { background: var(--accent); color: var(--accent-ink); }
+.toast.plain { padding: 9px 18px; }
+
+/* ---------- mockup controls (not part of the design) ---------- */
+.mock { position: fixed; left: 14px; bottom: 12px; display: flex; gap: 14px; align-items: center; font: 12px/1 system-ui, sans-serif;
+        color: rgba(255,255,255,.85); background: rgba(0,0,0,.45); padding: 7px 10px; border-radius: 9px;
+        backdrop-filter: blur(8px); z-index: 200; }
+body.maximized .mock { opacity: .25; } body.maximized .mock:hover { opacity: 1; }
+
+/* ---------- app mode: inside the shell's own frame (html.csd, set by the shell) ---------- */
+html.csd, html.csd body { background: transparent; }
+html.csd .window { inset: 0; box-shadow: none;
+  /* the frame's radius is in window pixels; the window is zoomed */
+  border-radius: calc(var(--csd-radius, 17.5px) / var(--scale, 1.25)); }
+html.csd.maximized .window, html.csd.fullscreen .window, html.csd.tiled .window { border-radius: 0; }
+html.csd.maximized .window::after, html.csd.fullscreen .window::after { display: none; }
+.wctl:empty { display: none; }
+#wctl-start { margin-left: 0; margin-right: 6px; padding-left: 4px; padding-right: 0; }
+html.csd.inactive .wctl button { background: none; box-shadow: inset 0 0 0 1px var(--ctl-hover); }
+html.csd.inactive .headerbar .title { color: var(--fg-2); }
+/* the mockup's own controls stay, out of the way */
+html.csd .mock { left: auto; right: 14px; bottom: 12px; opacity: .2; transition: opacity .15s; }
+html.csd .mock:hover { opacity: 1; }
+html.csd .mock .m-win-only { display: none; }
+.mock label { display: inline-flex; gap: 5px; align-items: center; }
+.mock select { font: inherit; background: rgba(255,255,255,.12); color: inherit; border: 0; border-radius: 5px; padding: 3px 4px; }
+.mock select option { color: #000; }
+</style>
+</head>
+<body>
+
+<div class="window" id="win">
+  <!-- sidebar -->
+  <aside class="sidebar">
+    <div class="headerbar" data-window-header>
+      <div class="wctl" id="wctl-start"></div>
+      <button class="icon-btn" data-act="toggle-sidebar" title="Hide sidebar (F9)"><svg class="i"><use href="#i-panel"/></svg></button>
+      <div class="title">lmgw</div>
+      <button class="icon-btn" data-pop="app-menu" title="Main menu"><svg class="i"><use href="#i-menu"/></svg></button>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot">
+      <div class="gpu-row">
+        <div class="line"><span>GPU</span><span id="vram">18.6 of 24.0 GiB</span></div>
+        <div class="bar"><i id="vram-bar" style="width:77%"></i></div>
+      </div>
+      <div class="foot-row">
+        <span class="live"><span class="dot run"></span>Live · 2 running</span>
+        <span style="display:flex;align-items:center;gap:8px">Hold <button class="switch" id="hold" aria-label="GPU hold"></button></span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- content -->
+  <section class="main">
+    <div class="list-pane">
+      <div class="headerbar" id="list-head" data-window-header>
+        <button class="icon-btn" data-act="toggle-sidebar" id="sb-show" title="Show sidebar (F9)" style="display:none"><svg class="i"><use href="#i-panel"/></svg></button>
+        <div class="headtext">
+          <span class="title">Models</span>
+          <button class="filter-btn" data-pop="filter-menu"><span id="filter-label">All classes · 31</span><svg class="i"><use href="#i-down"/></svg></button>
+        </div>
+        <div class="spacer"></div>
+        <button class="icon-btn" title="Downloads"><svg class="i"><use href="#i-download"/></svg></button>
+        <button class="icon-btn" data-pop="add-menu" title="Add a model"><svg class="i"><use href="#i-plus"/></svg></button>
+      </div>
+      <label class="search" id="search">
+        <svg class="i"><use href="#i-search"/></svg>
+        <input id="q" placeholder="Search models" spellcheck="false">
+        <button class="clear" data-act="clear-search" title="Clear"><svg class="i" style="width:12px;height:12px"><use href="#i-x"/></svg></button>
+      </label>
+      <div class="list" id="list" tabindex="0"></div>
+    </div>
+
+    <div class="handle" id="handle"></div>
+
+    <div class="inspector">
+      <div class="headerbar" id="insp-head" data-window-header>
+        <div class="spacer"></div>
+        <span id="head-actions" style="display:flex;gap:6px"></span>
+        <button class="icon-btn" data-pop="row-menu" title="More"><svg class="i"><use href="#i-more"/></svg></button>
+        <div class="wctl" id="wctl-end">
+          <button title="Minimize"><svg class="i"><use href="#i-min"/></svg></button>
+          <button title="Maximize" data-act="maximize"><svg class="i"><use href="#i-max"/></svg></button>
+          <button title="Close"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+      </div>
+      <div class="scroll" id="insp-scroll"><div class="page auto" id="page"></div></div>
+      <div class="toast" id="toast"></div>
+    </div>
+  </section>
+</div>
+
+<!-- popovers -->
+<div class="popover" id="filter-menu"></div>
+<div class="popover" id="add-menu">
+  <button><span class="chk"></span>Find a model…</button>
+  <button><span class="chk"></span>Local chat model from a file…</button>
+  <button><span class="chk"></span>Cloud alias…</button>
+  <button><span class="chk"></span>Candidate alias…</button>
+</div>
+<div class="popover" id="app-menu">
+  <button><span class="chk"></span>Open in browser</button>
+  <button><span class="chk"></span>Keyboard shortcuts</button>
+  <hr>
+  <button><span class="chk"></span>About lmgw</button>
+  <button><span class="chk"></span>Quit</button>
+</div>
+<div class="popover" id="row-menu">
+  <button><span class="chk"></span>Test</button>
+  <button><span class="chk"></span>Duplicate</button>
+  <button><span class="chk"></span>Show file in folder</button>
+  <hr>
+  <button style="color:var(--err)"><span class="chk"></span>Delete…</button>
+</div>
+<div class="popover" id="dd-menu"></div>
+
+<div class="mock">
+  <label>Theme <select id="m-theme"><option>dark</option><option>light</option></select></label>
+  <label>Font <select id="m-font">
+    <option value='"Adwaita Sans", "Inter", sans-serif'>Adwaita Sans</option>
+    <option value='"Inter", sans-serif'>Inter</option>
+    <option value='"Noto Sans", sans-serif'>Noto Sans</option>
+  </select></label>
+  <label>Scale <select id="m-scale"><option value="1.25">125 %</option><option value="1">100 %</option></select></label>
+  <label>Detail <select id="m-detail"><option value="auto">two columns when wide</option><option value="clamp">one column</option></select></label>
+  <label class="m-win-only">Window <select id="m-win"><option value="float">floating</option><option value="max">maximized</option></select></label>
+</div>
+
+<!-- symbolic icons (Lucide-style strokes) -->
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.5-4.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></symbol>
+  <symbol id="i-min" viewBox="0 0 24 24"><path d="M6 12.5h12"/></symbol>
+  <symbol id="i-max" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5.5" r=".9"/><circle cx="12" cy="12" r=".9"/><circle cx="12" cy="18.5" r=".9"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5.5v13l11-6.5z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/></symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3h5M10.5 3v6.2L5.2 18.4A1.8 1.8 0 0 0 6.8 21h10.4a1.8 1.8 0 0 0 1.6-2.6L13.5 9.2V3M7.5 15h9"/></symbol>
+  <symbol id="i-dash" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="9" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="5" rx="1.5"/><rect x="13.5" y="11.5" width="7" height="9" rx="1.5"/><rect x="3.5" y="15.5" width="7" height="5" rx="1.5"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 14.5a2 2 0 0 1-2 2H8l-4 3.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4.5M9 13.5v1.5M15 13.5v1.5"/><circle cx="12" cy="3.8" r=".8"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 4.5-9 4.5-9-4.5z"/><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M4.5 19.5h15"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M3 5h5.5A3.5 3.5 0 0 1 12 8.5V20a2.5 2.5 0 0 0-2.5-2.5H3zM21 5h-5.5A3.5 3.5 0 0 0 12 8.5V20a2.5 2.5 0 0 1 2.5-2.5H21z"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="8" ry="2.8"/><path d="M4 5.5v13c0 1.5 3.6 2.8 8 2.8s8-1.3 8-2.8v-13M4 12c0 1.5 3.6 2.8 8 2.8s8-1.3 8-2.8"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0zM12 17v4"/></symbol>
+  <symbol id="i-net" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M6 16v-2.5h12V16"/></symbol>
+  <symbol id="i-braces" viewBox="0 0 24 24"><path d="M8 3.5H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2.5 2 2 0 0 1 2 2.5v4a2 2 0 0 0 2 2h1M16 3.5h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2.5 2 2 0 0 0-2 2.5v4a2 2 0 0 1-2 2h-1"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M21 12h-4l-3 8-4-16-3 8H3"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16M8.5 16v-4M13 16V8M17.5 16v-6"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8.3 6H15a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h6.7"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx=".8"/><path d="M9 2.5V5M15 2.5V5M9 19v2.5M15 19v2.5M2.5 9H5M2.5 15H5M19 9h2.5M19 15h2.5"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5a4.5 4.5 0 0 1-.6-9 6 6 0 0 1 11.4 1.6A3.8 3.8 0 0 1 17.5 18.5z"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h1.5M7 8v8M10.5 5v14M14 9v6M17.5 7v10M21 12h-1"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/></symbol>
+  <symbol id="i-split" viewBox="0 0 24 24"><path d="M12 21v-7l-6-6M12 14l6-6M4 4h4v4M20 4h-4v4"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M3 7h4l10 10h4M3 17h4l3-3M14 10l3-3h4M18.5 4.5 21 7l-2.5 2.5M18.5 14.5 21 17l-2.5 2.5"/></symbol>
+</svg>
+
+<script>
+// ---------------- data (made up for the mockup) ----------------
+const CLASSES = [
+  { id: "chat", label: "Local chat", icon: "i-chat" },
+  { id: "aux", label: "Embeddings, rerank and decisions", short: "Aux", icon: "i-split" },
+  { id: "audio", label: "Audio", icon: "i-wave" },
+  { id: "image", label: "Image", icon: "i-image" },
+  { id: "alias", label: "Cloud aliases", icon: "i-cloud" },
+  { id: "cand", label: "Candidate aliases", icon: "i-shuffle" },
+];
+const M = [
+  ["chat","qwen3.8-flash-next","Qwen3.8-Flash-Next-Q4_K_M.gguf",18.6,262144,131072,"run",{tps:94}],
+  ["chat","gemma-4-12b","gemma-4-12b-it-Q6_K.gguf",9.8,131072,65536,"stop"],
+  ["chat","gemma-4-27b","gemma-4-27b-it-UD-Q4_K_XL.gguf",16.4,131072,32768,"stop"],
+  ["chat","deepseek-v4-flash","DeepSeek-V4-Flash-IQ2_XXS.gguf",61.2,163840,32768,"stop",{note:"MoE experts on the CPU"}],
+  ["chat","glm-4.7-air","GLM-4.7-Air-Q3_K_M.gguf",52.1,131072,16384,"stop"],
+  ["chat","mistral-small-4","Mistral-Small-4-24B-Q5_K_M.gguf",15.9,131072,65536,"stop"],
+  ["chat","qwen3.8-coder-30b","Qwen3.8-Coder-30B-A3B-Q4_K_M.gguf",17.3,262144,65536,"stop"],
+  ["chat","phi-5-mini","phi-5-mini-instruct-Q8_0.gguf",4.1,131072,131072,"stop"],
+  ["chat","llama-4-scout","Llama-4-Scout-17B-16E-IQ3_M.gguf",44.0,262144,16384,"off"],
+  ["chat","smollm4-3b","SmolLM4-3B-Q8_0.gguf",3.2,65536,65536,"off"],
+  ["aux","embed/bge-m3","bge-m3-Q8_0.gguf",0.6,8192,8192,"run",{kind:"Embeddings"}],
+  ["aux","embed/qwen3-embedding-4b","Qwen3-Embedding-4B-Q8_0.gguf",4.3,32768,8192,"stop",{kind:"Embeddings"}],
+  ["aux","embed/bge-reranker-v2","bge-reranker-v2-m3-Q8_0.gguf",0.6,8192,8192,"stop",{kind:"Rerank"}],
+  ["aux","decide/route-small","route-small-Q8_0.gguf",0.3,4096,4096,"stop",{kind:"Decision · CPU"}],
+  ["audio","parakeet-tdt-0.6b","parakeet-tdt-0.6b-v3",0,0,0,"run",{kind:"Speech to text · CPU"}],
+  ["audio","supertonic-2","supertonic-2",0,0,0,"stop",{kind:"Text to speech · CUDA"}],
+  ["audio","whisper-large-v3-turbo","whisper-large-v3-turbo",0,0,0,"stop",{kind:"Speech to text · CUDA"}],
+  ["audio","kokoro-82m","kokoro-82m-v1.1",0,0,0,"off",{kind:"Text to speech · CPU"}],
+  ["image","flux-2-klein","flux-2-klein-Q8_0.gguf",11.7,0,0,"stop",{kind:"Text to image"}],
+  ["image","sdxl-turbo","sd_xl_turbo_1.0_fp16.safetensors",6.5,0,0,"stop",{kind:"Text to image"}],
+  ["image","qwen-image-edit","Qwen-Image-Edit-Q4_K_M.gguf",12.9,0,0,"off",{kind:"Image editing"}],
+  ["alias","anthropic/claude-sonnet-5-5","claude-sonnet-5-5",0,0,0,"cloud",{up:"Anthropic"}],
+  ["alias","anthropic/claude-opus-5-5","claude-opus-5-5",0,0,0,"cloud",{up:"Anthropic"}],
+  ["alias","openai/gpt-5.5","gpt-5.5",0,0,0,"cloud",{up:"OpenAI"}],
+  ["alias","openai/gpt-5.5-mini","gpt-5.5-mini",0,0,0,"cloud",{up:"OpenAI"}],
+  ["alias","gemini/gemini-3-pro","gemini-3-pro",0,0,0,"cloud",{up:"Gemini"}],
+  ["alias","gemini/gemini-3-flash","gemini-3-flash",0,0,0,"cloud",{up:"Gemini"}],
+  ["alias","openrouter/kimi-k3","moonshotai/kimi-k3",0,0,0,"off",{up:"OpenRouter"}],
+  ["cand","fast","qwen3.8-flash-next → gemini/gemini-3-flash",0,0,0,"cloud",{}],
+  ["cand","smart","anthropic/claude-opus-5-5 → openai/gpt-5.5",0,0,0,"cloud",{}],
+  ["cand","vision","gemma-4-27b → gemini/gemini-3-pro",0,0,0,"cloud",{}],
+].map(([cls,name,file,gib,trained,ctx,state,x],i)=>({id:i,cls,name,file,gib,trained,ctx,state,...(x||{}),
+  enabled: state!=="off", listed: true, warm: name==="qwen3.8-flash-next", idle: 900, parallel: 1,
+  ngl: "All layers", fa: "Auto", ctk: "q8_0", fallback: cls==="chat" ? "anthropic/claude-sonnet-5-5" : "None"}));
+
+const NAV = [
+  [null, [["Overview","i-dash"]]],
+  ["Use", [["Chat","i-chat"],["Labs","i-flask"],["Agents","i-bot"]]],
+  ["Models", [["Models","i-layers",31],["Engines","i-box"],["Docs","i-book"],["Knowledge","i-db"]]],
+  ["Connect", [["Upstreams","i-plug"],["MCP servers","i-net"],["API reference","i-braces"]]],
+  ["Observe", [["Traffic","i-activity"],["Usage","i-chart"],["Wiring","i-route"]]],
+  [null, [["Settings","i-sliders"]]],
+];
+
+// ---------------- state ----------------
+const S = { filter: "all", q: "", sel: 0, dirty: {}, saved: {} };
+const $ = s => document.querySelector(s);
+const ico = (id, st="") => `<svg class="i" ${st}><use href="#${id}"/></svg>`;
+const fmtN = n => n.toLocaleString("en-US");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function stateOf(m) {
+  if (!m.enabled) return ["off", "Disabled"];
+  return { run: ["run","Running"], start: ["start","Starting"], stop: ["stop","Stopped"], cloud: ["cloud","Ready"] }[m.state] || ["stop","Stopped"];
+}
+function metaOf(m) {
+  switch (m.cls) {
+    case "chat": { const q = (m.file.match(/(UD-)?(I?Q\d\w*|F16|BF16|Q8_0)/i)||[""])[0];
+      return [q, m.gib.toFixed(1)+" GiB", fmtN(m.ctx)+" context", m.note].filter(Boolean).join(" · "); }
+    case "aux": return [m.kind, m.gib.toFixed(1)+" GiB"].join(" · ");
+    case "audio": return m.kind;
+    case "image": return [m.kind, m.gib.toFixed(1)+" GiB"].join(" · ");
+    case "alias": return m.up + " · " + m.file;
+    case "cand": return m.file;
+  }
+}
+
+// ---------------- nav ----------------
+function renderNav() {
+  let h = "";
+  for (const [label, items] of NAV) {
+    if (label) h += `<div class="nav-label">${label}</div>`; else if (h) h += `<div style="height:10px"></div>`;
+    for (const [name, icon, n] of items) {
+      h += `<button class="nav-item ${name==="Models"?"sel":""}">${ico(icon)}<span>${name}</span>${n?`<span class="count">${n}</span>`:""}</button>`;
+      if (name === "Models") h += `<button class="nav-item child">Downloads<span class="count">1</span></button>`;
+    }
+  }
+  $("#nav").innerHTML = h;
+}
+
+// ---------------- list ----------------
+function visible() {
+  const words = S.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return M.filter(m => (S.filter === "all" || (S.filter === "running" ? m.state === "run" && m.enabled : m.cls === S.filter))
+    && words.every(w => (m.name + " " + m.file + " " + (m.up||"") + " " + (m.kind||"")).toLowerCase().includes(w)));
+}
+function renderList() {
+  const vis = visible();
+  if (!vis.some(m => m.id === S.sel) && vis.length) S.sel = vis[0].id;
+  let h = "";
+  for (const c of CLASSES) {
+    const rows = vis.filter(m => m.cls === c.id);
+    if (!rows.length) continue;
+    h += `<div class="group-h">${c.label}<span class="n">${rows.length}</span></div>`;
+    for (const m of rows) {
+      const [dot, label] = stateOf(m);
+      h += `<div class="row ${m.id===S.sel?"sel":""} ${m.enabled?"":"off"}" data-id="${m.id}">
+        <div class="name">${esc(m.name)}</div>
+        <div class="state"><span class="dot ${dot}"></span>${label}</div>
+        <div class="meta">${esc(metaOf(m))}</div></div>`;
+    }
+  }
+  $("#list").innerHTML = h || `<div class="empty">No models match “${esc(S.q)}”</div>`;
+  const f = S.filter === "all" ? "All classes" : S.filter === "running" ? "Running" : CLASSES.find(c=>c.id===S.filter).label;
+  $("#filter-label").textContent = `${f} · ${vis.length}`;
+  $("#search").classList.toggle("has", !!S.q);
+  renderInspector();
+}
+function scrollSelIntoView() {
+  const el = $(`.row[data-id="${S.sel}"]`); if (el) el.scrollIntoView({ block: "nearest" });
+}
+
+// ---------------- inspector ----------------
+const cur = () => M.find(m => m.id === S.sel);
+const val = (m, k) => (S.dirty[m.id] && k in S.dirty[m.id]) ? S.dirty[m.id][k] : m[k];
+const isDirty = (m, k) => S.dirty[m.id] && k in S.dirty[m.id];
+
+function sw(m, k, t, s) {
+  return `<div class="prow ${isDirty(m,k)?"dirty":""}"><div class="txt"><span class="t">${t}</span>${s?`<span class="s">${s}</span>`:""}</div>
+    <button class="switch ${val(m,k)?"on":""}" data-sw="${k}" role="switch" aria-checked="${!!val(m,k)}"></button></div>`;
+}
+function spin(m, k, t, s, unit, step) {
+  return `<div class="prow ${isDirty(m,k)?"dirty":""}"><div class="txt"><span class="t">${t}</span>${s?`<span class="s">${s}</span>`:""}</div>
+    <div class="spin"><input value="${fmtN(val(m,k))}" data-spin="${k}" inputmode="numeric"><span class="unit">${unit}</span>
+    <button data-step="${k}" data-d="-${step}">${ico("i-minus")}</button><button data-step="${k}" data-d="${step}">${ico("i-plus")}</button></div></div>`;
+}
+function dd(m, k, t, s, opts) {
+  return `<div class="prow ${isDirty(m,k)?"dirty":""}"><div class="txt"><span class="t">${t}</span>${s?`<span class="s">${s}</span>`:""}</div>
+    <button class="dd" data-dd="${k}" data-opts="${esc(JSON.stringify(opts))}"><span>${esc(val(m,k))}</span>${ico("i-down")}</button></div>`;
+}
+function info(t, v) { return `<div class="prow"><div class="txt"><span class="t">${t}</span></div><span class="value">${esc(v)}</span></div>`; }
+const group = (title, body, desc) => `<div class="group"><h2>${title}</h2>${desc?`<p class="desc">${desc}</p>`:""}<div class="box">${body}</div></div>`;
+
+function renderInspector() {
+  const m = cur();
+  if (!m) { $("#page").innerHTML = `<div class="empty" style="padding-top:120px">Nothing selected</div>`; $("#head-actions").innerHTML = ""; return; }
+  const c = CLASSES.find(c => c.id === m.cls);
+  const [dot, label] = stateOf(m);
+  const local = !["alias","cand"].includes(m.cls);
+  // header actions
+  let a = "";
+  if (local && m.enabled) a += m.state === "run"
+    ? `<button class="btn flat" data-act="stop">${ico("i-stop")}Stop</button>`
+    : `<button class="btn flat" data-act="start">${ico("i-play")}Start</button>`;
+  a += `<button class="btn">Test</button>`;
+  $("#head-actions").innerHTML = a;
+
+  const chips = [];
+  if (m.state === "run" && m.enabled) chips.push(`<span class="chip ok"><span class="dot run" style="box-shadow:none"></span>Running${m.gib?` · ${m.gib.toFixed(1)} GiB VRAM`:""}${m.tps?` · ${m.tps} tok/s`:""}</span>`);
+  else if (m.state === "start") chips.push(`<span class="chip warn"><span class="dot start"></span>Starting</span>`);
+  else chips.push(`<span class="chip"><span class="dot ${dot}"></span>${label}</span>`);
+  if (m.cls === "chat") chips.push(`<span class="chip">Vision</span>`, `<span class="chip">Tools</span>`, `<span class="chip">Reasoning</span>`);
+  if (m.cls === "alias") chips.push(`<span class="chip">${m.up}</span>`);
+
+  let h = `<div class="hero"><div class="glyph">${ico(c.icon)}</div><div style="min-width:0">
+    <h1>${esc(m.name)}</h1><div class="sub">${esc(m.cls==="alias"?`${m.up} model ${m.file}`:m.cls==="cand"?m.file:m.file)}</div>
+    <div class="chips">${chips.join("")}</div></div></div>`;
+
+  if (m.cls === "chat") {
+    h += group("General",
+      sw(m,"enabled","Enabled","Serves requests for this model") +
+      sw(m,"listed","Listed","Shows up in /v1/models") +
+      sw(m,"warm","Warm start","Loads when lmgw starts") +
+      spin(m,"idle","Unload when idle","Frees the GPU after this long without requests","s",60));
+    h += group("Context",
+      spin(m,"ctx","Context size",`Trained for ${fmtN(m.trained)} tokens`,"tokens",4096) +
+      spin(m,"parallel","Parallel slots","Each slot gets the full context","",1),
+      "The largest context that fits next to the weights is filled in when the model is planned.");
+    h += group("GPU",
+      dd(m,"ngl","GPU layers","Layers kept in VRAM",["All layers","Fit to free VRAM","48","32","0 (CPU only)"]) +
+      dd(m,"fa","Flash attention","",["Auto","On","Off"]) +
+      dd(m,"ctk","K cache type","Smaller types fit more context",["f16","q8_0","q4_0"]));
+    h += group("Fallback",
+      dd(m,"fallback","Fallback","Answers while the GPU hold is on",["None","anthropic/claude-sonnet-5-5","openai/gpt-5.5-mini","gemini/gemini-3-flash"]));
+    h += group("File", info("Path", "models/" + m.file) + info("Size", m.gib.toFixed(1) + " GiB") +
+      `<div class="prow action"><div class="txt"><span class="t">Show in folder</span></div></div>`);
+  } else if (m.cls === "alias") {
+    h += group("General", sw(m,"enabled","Enabled","") + sw(m,"listed","Listed","Shows up in /v1/models"));
+    h += group("Upstream", info("Provider", m.up) + info("Model", m.file) + info("Price", "per the price list"));
+    h += group("Fallback", dd(m,"fallback","Fallback","Answers when the upstream fails",["None","qwen3.8-flash-next","openai/gpt-5.5-mini"]),
+      "An alias without a fallback never leaves its upstream.");
+  } else if (m.cls === "cand") {
+    h += group("General", sw(m,"enabled","Enabled",""));
+    h += group("Candidates", m.file.split(" → ").map((x,i)=>info(i?"Alternate":"Primary", x)).join(""));
+  } else {
+    h += group("General", sw(m,"enabled","Enabled","") + spin(m,"idle","Unload when idle","","s",60));
+    h += group("Details", info("Kind", m.kind) + info("Files", m.file) + (m.gib?info("Size", m.gib.toFixed(1)+" GiB"):""));
+  }
+  h += `<div class="group"><div class="box"><div class="prow action danger"><div class="txt"><span class="t">Delete model…</span>
+        <span class="s">Removes the row; the file stays on disk</span></div></div></div></div>`;
+  $("#page").innerHTML = h;
+  updateToast();
+}
+
+// ---------------- edits ----------------
+function setVal(k, v) {
+  const m = cur(); S.dirty[m.id] = S.dirty[m.id] || {};
+  if (v === m[k]) delete S.dirty[m.id][k]; else S.dirty[m.id][k] = v;
+  if (!Object.keys(S.dirty[m.id]).length) delete S.dirty[m.id];
+  renderInspector();
+}
+let toastTimer;
+function updateToast(msg) {
+  const t = $("#toast"); clearTimeout(toastTimer);
+  if (msg) { t.className = "toast show plain"; t.textContent = msg; toastTimer = setTimeout(() => updateToast(), 1800); return; }
+  const n = Object.values(S.dirty).reduce((a, d) => a + Object.keys(d).length, 0);
+  if (!n) { t.className = "toast"; return; }
+  t.className = "toast show";
+  t.innerHTML = `<span>${n} unsaved change${n>1?"s":""}</span><button class="btn" data-act="discard">Discard</button><button class="btn suggested" data-act="save">Save</button>`;
+}
+function save() {
+  if (!Object.keys(S.dirty).length) return;
+  for (const [id, d] of Object.entries(S.dirty)) Object.assign(M.find(m => m.id == id), d);
+  S.dirty = {}; renderList(); updateToast("Saved");
+}
+
+// ---------------- popovers ----------------
+let openPop = null;
+function closePop() { if (openPop) { openPop.classList.remove("open"); openPop = null; } }
+function showPop(id, anchor, alignRight) {
+  closePop();
+  const p = $("#" + id); p.classList.add("open"); openPop = p;
+  const sc = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--scale")) || 1.25;
+  const r = anchor.getBoundingClientRect(); const pr = p.getBoundingClientRect();
+  // anchor rect is in zoomed page px; the popover's own zoom divides its left/top
+  let left = alignRight ? r.right - pr.width : r.left;
+  left = Math.max(8, Math.min(left, innerWidth - pr.width - 8));
+  p.style.left = left / sc + "px"; p.style.top = (r.bottom + 4) / sc + "px";
+}
+function filterMenu() {
+  const items = [["all","All classes",M.length],["running","Running",M.filter(m=>m.state==="run"&&m.enabled).length],null,
+    ...CLASSES.map(c=>[c.id,c.label,M.filter(m=>m.cls===c.id).length])];
+  $("#filter-menu").innerHTML = items.map(x => x ? `<button data-filter="${x[0]}"><span class="chk">${S.filter===x[0]?ico("i-check"):""}</span>${x[1]}<span class="n">${x[2]}</span></button>` : "<hr>").join("");
+}
+
+// ---------------- events ----------------
+document.addEventListener("click", e => {
+  const t = e.target.closest("button, .row, [data-pop]");
+  if (!t) { closePop(); return; }
+  if (t.dataset.pop) { const id = t.dataset.pop; if (openPop && openPop.id === id) return closePop();
+    if (id === "filter-menu") filterMenu(); return showPop(id, t, id !== "filter-menu"); }
+  if (openPop && openPop.contains(t)) {
+    if (t.dataset.filter) { S.filter = t.dataset.filter; renderList(); }
+    if (t.dataset.opt !== undefined) setVal(openPop.dataset.key, t.dataset.opt);
+    return closePop();
+  }
+  closePop();
+  if (t.classList.contains("row")) { S.sel = +t.dataset.id; renderList(); $("#list").focus({preventScroll:true}); return; }
+  if (t.dataset.sw) return setVal(t.dataset.sw, !val(cur(), t.dataset.sw));
+  if (t.dataset.step) { const k = t.dataset.step; return setVal(k, Math.max(0, val(cur(), k) + +t.dataset.d)); }
+  if (t.dataset.dd) { const m = cur(), k = t.dataset.dd, opts = JSON.parse(t.dataset.opts), p = $("#dd-menu");
+    p.dataset.key = k; p.innerHTML = opts.map(o => `<button data-opt="${esc(o)}"><span class="chk">${val(m,k)===o?ico("i-check"):""}</span>${esc(o)}</button>`).join("");
+    return showPop("dd-menu", t, true); }
+  if (t.id === "hold") { t.classList.toggle("on"); return updateToast(t.classList.contains("on") ? "GPU hold on: local models paused" : "GPU hold off"); }
+  switch (t.dataset.act) {
+    case "toggle-sidebar": document.body.classList.toggle("no-sidebar"); syncSidebarBtn(); break;
+    case "clear-search": e.preventDefault(); $("#q").value = ""; S.q = ""; renderList(); $("#q").focus(); break;
+    case "save": save(); break;
+    case "discard": S.dirty = {}; renderInspector(); break;
+    case "maximize": $("#m-win").value = document.body.classList.toggle("maximized") ? "max" : "float"; break;
+    case "start": { const m = cur(); m.state = "start"; renderList(); setTimeout(() => { m.state = "run"; renderList(); }, 1600); break; }
+    case "stop": cur().state = "stop"; renderList(); break;
+  }
+});
+document.addEventListener("change", e => {
+  if (e.target.dataset.spin) { const n = parseInt(e.target.value.replace(/\D/g, ""), 10); if (!isNaN(n)) setVal(e.target.dataset.spin, n); else renderInspector(); }
+});
+$("#q").addEventListener("input", e => { S.q = e.target.value; renderList(); });
+$("#list").addEventListener("scroll", e => $("#list-head").classList.toggle("scrolled", e.target.scrollTop > 0));
+$("#insp-scroll").addEventListener("scroll", e => $("#insp-head").classList.toggle("scrolled", e.target.scrollTop > 0));
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey && e.key === "f") || (e.key === "/" && document.activeElement.tagName !== "INPUT")) { e.preventDefault(); $("#q").focus(); $("#q").select(); return; }
+  if (e.ctrlKey && e.key === "s") { e.preventDefault(); save(); return; }
+  if (e.key === "F9") { e.preventDefault(); document.body.classList.toggle("no-sidebar"); syncSidebarBtn(); return; }
+  if (e.key === "Escape") { if (openPop) return closePop(); if (document.activeElement === $("#q")) { if (S.q) { $("#q").value = ""; S.q = ""; renderList(); } else $("#list").focus(); } return; }
+  const inList = document.activeElement === $("#list") || document.activeElement === $("#q");
+  if (inList && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault(); const vis = visible(); const order = CLASSES.flatMap(c => vis.filter(m => m.cls === c.id));
+    const i = order.findIndex(m => m.id === S.sel); const n = order[Math.max(0, Math.min(order.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+    if (n) { S.sel = n.id; renderList(); scrollSelIntoView(); }
+    if (document.activeElement === $("#q")) $("#list").focus({preventScroll:true});
+  }
+});
+function syncSidebarBtn() { $("#sb-show").style.display = document.body.classList.contains("no-sidebar") ? "grid" : "none"; }
+
+// resizable list pane
+$("#handle").addEventListener("pointerdown", e => {
+  const sc = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--scale")) || 1.25;
+  const start = e.clientX, w0 = $(".list-pane").getBoundingClientRect().width / sc;
+  document.body.classList.add("dragging");
+  const mv = ev => document.documentElement.style.setProperty("--list-w", Math.max(280, Math.min(640, w0 + (ev.clientX - start) / sc)) + "px");
+  const up = () => { document.body.classList.remove("dragging"); removeEventListener("pointermove", mv); removeEventListener("pointerup", up); };
+  addEventListener("pointermove", mv); addEventListener("pointerup", up);
+});
+
+// mockup controls
+const setScale = v => document.documentElement.style.setProperty("--scale", v);
+$("#m-theme").onchange = e => document.documentElement.dataset.theme = e.target.value;
+$("#m-font").onchange = e => document.documentElement.style.setProperty("--font", e.target.value);
+$("#m-scale").onchange = e => setScale(e.target.value);
+$("#m-detail").onchange = e => $("#page").classList.toggle("auto", e.target.value === "auto");
+$("#m-win").onchange = e => document.body.classList.toggle("maximized", e.target.value === "max");
+if (matchMedia("(prefers-color-scheme: light)").matches) { document.documentElement.dataset.theme = "light"; $("#m-theme").value = "light"; }
+setScale(1.25);
+
+// ---------------- app mode (the shell's own frame) ----------------
+// The shell sets html.csd and the window's states, and hands over the desktop's button order
+// (src-tauri/src/window_chrome.rs); the page draws the buttons where the desktop puts them.
+const WBTN = { minimize: ["Minimize", "i-min"], maximize: ["Maximize", "i-max"], close: ["Close", "i-x"] };
+function windowButtons(names) {
+  return names.filter(n => WBTN[n]).map(n => `<button title="${WBTN[n][0]}" data-window-button="${n}">${ico(WBTN[n][1])}</button>`).join("");
+}
+let appMode = false, wctlKey = null;
+addEventListener("lmgw-window", e => {
+  const s = e.detail;
+  if (!s || !s.csd) return;
+  if (!appMode) {
+    appMode = true;
+    document.body.classList.remove("maximized");
+    // The page's corner in window pixels follows its scale.
+    lmgwWindow.radius(14 * (parseFloat($("#m-scale").value) || 1.25));
+    $("#m-scale").addEventListener("change", ev => lmgwWindow.radius(14 * parseFloat(ev.target.value)));
+    // The shell shows the window once the page has drawn itself.
+    window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "lmgw:mounted", payload: null }).catch(() => {});
+  }
+  // Rebuilt only when the layout changed: a rebuild between a press and its click loses the click.
+  const key = JSON.stringify(s.layout);
+  if (key === wctlKey) return;
+  wctlKey = key;
+  $("#wctl-start").innerHTML = windowButtons(s.layout.start);
+  $("#wctl-end").innerHTML = windowButtons(s.layout.end);
+});
+if (window.lmgwWindow && lmgwWindow.state) dispatchEvent(new CustomEvent("lmgw-window", { detail: lmgwWindow.state }));
+
+renderNav(); renderList(); $("#list").focus();
+</script>
+</body>
+</html>

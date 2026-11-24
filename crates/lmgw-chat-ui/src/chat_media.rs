@@ -142,10 +142,15 @@ pub(super) fn regain_alias(ev: &VoiceEvent, tools: RwSignal<Vec<ToolCard>>) -> O
     if v["stage"] != "chat" || v["state"] != "loading" {
         return None;
     }
-    let after_media = tools.with_untracked(|t| {
-        t.iter()
-            .any(|c| c.done.get_untracked() && c.name.with_untracked(|n| is_media_tool(n)))
-    });
+    // The bubble may be gone (its page went, and nothing shows it): no card.
+    let after_media = tools
+        .try_with_untracked(|t| {
+            t.iter().any(|c| {
+                c.done.try_get_untracked() == Some(true)
+                    && c.name.try_with_untracked(|n| is_media_tool(n)) == Some(true)
+            })
+        })
+        .unwrap_or(false);
     after_media.then(|| v["alias"].as_str().unwrap_or("the chat model").to_string())
 }
 
@@ -340,18 +345,34 @@ pub(super) fn stage_words(f: &ToolProgressFrame) -> String {
         Some(MediaPhase::Downloading) => lmgw_ui_kit::download::Dl::of_frame(f)
             .unwrap_or_default()
             .words(),
-        Some(MediaPhase::Unloading) => format!("Unloading {model}"),
-        Some(MediaPhase::Loading) => format!("Loading {model}"),
-        Some(MediaPhase::WaitingForRoom) => match (f.needs_bytes, f.free_bytes) {
-            (Some(n), Some(free)) => {
-                format!(
-                    "Waiting for room (needs {}, {} free)",
-                    lmgw_api_types::units::fmt_bytes(n),
-                    lmgw_api_types::units::fmt_bytes(free)
-                )
+        Some(MediaPhase::Unloading) => format!(
+            "Unloading {model}{}{}",
+            f.on.as_ref()
+                .map(|o| format!(" from {o}"))
+                .unwrap_or_default(),
+            if f.moves {
+                " (it moves to another card)"
+            } else {
+                ""
             }
-            _ => "Waiting for room".to_string(),
-        },
+        ),
+        Some(MediaPhase::Loading) => format!("Loading {model}"),
+        Some(MediaPhase::WaitingForRoom) => {
+            let on =
+                f.on.as_ref()
+                    .map(|o| format!(" on {o}"))
+                    .unwrap_or_default();
+            match (f.needs_bytes, f.free_bytes) {
+                (Some(n), Some(free)) => {
+                    format!(
+                        "Waiting for room{on} (needs {}, {} free)",
+                        lmgw_api_types::units::fmt_bytes(n),
+                        lmgw_api_types::units::fmt_bytes(free)
+                    )
+                }
+                _ => format!("Waiting for room{on}"),
+            }
+        }
         Some(MediaPhase::Queued) => match f.queue_position {
             Some(p) if p > 0 => format!("Queued ({p} ahead)"),
             _ => "Queued".to_string(),
@@ -626,6 +647,21 @@ mod tests {
         assert_eq!(
             stage_words(&w),
             "Waiting for room (needs 6.6 GiB, 2.1 GiB free)"
+        );
+        // On a computer with several cards: the card, and a move.
+        w.on = Some("NVIDIA RTX 6000 Ada Generation (card 2)".into());
+        assert_eq!(
+            stage_words(&w),
+            "Waiting for room on NVIDIA RTX 6000 Ada Generation (card 2) (needs 6.6 GiB, 2.1 \
+             GiB free)"
+        );
+        let mut u = f(MediaPhase::Unloading, Some("chat/q"));
+        u.on = Some("NVIDIA RTX 6000 Ada Generation (card 0)".into());
+        u.moves = true;
+        assert_eq!(
+            stage_words(&u),
+            "Unloading chat/q from NVIDIA RTX 6000 Ada Generation (card 0) (it moves to another \
+             card)"
         );
         assert_eq!(
             stage_words(&f(MediaPhase::Generating, Some("image/z"))),

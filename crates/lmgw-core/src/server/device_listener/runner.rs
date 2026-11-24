@@ -346,7 +346,10 @@ impl DeviceListener {
                 Applied::Listening { urls, ended }
             }
             Err(error) => {
-                tracing::warn!("lmgw devices not listening: {error}");
+                tracing::warn!(
+                    "lmgw devices not listening: {error} ({})",
+                    plan.settings_text()
+                );
                 self.set_view(View {
                     state: wire::DeviceListenerState::Error,
                     plan: Some(plan),

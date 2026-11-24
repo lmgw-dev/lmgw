@@ -13,11 +13,17 @@
 
 use serde::Serialize;
 
+pub use lmgw_api_types::DeviceId;
+
 mod load;
 
 /// One device's memory, as the driver reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GpuMemory {
+    /// The card's stable id (device-ledger design D1): NVML's UUID
+    /// (`GPU-…`), on AMD the PCI address. `index` is the driver's position,
+    /// for display only.
+    pub id: DeviceId,
     pub index: u32,
     pub name: String,
     pub total_bytes: u64,
@@ -51,7 +57,12 @@ pub trait GpuProbe: Send + Sync + 'static {
         ))
     }
 
-    /// GPU memory per process, summed over every device this probe counts.
+    /// GPU memory per process, per device (device-ledger design D3): one
+    /// [`DeviceProcesses`] per device this probe counts, in the driver's
+    /// order, each with what every listed process holds on that device. A
+    /// device on which nothing asked about is listed may be absent or have
+    /// an empty list; a process on two devices is listed on each, with what
+    /// it holds there.
     ///
     /// `own` are the processes of lmgw's registered containers, `retired`
     /// those of containers that just left the registry (tombstones,
@@ -61,10 +72,10 @@ pub trait GpuProbe: Send + Sync + 'static {
     /// (amdgpu's DRM `fdinfo`) answers for exactly these. A PID in `own` it
     /// cannot read is an error — lmgw's share would be a guess; one in
     /// `retired` it cannot read is simply not listed, since a tombstone's PID
-    /// may belong to somebody else's process by now. A PID absent from the
-    /// answer holds nothing the driver can see. `Err` = no process list right
-    /// now.
-    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    /// may belong to somebody else's process by now. A PID absent from a
+    /// device's list holds nothing the driver can see there. `Err` = no
+    /// process list right now.
+    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         let _ = (own, retired);
         Err(format!(
             "{} reports no per-process GPU memory",
@@ -117,8 +128,8 @@ pub struct GpuPower {
     pub power_limit_mw: Option<u32>,
 }
 
-/// What one process holds on the GPU, summed over the devices a probe counts
-/// (candidate-aliases design §4.7).
+/// What one process holds on one device (candidate-aliases design §4.7);
+/// [`DeviceProcesses`] says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessMemory {
     pub pid: u32,
@@ -127,6 +138,23 @@ pub struct ProcessMemory {
     /// keys. Never read as zero: for an lmgw process that would move its
     /// memory into "outside use".
     pub bytes: Option<u64>,
+}
+
+/// The processes the driver lists on one device, and what each holds there
+/// (device-ledger design §2.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceProcesses {
+    pub device: DeviceId,
+    pub processes: Vec<ProcessMemory>,
+}
+
+impl DeviceProcesses {
+    /// Every listed process on every device, one row per device it is on:
+    /// for a caller that wants what a process holds in all, which is the
+    /// sum of its rows.
+    pub fn all(devices: &[DeviceProcesses]) -> impl Iterator<Item = &ProcessMemory> {
+        devices.iter().flat_map(|d| d.processes.iter())
+    }
 }
 
 /// A probe that reports no telemetry at all, with a fixed reason.
@@ -177,25 +205,31 @@ impl NvmlProbe {
         self.nvml.is_ok()
     }
 
-    /// Every device's PCI address, in driver index order — what the
-    /// Windows probe matches WDDM adapters by ([`super::wddm::counted`]).
-    pub fn pci_addresses(&self) -> Result<Vec<super::wddm::PciAddress>, String> {
+    /// Every device's id and PCI address, in driver index order — what the
+    /// Windows probe matches WDDM adapters by ([`super::wddm::counted`]) and
+    /// names each device's process list with ([`super::wddm::processes`]).
+    pub fn device_addresses(&self) -> Result<Vec<(DeviceId, super::wddm::PciAddress)>, String> {
         let nvml = self.nvml.as_ref().map_err(Clone::clone)?;
         let count = nvml
             .device_count()
             .map_err(|e| format!("nvmlDeviceGetCount: {e}"))?;
         (0..count)
             .map(|index| {
-                let pci = nvml
+                let dev = nvml
                     .device_by_index(index)
-                    .and_then(|d| d.pci_info())
+                    .map_err(|e| format!("nvmlDeviceGetHandleByIndex({index}): {e}"))?;
+                let id = uuid_of(&dev, index)?;
+                let pci = dev
+                    .pci_info()
                     .map_err(|e| format!("nvmlDeviceGetPciInfo({index}): {e}"))?;
-                super::wddm::PciAddress::from_nvml_bus_id(&pci.bus_id).ok_or_else(|| {
-                    format!(
-                        "nvmlDeviceGetPciInfo({index}): bus id '{}' is not DDDDDDDD:BB:DD.F",
-                        pci.bus_id
-                    )
-                })
+                let at =
+                    super::wddm::PciAddress::from_nvml_bus_id(&pci.bus_id).ok_or_else(|| {
+                        format!(
+                            "nvmlDeviceGetPciInfo({index}): bus id '{}' is not DDDDDDDD:BB:DD.F",
+                            pci.bus_id
+                        )
+                    })?;
+                Ok((id, at))
             })
             .collect()
     }
@@ -216,6 +250,7 @@ impl GpuProbe for NvmlProbe {
                 .memory_info()
                 .map_err(|e| format!("nvmlDeviceGetMemoryInfo({index}): {e}"))?;
             out.push(GpuMemory {
+                id: uuid_of(&dev, index)?,
                 index,
                 name: dev.name().unwrap_or_else(|_| format!("GPU {index}")),
                 total_bytes: mem.total,
@@ -278,7 +313,9 @@ impl GpuProbe for NvmlProbe {
     /// an editor) are listed too; they are the outside use §4.7 is about.
     ///
     /// The PIDs asked about are not needed: NVML answers for the whole device.
-    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    /// Every device is in the answer, one with nothing on it with an empty
+    /// list.
+    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         let nvml = self.nvml.as_ref().map_err(Clone::clone)?;
         let count = nvml
             .device_count()
@@ -303,10 +340,22 @@ impl GpuProbe for NvmlProbe {
                     ))
                 }
             };
-            devices.push(merge_device(&listed(&compute), &listed(&graphics)));
+            devices.push(DeviceProcesses {
+                device: uuid_of(&dev, index)?,
+                processes: merge_device(&listed(&compute), &listed(&graphics)),
+            });
         }
-        Ok(sum_devices(&devices))
+        Ok(devices)
     }
+}
+
+/// A device's UUID (`GPU-…`, `nvmlDeviceGetUUID`): its id. NVML answers it
+/// for every product; a device that does not fails the read it is part of,
+/// as one whose memory cannot be read does.
+fn uuid_of(dev: &nvml_wrapper::Device<'_>, index: u32) -> Result<DeviceId, String> {
+    dev.uuid()
+        .map(DeviceId)
+        .map_err(|e| format!("nvmlDeviceGetUUID({index}): {e}"))
 }
 
 fn listed(infos: &[nvml_wrapper::struct_wrappers::device::ProcessInfo]) -> Vec<ProcessMemory> {
@@ -367,26 +416,6 @@ pub(crate) fn merge_device(
     }
     merged
         .into_iter()
-        .map(|(pid, bytes)| ProcessMemory { pid, bytes })
-        .collect()
-}
-
-/// Every device's list as one pooled list, the way the ledger pools the
-/// devices themselves: a process on two cards holds the sum. One device that
-/// cannot size it makes its total unknown.
-pub(crate) fn sum_devices(devices: &[Vec<ProcessMemory>]) -> Vec<ProcessMemory> {
-    let mut out: std::collections::BTreeMap<u32, Option<u64>> = Default::default();
-    for p in devices.iter().flatten() {
-        out.entry(p.pid)
-            .and_modify(|b| {
-                *b = match (*b, p.bytes) {
-                    (Some(a), Some(c)) => Some(a.saturating_add(c)),
-                    _ => None,
-                }
-            })
-            .or_insert(p.bytes);
-    }
-    out.into_iter()
         .map(|(pid, bytes)| ProcessMemory { pid, bytes })
         .collect()
 }
@@ -493,24 +522,6 @@ mod tests {
         );
         assert_eq!(
             merge_device(&[pm(10, Some(100)), pm(10, None)], &[]),
-            vec![pm(10, None)]
-        );
-    }
-
-    /// Pooled like the ledger: a process on two cards holds the sum, and one
-    /// card that cannot size it makes the total unknown.
-    #[test]
-    fn devices_pool_per_pid() {
-        let pooled = sum_devices(&[
-            vec![pm(10, Some(100)), pm(20, Some(5))],
-            vec![pm(10, Some(40)), pm(30, None)],
-        ]);
-        assert_eq!(
-            pooled,
-            vec![pm(10, Some(140)), pm(20, Some(5)), pm(30, None)]
-        );
-        assert_eq!(
-            sum_devices(&[vec![pm(10, Some(1))], vec![pm(10, None)]]),
             vec![pm(10, None)]
         );
     }

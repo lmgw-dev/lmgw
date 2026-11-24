@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# Usage: scripts/ui-matrix.py [--routes all|/a,/b] [--sizes all|1440x900,...] [--shots DIR] [--json OUT]
+# Usage: scripts/ui-matrix.py [--routes all|extra|full|/a,/b] [--sizes all|1440x900,...] [--shots DIR] [--json OUT]
 #                            [--chat-drawer open|closed] [--side PERSIST=open|closed ...]
-#                            [--dsf 1.25] [--tauri] [--init-script JS ...]
+#                            [--dsf 1.25] [--tauri] [--init-script JS ...] [--expect-theme light|dark]
+# Every route as a screenshot plus this verdict, in one command (own dev copy, runs, cleanup):
+# scripts/ui-shots.sh.
 """Layout matrix for the dashboard: every route at every window size, measured.
 
 The dashboard is used in a window that is resized all day, so "does this page
@@ -24,6 +26,9 @@ screenshot only hints at:
                      textarea wraps and never overflows, so nothing else
                      sees it), or is wider inside than it is (it would
                      scroll sideways: a classic scrollbar shows a bar)
+  split_short        a list-beside-detail split (.nav-split) ends more than 2px
+                     above the bottom of the window's content area (the
+                     Docs corpora once stopped at its content height)
   under_panel        a card in a split's main pane reaches past that pane's
                      right edge, or under the split's open side panel (a
                      results grid that did not reflow beside the panel)
@@ -63,7 +68,9 @@ import argparse
 import asyncio
 import base64
 import json
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -77,7 +84,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import chrome_profile  # noqa: E402
 
 SIZES = ["1024x700", "1280x800", "1440x900", "1920x1080", "2560x1400", "1440x600", "900x1200"]
-# `{agent}`, `{agent_tab}`, `{local}`, `{kb}` and `{batch}` are filled from the instance's own data.
+# `{name}` placeholders are filled from the instance's own data by FILLERS below.
 ROUTES = [
     "/", "/chat", "/audio-lab", "/image-lab", "/decision-lab", "/decision-lab/batches/{batch}",
     "/voice-lab",
@@ -90,8 +97,24 @@ ROUTES = [
     "/settings/runtimes", "/api-reference", "/api-reference?op=post_v1_chat_completions",
     "/no-such-page",
 ]
+SETTINGS_CATEGORIES = ["network", "retention", "usage-cost", "gpu", "runtimes", "backends", "chat",
+                       "documents", "realtime", "agents", "docs", "tokens", "appearance", "about"]
+# What `ROUTES` leaves out: the settings categories, one editor per model class, the details of
+# upstreams, MCP servers, keys, traffic records, benchmark runs and builds, the chat profiles, a
+# text chat thread, the other labs and the debug-build widget sampler. `--routes extra` is these,
+# `--routes full` is `all` plus these (`all` itself keeps its meaning for its older callers).
+EXTRA_ROUTES = [
+    "/documents-lab", "/chat?t={thread}", "/chat/profiles", "/chat/profiles/{profile}",
+    "/chat/profiles/new", "/agents/{agent}/run",
+    "/models/local/new", "/models/aux/{aux}", "/models/audio/{audio}", "/models/image/{image}",
+    "/models/alias/{alias}", "/models/candidate/{candidate}", "/models/upstream/{upstream}",
+    "/backends/builds/{build}", "/backends/windows", "/benchmarks/{bench}",
+    "/docs/corpora/{corpus}", "/upstreams/{upstream}", "/upstreams/new", "/mcp-servers/{mcp}",
+    "/traffic/{log}", "/traffic/conversations/{chain}", "/usage/keys/{key}", "/dev/components",
+] + [f"/settings/{c}" for c in SETTINGS_CATEGORIES]
+ROUTE_SETS = {"all": ROUTES, "extra": EXTRA_ROUTES, "full": list(dict.fromkeys(ROUTES + EXTRA_ROUTES))}
 FAILING = ["content_scroll", "nested_v", "page_hscroll", "gutter", "wrapped_btns",
-           "primary_offscreen", "composer_input", "under_panel", "hbars"]
+           "primary_offscreen", "composer_input", "under_panel", "split_short", "hbars"]
 
 # html.tauri, then one fresh layout: a scroller built before the class keeps
 # the bar it was built with.
@@ -149,7 +172,9 @@ MEASURE = r"""(() => {
   // that is clipped by the button's own height shows up as overflow.
   const lines = el => { const r = document.createRange(); r.selectNodeContents(el);
     const tops = [];
-    for (const x of r.getClientRects()) if (x.width > 0 && x.height > 0 &&
+    // Boxes under 2px either way (a visually hidden file input inside a
+    // label) are not text lines.
+    for (const x of r.getClientRects()) if (x.width > 1 && x.height > 1 &&
         !tops.some(t => Math.abs(t - x.top) < 6)) tops.push(x.top);
     return tops.length; };
   // An icon button (the composer's Send) is named by its aria-label.
@@ -194,6 +219,12 @@ MEASURE = r"""(() => {
       if (past || covered) under.push(name(c) + ' right ' + Math.round(r.right));
     }
   }
+  const ns = content.querySelector('.nav-split');
+  if (ns && ns.offsetParent) {
+    const cb = content.getBoundingClientRect().bottom;
+    const gap = Math.round(cb - ns.getBoundingClientRect().bottom);
+    out.split_short = gap > 2 ? gap : 0;
+  } else out.split_short = 0;
   out.under_panel = under.length; out.offenders.under_panel = under.slice(0, 4);
 
   // Sideways scrollers: a classic bar shows for every one of them.
@@ -227,6 +258,12 @@ MEASURE = r"""(() => {
 })()"""
 
 
+# "dark" or "light" by the page's own background, whatever way the theme was chosen.
+THEME = r"""(() => { const c = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g) || [];
+  const [r, g, b] = c.map(Number);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128 ? 'dark' : 'light'; })()"""
+
+
 def fails(m: dict, tauri: bool = False) -> list:
     bad = []
     if m.get("content_scroll", 0) > 1:
@@ -246,6 +283,8 @@ def fails(m: dict, tauri: bool = False) -> list:
         bad.append("composer_input")
     if m.get("under_panel", 0) > 0:
         bad.append("under_panel")
+    if m.get("split_short", 0) > 0:
+        bad.append("split_short")
     if tauri and m.get("hbars", 0) > 0:
         bad.append("hbars")
     return bad
@@ -273,42 +312,124 @@ def api_get(base: str, token: str, path: str):
         return json.load(r)
 
 
+def _agents(base, token):
+    return api_get(base, token, "/api/agents")
+
+
+def _models(base, token):
+    return api_get(base, token, "/api/models/full")
+
+
+def _first_row(rows):
+    return [str(rows[0]["model"]["id"])] if rows else []
+
+
+def _text_thread(base, token):
+    # A typed thread: not temporary, no agent, no tools, nothing stored of a voice conversation
+    # (voice, languages, seed: a text thread has an empty voice object).
+    for t in api_get(base, token, "/chat/api/threads").get("threads", []):
+        if (t.get("kind") == "chat" and not t.get("agent_id") and not t.get("temporary")
+                and not t.get("voice") and not t.get("mcp_tools")):
+            return [str(t["id"])]
+    return []
+
+
+def _keys(base, token):
+    # One key per kind (internal, device, agent, ...): they lay out differently.
+    seen, out = set(), []
+    for k in api_get(base, token, "/api/usage/keys").get("keys", []):
+        if k.get("kind") not in seen:
+            seen.add(k.get("kind"))
+            out.append(str(k["id"]))
+    return out
+
+
+def _mcp(base, token):
+    # The first server and the first of a different shape (an agent's, a device's, a plain one).
+    seen, out = set(), []
+    for m in api_get(base, token, "/api/mcp-servers").get("mcp_servers", []):
+        shape = (bool(m.get("agent_id")), bool(m.get("device")))
+        if shape not in seen:
+            seen.add(shape)
+            out.append(str(m["id"]))
+    return out
+
+
+# placeholder -> ids from the instance's own data (admin API, owner token). An empty list skips
+# the route with a note: a kind the data has no row of is not a failure.
+FILLERS = {
+    # every installed agent: chat, app and script agents lay out differently
+    "agent": lambda b, t: [a["id"] for a in _agents(b, t)],
+    # each agent's other tabs (`<id>/runs`, `<id>/definition`, `<id>/ui` for one serving an app)
+    "agent_tab": lambda b, t: [f"{a['id']}/{x}" for a in _agents(b, t)
+                               for x in ("runs", "definition") + (("ui",) if a.get("app") else ())],
+    "local": lambda b, t: _first_row(_models(b, t).get("local", [])),
+    "aux": lambda b, t: _first_row(_models(b, t).get("aux", [])),
+    "audio": lambda b, t: _first_row(_models(b, t).get("audio", [])),
+    "image": lambda b, t: _first_row(_models(b, t).get("image", [])),
+    "alias": lambda b, t: [str(a["id"]) for a in _models(b, t).get("aliases", [])[:1]],
+    "candidate": lambda b, t: [str(a["id"]) for a in _models(b, t).get("candidate_aliases", [])[:1]],
+    "upstream": lambda b, t: [str(u["id"]) for u in api_get(b, t, "/api/upstreams")
+                              .get("upstreams", [])[:1]],
+    "mcp": _mcp,
+    "key": _keys,
+    "log": lambda b, t: [str(r["log_id"]) for r in api_get(b, t, "/api/logs").get("logs", [])[:1]],
+    "chain": lambda b, t: [r["chain_id"] for r in api_get(b, t, "/api/responses")
+                           .get("chains", [])[:1]],
+    "bench": lambda b, t: [str(r["id"]) for r in api_post(b, t, "/api/op/bench_runs")
+                           .get("runs", [])[:1]],
+    "build": lambda b, t: [str(r["build"]["id"]) for r in api_post(b, t, "/api/op/builds")
+                           .get("builds", [])[:1]],
+    "profile": lambda b, t: [str(p["id"]) for p in api_get(b, t, "/chat/api/profiles")
+                             .get("profiles", [])[:1]],
+    "thread": _text_thread,
+    "corpus": lambda b, t: [str(c["id"]) for c in api_get(b, t, "/api/docs/corpora")
+                            .get("corpora", [])[:1]],
+    # the first knowledge base / the newest Decision lab set run
+    "kb": lambda b, t: [str(x["id"]) for x in api_get(b, t, "/api/knowledge/bases")
+                        .get("bases", [])[:1]],
+    "batch": lambda b, t: [str(x["id"]) for x in api_get(b, t, "/decision-lab/api/batches")
+                           .get("batches", [])[:1]],
+}
+
+
+def api_post(base: str, token: str, path: str):
+    req = urllib.request.Request(base + path, data=b"{}", method="POST",
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
 def expand_routes(spec: str, base: str, token: str) -> list:
-    """`{agent}` becomes every installed agent (chat, app and script agents
-    lay out differently), `{agent_tab}` each agent's other tabs (`<id>/runs`,
-    `<id>/definition`, and `<id>/ui` for one that serves an app); `{local}`
-    the first local chat model, `{kb}` the first knowledge base, `{batch}`
-    the newest Decision lab set run."""
-    routes = ROUTES if spec == "all" else [r.strip() for r in spec.split(",") if r.strip()]
+    """`--routes` is a set name (`all`, `extra`, `full`) or comma-separated paths. A `{name}`
+    in a route is every id FILLERS finds for it on the instance; a route whose kind has
+    no row there, or whose list the API will not give, is skipped with a note."""
+    routes = ROUTE_SETS.get(spec) or [r.strip() for r in spec.split(",") if r.strip()]
     fill = {}
-    if any("{agent}" in r or "{agent_tab}" in r for r in routes):
-        agents = api_get(base, token, "/api/agents")
-        fill["agent"] = [a["id"] for a in agents]
-        fill["agent_tab"] = [f"{a['id']}/{t}" for a in agents
-                             for t in ("runs", "definition") + (("ui",) if a.get("app") else ())]
-    if any("{local}" in r for r in routes):
-        local = api_get(base, token, "/api/models/full").get("local", [])
-        fill["local"] = [str(local[0]["model"]["id"])] if local else []
-    if any("{kb}" in r for r in routes):
-        bases = api_get(base, token, "/api/knowledge/bases").get("bases", [])
-        fill["kb"] = [str(bases[0]["id"])] if bases else []
-    if any("{batch}" in r for r in routes):
-        runs = api_get(base, token, "/decision-lab/api/batches").get("batches", [])
-        fill["batch"] = [str(runs[0]["id"])] if runs else []
     out = []
     for r in routes:
-        key = next((k for k in fill if "{" + k + "}" in r), None)
-        if key is None:
+        m = re.search(r"\{(\w+)\}", r)
+        if m is None:
             out.append(r)
-        elif not fill[key]:
+            continue
+        key = m.group(1)
+        if key not in fill:
+            if key not in FILLERS:
+                sys.exit(f"route {r}: no filler for {{{key}}}")
+            try:
+                fill[key] = FILLERS[key](base, token)
+            except (OSError, ValueError, KeyError) as e:
+                print(f"skip {r}: reading the instance's {key} failed ({e})", file=sys.stderr)
+                fill[key] = []
+        if not fill[key]:
             print(f"skip {r}: the instance has no {key}", file=sys.stderr)
-        else:
-            out.extend(r.replace("{" + key + "}", v) for v in fill[key])
+        out.extend(r.replace("{" + key + "}", v) for v in fill[key])
     return out
 
 
 def slug(route: str) -> str:
-    s = route.strip("/").replace("/", "_")
+    s = route.strip("/").replace("/", "_").replace("?", "_").replace("=", "_")
     return s or "overview"
 
 
@@ -424,6 +545,12 @@ async def run(args, routes, sizes, token) -> list:
                         await asyncio.sleep(args.settle)
                     m = await ev(MEASURE) or {"error": "no result"}
                     m.update(route=route, size=size, fails=fails(m, args.tauri))
+                    if args.expect_theme:
+                        m["theme"] = await ev(THEME)
+                        if m["theme"] != args.expect_theme:
+                            m["fails"].append("theme")
+                            m.setdefault("offenders", {})["theme"] = [
+                                f"expected {args.expect_theme}, the page is {m['theme']}"]
                     results.append(m)
                     report(m, args.verbose)
                     if args.shots:
@@ -463,7 +590,10 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:8899", help="dashboard origin")
     ap.add_argument("--token", help="owner token (default: read --token-file)")
     ap.add_argument("--token-file", default="/tmp/lmgw-ux-token")
-    ap.add_argument("--routes", default="all", help="'all' or comma-separated paths")
+    ap.add_argument("--routes", default="all",
+                    help="'all' (the base set), 'extra' (what all leaves out: settings categories, "
+                         "editors, details), 'full' (both) or comma-separated paths; "
+                         "{name} placeholders are filled from the instance's data")
     ap.add_argument("--sizes", default="all", help="'all' or comma-separated WxH")
     ap.add_argument("--shots", metavar="DIR", help="write a viewport PNG per route and size")
     ap.add_argument("--json", metavar="OUT", help="write every measurement as JSON")
@@ -471,6 +601,9 @@ def main() -> int:
     ap.add_argument("--init-script", action="append", default=[], metavar="JS",
                     help="evaluate JS in every new document before the page's own scripts "
                          "(repeatable), as in ui-drive.py: an in-page fake")
+    ap.add_argument("--expect-theme", choices=["dark", "light"],
+                    help="FAIL every measurement whose page background is not this theme "
+                         "(proves a --init-script that sets the stored theme took effect)")
     ap.add_argument("--wait", type=float, default=15.0,
                     help="most seconds to wait for a route to go quiet after navigating")
     ap.add_argument("--settle", type=float, default=0.8, help="seconds after a resize")
@@ -485,9 +618,14 @@ def main() -> int:
     ap.add_argument("--tauri", action="store_true",
                     help="set html.tauri (the app's classic scrollbars) and FAIL sideways scrollers")
     ap.add_argument("--podman-guard", default="lmgw-dev", metavar="PREFIX",
-                    help="container names to compare before/after ('' disables)")
+                    help="container names to compare before/after ('' disables); a dev copy "
+                         "made with LMGW_DEV_COPY_PREFIX needs that prefix here")
     ap.add_argument("-v", "--verbose", action="store_true", help="list offenders for every row")
     args = ap.parse_args()
+    # Started in the background by a script, SIGINT is ignored and SIGTERM kills outright: turn both
+    # into an exit that unwinds, so the Chrome process and its /tmp profile still go.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     token = args.token or Path(args.token_file).read_text().strip()
     sizes = SIZES if args.sizes == "all" else [s.strip() for s in args.sizes.split(",")]

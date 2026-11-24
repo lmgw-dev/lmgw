@@ -36,6 +36,10 @@
 //! its automatic share held between its floor and the split's width, and goes
 //! away as the look does.
 //!
+//! The panel's head can be a window's header bar (`window_header`), with
+//! the caller's things in it: a host's window buttons first (`head_start`)
+//! and the panel's own actions before the fold button (`head_actions`).
+//!
 //! Each pane scrolls itself, and the panel's body only vertically: its body is
 //! its own scroller, and the main pane is the caller's to fill (a transcript,
 //! a form column). A row too long for the panel ellipsizes rather than
@@ -53,6 +57,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use super::icon::{Ico, Icon};
 use crate::element_size::use_element_size;
 
 /// The panel as a drawer in place of its rail (module doc): `active` while
@@ -206,6 +211,18 @@ pub fn SplitPane(
     /// A drawer in place of the rail while its `active` holds (module doc).
     #[prop(optional)]
     drawer: Option<Drawer>,
+    /// The panel's head is a window's header bar (`data-window-header`): a
+    /// host with its own window frame moves the window from it.
+    #[prop(optional)]
+    window_header: bool,
+    /// Drawn first in the panel's head, before its label: a host's window
+    /// buttons when the desktop puts them at the start.
+    #[prop(optional, into)]
+    head_start: Option<ViewFn>,
+    /// The panel's own actions, in its head between the label and the fold
+    /// button (a list's New and its menu).
+    #[prop(optional, into)]
+    head_actions: Option<ViewFn>,
     /// The panel's body.
     #[prop(into)]
     side_view: ViewFn,
@@ -270,8 +287,8 @@ pub fn SplitPane(
     };
 
     let (fold_glyph, open_glyph, edge) = match side {
-        Side::Left => ("«", "»", "left"),
-        Side::Right => ("»", "«", "right"),
+        Side::Left => (Ico::Back, Ico::Right, "left"),
+        Side::Right => (Ico::Right, Ico::Back, "right"),
     };
     // The handle: a drag in progress is (pointer, its start x, the width then);
     // `moved` keeps a plain click (or the two of a double-click) from turning
@@ -457,6 +474,7 @@ pub fn SplitPane(
     let panel = move || {
         let (l1, l2) = (l1.clone(), l2.clone());
         let side_view = side_view.clone();
+        let (head_start, head_actions) = (head_start.clone(), head_actions.clone());
         view! {
             <Show when=move || shown.get()>
                 <aside
@@ -481,9 +499,13 @@ pub fn SplitPane(
                         }
                     }
                 >
-                    <div class="dock-head">
-                        <span class="dock-title">{let l = l1.clone(); move || l.get()}</span>
+                    <div class="dock-head" data-window-header=window_header.then_some("")>
+                        {head_start.as_ref().map(|v| v.run())}
+                        <span class="dock-title" title={let l = l1.clone(); move || l.get()}>{let l = l1.clone(); move || l.get()}</span>
                         {move || pill().map(|b| view! { <span class="count">{b}</span> })}
+                        {head_actions
+                            .as_ref()
+                            .map(|v| view! { <span class="dock-actions">{v.run()}</span> })}
                         <button
                             type="button"
                             class="dock-fold"
@@ -493,7 +515,7 @@ pub fn SplitPane(
                             }
                             on:click=move |_| fold()
                         >
-                            {fold_glyph}
+                            <Icon ico=fold_glyph/>
                         </button>
                     </div>
                     <div class="dock-body">{side_view.run()}</div>
@@ -524,7 +546,7 @@ pub fn SplitPane(
                     }
                     on:click=move |_| open()
                 >
-                    <span class="dock-glyph" aria-hidden="true">{open_glyph}</span>
+                    <span class="dock-glyph" aria-hidden="true"><Icon ico=open_glyph/></span>
                     <span class="dock-rail-label">{let l = l3.clone(); move || l.get()}</span>
                     {move || pill().map(|b| view! { <span class="count">{b}</span> })}
                 </button>

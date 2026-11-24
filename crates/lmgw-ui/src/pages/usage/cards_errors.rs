@@ -9,6 +9,7 @@ use crate::charts::{
 };
 
 use super::*;
+use crate::labels::error_kind_label;
 
 // ---------------------------------------------------------------------------
 // 11 · refusals & errors
@@ -31,7 +32,8 @@ pub(super) fn ErrorsCard(
         <div class="card chart-card u-errors">
             <ChartHead
                 title="Refusals & errors"
-                note="by kind — lmgw refusing is amber, something failing is red"
+                note="Refusals amber, failures red"
+                explain="By kind: lmgw refusing is amber, something failing is red."
                 tv=tv
                 extra=move || {
                     view! {
@@ -153,8 +155,11 @@ pub(super) fn ErrorsCard(
                     };
                     if grand == 0 || n == 0 {
                         return view! {
-                            <div class="chart-empty">
-                                "Nothing failed and nothing was refused in this window."
+                            <div
+                                class="card-empty-line"
+                                title="Nothing failed and nothing was refused in this window."
+                            >
+                                "No failures or refusals in this window"
                             </div>
                             <div class="chart-foot">{range_note}</div>
                         }
@@ -223,7 +228,7 @@ pub(super) fn ErrorsCard(
                                             }
                                         >
                                             <title>
-                                                {format!("Open {kind} in Traffic")}
+                                                {format!("Open {} in Traffic", error_kind_label(&kind))}
                                             </title>
                                         </path>
                                     }
@@ -264,9 +269,9 @@ pub(super) fn ErrorsCard(
                                             TipRow::new(
                                                 shades[si].0.clone(),
                                                 if k.refusal {
-                                                    format!("{} (refused)", k.kind)
+                                                    format!("{} (refused)", error_kind_label(&k.kind))
                                                 } else {
-                                                    k.kind.clone()
+                                                    error_kind_label(&k.kind)
                                                 },
                                                 counts[si][b].to_string(),
                                             )
@@ -283,11 +288,12 @@ pub(super) fn ErrorsCard(
                             LegendItem::fill(
                                     shades[si].0.clone(),
                                     if k.refusal {
-                                        format!("{} (refused)", k.kind)
+                                        format!("{} (refused)", error_kind_label(&k.kind))
                                     } else {
-                                        k.kind.clone()
+                                        error_kind_label(&k.kind)
                                     },
                                 )
+                                .titled(format!("Code: {}", k.kind))
                                 .at(shades[si].1)
                                 .linking(
                                     scope.clone().failures().kind(k.kind.clone()).href(),
@@ -295,7 +301,7 @@ pub(super) fn ErrorsCard(
                         })
                         .collect();
                     let mut headers = vec!["Bucket".to_string()];
-                    headers.extend(order.iter().map(|k| k.kind.clone()));
+                    headers.extend(order.iter().map(|k| error_kind_label(&k.kind)));
                     headers.push("Total".into());
                     let rows: Vec<Vec<String>> = (0..n)
                         .map(|b| {

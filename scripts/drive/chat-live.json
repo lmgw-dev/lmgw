@@ -14,7 +14,7 @@
   "label": "the list is in, and empty"
  },
  {
-  "js": "(async()=>{const r=await fetch('/api/op/key_create',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'device',name:'live-desktop-'+Date.now()})});const k=await r.json();const h={'content-type':'application/json',authorization:'Bearer '+k.key};window.__dev=(u,b)=>fetch(u,{method:'POST',credentials:'omit',headers:h,body:JSON.stringify(b||{})}).then(r=>r.json());window.__devSend=(t,c)=>fetch('/chat/api/threads/'+t+'/send',{method:'POST',credentials:'omit',headers:h,body:JSON.stringify({content:c})}).then(r=>r.text());window.__same=1;window.__said=()=>[...document.querySelectorAll('#chat-scroll .msg-item')].map(e=>e.textContent).join(' | ');return k.key?'device paired':JSON.stringify(k)})()"
+  "js": "(async()=>{const r=await fetch('/api/op/key_create',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'owner',name:'live-desktop-'+Date.now()})});const k=await r.json();const h={'content-type':'application/json',authorization:'Bearer '+k.key};window.__dev=(u,b)=>fetch(u,{method:'POST',credentials:'omit',headers:h,body:JSON.stringify(b||{})}).then(r=>r.json());window.__devSend=(t,c)=>fetch('/chat/api/threads/'+t+'/send',{method:'POST',credentials:'omit',headers:h,body:JSON.stringify({content:c})}).then(r=>r.text());window.__same=1;window.__said=()=>[...document.querySelectorAll('#chat-scroll .msg-item')].map(e=>e.textContent).join(' | ');return k.key?'second writer keyed':JSON.stringify(k)})()"
  },
  {
   "shot": "01-empty"
@@ -66,7 +66,7 @@
   "shot": "03-appended"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft the device must not touch"
@@ -241,7 +241,7 @@
   "js": "(()=>{window.__cur=()=>fetch('/chat/api/folders').then(r=>r.json()).then(l=>l.folders.find(f=>f.id===__f).ongoing.current_thread_id);return __cur().then(c=>'the folder\\'s current thread is '+c+', the device thread '+__d)})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft whose conversation goes"
@@ -273,7 +273,7 @@
   "shot": "06-draft-waits"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -306,7 +306,7 @@
   "shot": "07-draft-sent"
  },
  {
-  "js": "(()=>{const of=window.fetch;window.__log=[];window.__hold={};window.__late={};window.__fail={};window.fetch=async function(u,o){if(typeof u==='string')return of.apply(this,arguments);const k=u.method.toUpperCase()+' '+new URL(u.url).pathname;window.__log.push(k);for(const re of Object.keys(window.__fail)){if(new RegExp(re).test(k)){const f=window.__fail[re];delete window.__fail[re];const st=typeof f==='object'?f.status:(f>=400?f:500);if(typeof f==='object'&&f.ms)await new Promise(z=>setTimeout(z,f.ms));return new Response(JSON.stringify(st===404?{code:'not_found',message:'the drive says this conversation is not there'}:{code:'internal',message:'the drive fails this read'}),{status:st,headers:{'content-type':'application/json'}})}}for(const [re,ms] of Object.entries(window.__late)){if(new RegExp(re).test(k)){await new Promise(z=>setTimeout(z,ms));break}}for(const [re,ms] of Object.entries(window.__hold)){if(new RegExp(re).test(k)){const r=await of.apply(this,arguments);await new Promise(z=>setTimeout(z,ms));return r}}return of.apply(this,arguments)};window.__made=()=>__cur();window.__thread=id=>fetch('/chat/api/threads/'+id).then(r=>r.json());return 'the page\\'s own requests (gloo-net passes a Request; the drive\\'s own calls pass a URL) are logged in __log; __hold delays an answer, __late delays a request before it goes out, __fail fails one (a status: 404 is not_found, else a 500; or {status, ms}: that late)'})()"
+  "js": "(()=>{const of=window.fetch;window.__log=[];window.__hold={};window.__late={};window.__fail={};window.fetch=async function(u,o){const isr=typeof u!=='string';if(!isr&&(!o||o.credentials==='omit'))return of.apply(this,arguments);const k=(isr?u.method:(o.method||'GET')).toUpperCase()+' '+new URL(isr?u.url:u,location.href).pathname;window.__log.push(k);for(const re of Object.keys(window.__fail)){if(new RegExp(re).test(k)){const f=window.__fail[re];delete window.__fail[re];const st=typeof f==='object'?f.status:(f>=400?f:500);if(typeof f==='object'&&f.ms)await new Promise(z=>setTimeout(z,f.ms));return new Response(JSON.stringify(st===404?{code:'not_found',message:'the drive says this conversation is not there'}:{code:'internal',message:'the drive fails this read'}),{status:st,headers:{'content-type':'application/json'}})}}for(const [re,ms] of Object.entries(window.__late)){if(new RegExp(re).test(k)){await new Promise(z=>setTimeout(z,ms));break}}for(const [re,ms] of Object.entries(window.__hold)){if(new RegExp(re).test(k)){const r=await of.apply(this,arguments);await new Promise(z=>setTimeout(z,ms));return r}}return of.apply(this,arguments)};window.__made=()=>__cur();window.__thread=id=>fetch('/chat/api/threads/'+id).then(r=>r.json());return 'the page\\'s own requests (gloo-net passes a Request; the drive\\'s own calls pass a URL) are logged in __log; __hold delays an answer, __late delays a request before it goes out, __fail fails one (a status: 404 is not_found, else a 500; or {status, ms}: that late)'})()"
  },
  {
   "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue one')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
@@ -328,7 +328,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft sent with a double Enter"
@@ -345,7 +345,7 @@
   "js": "(()=>{window.__hold={'^GET /chat/api/threads/\\\\d+$':900};window.__log=[];return 'the open of a thread answers 0.9 s late'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -411,7 +411,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft whose open fails"
@@ -428,7 +428,7 @@
   "js": "(()=>{window.__fail={'^GET /chat/api/threads/\\\\d+$':1};window.__log=[];return 'the next open of a thread fails'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -442,7 +442,7 @@
   "js": "__made().then(m=>{window.__m2=m;return __devSend(m,'Kai: in the new chat meanwhile')}).then(s=>s.includes('event: done')?'Kai wrote in '+__m2:s)"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -493,7 +493,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft left while it is made"
@@ -510,7 +510,7 @@
   "js": "(()=>{window.__hold={'^POST /chat/api/folders/\\\\d+/current$':500,['^GET /chat/api/threads/'+__u+'$']:1500};window.__log=[];return 'the create answers 0.5 s late, the other conversation 1.5 s'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -577,7 +577,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft on the folder's model"
@@ -620,7 +620,7 @@
   "js": "(()=>{window.__log=[];return 'log cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -679,7 +679,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft on the model picked"
@@ -725,7 +725,7 @@
   "js": "(()=>{window.__log=[];return 'log cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -779,7 +779,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft whose leaving fails"
@@ -821,7 +821,7 @@
   "js": "(()=>{window.__fail={'^POST /chat/api/threads$':500};return 'the next New chat fails'})()"
  },
  {
-  "click": ".thread-tools .row .btn",
+  "click": ".chat-list-new",
   "nth": 0
  },
  {
@@ -866,7 +866,7 @@
   "wait": 0.3
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -885,7 +885,7 @@
   "js": "(()=>{window.__log=[];return 'log cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "key": "Enter"
@@ -970,7 +970,7 @@
   "js": "(()=>{window.__hold={'^POST /chat/api/threads$':1500};window.__log=[];return 'New chat\\'s POST answers 1.5 s late'})()"
  },
  {
-  "click": ".thread-tools .row .btn",
+  "click": ".chat-list-new",
   "nth": 0
  },
  {
@@ -1007,7 +1007,7 @@
   "wait": 0.2
  },
  {
-  "click": ".thread-tools .row .btn",
+  "click": ".chat-list-new",
   "nth": 0
  },
  {
@@ -1029,16 +1029,14 @@
  {
   "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());return 'toasts cleared'})()"
  },
- {
-  "click": ".thread-tools button[title^='New temporary chat']"
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='New temporary chat']"},
  {
   "until": "!!document.querySelector('.temp-strip')&&+new URLSearchParams(location.search).get('t')<0",
   "timeout": 10,
   "label": "a temporary chat is open (CF-10)"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "Kai: kept while the row is clicked"
@@ -1189,7 +1187,7 @@
   "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft that waits through Retry"
@@ -1269,7 +1267,7 @@
   "label": "opened in the page"
  },
  {
-  "click": "textarea.composer-input"
+  "js": "(()=>{const t=document.querySelector('textarea.composer-input');t.focus();t.setSelectionRange(t.value.length,t.value.length);return 'composer focused'})()"
  },
  {
   "type": "a draft left behind"

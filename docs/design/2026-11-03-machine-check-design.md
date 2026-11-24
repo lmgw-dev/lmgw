@@ -160,7 +160,10 @@ labels or in messages; a download never starts a model (2026-10-13).
 - **D13 — When it runs.** At boot, on demand, after a GPU model start fails, and after a fix. No
   timer yet. Separately, before every GPU container start lmgw judges its own spec, which costs
   file stats only (§3.6.2).
-- **D14 — Words.** Each item is a plain sentence. Every technical term goes into its detail fold.
+- **D14 — Words.** Each item is a plain sentence. Every technical term goes into its detail fold,
+  except the name of a product the person may have to install: the item says what is missing by
+  its product name (the NVIDIA Container Toolkit), which the owner approved on 2026-11-22. The
+  headline stays general.
   The download line says "Download for your graphics card · 1.2 of 3.4 GB". It does not say
   "one-time": the engine images get updates. The proposal's example said "Getting the engine for
   your graphics card ready", but the proposal also lists "engine" among the words that stay out of
@@ -1700,12 +1703,12 @@ Podman uses on any boot where NVIDIA's refresh failed.
 | Cause | Plain sentence | Detail |
 |---|---|---|
 | ok | Models can use the graphics card. | toolkit 1.20.1 (`nvidia-container-toolkit-base`, NVIDIA's repository) · lmgw's own description, written <time> for driver <version> · <n> paths present · your own containers use `/var/run/cdi/nvidia.yaml`, which lmgw's models don't read |
-| toolkit missing | One piece is missing so models can use the graphics card. lmgw can set it up. | NVIDIA Container Toolkit not installed (`/usr/bin/nvidia-ctk` absent); it comes from NVIDIA's repository (§3.2) |
+| toolkit missing | The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. lmgw can set it up. (headline: One piece is missing so models can use the graphics card.) | NVIDIA Container Toolkit not installed (`/usr/bin/nvidia-ctk` absent); it comes from NVIDIA's repository (§3.2) |
 | toolkit from Fedora's retired package (info while it works) | One piece comes from a package Fedora no longer updates. lmgw can switch it to NVIDIA's. | owner `golang-github-nvidia-container-toolkit-1.17.4` · retired, Fedora bug 2434398 |
 | description can't be written, the toolkit's fault (D57) | lmgw couldn't write the description of your graphics card that models use. lmgw can update the piece that writes it. (Or, for an owner lmgw doesn't manage: "Updating the piece that writes it from where it came from usually fixes this.") | `nvidia-ctk cdi generate` exit 1 · its last lines, or the paths its spec names that are not there · owner and version |
 | writing it ran out of the load timeout (D57) | Your graphics card stopped answering while lmgw prepared it for models. Restart the computer. | the program and how long it ran · a longer Settings → GPU → Admission → Load timeout gives a slow card more time |
 | a folder of lmgw's is not private, or lmgw's files fail (D57) | lmgw keeps a file about your graphics card in a folder only you may open, and that folder is open to others. … / lmgw couldn't save a file about your graphics card. The details say why. | the folder and its mode, or the file error; no plan |
-| another repository offers the toolkit (D56) | One piece is missing so models can use the graphics card. Here's how to add it. | the repository and package from the user's cached metadata; the plan installs from it alone |
+| another repository offers the toolkit (D56) | The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. Here's how to add it. (headline: One piece is missing so models can use the graphics card.) | the repository and package from the user's cached metadata; the plan installs from it alone |
 | NVIDIA's repository not loading (info) | lmgw's graphics card piece hasn't been able to get updates since October 14, 2026. | §3.2's frozen-section reading: `updates` loaded 2 Nov, NVIDIA's section last 14 Oct, its `metadata_expire` 48 h |
 
 When 1.1 is not ok, this item says "not checked yet: the driver comes first". While the driver
@@ -1810,8 +1813,8 @@ One headline verdict, typed:
 | Verdict | When | Headline |
 |---|---|---|
 | `ready` | 1.1 ok, 1.2 ok (NVIDIA) or render node usable (AMD, `/dev/kfd` not needed, D137), 1.3 ok, 1.4 ok | This computer is ready for local models. |
-| `needs_fix` | something §3 can fix with a button here | One thing is missing so models can use the graphics card. lmgw can set it up. |
-| `needs_steps` | the same, but only by instructions here (§3.7) | One thing is missing so models can use the graphics card. Here's how to add it. |
+| `needs_fix` | something §3 can fix with a button here | One piece is missing so models can use the graphics card. |
+| `needs_steps` | the same, but only by instructions here (§3.7) | One piece is missing so models can use the graphics card. |
 | `needs_restart` | 1.1 driver updated or not running | Restart the computer to finish the graphics driver update. (or the not-running sentence) |
 | `needs_driver` | 1.1 NVIDIA card without NVIDIA's driver | Your NVIDIA card needs NVIDIA's driver before it can run models. |
 | `cloud_only` | 1.1 none | No graphics card found. Cloud models work; local models need a graphics card. |

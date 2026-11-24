@@ -25,10 +25,11 @@ mod image_chat;
 mod run_args_note;
 use crate::widgets::model_picker::ListStatus;
 use crate::widgets::{
-    use_toasts, ImageClass, ImagePicker, MenuItem, Modal, ModalFooter, ModalSize, ModelPicker,
-    RowMenu, Select,
+    use_toasts, CopyBtn, Ico, Icon, ImageClass, ImagePicker, MenuItem, Modal, ModalFooter,
+    ModalSize, ModelPicker, RowMenu, Select,
 };
 pub use aux_models::AuxEditor;
+pub(crate) use aux_models::AuxForm;
 
 fn num_field<T: std::str::FromStr>(label: &str, raw: &str) -> Result<Option<T>, String> {
     let raw = raw.trim();
@@ -77,7 +78,7 @@ pub fn AliasEditor(
 }
 
 #[component]
-fn AliasForm(
+pub(crate) fn AliasForm(
     a: AliasView,
     open: RwSignal<bool>,
     on_saved: impl Fn() + Copy + Send + Sync + 'static,
@@ -152,7 +153,7 @@ fn AliasForm(
             .unwrap_or_default(),
     );
     let reasoning_enabled_opts = Signal::derive(|| {
-        [("", "leave default"), ("on", "on"), ("off", "off")]
+        [("", "Server default"), ("on", "on"), ("off", "off")]
             .into_iter()
             .map(|(v, l)| (v.to_string(), l.to_string()))
             .collect::<Vec<_>>()
@@ -438,7 +439,7 @@ fn AliasForm(
                     {text("Stop sequences (comma-separated)", stop)}
                     <div class="field">
                         <label>"Reasoning"</label>
-                        <Select value=reasoning_enabled options=reasoning_enabled_opts placeholder="leave default"/>
+                        <Select value=reasoning_enabled options=reasoning_enabled_opts placeholder="Server default"/>
                     </div>
                     {text("Reasoning effort", reasoning_effort)}
                     {text("Reasoning budget (tokens)", reasoning_budget)}
@@ -602,7 +603,7 @@ pub fn AudioEditor(
 }
 
 #[component]
-fn AudioForm(
+pub(crate) fn AudioForm(
     m: AudioModel,
     open: RwSignal<bool>,
     on_saved: impl Fn() + Copy + Send + Sync + 'static,
@@ -658,15 +659,39 @@ fn AudioForm(
             .unwrap_or_default();
         lmgw_api_types::public_names::prefixed(&prefix, model_id.get().trim())
     });
+    // The row's read, for its pin and the card it is on (device-ledger
+    // design §8); bumped by a save.
+    let reread = RwSignal::new(0u32);
+    let detail = LocalResource::new(move || {
+        reread.get();
+        let mid = saved_model_id.get();
+        async move {
+            if mid.trim().is_empty() {
+                return None;
+            }
+            crate::api::get::<lmgw_api_types::AudioModelDetail>(format!(
+                "/api/local-model?target=audio&model_id={}",
+                String::from(js_sys::encode_uri_component(&mid))
+            ))
+            .await
+            .ok()
+        }
+    });
+    let pin = crate::pages::gpu_pin::EditorPin::new(create);
+    Effect::new(move |_| {
+        if let Some(d) = detail.get().flatten() {
+            pin.read(d.gpu_pin.as_deref());
+        }
+    });
     let saving = RwSignal::new(false);
     let task_opts = Signal::derive(|| {
         AUDIO_TASKS
             .iter()
-            .map(|t| (t.to_string(), t.to_string()))
+            .map(|t| (t.to_string(), super::audio_spec::task_label(t)))
             .collect::<Vec<_>>()
     });
     let mode_opts = Signal::derive(|| {
-        [("offline", "offline"), ("streaming", "streaming")]
+        [("offline", "Offline"), ("streaming", "Streaming")]
             .into_iter()
             .map(|(v, l)| (v.to_string(), l.to_string()))
             .collect::<Vec<_>>()
@@ -833,6 +858,8 @@ fn AudioForm(
             "warm_start": warm_start.get_untracked(),
             "clear": clear.join(" "),
         });
+        let mut body = body;
+        pin.add_to(&mut body);
         saving.set(true);
         spawn_local(async move {
             let res =
@@ -841,6 +868,7 @@ fn AudioForm(
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
+                    reread.update(|n| *n += 1);
                     // What the saves said about the fallback stays on the
                     // form, under the field, until the owner closes it.
                     if saves.answered(v.id, v.fallback_notes) {
@@ -1013,7 +1041,7 @@ fn AudioForm(
                         prop:checked=move || warm_start.get()
                         on:change=move |ev| warm_start.set(event_target_checked(&ev))
                     />
-                    "start at boot (warm start)"
+                    "Start at boot (warm start)"
                 </label>
                 <FallbackField
                     value=fallback
@@ -1066,6 +1094,12 @@ fn AudioForm(
                 <p class="dim mini-note">
                     "Blank image/args inherit the audio class settings (Settings → Runtimes → Audio)." " " {run_args_note::OVERRIDE_REPLACES}
                 </p>
+                <crate::pages::gpu_pin::GpuPinField
+                    value=pin.value
+                    note=Signal::derive(move || {
+                        detail.get().flatten().and_then(|d| d.command_line_note)
+                    })
+                />
                 <ContainerStatusRow class="audio" model_id=saved_model_id/>
             </section>
         </div>
@@ -1077,27 +1111,6 @@ fn AudioForm(
                 {move || if saving.get() { "Saving…" } else { "Save model" }}
             </button>
         </ModalFooter>
-    }
-}
-
-/// Copy-to-clipboard button — small local twin of `overview::CopyBtn` (that
-/// one is private to its module, so this file gets its own rather than
-/// exporting across pages for a 10-line widget).
-#[component]
-fn CopyBtn(text: String) -> impl IntoView {
-    let copied = RwSignal::new(false);
-    view! {
-        <button
-            class="copy-btn"
-            title="Copy"
-            on:click=move |_| {
-                let _ = window().navigator().clipboard().write_text(&text);
-                copied.set(true);
-                set_timeout(move || copied.set(false), std::time::Duration::from_secs(2));
-            }
-        >
-            {move || if copied.get() { "✓" } else { "⧉" }}
-        </button>
     }
 }
 
@@ -1289,13 +1302,14 @@ pub fn ImageEditor(
 }
 
 #[component]
-fn ImageForm(
+pub(crate) fn ImageForm(
     m: lmgw_api_types::ImageModel,
     open: RwSignal<bool>,
     on_saved: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let toasts = use_toasts();
-    let modal = crate::widgets::use_modal();
+    // Its modal, or the Models pane it is embedded in.
+    let modal = super::editor_host::use_editor_host();
     let create = m.id == 0;
     // A second save is an update of what the first created (review C-a).
     let saves = Saves::new(m.id);
@@ -1382,8 +1396,8 @@ fn ImageForm(
             })
             .collect::<Vec<&'static str>>(),
     );
-    // Rows added or taken off by a button fire no input event; the modal is
-    // told directly, so Esc asks about them too (review code:C7).
+    // Rows added or taken off by a button fire no input event; the modal (or
+    // the pane) is told directly, so Esc and leaving ask about them too.
     let touch_editor = move || {
         if let Some(m) = modal {
             m.touch();
@@ -1454,6 +1468,11 @@ fn ImageForm(
 
     // --- the block every class editor has ----------------------------------
     let enabled = RwSignal::new(m.enabled);
+    // What the row's `enabled` was when this form read it (or last saved
+    // it): an update sends the switch only when it moved from that, so an
+    // Enable or Disable made elsewhere meanwhile (the Models menu, beside
+    // an open form) is not undone by this form's Save.
+    let enabled_base = StoredValue::new(m.enabled);
     let idle = RwSignal::new(m.idle_seconds.to_string());
     let image = RwSignal::new(m.image.clone().unwrap_or_default());
     let extra_run_args = RwSignal::new(
@@ -1534,6 +1553,13 @@ fn ImageForm(
         }
         era_applied.set(Some(generation));
         extra_run_args.set(d.extra_run_args.unwrap_or_default().join("\n"));
+    });
+    // The cards it may run on (device-ledger design §8), from its read.
+    let pin = crate::pages::gpu_pin::EditorPin::new(create);
+    Effect::new(move |_| {
+        if let Some(d) = detail.get().flatten() {
+            pin.read(d.gpu_pin.as_deref());
+        }
     });
 
     let collect_files = move || -> Result<Map<String, Value>, String> {
@@ -1662,6 +1688,8 @@ fn ImageForm(
         }
         let fallback_v = fallback_arg(&mut clear, fallback);
         let (action, id) = saves.target();
+        let enabled_v = enabled.get_untracked();
+        let send_enabled = saves.creating() || enabled_v != enabled_base.get_value();
         let body = json!({
             "action": action,
             "id": id,
@@ -1670,7 +1698,8 @@ fn ImageForm(
             "args": args,
             "modes": modes,
             "edit": edit.get_untracked(),
-            "enabled": enabled.get_untracked(),
+            // Absent on an update keeps the row's own.
+            "enabled": send_enabled.then_some(enabled_v),
             "idle_seconds": idle_v,
             "image": image.get_untracked().trim(),
             "extra_run_args": if era_empty { Value::Null } else { json!(era) },
@@ -1681,6 +1710,8 @@ fn ImageForm(
             "preview_mode": mode,
             "clear": clear.join(","),
         });
+        let mut body = body;
+        pin.add_to(&mut body);
         saving.set(true);
         let saved_id = model_id.get_untracked().trim().to_string();
         spawn_local(async move {
@@ -1693,6 +1724,9 @@ fn ImageForm(
                     // closing it now is not a discard (review par:PAR-4).
                     if let Some(m) = modal {
                         m.saved();
+                    }
+                    if send_enabled {
+                        enabled_base.set_value(enabled_v);
                     }
                     saved_once.set(true);
                     saves.answered(v.id, v.fallback_notes);
@@ -1774,7 +1808,7 @@ fn ImageForm(
                         prop:checked=move || img_gen.get()
                         on:change=move |ev| img_gen.set(event_target_checked(&ev))
                     />
-                    "img_gen"
+                    "Images"
                 </label>
                 <label class="row dim" style="gap:5px">
                     <input
@@ -1782,7 +1816,7 @@ fn ImageForm(
                         prop:checked=move || vid_gen.get()
                         on:change=move |ev| vid_gen.set(event_target_checked(&ev))
                     />
-                    "vid_gen"
+                    "Video"
                 </label>
                 <label class="row dim" style="gap:5px">
                     <input
@@ -1794,9 +1828,9 @@ fn ImageForm(
                 </label>
             </div>
             <p class="dim mini-note">
-                "Only tick edits for a pipeline that really takes reference images: measured "
-                "(design §12.8), one that does not does not refuse the request — sd-server "
-                "segfaults and the container exits."
+                "Only tick edits for a pipeline that really takes reference images: one that "
+                "does not take them does not refuse the request (measured, design §12.8), "
+                "sd-server segfaults and the container exits."
             </p>
             {move || {
                 let endpoints = detail
@@ -1918,7 +1952,7 @@ fn ImageForm(
                                             touch_editor();
                                         }
                                     >
-                                        "✕"
+                                        <Icon ico=Ico::Close/>
                                     </button>
                                 </div>
                             </div>
@@ -1941,7 +1975,7 @@ fn ImageForm(
                     .map(|(i, a)| {
                         let sig = arg_sigs.with_value(|s| s[i].1);
                         let type_opts = Signal::derive(|| {
-                            std::iter::once((String::new(), "sd-server default".to_string()))
+                            std::iter::once((String::new(), "Server default".to_string()))
                                 .chain(
                                     IMAGE_TYPES.iter().map(|t| (t.to_string(), t.to_string())),
                                 )
@@ -2025,7 +2059,7 @@ fn ImageForm(
                         prop:checked=move || enabled.get()
                         on:change=move |ev| enabled.set(event_target_checked(&ev))
                     />
-                    "enabled"
+                    "Enabled"
                 </label>
                 <label class="row dim" style="gap:5px">
                     <input
@@ -2033,7 +2067,7 @@ fn ImageForm(
                         prop:checked=move || warm_start.get()
                         on:change=move |ev| warm_start.set(event_target_checked(&ev))
                     />
-                    "start at boot (warm start)"
+                    "Start at boot (warm start)"
                 </label>
             </div>
             <div class="field" style="margin-top:8px">
@@ -2090,6 +2124,12 @@ fn ImageForm(
             <p class="dim mini-note">
                 "Blank image/args inherit the image class settings (Settings → Runtimes → Image)." " " {run_args_note::OVERRIDE_REPLACES}
             </p>
+            <crate::pages::gpu_pin::GpuPinField
+                value=pin.value
+                note=Signal::derive(move || {
+                    detail.get().flatten().and_then(|d| d.command_line_note)
+                })
+            />
             <ContainerStatusRow class="image" model_id=saved_model_id/>
         </section>
 
@@ -2178,7 +2218,7 @@ fn ImageFileField(
     // The editor this field sits in (not the browser below, which is a modal
     // of its own): a pick or a ✕ writes the path without an input event, and
     // has to tell it so, or Esc would drop the pick unasked.
-    let editor = crate::widgets::use_modal();
+    let editor = super::editor_host::use_editor_host();
     let touch = move || {
         if let Some(m) = editor {
             m.touch();
@@ -2247,7 +2287,7 @@ fn ImageFileField(
                                     touch();
                                 }
                             >
-                                "✕"
+                                <Icon ico=Ico::Close/>
                             </button>
                         }
                     })}

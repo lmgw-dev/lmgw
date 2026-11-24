@@ -1,13 +1,17 @@
 //! PDF text and page images through poppler's `pdftotext` and `pdftoppm`,
-//! external binaries (poppler-utils; the RPM depends on it). Ported from
+//! external binaries (poppler-utils; the RPM recommends it, so it can be
+//! missing: a run then fails with [`PdfError::ToolMissing`], which names the
+//! package, and nothing checks for it at start). Ported from
 //! folder-chat's `pdf.rs`, which explains why an external tool: it is the
 //! engine every Linux desktop viewer uses, a malformed PDF crashes a child
 //! process rather than the gateway, and nothing is written to disk — the PDF
 //! goes to the tool's stdin and the result comes back on stdout, so **no path
 //! is ever handed to poppler**.
 //!
-//! Every run is bounded by [`PDF_TIMEOUT`] and killed when it passes (or when
-//! the calling future is dropped). Its stdout is read as it arrives, against
+//! Every run goes through the conversion's shared runner
+//! ([`super::convert::run`]): a slot of the tool pool, a process group of its
+//! own, bounded by [`PDF_TIMEOUT`] and killed when it passes (or when the
+//! calling future is dropped). Its stdout is read as it arrives, against
 //! the same named budget as the office formats
 //! ([`super::office::MAX_UNCOMPRESSED_BYTES`]): a hostile PDF's text can be far
 //! larger than the PDF, and a run that passes it is killed and refused by name.
@@ -18,6 +22,10 @@
 //! - [`PdfText::classify`]: every page has text ([`PdfClass::Text`]), none has
 //!   ([`PdfClass::Scanned`]), or some do ([`PdfClass::Hybrid`]).
 //! - [`render_page`]: `pdftoppm -r 150 -png -singlefile -f N -l N -`, one PNG.
+//! - [`geometry`]: the two runs document conversion reads a PDF's layout
+//!   from (`pdftotext -bbox-layout`, `pdftohtml -xml`). Chat attachments and
+//!   knowledge bases read [`text`] until they resolve through the conversion's
+//!   capability table too (document-conversion design WP7).
 
 use std::path::Path;
 use std::process::Stdio;
@@ -25,7 +33,21 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use super::convert::run::RunError;
 use super::office::MAX_UNCOMPRESSED_BYTES;
+
+pub mod geometry;
+pub mod limit;
+pub mod square;
+pub mod wide;
+pub(crate) use limit::reading;
+pub use limit::{
+    piped_read, poppler, At, Limit, PopplerTool, PDFTOHTML_IMAGES,
+    POPPLER_IMAGE_MEMORY_LIMIT_BYTES, POPPLER_PIPE_READ_PER_BYTE, POPPLER_TEXT_MEMORY_LIMIT_BYTES,
+    POPPLER_WIDE_MEMORY_LIMIT_BYTES,
+};
+#[cfg(all(test, unix))]
+mod tests_limit;
 
 /// The text extractor, looked up on `PATH`.
 pub const PDFTOTEXT: &str = "pdftotext";
@@ -42,25 +64,6 @@ pub const PDFTOPPM: &str = "pdftoppm";
 /// decompression bomb, a content stream that loops). Generous on purpose: a
 /// false timeout costs a document, an over-long wait costs minutes.
 pub const PDF_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// How many lines of a failed run's stderr go into the error message (the rest
-/// is counted as `(… N more lines)`, or `(… more)` when stderr was longer than
-/// the 64 KiB kept and the count is unknown). Display only: the run's outcome never
-/// depends on it, and stderr is always drained.
-pub const STDERR_LINES_SHOWN: usize = 20;
-
-/// The address space one poppler child may use (`RLIMIT_AS`): 4 GiB.
-///
-/// A hostile PDF can ask for more memory than the machine has (a page
-/// declared 100 000 pt wide rendered at 150 dpi, a stream that inflates
-/// without end); with no limit the child grows until the kernel's OOM killer
-/// picks a victim, and that may be the gateway or the desktop. The limit makes
-/// the child fail alone, and the refusal names this constant
-/// ([`PdfError::OutOfMemory`]). Ordinary documents are far below it: a page
-/// at 150 dpi is under 10 MB of pixels, an A0 poster about 100 MB, and
-/// pdftotext of a several-hundred-page book stays under a few hundred MB; the
-/// rest of the 4 GiB is the address space poppler's own libraries map.
-pub const POPPLER_MEMORY_LIMIT_BYTES: u64 = 4 << 30;
 
 /// The resolution a page is rendered at for a vision model (`pdftoppm -r`).
 ///
@@ -92,34 +95,82 @@ pub enum PdfError {
         crate::hf::fmt_bytes(MAX_UNCOMPRESSED_BYTES)
     )]
     OutputTooLarge { tool: &'static str },
-    #[error(
-        "{tool} needed more than POPPLER_MEMORY_LIMIT_BYTES ({}) of memory and was stopped; \
-         the PDF is probably malformed or declares an enormous page",
-        crate::hf::fmt_bytes(POPPLER_MEMORY_LIMIT_BYTES)
-    )]
-    OutOfMemory { tool: &'static str },
+    #[error("{}", oom_said(tool, *limit, *piped, *retry))]
+    OutOfMemory {
+        tool: &'static str,
+        limit: Limit,
+        piped: bool,
+        retry: Retry,
+    },
     #[error("pdftoppm finished but wrote no image (is page {0} in the document?)")]
     EmptyPage(u32),
+    /// lmgw's reader, which starts poppler, is not there.
+    #[error("{}", super::convert::run::start::no_reader())]
+    NoReader,
+    /// lmgw's reader could not confine poppler or set its limits
+    /// (`RunError::NotStarted`): lmgw's own failure, not the file's.
+    #[error("{0}")]
+    NotStarted(String),
 }
 
-/// How a piped poppler run ended, before it is worded for its tool.
-enum RunError {
-    Missing,
-    Failed(String),
-    Timeout,
-    TooLarge,
-    OutOfMemory,
+/// Whether a run that ran out of memory was run once more under
+/// [`POPPLER_WIDE_MEMORY_LIMIT_BYTES`] ([`wide`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    /// Not run again: the wide run itself, or a step that is not run
+    /// again (the picture gate's runs, whose failure only costs it its
+    /// choice of pages).
+    No,
+    /// Its own limit (this) was not enough and it was run again under the
+    /// wide one, which it passed too.
+    Widened(Limit),
+    /// Not run again: the file's deadline left no time for it.
+    Deadline,
 }
 
-impl RunError {
-    fn into_pdf(self, tool: &'static str) -> PdfError {
-        match self {
-            Self::Missing => PdfError::ToolMissing,
-            Self::Failed(message) => PdfError::Failed { tool, message },
-            Self::Timeout => PdfError::Timeout { tool },
-            Self::TooLarge => PdfError::OutputTooLarge { tool },
-            Self::OutOfMemory => PdfError::OutOfMemory { tool },
-        }
+/// [`PdfError::OutOfMemory`] in words: the limit it passed, a pipe's share,
+/// and whether it was run again.
+fn oom_said(tool: &str, limit: Limit, piped: bool, retry: Retry) -> String {
+    let piped = if piped {
+        format!(
+            " (and POPPLER_PIPE_READ_PER_BYTE ({POPPLER_PIPE_READ_PER_BYTE}) per byte of the \
+             file, which came through a pipe)"
+        )
+    } else {
+        String::new()
+    };
+    let retry = match retry {
+        Retry::No => String::new(),
+        Retry::Widened(from) => format!(" (run again under it after {})", from.said()),
+        Retry::Deadline => format!(
+            "; it was not run again under {}, as the file's deadline left no time",
+            Limit::Wide.said()
+        ),
+    };
+    format!(
+        "{tool} needed more memory than {}{piped} and was stopped{retry}; the PDF is probably \
+         malformed, declares an enormous page or holds an enormous image",
+        limit.said()
+    )
+}
+
+/// A poppler run's end, in poppler's words: `at` says the tool, its limit
+/// and whether its file was piped.
+pub(crate) fn into_pdf(e: RunError, at: At) -> PdfError {
+    let tool = at.tool.name();
+    match e {
+        RunError::Missing => PdfError::ToolMissing,
+        RunError::Failed(message) => PdfError::Failed { tool, message },
+        RunError::Timeout => PdfError::Timeout { tool },
+        RunError::TooLarge | RunError::FileTooLarge(_) => PdfError::OutputTooLarge { tool },
+        RunError::OutOfMemory => PdfError::OutOfMemory {
+            tool,
+            limit: at.limit,
+            piped: at.piped,
+            retry: Retry::No,
+        },
+        RunError::NoReader => PdfError::NoReader,
+        RunError::NotStarted(m) => PdfError::NotStarted(m),
     }
 }
 
@@ -130,6 +181,9 @@ pub struct PdfText {
     pub pages: Vec<String>,
     /// The 1-based numbers of the pages that have no text.
     pub textless: Vec<u32>,
+    /// What its run said of its memory: run again under the wide limit
+    /// ([`wide::Note`]).
+    pub notes: Vec<wide::Note>,
 }
 
 /// What kind of PDF it is, by its pages' text.
@@ -161,7 +215,11 @@ impl PdfText {
             .filter(|(_, p)| p.trim().is_empty())
             .map(|(i, _)| i as u32 + 1)
             .collect();
-        Self { pages, textless }
+        Self {
+            pages,
+            textless,
+            notes: Vec::new(),
+        }
     }
 
     pub fn classify(&self) -> PdfClass {
@@ -201,15 +259,31 @@ pub async fn text(bytes: Bytes) -> Result<PdfText, PdfError> {
 /// [`text`] with the binary and the timeout named, so a test can prove what
 /// a missing tool or a slow one turns into.
 pub async fn text_with(bin: &Path, bytes: Bytes, timeout: Duration) -> Result<PdfText, PdfError> {
-    let raw = run_piped(bin, &["-layout", "-enc", "UTF-8", "-", "-"], bytes, timeout)
-        .await
-        .map_err(|e| e.into_pdf("pdftotext"))?;
-    Ok(PdfText::from_raw(&String::from_utf8_lossy(&raw)))
+    let args = ["-layout", "-enc", "UTF-8"].map(String::from).to_vec();
+    let call = wide::Call::new(
+        PopplerTool::Text,
+        bin,
+        args,
+        &["-"],
+        wide::Src::Bytes(bytes),
+    );
+    let got = wide::own(&call, timeout).await?;
+    let mut text = PdfText::from_raw(&String::from_utf8_lossy(&got.out));
+    text.notes = got.notes;
+    Ok(text)
+}
+
+/// A page rendered for Chat or a knowledge base: its PNG, and what its run
+/// said of its memory ([`wide::Note`]).
+#[derive(Debug)]
+pub struct Rendered {
+    pub png: Vec<u8>,
+    pub notes: Vec<wide::Note>,
 }
 
 /// Render page `page` (1-based) of the PDF in `bytes` as one PNG at
 /// [`PAGE_DPI`].
-pub async fn render_page(bytes: Bytes, page: u32) -> Result<Vec<u8>, PdfError> {
+pub async fn render_page(bytes: Bytes, page: u32) -> Result<Rendered, PdfError> {
     render_page_with(Path::new(PDFTOPPM), bytes, page, PAGE_DPI, PDF_TIMEOUT).await
 }
 
@@ -220,16 +294,25 @@ pub async fn render_page_with(
     page: u32,
     dpi: u32,
     timeout: Duration,
-) -> Result<Vec<u8>, PdfError> {
+) -> Result<Rendered, PdfError> {
     let (dpi, n) = (dpi.to_string(), page.to_string());
-    let args = ["-r", &dpi, "-png", "-singlefile", "-f", &n, "-l", &n, "-"];
-    let png = run_piped(bin, &args, bytes, timeout)
-        .await
-        .map_err(|e| e.into_pdf("pdftoppm"))?;
-    if png.is_empty() {
+    let args = ["-r", &dpi, "-png", "-singlefile", "-f", &n, "-l", &n].map(String::from);
+    let mut call = wide::Call::new(
+        PopplerTool::Render,
+        bin,
+        args.to_vec(),
+        &[],
+        wide::Src::Bytes(bytes),
+    );
+    call.span = Some((page, page));
+    let got = wide::own(&call, timeout).await?;
+    if got.out.is_empty() {
         return Err(PdfError::EmptyPage(page));
     }
-    Ok(png)
+    Ok(Rendered {
+        png: got.out,
+        notes: got.notes,
+    })
 }
 
 /// Whether both poppler tools can be run here — what tests that need them
@@ -247,222 +330,6 @@ pub async fn available() -> bool {
         }
     }
     true
-}
-
-/// `bin args…` with `bytes` on stdin, stdout back undecoded, killed after
-/// `timeout` (or when the future is dropped) or when stdout passes
-/// [`MAX_UNCOMPRESSED_BYTES`], and limited to [`POPPLER_MEMORY_LIMIT_BYTES`]
-/// of address space.
-async fn run_piped(
-    bin: &Path,
-    args: &[&str],
-    bytes: Bytes,
-    timeout: Duration,
-) -> Result<Vec<u8>, RunError> {
-    run_piped_within(
-        bin,
-        args,
-        bytes,
-        timeout,
-        MAX_UNCOMPRESSED_BYTES,
-        POPPLER_MEMORY_LIMIT_BYTES,
-    )
-    .await
-}
-
-/// [`run_piped`] with the stdout limit and the child's address-space limit
-/// named (tests use small ones).
-async fn run_piped_within(
-    bin: &Path,
-    args: &[&str],
-    bytes: Bytes,
-    timeout: Duration,
-    limit: u64,
-    mem_limit: u64,
-) -> Result<Vec<u8>, RunError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let name = bin.display().to_string();
-    let mut cmd = tokio::process::Command::new(bin);
-    limit_address_space(&mut cmd, mem_limit)?;
-    let mut child = cmd
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A timeout, or a caller that is dropped mid-file, must not leave the
-        // tool behind.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                RunError::Missing
-            } else {
-                RunError::Failed(format!("could not run {name}: {e}"))
-            }
-        })?;
-    let pipe = |what: &str| RunError::Failed(format!("{name}'s {what} was not piped"));
-    let mut stdin = child.stdin.take().ok_or_else(|| pipe("stdin"))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| pipe("stdout"))?;
-    let mut stderr = child.stderr.take().ok_or_else(|| pipe("stderr"))?;
-    // Written from its own task while the output is read: a PDF larger than
-    // the pipe buffer would otherwise deadlock against the tool's output. A
-    // write that fails because the tool gave up early is not the error worth
-    // reporting — its exit status and stderr are.
-    let writer = tokio::spawn(async move {
-        let _ = stdin.write_all(&bytes).await;
-        let _ = stdin.shutdown().await;
-    });
-    // stderr is drained to the end (so the tool never blocks on it) but only
-    // its first bytes are kept, for the message.
-    let err_reader = tokio::spawn(async move {
-        let mut kept = Vec::new();
-        let mut cut = false;
-        let mut chunk = [0u8; 8192];
-        while let Ok(n) = stderr.read(&mut chunk).await {
-            if n == 0 {
-                break;
-            }
-            if kept.len() < STDERR_KEEP_BYTES {
-                kept.extend_from_slice(&chunk[..n]);
-            } else {
-                cut = true;
-            }
-        }
-        // A chunk that crossed the bound is kept whole; only what came after
-        // it is lost.
-        (kept, cut)
-    });
-    // stdout is read as it comes, so a run that produces more than `limit` is
-    // stopped when it crosses it, not after it has filled memory. Dropping
-    // this future on a timeout drops the child, which `kill_on_drop` kills.
-    let work = async {
-        let mut out = Vec::new();
-        let mut chunk = vec![0u8; 64 << 10];
-        loop {
-            let n = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|e| RunError::Failed(format!("{name}: {e}")))?;
-            if n == 0 {
-                break;
-            }
-            if (out.len() + n) as u64 > limit {
-                return Err(RunError::TooLarge);
-            }
-            out.extend_from_slice(&chunk[..n]);
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| RunError::Failed(format!("{name}: {e}")))?;
-        Ok((out, status))
-    };
-    let (out, status) = match tokio::time::timeout(timeout, work).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            writer.abort();
-            err_reader.abort();
-            return Err(e);
-        }
-        Err(_) => {
-            writer.abort();
-            err_reader.abort();
-            return Err(RunError::Timeout);
-        }
-    };
-    let _ = writer.await;
-    // Poppler reports a failed allocation on stderr and can still exit 0 with
-    // a stub (a 1x1 image for a page that did not fit), so stderr is read for
-    // a success too; the pipe closes when the child exits.
-    let (stderr, cut) = err_reader.await.unwrap_or_default();
-    let stderr = String::from_utf8_lossy(&stderr);
-    if ran_out_of_memory(&status, &stderr) {
-        return Err(RunError::OutOfMemory);
-    }
-    if !status.success() {
-        return Err(RunError::Failed(format!(
-            "{} ({status})",
-            first_lines(&stderr, !cut)
-        )));
-    }
-    Ok(out)
-}
-
-/// The child's address space limited to `mem_limit` bytes (`RLIMIT_AS`).
-#[cfg(unix)]
-fn limit_address_space(cmd: &mut tokio::process::Command, mem_limit: u64) -> Result<(), RunError> {
-    // SAFETY: the hook runs in the forked child before exec and calls only
-    // `setrlimit`, which is async-signal-safe; it allocates nothing.
-    unsafe {
-        cmd.pre_exec(move || {
-            let lim = libc::rlimit {
-                rlim_cur: mem_limit as libc::rlim_t,
-                rlim_max: mem_limit as libc::rlim_t,
-            };
-            if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    Ok(())
-}
-
-/// Poppler is not run without its memory limit, and a job object's limit is
-/// not set yet on Windows (Windows design §4.4, WP6).
-#[cfg(not(unix))]
-fn limit_address_space(
-    _cmd: &mut tokio::process::Command,
-    _mem_limit: u64,
-) -> Result<(), RunError> {
-    Err(RunError::Failed(
-        "PDF extraction's memory limit for poppler is not supported on Windows yet".to_string(),
-    ))
-}
-
-/// How much of a run's stderr is kept to be shown: 64 KiB. Display only.
-const STDERR_KEEP_BYTES: usize = 64 << 10;
-
-/// Did the child die of the address-space limit? A failed allocation shows
-/// as poppler's own out-of-memory message, a C++ `bad_alloc`, or the abort or
-/// segfault that follows one.
-fn ran_out_of_memory(status: &std::process::ExitStatus, stderr: &str) -> bool {
-    let s = stderr.to_ascii_lowercase();
-    let says = s.contains("bad_alloc") || s.contains("out of memory") || s.contains("memory alloc");
-    says || (died_of_abort_or_segv(status) && s.contains("memory"))
-}
-
-#[cfg(unix)]
-fn died_of_abort_or_segv(status: &std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt;
-    matches!(status.signal(), Some(libc::SIGABRT | libc::SIGSEGV))
-}
-
-/// Windows has no signals; poppler does not run there yet ([`limit_address_space`]).
-#[cfg(not(unix))]
-fn died_of_abort_or_segv(_status: &std::process::ExitStatus) -> bool {
-    false
-}
-
-/// The first [`STDERR_LINES_SHOWN`] lines of `text`, trimmed, with `(… N more
-/// lines)` when there were more — or `(… more)` when `complete` is false: the
-/// text is only what was kept of a longer stderr, so a count would be wrong.
-fn first_lines(text: &str, complete: bool) -> String {
-    let text = text.trim();
-    let total = text.lines().count();
-    let mut shown: Vec<&str> = text.lines().take(STDERR_LINES_SHOWN).collect();
-    let more = if complete {
-        format!(
-            "(… {} more lines)",
-            total.saturating_sub(STDERR_LINES_SHOWN)
-        )
-    } else {
-        "(… more)".to_string()
-    };
-    if total > STDERR_LINES_SHOWN || !complete {
-        shown.push(&more);
-    }
-    shown.join("\n")
 }
 
 #[cfg(test)]
@@ -528,38 +395,66 @@ mod tests {
         assert_eq!(e, PdfError::ToolMissing);
     }
 
-    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
-    // limit; Windows refuses every run (a_run_is_refused_on_windows).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_run_that_overstays_is_killed_and_the_error_names_the_constant() {
-        // `sleep` ignores stdin and outlives a 100 ms budget.
-        let e = run_piped(
-            Path::new("sleep"),
-            &["30"],
-            Bytes::new(),
-            Duration::from_millis(100),
-        )
-        .await;
-        let e = e.map_err(|e| e.into_pdf("pdftotext")).unwrap_err();
+    /// The runner's ends in poppler's words: each names the constant that
+    /// bounded it (the runner's own tests stop real runs, `convert/run`).
+    #[test]
+    fn a_stopped_run_names_the_constant_that_stopped_it() {
+        let text = At {
+            tool: PopplerTool::Text,
+            limit: Limit::Text,
+            piped: true,
+        };
+        let e = into_pdf(RunError::Timeout, text);
         assert_eq!(e, PdfError::Timeout { tool: "pdftotext" });
         let s = e.to_string();
         assert!(s.contains("PDF_TIMEOUT") && s.contains("300 s"), "{s}");
-    }
-
-    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
-    // limit; Windows refuses every run (a_run_is_refused_on_windows).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_large_input_does_not_deadlock_the_pipe() {
-        // `cat` echoes stdin to stdout: 4 MiB is far past both pipe buffers,
-        // so a writer that shared the reader's task would hang.
-        let data = Bytes::from(vec![b'x'; 4 << 20]);
-        let out = run_piped(Path::new("cat"), &[], data.clone(), Duration::from_secs(30))
-            .await
-            .ok()
-            .unwrap();
-        assert_eq!(out.len(), data.len());
+        let e = into_pdf(RunError::TooLarge, text);
+        assert!(e.to_string().contains("MAX_UNCOMPRESSED_BYTES"), "{e}");
+        let render = At {
+            tool: PopplerTool::Render,
+            limit: Limit::Image,
+            piped: false,
+        };
+        let s = into_pdf(RunError::OutOfMemory, render).to_string();
+        assert!(
+            s.contains("POPPLER_IMAGE_MEMORY_LIMIT_BYTES (2.0 GiB)"),
+            "{s}"
+        );
+        // A spooled file has no pipe's share to say.
+        assert!(!s.contains("POPPLER_PIPE_READ_PER_BYTE"), "{s}");
+        let s = into_pdf(RunError::OutOfMemory, text).to_string();
+        assert!(
+            s.contains("POPPLER_TEXT_MEMORY_LIMIT_BYTES (512 MiB)"),
+            "{s}"
+        );
+        assert!(s.contains("POPPLER_PIPE_READ_PER_BYTE (3)"), "{s}");
+        // Run again under the wide limit and stopped there too, or not run
+        // again for the deadline: both limits named.
+        let wide = PdfError::OutOfMemory {
+            tool: "pdftotext",
+            limit: Limit::Wide,
+            piped: false,
+            retry: Retry::Widened(Limit::Text),
+        };
+        let s = wide.to_string();
+        assert!(
+            s.contains("more memory than POPPLER_WIDE_MEMORY_LIMIT_BYTES (4.0 GiB)")
+                && s.contains("after POPPLER_TEXT_MEMORY_LIMIT_BYTES (512 MiB)"),
+            "{s}"
+        );
+        let late = PdfError::OutOfMemory {
+            tool: "pdftoppm",
+            limit: Limit::Image,
+            piped: false,
+            retry: Retry::Deadline,
+        };
+        let s = late.to_string();
+        assert!(
+            s.contains("POPPLER_IMAGE_MEMORY_LIMIT_BYTES")
+                && s.contains("not run again under POPPLER_WIDE_MEMORY_LIMIT_BYTES")
+                && s.contains("deadline"),
+            "{s}"
+        );
     }
 
     // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
@@ -567,22 +462,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_failing_tool_reports_its_exit_status() {
-        let e = run_piped(
-            Path::new("false"),
-            &[],
-            Bytes::new(),
-            Duration::from_secs(30),
-        )
-        .await
-        .map_err(|e| e.into_pdf("pdftotext"))
-        .unwrap_err();
+        let e = text_with(Path::new("false"), Bytes::new(), PDF_TIMEOUT)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
-                e,
+                &e,
                 PdfError::Failed {
                     tool: "pdftotext",
-                    ..
-                }
+                    message,
+                } if message.contains("exit status")
             ),
             "{e:?}"
         );
@@ -646,7 +535,7 @@ mod tests {
             return;
         }
         let pdf = Bytes::from(test_files::pdf(&[Some("Hello"), Some("World")]));
-        let png = render_page(pdf.clone(), 2).await.unwrap();
+        let png = render_page(pdf.clone(), 2).await.unwrap().png;
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
         // 300x200 pt at 150 dpi.
         let (w, h) = (
@@ -662,45 +551,6 @@ mod tests {
         );
     }
 
-    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
-    // limit; Windows refuses every run (a_run_is_refused_on_windows).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn output_past_the_limit_is_stopped_and_named() {
-        // `yes` writes forever; the run is killed when stdout crosses the limit.
-        let started = std::time::Instant::now();
-        let e = run_piped_within(
-            Path::new("yes"),
-            &[],
-            Bytes::new(),
-            PDF_TIMEOUT,
-            1 << 20,
-            POPPLER_MEMORY_LIMIT_BYTES,
-        )
-        .await
-        .map_err(|e| e.into_pdf("pdftotext"))
-        .unwrap_err();
-        assert_eq!(e, PdfError::OutputTooLarge { tool: "pdftotext" });
-        assert!(e.to_string().contains("MAX_UNCOMPRESSED_BYTES"), "{e}");
-        assert!(started.elapsed() < Duration::from_secs(10));
-    }
-
-    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
-    // limit; Windows refuses every run (a_run_is_refused_on_windows).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_stderr_longer_than_what_is_kept_says_more_without_a_count() {
-        // 400 KB of stderr against the 64 KiB kept: the count would be a lie.
-        let script = "yes 'a line of complaint text' | head -c 400000 >&2; exit 3";
-        let Err(RunError::Failed(m)) =
-            run_piped(Path::new("sh"), &["-c", script], Bytes::new(), PDF_TIMEOUT).await
-        else {
-            panic!("expected a failed run");
-        };
-        assert!(m.contains("\n(… more) ("), "{m}");
-        assert!(!m.contains("more lines"), "{m}");
-    }
-
     #[tokio::test]
     async fn a_page_that_needs_more_than_the_memory_limit_is_stopped_and_named() {
         if !available().await {
@@ -709,7 +559,11 @@ mod tests {
         }
         // 300x200 pt at 5 000 dpi is a 20 800 x 13 900 pixel page (~870 MB).
         let pdf = Bytes::from(test_files::pdf(&[Some("Hello")]));
-        let e = run_piped_within(
+        let bounds = super::super::convert::run::Bounds {
+            memory: 512 << 20,
+            ..poppler(Limit::Image, PDF_TIMEOUT)
+        };
+        let e = super::super::convert::run::piped(
             Path::new(PDFTOPPM),
             &[
                 "-r",
@@ -723,15 +577,32 @@ mod tests {
                 "-",
             ],
             pdf,
-            PDF_TIMEOUT,
-            MAX_UNCOMPRESSED_BYTES,
-            512 << 20,
+            bounds,
         )
         .await
-        .map_err(|e| e.into_pdf("pdftoppm"))
+        .map_err(|e| {
+            let at = At {
+                tool: PopplerTool::Render,
+                limit: Limit::Image,
+                piped: true,
+            };
+            into_pdf(e, at)
+        })
         .unwrap_err();
-        assert_eq!(e, PdfError::OutOfMemory { tool: "pdftoppm" }, "{e}");
-        assert!(e.to_string().contains("POPPLER_MEMORY_LIMIT_BYTES"), "{e}");
+        assert!(
+            matches!(
+                e,
+                PdfError::OutOfMemory {
+                    tool: "pdftoppm",
+                    ..
+                }
+            ),
+            "{e}"
+        );
+        assert!(
+            e.to_string().contains("POPPLER_IMAGE_MEMORY_LIMIT_BYTES"),
+            "{e}"
+        );
     }
 
     #[tokio::test]
@@ -748,25 +619,9 @@ mod tests {
         assert_eq!(t.classify(), PdfClass::Text);
         let scan = Bytes::from(test_files::pdf(&vec![None; 30]));
         for page in [1, 15, 30] {
-            let png = render_page(scan.clone(), page).await.unwrap();
+            let png = render_page(scan.clone(), page).await.unwrap().png;
             assert!(png.starts_with(b"\x89PNG"), "page {page}");
         }
-    }
-
-    // Unix's tools (sh, yes, cat, sleep, false) under poppler's address-space
-    // limit; Windows refuses every run (a_run_is_refused_on_windows).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_long_stderr_is_shown_as_its_first_lines_and_a_count() {
-        let script = "for i in $(seq 1 100); do echo line$i >&2; done; exit 3";
-        let Err(RunError::Failed(m)) =
-            run_piped(Path::new("sh"), &["-c", script], Bytes::new(), PDF_TIMEOUT).await
-        else {
-            panic!("expected a failed run");
-        };
-        assert!(m.starts_with("line1\nline2\n"), "{m}");
-        assert!(m.contains("line20\n(… 80 more lines) ("), "{m}");
-        assert!(!m.contains("line21"), "{m}");
     }
 
     /// On Windows poppler is not run without its memory limit, which is not

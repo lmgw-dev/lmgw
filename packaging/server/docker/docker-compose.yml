@@ -1,0 +1,117 @@
+# lmgw on a server that runs Docker instead of Podman: the same image as the Quadlet unit
+# (../lmgw.container), started by Docker Compose. Not the tested layout: the image is built for a
+# rootless Podman, and docs/server.md is written for that. Here the container's root is the
+# host's root, and whoever administers lmgw can become root on the host: the user namespace the
+# entrypoint makes for lmgw maps the ids to themselves and is no security boundary (docs/server.md
+# section 14, "What the container may do"). Use it where Podman 5.1 or newer is not available on
+# the host, and give lmgw accounts only to people who may be root there.
+#
+# Needs Docker 28.3 or newer: writable-cgroups (28.0) and CDI devices without a daemon setting
+# (28.3; `docker info` lists nvidia.com/gpu=all under "Discovered Devices").
+#
+# The image arrives as an archive, never from a registry:
+#   docker load -i lmgw-server-<version>.docker.tar
+#   docker tag localhost/lmgw-server:<version, + written as _> localhost/lmgw-server:current
+#   docker compose up -d
+#
+# Beside this file:
+#   tls/tls.crt, tls/tls.key     the TLS pair (the chain leaf first; the key mode 600). lmgw reads
+#                                a renewed pair from the next connection on, without a restart.
+#   secrets/lmgw-wrap-key        the device CA's wrapping key, made once:
+#                                  (umask 077; openssl rand -hex 32 > secrets/lmgw-wrap-key)
+#                                Back it up on its own (docs/server.md section 4).
+#
+# The first sign-in: docker logs lmgw 2>&1 | grep 'set a password'
+# The command line:  docker exec -it lmgw lmgw-server account list
+name: lmgw
+
+services:
+  lmgw:
+    image: localhost/lmgw-server:current
+    container_name: lmgw
+    # Nothing to pull from: a missing image fails the start instead of asking a registry.
+    pull_policy: never
+    restart: unless-stopped
+    devices:
+      # The cards by their CDI name, from the host's CDI spec (nvidia-ctk cdi list). One card:
+      # nvidia.com/gpu=<index or UUID>. Without an NVIDIA card, remove the line.
+      - nvidia.com/gpu=all
+      # The nested Podman's networking (pasta).
+      - /dev/net/tun
+    # The entrypoint moves lmgw and its nested Podman into a user namespace of their own
+    # (entrypoint.sh), where the nested Podman works. The options here are what making that
+    # namespace and working in it need; without any one of them the start stops (each seen on
+    # Ubuntu 24.04, kernel 6.8, Docker 29.9):
+    cap_add:
+      # Ubuntu's AppArmor refuses a user namespace with a mount namespace to a process without
+      # it ("unshare: cannot change root filesystem propagation: Permission denied"), and the
+      # entrypoint mounts a whole /proc and /sys for the nested containers with it.
+      - SYS_ADMIN
+    security_opt:
+      # Docker's default seccomp profile refuses pivot_root, which pasta and crun call
+      # ("Failed to pivot_root() into empty tmpfs: Operation not permitted").
+      - seccomp=unconfined
+      # Docker's default AppArmor profile denies the mounts (the same unshare refusal).
+      - apparmor=unconfined
+      # A writable /sys/fs/cgroup for the nested Podman's memory and CPU limits, which
+      # podman run --systemd=always gives under Podman. The entrypoint makes the leaf.
+      - writable-cgroups=true
+    cgroup: private
+    # What --systemd=always mounts under Podman. /run needs exec: the nested Podman's runtime
+    # files are there. TMPDIR is /var/tmp, a volume, so /tmp holds nothing large.
+    tmpfs:
+      - /run:exec,mode=0755
+      - /tmp
+    # A whole quit (docs/server.md section 5, "The stop budget"). Raise both numbers together
+    # when Settings -> About says the stored unload timeout makes a stop longer.
+    stop_grace_period: 95s
+    environment:
+      LMGW_STOP_TIMEOUT: "95"
+      LMGW_TLS_CERT: /etc/lmgw/tls/tls.crt
+      LMGW_TLS_KEY: /etc/lmgw/tls/tls.key
+      # The address people open; the certificate must cover its host name.
+      LMGW_PUBLIC_URL: https://lmgw.example:8443
+    volumes:
+      - lmgw-data:/data
+      - lmgw-store:/var/lib/containers
+      - lmgw-buildcache:/var/tmp
+      - ./tls:/etc/lmgw/tls:ro
+    secrets:
+      - source: lmgw-wrap-key
+        target: lmgw-wrap-key
+    ports:
+      # The TLS listener and its WebRTC group, the device listener and its group. The plain
+      # listener is the container's loopback behind TLS (127.0.0.1:8787) and is not published.
+      - "8443:8443"
+      - "8443:8443/udp"
+      - "8788:8788"
+      - "8788:8788/udp"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # A migrating release's first start copies and migrates the databases before lmgw answers.
+      start_period: 900s
+      start_interval: 2s
+    labels:
+      # willfarrell/autoheal, where it watches every container: its default stop timeout (10 s)
+      # is shorter than lmgw's quit.
+      autoheal.stop.timeout: "95"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  lmgw-data:
+    name: lmgw-data
+  lmgw-store:
+    name: lmgw-store
+  lmgw-buildcache:
+    name: lmgw-buildcache
+
+secrets:
+  lmgw-wrap-key:
+    file: ./secrets/lmgw-wrap-key

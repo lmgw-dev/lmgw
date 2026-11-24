@@ -46,6 +46,60 @@ pub(crate) const TAGS: &[TagDef] = &[
         description: "",
     },
     TagDef {
+        id: "docling-serve",
+        name: "docling-serve compatible",
+        group: Group::Inference,
+        description: "docling-serve's convert routes (release 1.38), answered by lmgw's own \
+            conversion, for the tools that call docling today: point them at lmgw and change \
+            the key (X-Api-Key works; the status WebSocket takes ?api_key=). Every docling \
+            option a request sets gets an outcome, listed in x-lmgw-option-notes when it is \
+            not honoured. honoured: from_formats (others are skipped), to_formats md and \
+            text, do_ocr, do_table_structure, page_range, document_timeout (a per-file \
+            deadline), abort_on_error, md_page_break_placeholder, md_compact_tables. Mapped \
+            onto lmgw's equivalent: ocr_engine and ocr_preset (any name: lmgw's OCR), \
+            ocr_lang (BCP-47 to tesseract codes), pdf_backend (poppler), table_mode \
+            (accurate: table pages go to a chosen page-reading model; fast: lmgw's own \
+            tables, and a chosen page-reading model reads only the pages nothing else \
+            read), table_cell_matching and the table/layout presets (lmgw's tables and \
+            layout), \
+            pipeline (standard, legacy, native: lmgw's pipeline; vlm: the page-reading \
+            model; asr: the speech-to-text model chosen under Settings > Documents, which \
+            transcribes audio and videos on every pipeline), the vlm_pipeline_* options (the page-reading model; an API url is not \
+            followed), do_pdf_heading_hierarchy (lmgw's heading levels), picture \
+            descriptions (the picture-description model, the caller's prompt kept; an API \
+            url is not followed), formula and code enrichment (do_formula_enrichment, \
+            do_code_enrichment, code_formula_preset: the page-reading model writes formulas \
+            as LaTeX and code as fenced blocks on the pages it reads; no option picks pages \
+            for them). image_export_mode (placeholder, embedded, referenced: the \
+            zip holds referenced pictures under artifacts/ as the markdown links them), \
+            include_images (false keeps placeholders) and images_scale are the native \
+            pictures and images_scale. do_picture_description is the native \
+            describe_pictures, answered by the picture-description model the owner chose \
+            (mapped; none chosen: mapped(model_not_chosen), pictures without descriptions), \
+            picture_description_api/_local/_custom_config give their prompt and a note naming \
+            each of their keys (url and headers never followed), and \
+            picture_description_area_threshold is the native describe_min_area (smaller \
+            pictures kept, not described); pictures are exported whatever their size, as \
+            docling exports them. Not yet: to_formats json \
+            (DoclingDocument), html, doctags and the rest (their fields stay null, status \
+            partial_success, errors names them), include_page_images, ocr_custom_config, picture \
+            classification, chart extraction, chunking, and \
+            any option lmgw does not know (a note, never a 422; a wrong type for a known \
+            option is docling's 422). lmgw calls no address a caller chose but one: an http \
+            source is fetched only with the owner's setting documents.fetch_sources on, \
+            for a request with an API key, and from the hosts on documents.source_hosts (a \
+            private, loopback or link-local address, or one of this computer's own, only \
+            when listed itself; redirects re-checked; max_body_mb, SOURCE_FETCH_TIMEOUT, \
+            a gateway-wide fetch pool); off it is a 400 http_source_refused, without a key \
+            a 401 http_source_needs_key, with max_body_mb 0 a 400 \
+            http_source_needs_limit, an unlisted host 400 http_source_host_refused, and a \
+            fetch that fails fails its file with \
+            source_address_refused, source_redirect_refused, source_too_large, \
+            source_timeout, source_http_status or source_unreachable. Callbacks are not \
+            called, s3 and other storage sources are 400 source_kind_refused, \
+            put/s3/presigned_url targets 400 target_refused.",
+    },
+    TagDef {
         id: "mcp",
         name: "MCP",
         group: Group::Inference,
@@ -147,6 +201,15 @@ pub(crate) const TAGS: &[TagDef] = &[
         description: "The dashboard's image playground: the models that can draw, and the \
                        generate and edit routes that turn a form into a /v1/images/* request \
                        and run it through the same handlers.",
+    },
+    TagDef {
+        id: "documents-lab",
+        name: "Documents lab",
+        group: Group::DashboardApi,
+        description: "The dashboard's document-conversion playground: a form and its files \
+                       kept as a group, and the run that sends them to \
+                       /v1/documents/convert (sync or as a job) or the docling-compatible \
+                       /v1/convert/file through the same handlers.",
     },
     TagDef {
         id: "decision-lab",

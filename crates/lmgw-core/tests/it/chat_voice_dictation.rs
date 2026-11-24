@@ -154,7 +154,7 @@ pub(crate) async fn failing_cloud_asr(state: &SharedState, name: &str) -> MockSe
 }
 
 /// `mock` as the provider behind the speech-to-text alias `name`.
-async fn cloud_alias(state: &SharedState, name: &str, mock: MockServer) -> MockServer {
+pub(crate) async fn cloud_alias(state: &SharedState, name: &str, mock: MockServer) -> MockServer {
     let up = store::insert_upstream(
         &state.db,
         &NewUpstream {

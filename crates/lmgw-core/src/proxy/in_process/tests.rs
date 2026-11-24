@@ -85,6 +85,7 @@ async fn a_route_the_caller_refuses_gets_no_catalog_read() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let refused = stream_once_on(
         &state,
@@ -177,6 +178,7 @@ async fn a_stop_ends_a_call_whose_per_route_check_waits() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let (handle, signal) = crate::proxy::stop_pair();
     handle.stop();
@@ -310,6 +312,7 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let newest = || async {
         crate::store::query_logs(
@@ -385,4 +388,5 @@ async fn a_stream_stopped_after_its_answer_counts_its_request() {
     );
 }
 
+mod dropped;
 mod failed;

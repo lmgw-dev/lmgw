@@ -20,6 +20,11 @@
 //!   confirm, with the note renewed; any other change of the context drops
 //!   the note.
 //!
+//! - [`engine`]: the engine image the get waits for before it creates the
+//!   row (device-ledger design, ruling 13): one that comes after the
+//!   files, one whose download fails, one no registry gives.
+//! - [`layout`]: Get it asks where only a split holds the file (device-ledger
+//!   design WP12), and sets it up as chosen.
 //! - [`review`]: WP5's review round (shared downloads, cancels, a waiting
 //!   get's untracked or cancelled paused row, concurrent gets, a dropped
 //!   request, the status read, pass-through names, Fit again's confirm and
@@ -47,6 +52,8 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use crate::common::{self, patience, Gw};
 use crate::plan_pin::{chat_header, drafter, embedder, projector};
 
+mod engine;
+mod layout;
 mod review;
 
 const REPO: &str = "demo-org/demo-chat-GGUF";
@@ -66,9 +73,25 @@ fn sha(bytes: &[u8]) -> String {
 }
 
 /// A `podman` that agrees to everything, starts nothing, and records every
-/// call.
+/// call. With an [`Engine`] it also keeps that one image's store: whether
+/// it is here, its ID, and llama-server's `--help` from it.
 #[derive(Default)]
-struct Podman(Mutex<Vec<Vec<String>>>);
+struct Podman {
+    calls: Mutex<Vec<Vec<String>>>,
+    engine: Mutex<Option<Engine>>,
+}
+
+/// The engine image the fake [`Podman`] keeps, and what read its flags.
+#[derive(Default)]
+struct Engine {
+    here: bool,
+    /// `--help` runs while the image was not here, and once it was.
+    help_missing: usize,
+    help_here: usize,
+}
+
+/// llama-server's own `--help` (a build with `--fit`).
+const LLAMA_HELP: &str = include_str!("../fixtures/llama/llama-server-help-4b1a27fa0.txt");
 
 impl CommandRunner for Podman {
     fn run<'a>(
@@ -76,14 +99,44 @@ impl CommandRunner for Podman {
         _program: &'a str,
         args: &'a [String],
     ) -> Erased<'a, std::io::Result<CmdOutput>> {
-        self.0.lock().unwrap().push(args.to_vec());
-        Box::pin(async move {
-            Ok(CmdOutput {
-                status: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        })
+        self.calls.lock().unwrap().push(args.to_vec());
+        let out = |status: i32, stdout: &str, stderr: &str| CmdOutput {
+            status,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        let answer = {
+            let mut engine = self.engine.lock().unwrap();
+            match engine.as_mut() {
+                None => out(0, "", ""),
+                Some(e) => {
+                    let image = args.iter().any(|a| a == "image");
+                    let not_known = "Error: image not known\n";
+                    if image && args.iter().any(|a| a == "exists") {
+                        out(if e.here { 0 } else { 1 }, "", "")
+                    } else if image && args.iter().any(|a| a == "inspect") {
+                        match e.here {
+                            true => out(0, "c0ffee\n", ""),
+                            false => out(125, "", not_known),
+                        }
+                    } else if args.iter().any(|a| a == "--help") {
+                        match e.here {
+                            true => {
+                                e.help_here += 1;
+                                out(0, LLAMA_HELP, "")
+                            }
+                            false => {
+                                e.help_missing += 1;
+                                out(125, "", not_known)
+                            }
+                        }
+                    } else {
+                        out(0, "", "")
+                    }
+                }
+            }
+        };
+        Box::pin(async move { Ok(answer) })
     }
 }
 
@@ -92,7 +145,7 @@ impl Podman {
     /// own check of the engine's flags runs `llama-server --help` in a
     /// throwaway container (`lmgw-help-…`), which loads no model.
     fn starts(&self) -> Vec<Vec<String>> {
-        self.0
+        self.calls
             .lock()
             .unwrap()
             .iter()
@@ -110,7 +163,11 @@ impl Podman {
 
 /// What the mock CDN serves, by repo path: a `Range: bytes=N-` gets a `206`
 /// from byte N, anything else the whole file. A path in `missing` answers
-/// `404`; `delay` holds every answer back, `slow` those of its files longer.
+/// `404`; `delay` holds every transfer back, `slow` those of its files
+/// longer. A header read (`Range: bytes=0-`, `hf::remote`; a download asks
+/// without a Range or from a byte past 0) is answered at once: the op reads
+/// the headers before it answers, and a delayed one held every `model_get`
+/// call for the whole delay (a 20 s delay made a test of cancels 66 s long).
 #[derive(Clone, Default)]
 struct Cdn {
     files: Arc<HashMap<String, Vec<u8>>>,
@@ -162,6 +219,9 @@ impl Cdn {
             }
             _ => ResponseTemplate::new(404),
         };
+        if range.as_deref() == Some("bytes=0-") {
+            return answer;
+        }
         let slow = self.slow.iter().find(|(f, _)| *f == file).map(|(_, d)| *d);
         match slow.or(self.delay) {
             Some(d) => answer.set_delay(d),
@@ -751,6 +811,7 @@ async fn a_restart_mid_get_goes_on_and_creates_the_row_once() {
             measure: "beside",
             model_id: "demo-chat",
             kind: None,
+            layout: None,
         },
     )
     .await

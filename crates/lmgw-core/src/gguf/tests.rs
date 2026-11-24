@@ -1473,3 +1473,169 @@ fn a_named_chat_template_is_captured_next_to_the_bare_one() {
         Some("tools")
     );
 }
+
+// ---- looped models -----------------------------------------------------
+
+/// Inkling 2 Mini as ggml-org converts it (`inkling2_loop`): 24 stored
+/// layers whose core 6..18 runs 3 times, query heads stated per layer.
+#[test]
+fn a_looped_model_states_its_loop_core() {
+    let mut b = Build::default();
+    b.str("general.architecture", "inkling2_loop")
+        .u32("inkling2_loop.block_count", 24)
+        .arr_u32("inkling2_loop.attention.head_count", &[24; 24])
+        .arr_u32("inkling2_loop.attention.head_count_kv", &[8; 24])
+        .u32("inkling2_loop.loop.start", 6)
+        .u32("inkling2_loop.loop.end", 18)
+        .u32("inkling2_loop.loop.count", 3)
+        .u32("inkling2_loop.loop.gate_rank", 64)
+        .bool("inkling2_loop.loop.varying", false);
+    let f = b.file();
+    let s = summarize(f.path()).unwrap();
+    let l = s.layer_loop.unwrap();
+    assert_eq!((l.start, l.end, l.count), (6, 18, 3));
+    // llama.cpp's cache slots: 24 stored + 2 more passes over 12 layers.
+    assert_eq!(l.cache_layers(24), 48);
+    // A per-layer head_count reads as its largest layer's, not as absent.
+    assert_eq!(s.head_count, Some(24));
+}
+
+/// A loop llama.cpp refuses to load is no loop to size by.
+#[test]
+fn a_loop_llama_cpp_would_refuse_is_no_loop() {
+    for (start, end, count) in [(6, 30, 3), (6, 6, 3), (12, 6, 3), (6, 18, 0)] {
+        let mut b = Build::default();
+        b.str("general.architecture", "foo")
+            .u32("foo.block_count", 24)
+            .u32("foo.loop.start", start)
+            .u32("foo.loop.end", end)
+            .u32("foo.loop.count", count);
+        let f = b.file();
+        let s = summarize(f.path()).unwrap();
+        assert_eq!(s.layer_loop, None, "{start}..{end} x{count}");
+    }
+    // Part of a loop is no loop either.
+    let mut b = Build::default();
+    b.str("general.architecture", "foo")
+        .u32("foo.block_count", 24)
+        .u32("foo.loop.start", 6)
+        .u32("foo.loop.end", 18);
+    let f = b.file();
+    assert_eq!(summarize(f.path()).unwrap().layer_loop, None);
+}
+
+/// Inkling-shaped attention: every 6th layer full, the rest windowed.
+fn swa_every_6th(n: usize) -> Vec<bool> {
+    (0..n).map(|i| (i + 1) % 6 != 0).collect()
+}
+
+/// The stored layers, then `count − 1` copies of the core: the layers
+/// llama.cpp keeps a cache for.
+fn unrolled<T: Clone>(stored: &[T], start: usize, end: usize, count: usize) -> Vec<T> {
+    let mut v = stored.to_vec();
+    for _ in 1..count {
+        v.extend_from_slice(&stored[start..end]);
+    }
+    v
+}
+
+fn looped(s: ModelSummary, start: u64, end: u64, count: u64) -> ModelSummary {
+    ModelSummary {
+        layer_loop: Some(LayerLoop { start, end, count }),
+        ..s
+    }
+}
+
+/// A looped model's cache is the cache of the same model unrolled: its core
+/// once per pass, each pass windowed or not as the layer it repeats. Checked
+/// on every layer classification `kv_cache_bytes` has.
+#[test]
+fn a_looped_cache_is_the_unrolled_models_cache() {
+    let base = ModelSummary {
+        key_length: Some(128),
+        value_length: Some(128),
+        sliding_window: Some(1024),
+        ..Default::default()
+    };
+    let ctx = 1_048_576;
+
+    // Per-layer KV heads with a window array (Inkling 2 Mini).
+    let stored = ModelSummary {
+        block_count: Some(24),
+        head_count_kv_per_layer: Some(vec![8; 24]),
+        sliding_window_layers: Some(swa_every_6th(24)),
+        sliding_window_pattern: Some(24),
+        sliding_window_pattern_is_array: true,
+        ..base.clone()
+    };
+    let flat = ModelSummary {
+        block_count: Some(48),
+        head_count_kv_per_layer: Some(vec![8; 48]),
+        sliding_window_layers: Some(unrolled(&swa_every_6th(24), 6, 18, 3)),
+        sliding_window_pattern: Some(48),
+        sliding_window_pattern_is_array: true,
+        ..base.clone()
+    };
+    let want = kv_cache_bytes(&flat, ctx, 8).unwrap();
+    assert_eq!(
+        kv_cache_bytes(&looped(stored.clone(), 6, 18, 3), ctx, 8),
+        Some(want)
+    );
+    // 8 full-attention layers of 48 hold the whole context, 4 of 24 did.
+    assert!(kv_cache_bytes(&stored, ctx, 8).unwrap() < want);
+
+    // Uniform KV heads with the same window array.
+    let scalar = |s: ModelSummary| ModelSummary {
+        head_count_kv: Some(8),
+        head_count_kv_per_layer: None,
+        ..s
+    };
+    assert_eq!(
+        kv_cache_bytes(&looped(scalar(stored), 6, 18, 3), ctx, 8),
+        Some(want)
+    );
+    assert_eq!(kv_cache_bytes(&scalar(flat), ctx, 8), Some(want));
+
+    // An integer stride: every 6th layer full, closed form. A core aligned
+    // to the stride unrolls into the 48-layer model of the same stride.
+    let stride = |layers| ModelSummary {
+        block_count: Some(layers),
+        head_count_kv: Some(8),
+        sliding_window_pattern: Some(6),
+        ..base.clone()
+    };
+    assert_eq!(
+        kv_cache_bytes(&looped(stride(24), 6, 18, 3), ctx, 8),
+        kv_cache_bytes(&stride(48), ctx, 8)
+    );
+
+    // A hybrid's full_attention_interval: every 4th layer attends.
+    let hybrid = |layers| ModelSummary {
+        block_count: Some(layers),
+        head_count_kv: Some(8),
+        full_attention_interval: Some(4),
+        ssm_state_size: Some(128),
+        ssm_inner_size: Some(4096),
+        ..base.clone()
+    };
+    assert_eq!(
+        kv_cache_bytes(&looped(hybrid(24), 4, 12, 2), ctx, 8),
+        kv_cache_bytes(&hybrid(32), ctx, 8)
+    );
+}
+
+/// One pass is the model run once: nothing extra.
+#[test]
+fn a_single_pass_loop_costs_nothing_extra() {
+    let s = ModelSummary {
+        block_count: Some(24),
+        head_count_kv: Some(8),
+        key_length: Some(128),
+        value_length: Some(128),
+        ..Default::default()
+    };
+    assert_eq!(
+        kv_cache_bytes(&looped(s.clone(), 6, 18, 1), 4096, 16),
+        kv_cache_bytes(&s, 4096, 16)
+    );
+}

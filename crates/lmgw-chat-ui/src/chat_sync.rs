@@ -83,6 +83,7 @@ pub(super) struct ListRead {
     pub temporary: RwSignal<Vec<ChatThread>>,
     pub folders: RwSignal<Vec<FolderInfo>>,
     pub archived_count: RwSignal<i64>,
+    pub active_count: RwSignal<i64>,
     /// The read's state: `None` while the first is out, the error of the
     /// last one that failed.
     pub state: RwSignal<Option<Result<(), String>>>,
@@ -145,6 +146,7 @@ impl ListRead {
         set_if_changed(self.temporary, r.temporary);
         set_if_changed(self.folders, r.folders);
         set_if_changed(self.archived_count, r.archived_count);
+        set_if_changed(self.active_count, r.active_count);
         if !matches!(self.state.get_untracked(), Some(Ok(()))) {
             self.state.set(Some(Ok(())));
         }

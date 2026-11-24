@@ -26,6 +26,7 @@ fn spec(engine: EngineArgs) -> RenderSpec {
         engine,
         health_path: "/health",
         fitted: None,
+        charge: None,
     }
 }
 

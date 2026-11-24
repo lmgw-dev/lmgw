@@ -328,8 +328,8 @@ async fn the_toolkit_is_the_images() {
     let toolkit = item(&c, MachineItemId::CardForModels);
     assert_eq!(
         toolkit.sentence,
-        "One piece is missing so models can use the graphics card: this server image is \
-         incomplete. On the host: load a current lmgw server image and restart the service."
+        "The NVIDIA Container Toolkit is missing from this server image, so models can't use the \
+         graphics card. On the host: load a current lmgw server image and restart the service."
     );
     assert_eq!(toolkit.cause, Some(MachineCause::ToolkitMissing));
     assert!(c.plan.is_none(), "{:?}", c.plan);
@@ -481,7 +481,8 @@ async fn the_desktop_keeps_its_words() {
     let c = w.check().await;
     assert_eq!(
         item(&c, MachineItemId::CardForModels).sentence,
-        "One piece is missing so models can use the graphics card. Here's how to add it."
+        "The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. \
+         Here's how to add it."
     );
     assert!(c.plan.is_some(), "the desktop keeps its plan");
 
@@ -544,5 +545,41 @@ async fn in_the_server_image_the_metered_probe_is_not_run() {
     assert!(
         matches!(&done[..], [Prefetched::Metered { .. }]),
         "{done:?}"
+    );
+}
+
+/// The control node is there and SELinux denies the container its stat: not
+/// "started without the card", but the host's module for the card.
+#[tokio::test]
+async fn a_card_denied_by_selinux_names_the_hosts_module() {
+    let w = World::nvidia().await;
+    in_container(&w);
+    w.m.facts.deny("/dev/nvidiactl");
+    let c = w.check().await;
+    let card = item(&c, MachineItemId::GraphicsCard);
+    let sentence = "On the host: SELinux keeps the lmgw container from the graphics card. \
+                    Install lmgw's SELinux module (docs/server.md), then restart the lmgw \
+                    service.";
+    assert_eq!(card.sentence, sentence);
+    assert_eq!(card.cause, Some(MachineCause::CardDeniedBySelinux));
+    assert_eq!(c.verdict, MachineVerdict::NeedsSteps);
+    assert!(
+        card.detail
+            .iter()
+            .any(|l| l.contains("semodule -i lmgw-gpu.cil")
+                && l.contains("systemctl --user restart lmgw")),
+        "{:?}",
+        card.detail
+    );
+    assert!(
+        card.detail
+            .iter()
+            .any(|l| l.contains("container_use_devices") && l.contains("every container")),
+        "{:?}",
+        card.detail
+    );
+    assert_eq!(
+        item(&c, MachineItemId::CardForModels).sentence,
+        "Not checked yet: the graphics card comes first."
     );
 }

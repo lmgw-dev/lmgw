@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::chat::{present, ContinueState, Thread, ThreadMcp, ThreadVoice};
 use crate::chat::{MessageTask, ThreadTask};
 use crate::chat_approvals::ApprovalRequest;
+use crate::chat_frames::LabelNotice;
 use crate::voice_resolved::VoiceResolved;
 
 /// `POST /chat/api/threads`'s body.
@@ -285,6 +286,12 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub images_note: Option<String>,
+    /// On a reply: the MCP labels its thread or folder attached that
+    /// offered the turn no tools, as the turn's `error` frames said them
+    /// (`chat_frames::LabelNotice`), in the order they came. Absent when
+    /// there were none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<LabelNotice>,
     /// How the turn was spoken; `null` for a typed turn.
     pub voice: Option<MessageVoice>,
     /// A user message's origin: the sentence its client sent with it about

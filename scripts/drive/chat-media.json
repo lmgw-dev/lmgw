@@ -565,12 +565,12 @@
   "nav": "/models"
  },
  {
-  "until": "[...document.querySelectorAll('button.row-link')].some(b => b.textContent.includes('mock-turbo'))",
+  "until": "[...document.querySelectorAll('.mlist .lrow[data-key^=\"/models/image/\"]')].some(r => r.textContent.includes('mock-turbo'))",
   "timeout": 30,
   "label": "the image row is listed"
  },
  {
-  "js": "[...document.querySelectorAll('button.row-link')].find(b => b.textContent.includes('mock-turbo')).click(), 'opened'"
+  "js": "[...document.querySelectorAll('.mlist .lrow[data-key^=\"/models/image/\"]')].find(r => r.textContent.includes('mock-turbo')).click(), 'opened'"
  },
  {
   "until": "!!document.querySelector('[data-section=\"image-chat\"]')",
@@ -602,11 +602,18 @@
   "nav": "/models"
  },
  {
-  "until": "[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Add from recipe')",
+  "until": "document.querySelector('.mlist-head .row-menu button[title=\"Add a model\"]')",
   "timeout": 30
  },
  {
-  "js": "[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Add from recipe').click(), 'opened'"
+  "js": "document.querySelector('.mlist-head .row-menu button[title=\"Add a model\"]').click(), 'opened the Add menu'"
+ },
+ {
+  "until": "[...document.querySelectorAll('.menu-pop .menu-item')].some(m => m.textContent.trim() === 'Image model from a recipe…')",
+  "timeout": 5
+ },
+ {
+  "js": "[...document.querySelectorAll('.menu-pop .menu-item')].find(m => m.textContent.trim() === 'Image model from a recipe…').click(), 'opened'"
  },
  {
   "until": "!!document.querySelector('[data-section=\"upscalers\"] [data-upscaler]')",
@@ -656,7 +663,7 @@
   "label": "Settings → Chat has the picture and sound tools' defaults, none set"
  },
  {
-  "expect": "[...document.querySelectorAll('[id^=\"f-chat-media-defaults\"] label')].map(l => l.textContent.trim()).join('|') === 'Drawing pictures|Editing pictures|Speaking text|Voice|Transcribing recordings'",
+  "expect": "[...document.querySelectorAll('[id^=\"f-chat-media-defaults\"] .prow-title')].map(l => l.textContent.trim()).join('|') === 'Drawing pictures|Editing pictures|Speaking text|Voice|Transcribing recordings'",
   "label": "each default has a human label, no config key"
  },
  {
@@ -692,7 +699,7 @@
   "shot": "20-settings-media-defaults"
  },
  {
-  "js": "(() => { const b = document.querySelector(\".save-bar .btn.primary\"); if (!b) return 'missing .save-bar .btn.primary'; b.click(); return 'clicked'; })()"
+  "js": "(() => { const b = document.querySelector(\".save-toast .btn.suggested\"); if (!b) return 'missing .save-toast .btn.suggested'; b.click(); return 'clicked'; })()"
  },
  {
   "until": "__cm.poll('s', '/api/settings-full', v => v.chat_media_defaults?.generate === 'image/mock-turbo')",
@@ -798,7 +805,17 @@
   "label": "the thread is open again"
  },
  {
-  "js": "(() => { if (document.querySelector('.chat-settings')) return 'already open'; const r = document.querySelector('.dock-rail'); if (!r) return 'no rail'; r.click(); return 'opened'; })()"
+  "until": "!!document.querySelector('.dock.right > .dock-rail')",
+  "timeout": 20,
+  "label": "the thread settings' rail is there"
+ },
+ {
+  "js": "(() => { document.querySelector('.dock.right > .dock-rail').click(); return 'clicked'; })()"
+ },
+ {
+  "until": "(() => { const d = document.querySelector('.dock.right'); if (!d?.querySelector('.chat-settings')) return false; const w = d.getBoundingClientRect().width; const room = w - Math.min(420, Math.max(280, w * 0.3)) >= 480; return d.classList.contains('peek') !== room; })()",
+  "timeout": 20,
+  "label": "one click on the rail opens the thread settings the way the split's width says: docked with room for them beside a 480px conversation, laid over it without (the split knows its width from its first frame, so a click right after the thread opens no longer docks them only to fold them away when the width is first reported)"
  },
  {
   "until": "!!document.querySelector('.chat-settings [data-media-defaults] [data-media-field=\"generate\"] .select-btn') && __cm.selected('.chat-settings [data-media-field=\"generate\"]').startsWith('Inherit — cloud-image · cloud via mock')",

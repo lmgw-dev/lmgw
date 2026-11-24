@@ -1,7 +1,7 @@
 //! The Windows probe: NVML for the devices, D3DKMT for the processes.
 
 use super::{d3dkmt, processes, PciAddress};
-use crate::vram::nvml::{GpuMemory, GpuPower, GpuProbe, NvmlProbe, ProcessMemory};
+use crate::vram::nvml::{DeviceProcesses, GpuMemory, GpuPower, GpuProbe, NvmlProbe};
 
 /// NVML's device totals, power and driver version, with the per-process
 /// figures NVML cannot give under WDDM read from D3DKMT ([`super`]).
@@ -14,8 +14,8 @@ impl WddmProbe {
         Self { nvml }
     }
 
-    fn devices_pci(&self) -> Result<Vec<PciAddress>, String> {
-        self.nvml.pci_addresses()
+    fn devices_pci(&self) -> Result<Vec<(crate::vram::nvml::DeviceId, PciAddress)>, String> {
+        self.nvml.device_addresses()
     }
 }
 
@@ -38,7 +38,7 @@ impl GpuProbe for WddmProbe {
         d3dkmt::available()
     }
 
-    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         processes(&d3dkmt::Real, &self.devices_pci()?, own, retired)
     }
 

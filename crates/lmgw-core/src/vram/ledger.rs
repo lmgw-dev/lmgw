@@ -8,7 +8,8 @@ use crate::runtime::Class;
 use crate::state::SharedState;
 
 use super::attribution::{self, Container, Fill, Member, Reading};
-use super::nvml::{GpuMemory, ProcessMemory};
+use super::charge::CardCharge;
+use super::nvml::{DeviceId, DeviceProcesses, GpuMemory, ProcessMemory};
 use super::on_cpu::on_gpu;
 use super::plan::image::CONTEXT_STAND_IN;
 use super::residency;
@@ -17,6 +18,7 @@ use super::view::{peak_note, KeptFree, ResidentView};
 use super::{broadcast, VramScheduler};
 use crate::bench::OnCard;
 
+#[derive(Clone)]
 pub(super) struct Capacity {
     pub(super) total: u64,
     pub(super) free: u64,
@@ -38,6 +40,20 @@ pub(super) struct Ledger {
     pub(super) estimated_resident: u64,
     pub(super) capacity: Option<Capacity>,
     pub(super) inactive_reason: Option<String>,
+    /// What [`Capacity::kept_free`] holds, by the cards each part of it is
+    /// charged on (device-ledger design WP4): a card's own figure where no
+    /// group is on it ([`Self::cards`]).
+    pub(super) kept_on: KeptOn,
+    /// The declared budget (`vram.budget_mb`), in bytes; 0 for none
+    /// (device-ledger design §9.2).
+    pub(super) budget: u64,
+    /// The claims of starts that wait for their cards (§5.5), as this read
+    /// found them.
+    pub(super) claims: Vec<super::scheduler::Claim>,
+    /// What each entry's row costs, by generation, as this read sized it
+    /// for the charge: where a model stopped for room could be started
+    /// again (device-ledger design §6.2) is asked of it.
+    pub(super) footprints: Vec<(u64, super::Footprint)>,
 }
 
 /// A llama-server adopted from an earlier lmgw that has served nothing in
@@ -53,6 +69,8 @@ impl VramScheduler {
     /// Assemble the ledger: measure, then account, then reconcile.
     pub(super) async fn ledger(&self, state: &SharedState, snap: &Snapshot) -> Ledger {
         let s = &snap.settings;
+        // What the engine costs on each card, as stored (§4.2).
+        self.load_engine_costs(&state.db).await;
 
         // Residency is the registry, not a question asked over HTTP: an entry
         // exists exactly while lmgw believes a container for that model is up,
@@ -67,7 +85,10 @@ impl VramScheduler {
             .filter(|e| matches!(e.state, RuntimeState::Starting | RuntimeState::Ready))
             .filter(on_gpu)
             .collect();
-        let reservations = self.live.lock().unwrap().reservations.clone();
+        let (reservations, claims) = {
+            let live = self.live.lock().unwrap();
+            (live.reservations.clone(), live.claims.clone())
+        };
 
         let mut residents: Vec<ResidentView> = Vec::new();
         // What is committed but cannot be in the driver's `used` figure yet: a
@@ -96,6 +117,9 @@ impl VramScheduler {
         // budget-only branch `estimated_resident` already counts the whole
         // expected residency.
         let mut pending_loads: u64 = 0;
+        // The four above, by the cards each part is charged on.
+        let mut kept_on = KeptOn::default();
+        let mut footprints: Vec<(u64, super::Footprint)> = Vec::new();
         // Pruned against every live container, the CPU's too: what a CPU
         // container has answered is all its residency knows (`audio_model_
         // loaded`), and forgetting it here made it read as never loaded — a
@@ -166,8 +190,28 @@ impl VramScheduler {
                     }),
             );
         }
+        // And what each running model charged on several cards holds on
+        // each of them (device-ledger design §3.3, §4.3, WP5, WP6): a group,
+        // or a split, that runs is charged by what its processes hold on
+        // each card, where the driver says so.
+        if self.probe().process_support().is_ok() {
+            let last = self.last_devices.lock().unwrap().clone();
+            let groups: Vec<u64> = entries
+                .iter()
+                .filter(|e| e.state == RuntimeState::Ready)
+                .filter(|e| !asked.iter().any(|a| a.generation == e.generation))
+                .filter(|e| self.entry_cards(snap, e, &last).charge.on_several())
+                .map(|e| e.generation)
+                .collect();
+            let pids = self.pids.lock().unwrap();
+            asked.extend(groups.into_iter().map(|generation| residency::Ask {
+                generation,
+                root: pids.root(generation),
+            }));
+        }
         let read = self.devices_and_held(asked).await;
         let held_now = read.held;
+        let held_cards = read.cards;
         let (devices, telemetry_error) = match read.devices {
             Ok(d) => (d, None),
             Err(e) => (vec![], Some(e)),
@@ -177,27 +221,71 @@ impl VramScheduler {
                 .store(pooled(0, &devices).0, std::sync::atomic::Ordering::Relaxed);
             self.device_count
                 .store(devices.len(), std::sync::atomic::Ordering::Relaxed);
+            *self.last_devices.lock().unwrap() = devices.clone();
+            // The cards the headroom is kept on (device-ledger design §9.1).
+            self.growth.lock().unwrap().set_present(&devices);
+            // The audio class's device index, read once as a pin (§8.1).
+            self.audio_device_once(state, snap, &devices);
         }
         for e in &entries {
+            // The cards it is charged on (device-ledger design §3.2, §3.3).
+            let on = self.entry_cards(snap, e, &devices);
+            if let Some(gone) = on.nowhere() {
+                residents.push(ResidentView {
+                    container: e.class,
+                    model: e.model_id.clone(),
+                    state: e.state.as_str().to_string(),
+                    estimated_bytes: 0,
+                    charge: CardCharge::none(),
+                    in_flight: e.in_flight as usize,
+                    idle_seconds: Some(e.last_used_age_seconds),
+                    peak_extra_bytes: None,
+                    pending_bytes: None,
+                    note: Some(gone),
+                    cards: Vec::new(),
+                    generation: Some(e.generation),
+                    kept_bytes: 0,
+                });
+                continue;
+            }
+            let cards = on.charge.cards();
             // The rung the container runs, `starting` included: a climb's new
             // rung is charged from its claim on (ladder design §5).
             let fp = self.footprint_of(snap, e).await;
+            if let Some(f) = &fp {
+                footprints.push((e.generation, f.clone()));
+            }
             // A partial start is charged what admission gave it
             // (`registry::admission_grant`), from its claim on.
             let bytes = match &e.grant {
                 Some(g) => g.bytes,
                 None => fp.as_ref().map(|f| f.total_bytes).unwrap_or(0),
             };
-            // A start is not measured yet: with the learned headroom in
-            // use, its class's margin rides on its charge (`headroom`). A
-            // partial image start sets its context aside in its grant.
+            // And what its engine costs on each card it is on (§4.2): a
+            // llama.cpp model's, from the estimate on.
+            let bytes = cards
+                .iter()
+                .map(|c| self.engine_on(e.class, c))
+                .fold(bytes, u64::saturating_add);
+            // A start is not measured yet: its class's margin rides on its
+            // charge in every headroom mode (`headroom`, WP13). A partial
+            // image start sets its context aside in its grant.
             let margin = match (&e.grant, fp.as_ref()) {
                 (Some(_), _) if e.class == Class::Image => 0,
                 (_, Some(f)) => self.margin(snap, e.class, &e.model_id, f),
                 (_, None) => 0,
             };
+            // A split start is charged its part on each card (§4.3), as
+            // admission reserved it, until it is measured once it runs: how
+            // a total that moved since would divide among them is not known.
+            let split = on.charge.split_parts().is_some();
+            let bytes = match split {
+                true => on.charge.total(),
+                false => bytes,
+            };
             if e.state == RuntimeState::Starting {
                 unmeasured = unmeasured.saturating_add(bytes).saturating_add(margin);
+                kept_on.starting_charge(&on.charge, &cards, bytes, margin);
             }
             // A llama-server that is ready but has served nothing yet: what
             // its first prompt puts on the card (the CUDA pool's
@@ -215,6 +303,7 @@ impl VramScheduler {
                 && margin > 0;
             if first_prompt {
                 unmeasured = unmeasured.saturating_add(margin);
+                kept_on.starting_charge(&on.charge, &cards, 0, margin);
             }
             // Charged from `ready` on, in flight or not. While a generation is
             // actually running the driver's `used` already contains some or
@@ -294,10 +383,12 @@ impl VramScheduler {
                 Some((charge, context)) => {
                     let holds = reading.or(context).unwrap_or(0);
                     partial_kept = partial_kept.saturating_add(charge.saturating_sub(holds));
+                    kept_on.image_peak(&cards, charge.saturating_sub(holds));
                 }
                 None => {
                     if let Some(p) = peak {
                         reserved_peaks = reserved_peaks.saturating_add(p);
+                        kept_on.image_peak(&cards, p);
                     }
                 }
             }
@@ -339,6 +430,7 @@ impl VramScheduler {
                 b => b.saturating_add(margin),
             });
             pending_loads = pending_loads.saturating_add(pending_bytes.unwrap_or(0));
+            kept_on.pending_load(&cards, pending_bytes.unwrap_or(0));
             let note = match (e.class, e.state, audio, &pending) {
                 (Class::Image, RuntimeState::Ready, _, _) if partial.is_some() => {
                     Some(format!(
@@ -375,6 +467,15 @@ impl VramScheduler {
                 )),
                 _ => fp.as_ref().and_then(|f| f.note.clone()),
             };
+            // Charged on cards it was not recorded on, or on fewer than it
+            // was: the resident says so.
+            let note = match on.note.as_deref() {
+                None => note,
+                Some(cards) => Some(match note {
+                    Some(n) => format!("{n}. {cards}"),
+                    None => cards.to_string(),
+                }),
+            };
             let note = match first_prompt {
                 false => note,
                 true => {
@@ -389,11 +490,38 @@ impl VramScheduler {
                     })
                 }
             };
+            // A group that runs, charged by what its processes hold on each
+            // card where the driver says so (WP5): the measurement, in
+            // place of its estimate on the cards together.
+            let measured_on = match (e.state, held_cards.get(&e.generation)) {
+                (RuntimeState::Ready, Some(Ok(c))) if !c.is_empty() && on.charge.on_several() => {
+                    Some(c.clone())
+                }
+                _ => None,
+            };
+            let (bytes, charge, note) = match measured_on {
+                Some(c) => {
+                    let charge = CardCharge::per_card(c);
+                    let total = charge.total();
+                    let said =
+                        "Charged what its processes hold on each card they are on".to_string();
+                    // In place of the sentence that says it is not.
+                    let note = match (note, on.note.as_deref()) {
+                        (Some(n), Some(guess)) if n.contains(guess) => n.replace(guess, &said),
+                        (Some(n), _) => format!("{n}. {said}"),
+                        (None, _) => said,
+                    };
+                    (total, charge, Some(note))
+                }
+                None if split => (bytes, on.charge.clone(), note),
+                None => (bytes, on.charge.with_total(bytes), note),
+            };
             residents.push(ResidentView {
                 container: e.class,
                 model: e.model_id.clone(),
                 state: e.state.as_str().to_string(),
                 estimated_bytes: bytes,
+                charge,
                 in_flight: e.in_flight as usize,
                 idle_seconds: Some(e.last_used_age_seconds),
                 // A pipeline whose weights wait off the card has its peak in
@@ -401,6 +529,12 @@ impl VramScheduler {
                 peak_extra_bytes: peak.filter(|_| partial.is_none()),
                 pending_bytes: pending_bytes.filter(|p| *p > 0),
                 note,
+                cards: Vec::new(),
+                generation: Some(e.generation),
+                kept_bytes: match first_prompt {
+                    true => margin,
+                    false => 0,
+                },
             });
         }
         // A reservation is only charged while nothing in the registry answers
@@ -416,16 +550,19 @@ impl VramScheduler {
             // Its class's margin too, as a start's (`headroom`); a partial
             // image grant, less than its files, sets its context aside.
             let margin = match self.footprint(snap, r.class, &r.model_id).await {
-                Some(f) if r.class == Class::Image && r.bytes < f.total_bytes => 0,
+                Some(f) if r.class == Class::Image && r.charge.total() < f.total_bytes => 0,
                 Some(f) => self.margin(snap, r.class, &r.model_id, &f),
                 None => 0,
             };
-            unmeasured = unmeasured.saturating_add(r.bytes).saturating_add(margin);
+            let bytes = r.charge.total();
+            unmeasured = unmeasured.saturating_add(bytes).saturating_add(margin);
+            kept_on.starting_charge(&r.charge, &r.charge.cards(), bytes, margin);
             residents.push(ResidentView {
                 container: r.class,
                 model: r.model_id.clone(),
                 state: "reserved".into(),
-                estimated_bytes: r.bytes,
+                estimated_bytes: bytes,
+                charge: r.charge.clone(),
                 in_flight: 0,
                 idle_seconds: None,
                 // A reservation is a start that has not happened; its
@@ -434,6 +571,9 @@ impl VramScheduler {
                 peak_extra_bytes: None,
                 pending_bytes: None,
                 note: None,
+                cards: Vec::new(),
+                generation: None,
+                kept_bytes: 0,
             });
         }
 
@@ -525,6 +665,10 @@ impl VramScheduler {
             estimated_resident,
             capacity,
             inactive_reason,
+            kept_on,
+            budget,
+            claims,
+            footprints,
         }
     }
 
@@ -543,9 +687,10 @@ impl VramScheduler {
         }
     }
 
-    /// §4.7's measurement over the pooled devices: lmgw's own share, measured
-    /// per process, the used memory outside it, and the capacity and free
-    /// memory from the same device read. `Err` is why the share cannot be
+    /// §4.7's measurement, per device: lmgw's own share there, measured per
+    /// process, and the used memory there, whose sums the decisions read
+    /// ([`Measured::shares`]); and the pooled capacity and free memory from
+    /// the same device read. `Err` is why the share cannot be
     /// measured right now — the trigger is then unavailable and admission
     /// behaves exactly as it always has.
     ///
@@ -696,18 +841,18 @@ impl VramScheduler {
                     .into(),
             );
         }
+        // Per card (device-ledger design §2.3). A card whose figure is
+        // unknown is unknown on its own here; the sums the decisions read
+        // are unknown with it ([`Measured::shares`]), as the pooled figure
+        // was.
         let own = attribution::members_share(&members, &listed)?;
-        let stopped = cache.settle(&listed, &asked, &own_pids, &reused)?;
+        let stopped = cache.settle(&listed, &asked, &own_pids, &reused);
         drop(cache);
-        let lmgw = own.saturating_add(stopped);
-        let used: u64 = devices.iter().map(|d| d.used_bytes).sum();
         let budget = snap.settings.vram.budget_mb.saturating_mul(MIB);
         let (total, raw_free) = pooled(budget, &devices);
         Ok(Measured {
-            shares: Shares {
-                lmgw,
-                outside: used.saturating_sub(lmgw),
-            },
+            cards: card_shares(&devices, own.into_iter().chain(stopped)),
+            members: attribution::members_on_cards(&members, &listed),
             total,
             raw_free,
         })
@@ -739,6 +884,8 @@ impl VramScheduler {
         // And what an image container of a row whose weights all wait off
         // the card holds at rest: its context (`partial::floor`).
         self.read_image_at_rest(state);
+        // And what a llama.cpp model's engine costs on its card (§4.2).
+        self.read_engine_costs(state);
         if trigger_off(&state.snapshot()).is_some() || self.probe().process_support().is_err() {
             return;
         }
@@ -918,22 +1065,483 @@ fn container_of(e: &RuntimeView) -> Container {
     }
 }
 
-/// lmgw's measured share of the pooled devices, and the used memory outside
-/// it (§4.7).
+/// lmgw's measured share, and the used memory outside it (§4.7): of every
+/// card together ([`Measured::shares`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Shares {
     pub lmgw: u64,
     pub outside: u64,
 }
 
-/// One measurement pass ([`VramScheduler::measure`]): the shares, and the
-/// capacity and free memory of the same device read, by the ledger's rule
-/// ([`pooled`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One card's part of a measurement (device-ledger design §2.3): what the
+/// driver says is used there, and how much of it is lmgw's — `Err` with the
+/// reason where the driver lists one of lmgw's processes there without a
+/// figure ([`attribution::CardHeld`]). The outside use there is the
+/// difference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CardShares {
+    pub(super) id: DeviceId,
+    pub(super) used: u64,
+    /// The driver's free memory there, from the same device read.
+    pub(super) free: u64,
+    pub(super) lmgw: Result<u64, String>,
+}
+
+/// One measurement pass ([`VramScheduler::measure`]): per card, the used
+/// memory and lmgw's share of it; per container, what its processes hold on
+/// each card (device-ledger design §10, WP2); and the capacity and free
+/// memory of the same device read, by the ledger's rule ([`pooled`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Measured {
-    pub(super) shares: Shares,
+    pub(super) cards: Vec<CardShares>,
+    /// Each measured container's cards: the registry's and the benchmark
+    /// run's, by generation.
+    pub(super) members: Vec<attribution::MemberCards>,
     pub(super) total: u64,
     pub(super) raw_free: u64,
+}
+
+impl Measured {
+    /// Every card's together, which is what the decisions read: lmgw's
+    /// share summed over the cards, and the cards' used memory less it.
+    /// `Err` with the first card's reason when a card's share is unknown:
+    /// the sum would be a low guess, and is unknown as the pooled figure
+    /// was.
+    ///
+    /// The outside use is the sum of the used memory less the sum of lmgw's
+    /// share, not the sum of each card's outside use: a card on which the
+    /// process reading saw more of lmgw's than the device reading did
+    /// counts below zero there, as it did when the share was one pooled
+    /// figure.
+    pub(super) fn shares(&self) -> Result<Shares, String> {
+        let mut lmgw: u64 = 0;
+        let mut used: u64 = 0;
+        for c in &self.cards {
+            lmgw = lmgw.saturating_add(c.lmgw.clone()?);
+            used = used.saturating_add(c.used);
+        }
+        Ok(Shares {
+            lmgw,
+            outside: used.saturating_sub(lmgw),
+        })
+    }
+}
+
+/// The cards of a measurement: every device, in the driver's order, with
+/// lmgw's share there from `held` (each a part of it — a member's, a
+/// tombstone's; one unknown part makes the card's share unknown, with the
+/// first such part's reason). A card `held` names that the device read did
+/// not list (one that left between the reads) comes last, with nothing
+/// used: its share still counts, as it did in the pooled figure.
+pub(super) fn card_shares(
+    devices: &[GpuMemory],
+    held: impl IntoIterator<Item = attribution::CardHeld>,
+) -> Vec<CardShares> {
+    let mut cards: Vec<CardShares> = devices
+        .iter()
+        .map(|d| CardShares {
+            id: d.id.clone(),
+            used: d.used_bytes,
+            free: d.free_bytes,
+            lmgw: Ok(0),
+        })
+        .collect();
+    for h in held {
+        let i = match cards.iter().position(|c| c.id == h.device) {
+            Some(i) => i,
+            None => {
+                cards.push(CardShares {
+                    id: h.device.clone(),
+                    used: 0,
+                    free: 0,
+                    lmgw: Ok(0),
+                });
+                cards.len() - 1
+            }
+        };
+        let card = &mut cards[i];
+        card.lmgw = match (&card.lmgw, h.bytes) {
+            (Ok(a), Ok(b)) => Ok(a.saturating_add(b)),
+            (Err(e), _) => Err(e.clone()),
+            (Ok(_), Err(e)) => Err(e),
+        };
+    }
+    cards
+}
+
+/// One card in the ledger (device-ledger design §3.1, WP2): the driver's
+/// figures, lmgw's share there and the outside use there where a
+/// measurement was taken, and what is kept free there where that is known
+/// per card. What the status surfaces show (`view.rs`); the decisions read
+/// the same cards one by one through [`Ledger::capacity_on`], which places
+/// each model on its cards (§5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CardCapacity {
+    /// Its id, index and name, and the driver's total, used and free.
+    pub(super) memory: GpuMemory,
+    /// lmgw's share here, measured per process: `None` without a
+    /// measurement (the pass's own reason says why), `Err` where the driver
+    /// lists one of lmgw's processes here without a figure.
+    pub(super) lmgw: Option<Result<u64, String>>,
+    /// The used memory here less lmgw's share, never below zero; `None`
+    /// exactly when the share is not known.
+    pub(super) outside: Option<u64>,
+    /// What the ledger keeps free here on top of the memory in use: the
+    /// starts in flight, image peaks and pending loads of the models
+    /// charged on this card alone (device-ledger design WP4). `None` where
+    /// a model charged as a group on several cards (or on cards no device
+    /// read named) keeps something free: how it divides among them is not
+    /// known, and dividing it would be a guess; the ledger's `kept_free` is
+    /// all cards' together. On a machine of one card it is all of that.
+    pub(super) kept_free: Option<KeptFree>,
+}
+
+/// What the ledger keeps free on top of the memory in use, by the cards
+/// each part of it is charged on (device-ledger design WP4): a start in
+/// flight, an image peak or a pending load, each on its model's cards.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct KeptOn(Vec<(Vec<DeviceId>, KeptFree)>);
+
+impl KeptOn {
+    fn add(&mut self, cards: &[DeviceId], part: KeptFree) {
+        if part == KeptFree::default() {
+            return;
+        }
+        self.0.push((cards.to_vec(), part));
+    }
+
+    fn starting(&mut self, cards: &[DeviceId], bytes: u64) {
+        self.add(
+            cards,
+            KeptFree {
+                starting_bytes: bytes,
+                ..KeptFree::default()
+            },
+        );
+    }
+
+    /// A start in flight charged `charge` on `cards`, `bytes` in all and
+    /// `margin` beside it: a split's part on each of its cards with the
+    /// margin beside each (each card's process starts on its own, §4.3),
+    /// anything else `bytes` and the margin on its cards.
+    fn starting_charge(
+        &mut self,
+        charge: &CardCharge,
+        cards: &[DeviceId],
+        bytes: u64,
+        margin: u64,
+    ) {
+        match charge.split_parts() {
+            Some(parts) => {
+                for (card, part) in parts {
+                    let part = if bytes == 0 { 0 } else { part };
+                    self.starting(std::slice::from_ref(&card), part.saturating_add(margin));
+                }
+            }
+            None => self.starting(cards, bytes.saturating_add(margin)),
+        }
+    }
+
+    fn image_peak(&mut self, cards: &[DeviceId], bytes: u64) {
+        self.add(
+            cards,
+            KeptFree {
+                image_peak_bytes: bytes,
+                ..KeptFree::default()
+            },
+        );
+    }
+
+    fn pending_load(&mut self, cards: &[DeviceId], bytes: u64) {
+        self.add(
+            cards,
+            KeptFree {
+                pending_load_bytes: bytes,
+                ..KeptFree::default()
+            },
+        );
+    }
+
+    /// What is kept free on `cards` at most (device-ledger design WP5): every
+    /// part charged on one of them, a group's once however many of them it
+    /// names, and every part on cards no device read named. A group on
+    /// other cards too is counted whole: how it divides is not known, and
+    /// the larger figure never reads room that is not there.
+    pub(super) fn upper_on(&self, cards: &[DeviceId]) -> u64 {
+        self.0
+            .iter()
+            .filter(|(on, _)| on.is_empty() || on.iter().any(|c| cards.contains(c)))
+            .map(|(_, k)| {
+                k.starting_bytes
+                    .saturating_add(k.image_peak_bytes)
+                    .saturating_add(k.pending_load_bytes)
+            })
+            .fold(0, u64::saturating_add)
+    }
+
+    /// What is kept free on `card` alone: the parts charged on it alone.
+    /// `None` where a part on several cards, or on cards no device read
+    /// named, could be on it.
+    pub(super) fn on(&self, card: &DeviceId) -> Option<KeptFree> {
+        let mut k = KeptFree::default();
+        for (cards, part) in &self.0 {
+            match cards.as_slice() {
+                [one] if one == card => {
+                    k.starting_bytes = k.starting_bytes.saturating_add(part.starting_bytes);
+                    k.image_peak_bytes = k.image_peak_bytes.saturating_add(part.image_peak_bytes);
+                    k.pending_load_bytes =
+                        k.pending_load_bytes.saturating_add(part.pending_load_bytes);
+                }
+                [_] => {}
+                cards if cards.is_empty() || cards.contains(card) => return None,
+                _ => {}
+            }
+        }
+        Some(k)
+    }
+}
+
+/// The cards a registry entry is charged on, as one ledger read finds them
+/// ([`VramScheduler::entry_cards`]).
+pub(super) struct EntryCards {
+    /// Its cards, as a charge whose bytes are the caller's to set
+    /// ([`CardCharge::with_total`]): empty where every card it was recorded
+    /// on is gone.
+    pub(super) charge: CardCharge,
+    /// What the resident says of them: a recorded card that is gone, or a
+    /// container adopted without a record of its cards.
+    pub(super) note: Option<String>,
+    /// Every card it was recorded on is gone.
+    nowhere: bool,
+}
+
+impl EntryCards {
+    /// The note of an entry charged nowhere, when it is.
+    fn nowhere(&self) -> Option<String> {
+        self.nowhere.then(|| self.note.clone().unwrap_or_default())
+    }
+}
+
+impl VramScheduler {
+    /// The cards entry `e` is charged on, of `devices` (this read's;
+    /// device-ledger design §3.2, §3.3): the ones admission charged its
+    /// start on or its label recorded ([`RuntimeView::card_charge`]), else
+    /// the cards its row's arguments pass ([`super::charge::seen`]). A
+    /// recorded card this read does not list is gone: the entry is charged
+    /// on the others, nowhere where none is left, and the resident says so
+    /// (logged once per container). With no device read nothing is gone.
+    pub(super) fn entry_cards(
+        &self,
+        snap: &Snapshot,
+        e: &RuntimeView,
+        devices: &[GpuMemory],
+    ) -> EntryCards {
+        let Some(recorded) = &e.card_charge else {
+            let cards = match crate::runtime::descriptor::model_runtime(snap, e.class, &e.model_id)
+            {
+                Some(rt) => super::charge::seen(
+                    &rt.extra_run_args,
+                    e.placement,
+                    self.engine_build(e.class).as_deref(),
+                    devices,
+                ),
+                None => devices.iter().map(|d| d.id.clone()).collect(),
+            };
+            let note = (e.adopted && cards.len() > 1).then(|| {
+                format!(
+                    "Adopted from a container that does not record its cards: charged its \
+                     estimate on its {} cards together, not what it holds on each, until it is \
+                     started again",
+                    cards.len()
+                )
+            });
+            return EntryCards {
+                charge: CardCharge::over(cards, 0),
+                note,
+                nowhere: false,
+            };
+        };
+        if devices.is_empty() {
+            return EntryCards {
+                charge: recorded.clone(),
+                note: None,
+                nowhere: false,
+            };
+        }
+        let present: Vec<DeviceId> = devices.iter().map(|d| d.id.clone()).collect();
+        let (charge, gone) = recorded.on_present(&present);
+        if gone.is_empty() {
+            return EntryCards {
+                charge,
+                note: None,
+                nowhere: false,
+            };
+        }
+        let nowhere = charge.is_empty();
+        let note = format!(
+            "Started on {} {}, which this machine no longer lists: charged {}",
+            if gone.len() == 1 { "card" } else { "cards" },
+            CardCharge::names(&gone),
+            if nowhere {
+                "nowhere"
+            } else {
+                "on its other cards"
+            }
+        );
+        if self.cards_gone_said.lock().unwrap().insert(e.generation) {
+            tracing::warn!(
+                "{}/{}: {note}; the engine runs on whatever it has",
+                e.class.as_str(),
+                e.model_id
+            );
+        }
+        EntryCards {
+            charge,
+            note: Some(note),
+            nowhere,
+        }
+    }
+}
+
+impl Ledger {
+    /// The capacity of `cards` alone (device-ledger design §5, WP5): their
+    /// totals and the driver's free memory on them, less what the ledger
+    /// keeps free there ([`KeptOn::upper_on`]) and what the claims of other
+    /// starts take there ([`super::scheduler::Claim::kept`]): every claim
+    /// for a start without one of its own (`own: None`), the claims made
+    /// before its own for one that has (§5.5, served in order). Under a
+    /// declared budget never more than the budget leaves on every card
+    /// together (§9.2). The pooled capacity where `cards` is empty or no
+    /// device read named any (a declared budget without telemetry); `None`
+    /// without a capacity.
+    pub(super) fn capacity_on(&self, cards: &[DeviceId], own: Option<u64>) -> Option<Capacity> {
+        let pooled = self.capacity.as_ref()?;
+        let on: Vec<&GpuMemory> = self
+            .devices
+            .iter()
+            .filter(|d| cards.contains(&d.id))
+            .collect();
+        if on.is_empty() {
+            return Some(pooled.clone());
+        }
+        let ids: Vec<DeviceId> = on.iter().map(|d| d.id.clone()).collect();
+        let claimed = self.claimed_on(&ids, own);
+        let total: u64 = on.iter().map(|d| d.total_bytes).sum();
+        let raw: u64 = on.iter().map(|d| d.free_bytes).sum();
+        let kept = self.kept_on.upper_on(&ids);
+        let mut free = raw.saturating_sub(kept).saturating_sub(claimed);
+        let mut total = total;
+        if self.budget > 0 {
+            total = total.min(self.budget);
+            free = free.min(pooled.free.saturating_sub(self.claimed_on(&[], own)));
+        }
+        Some(Capacity {
+            total,
+            free,
+            measured: pooled.measured,
+            kept_free: pooled.kept_free,
+        })
+    }
+
+    /// What the claims other than `own` (and, for a claim, those made after
+    /// it) take on `cards`; on every card for `cards` empty.
+    fn claimed_on(&self, cards: &[DeviceId], own: Option<u64>) -> u64 {
+        self.claims
+            .iter()
+            .filter(|c| match own {
+                Some(id) => c.id < id,
+                None => true,
+            })
+            .filter(|c| cards.is_empty() || c.cards.iter().any(|x| cards.contains(x)))
+            .map(|c| c.kept(&self.residents))
+            .fold(0, u64::saturating_add)
+    }
+
+    /// What lmgw's resident `r` holds on `card` at most: its part there, a
+    /// group's whole where the group names the card (how a group divides is
+    /// not known), the peak kept free for it, and the first-prompt margin
+    /// kept free for it there ([`ResidentView::kept_bytes`], where it is
+    /// charged on that card alone or on no card named): what stopping it
+    /// frees there (owner, 2026-11-18); 0 where it is not there.
+    pub(super) fn held_on(r: &ResidentView, card: &DeviceId) -> u64 {
+        let on = match r.charge.alone_on(card) {
+            Some(b) => b,
+            None => r
+                .charge
+                .parts()
+                .iter()
+                .filter(|p| p.cards.is_empty() || p.cards.contains(card))
+                .map(|p| p.bytes)
+                .fold(0, u64::saturating_add),
+        };
+        if on == 0 {
+            return 0;
+        }
+        let kept = match r.charge.cards().as_slice() {
+            [] => r.kept_bytes,
+            [one] if one == card => r.kept_bytes,
+            _ => 0,
+        };
+        on.saturating_add(r.peak_extra_bytes.unwrap_or(0))
+            .saturating_add(kept)
+    }
+
+    /// Whether resident `r` is on one of `cards` (every resident is, for
+    /// `cards` empty): what an eviction or a wait on those cards may free.
+    pub(super) fn is_on(r: &ResidentView, cards: &[DeviceId]) -> bool {
+        cards.is_empty()
+            || r.charge
+                .parts()
+                .iter()
+                .any(|p| p.cards.is_empty() || p.cards.iter().any(|c| cards.contains(c)))
+    }
+
+    /// Under a declared budget over several cards, what the budget leaves
+    /// for a start (`own`: its claim) beside everything in use on every card
+    /// and other starts' claims: what a split's parts together must fit
+    /// (owner, 2026-11-18, `place::Card::pool`). `None` without a budget and
+    /// on one card.
+    pub(super) fn budget_left(&self, own: Option<u64>) -> Option<u64> {
+        if self.budget == 0 || self.devices.len() < 2 {
+            return None;
+        }
+        let pooled = self.capacity.as_ref()?;
+        Some(pooled.free.saturating_sub(self.claimed_on(&[], own)))
+    }
+
+    /// The declared budget, on a machine of several cards: what a split's
+    /// parts together may take at most, with nothing else of lmgw's there.
+    pub(super) fn budget_total(&self) -> Option<u64> {
+        (self.budget > 0 && self.devices.len() > 1).then_some(self.budget)
+    }
+
+    /// What is kept free on `card` alone ([`CardCapacity::kept_free`]);
+    /// `None` without a capacity.
+    pub(super) fn kept_free_on(&self, card: &DeviceId) -> Option<KeptFree> {
+        self.capacity.as_ref()?;
+        self.kept_on.on(card)
+    }
+
+    /// Every card the device read listed, in the driver's order, with
+    /// `measured`'s shares where a measurement was taken. A card the
+    /// measurement's own device read did not list has no share.
+    pub(super) fn cards(&self, measured: Option<&Measured>) -> Vec<CardCapacity> {
+        self.devices
+            .iter()
+            .map(|d| {
+                let shares = measured.and_then(|m| m.cards.iter().find(|c| c.id == d.id));
+                let lmgw = shares.map(|c| c.lmgw.clone());
+                let outside = shares
+                    .and_then(|c| c.lmgw.as_ref().ok().map(|own| c.used.saturating_sub(*own)));
+                CardCapacity {
+                    memory: d.clone(),
+                    lmgw,
+                    outside,
+                    kept_free: self.kept_free_on(&d.id),
+                }
+            })
+            .collect()
+    }
 }
 
 /// The pooled capacity and measured free memory of `devices`, by the
@@ -952,29 +1560,50 @@ pub(super) fn pooled(budget: u64, devices: &[GpuMemory]) -> (u64, u64) {
     }
 }
 
-/// Two readings of the driver's process list as one, per PID the larger
-/// figure (review finding 2): the device read between them may have seen
-/// either, and the larger one is the direction that never reads lmgw's
-/// memory as outside use. A PID only one reading lists keeps that reading's
-/// figure. A figure one reading could not give makes the PID's unknown —
-/// never the other reading's, which may be the smaller.
+/// Two readings of the driver's process lists as one, per device and PID
+/// the larger figure (review finding 2): the device read between them may
+/// have seen either, and the larger one is the direction that never reads
+/// lmgw's memory as outside use. A PID only one reading lists on a device
+/// keeps that reading's figure there. A figure one reading could not give
+/// makes the PID's unknown on that device — never the other reading's,
+/// which may be the smaller. The devices in the first reading's order, then
+/// any only the second lists.
 pub(super) fn larger_per_pid(
-    first: &[ProcessMemory],
-    second: &[ProcessMemory],
-) -> Vec<ProcessMemory> {
-    let mut per: std::collections::BTreeMap<u32, Option<u64>> = Default::default();
-    for p in first.iter().chain(second) {
-        per.entry(p.pid)
-            .and_modify(|b| {
-                *b = match (*b, p.bytes) {
-                    (Some(a), Some(c)) => Some(a.max(c)),
-                    _ => None,
-                }
-            })
-            .or_insert(p.bytes);
+    first: &[DeviceProcesses],
+    second: &[DeviceProcesses],
+) -> Vec<DeviceProcesses> {
+    let mut order: Vec<&DeviceId> = Vec::new();
+    let mut per: std::collections::HashMap<
+        &DeviceId,
+        std::collections::BTreeMap<u32, Option<u64>>,
+    > = Default::default();
+    for d in first.iter().chain(second) {
+        if !per.contains_key(&d.device) {
+            order.push(&d.device);
+        }
+        let on = per.entry(&d.device).or_default();
+        for p in &d.processes {
+            on.entry(p.pid)
+                .and_modify(|b| {
+                    *b = match (*b, p.bytes) {
+                        (Some(a), Some(c)) => Some(a.max(c)),
+                        _ => None,
+                    }
+                })
+                .or_insert(p.bytes);
+        }
     }
-    per.into_iter()
-        .map(|(pid, bytes)| ProcessMemory { pid, bytes })
+    order
+        .into_iter()
+        .map(|device| DeviceProcesses {
+            device: device.clone(),
+            processes: per
+                .remove(device)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(pid, bytes)| ProcessMemory { pid, bytes })
+                .collect(),
+        })
         .collect()
 }
 
@@ -1018,22 +1647,21 @@ pub(super) fn trigger_off(snap: &Snapshot) -> Option<String> {
     let s = &snap.settings;
     if !s.vram.fallback_on_external {
         return Some(format!(
-            "falling back when VRAM outside lmgw's control is short is off ({}) — only the GPU \
-             hold sends a local request to its fallback",
+            "falling back when VRAM outside lmgw's control is short is off ({}), so only the GPU \
+             hold sends a local request to its fallback.",
             crate::config::FALLBACK_ON_EXTERNAL_LABEL
         ));
     }
     if !s.vram.enabled {
         return Some(format!(
-            "GPU memory arbitration is off ({}) — admission does not arbitrate, so there is no \
-             shortfall to measure",
+            "GPU memory arbitration is off ({}), so admission does not arbitrate and there is no \
+             shortfall to measure.",
             crate::config::ADMISSION_LABEL
         ));
     }
     if s.hold.active {
         return Some(
-            "the GPU hold is on — every local request already goes to its fallback or is \
-             refused"
+            "while the hold is on, every local request goes to its own fallback or is refused."
                 .into(),
         );
     }
@@ -1084,4 +1712,41 @@ pub(super) fn unmeasured_start(
                 r.model_id
             )
         })
+}
+
+#[cfg(test)]
+mod kept_on_tests {
+    use super::*;
+
+    fn id(i: u32) -> DeviceId {
+        DeviceId::new(format!("GPU-{i}"))
+    }
+
+    /// What is kept free on a card alone: the parts charged on it alone,
+    /// summed; unknown where a group or a part of unnamed cards is on it;
+    /// nothing kept is zero, not unknown.
+    #[test]
+    fn what_is_kept_free_on_a_card_alone() {
+        let mut k = KeptOn::default();
+        assert_eq!(k.on(&id(0)), Some(KeptFree::default()));
+        k.starting(&[id(0)], 3);
+        k.image_peak(&[id(0)], 4);
+        k.pending_load(&[id(1)], 5);
+        k.starting(&[id(1), id(2)], 6);
+        // Nothing kept is no part at all, even of a group.
+        k.starting(&[id(3), id(0)], 0);
+        assert_eq!(
+            k.on(&id(0)),
+            Some(KeptFree {
+                starting_bytes: 3,
+                image_peak_bytes: 4,
+                pending_load_bytes: 0,
+            })
+        );
+        assert_eq!(k.on(&id(1)), None);
+        assert_eq!(k.on(&id(2)), None);
+        assert_eq!(k.on(&id(3)), Some(KeptFree::default()));
+        k.pending_load(&[], 1);
+        assert_eq!(k.on(&id(3)), None);
+    }
 }

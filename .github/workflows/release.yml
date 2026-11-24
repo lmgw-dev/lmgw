@@ -24,6 +24,14 @@
 # ci/build-windows.ps1; `publish-windows` (contents: write, no checkout) checks
 # it against the tag, uploads it to the release and adds it to the release's
 # latest.json as its `nsis` entry. The installer is not signed yet. Not run yet.
+#
+# The Arch Linux package follows the same pattern: `arch` (contents: read)
+# builds packaging/arch/PKGBUILD with makepkg in an Arch container, beside the
+# RPM build; `publish-arch` (contents: write, no checkout) checks the package
+# against the tag and its arch.json, uploads it with its .sha256 and adds it to
+# the release's latest.json as its `arch` entry. The in-app updater installs
+# RPMs only: it ignores that entry, and installing the package is left to the
+# user. ci/build-arch.sh is the build, shared with GitLab's arch job.
 name: Release
 
 on:
@@ -233,6 +241,65 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  arch:
+    name: Arch Linux package
+    # Beside the RPM build rather than after it, and published by a job of its
+    # own: an Arch failure never holds back the RPM's release.
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      # Arch's official image on quay, for the same reason the build job avoids Docker Hub.
+      # A floating tag, as the Fedora images here: the build runs pacman -Syu anyway.
+      image: quay.io/archlinux/archlinux:base-devel
+    # The same cold LTO build as the RPM's.
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Check the tag name
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$RELEASE_TAG' is not a release tag (v<X.Y.Z>)"
+            exit 1
+          fi
+      - name: Install checkout tools
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Mark the workspace a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # A dispatch can name a tag from before the PKGBUILD: nothing to build then.
+      - name: Check the tag has a PKGBUILD
+        id: pkgbuild
+        run: |
+          if [[ -f packaging/arch/PKGBUILD ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${RELEASE_TAG} has no packaging/arch/PKGBUILD: no Arch package for it"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The same script as GitLab's arch job: it checks the tag against
+      # Cargo.toml and the PKGBUILD, installs the PKGBUILD's dependencies and
+      # runs makepkg as an unprivileged user (makepkg refuses root).
+      - name: Build the package
+        if: steps.pkgbuild.outputs.build == 'true'
+        run: bash ci/build-arch.sh
+      - uses: actions/upload-artifact@v7
+        if: steps.pkgbuild.outputs.build == 'true'
+        with:
+          name: arch
+          path: dist-arch/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish
     needs: build
@@ -372,6 +439,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload assets
+    # publish-windows and publish-arch both rewrite the release's latest.json
+    # (download, add their entry, upload): one at a time, or one loses the other's.
+    concurrency:
+      group: release-latest-json
+      cancel-in-progress: false
     timeout-minutes: 15
     env:
       GH_REPO: ${{ github.repository }}
@@ -422,4 +494,77 @@ jobs:
             '.nsis = {file: $file, url: $url, sha256: $sha}' feed/latest.json > latest.json
           # The installer first, then the manifest that names its sha256.
           gh release upload "$TAG" "windows/$FILE" --clobber
+          gh release upload "$TAG" latest.json --clobber
+
+  publish-arch:
+    name: Publish the Arch Linux package
+    # After the release exists; a failed or skipped Arch build skips this, and
+    # the release stays without the package.
+    needs: [publish, arch]
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload assets
+    # publish-windows and publish-arch both rewrite the release's latest.json
+    # (download, add their entry, upload): one at a time, or one loses the other's.
+    concurrency:
+      group: release-latest-json
+      cancel-in-progress: false
+    timeout-minutes: 15
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    # As `publish`: no checkout, nothing of the build but its artifact.
+    steps:
+      - uses: actions/download-artifact@v8
+        id: download
+        # The arch job hands on nothing for a tag without a PKGBUILD.
+        continue-on-error: true
+        with:
+          name: arch
+          path: arch
+
+      - name: Check the package against the tag and arch.json
+        if: steps.download.outcome == 'success'
+        id: pkg
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "$TAG is no v<X.Y.Z> tag"
+          version="${BASH_REMATCH[1]}"
+          m=arch/arch.json
+          [[ -f "$m" ]] || fail "the Arch build handed on no arch.json"
+          got="$(jq -er .version "$m")" || fail "arch.json has no version"
+          [[ "$got" == "$version" ]] || fail "arch.json says $got, the tag $TAG"
+          file="$(jq -er .file "$m")" || fail "arch.json names no package"
+          [[ "$file" == "lmgw-${version}-1-x86_64.pkg.tar.zst" ]] || fail "arch.json names $file, not lmgw ${version}'s Arch package"
+          sha="$(jq -er .sha256 "$m")" || fail "arch.json has no sha256"
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "arch.json's sha256 is not 64 hex digits: $sha"
+          files="$(cd arch && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          [[ "$files" == "$(printf '%s\n' "$file" "$file.sha256" arch.json | LC_ALL=C sort)" ]] \
+            || fail "the Arch build handed on other files than $file, its .sha256 and arch.json: $files"
+          [[ -f "arch/$file" && ! -L "arch/$file" ]] || fail "$file is not a plain file"
+          have="$(sha256sum "arch/$file" | cut -d' ' -f1)"
+          [[ "$have" == "$sha" ]] || fail "$file's sha256 is $have, arch.json says $sha"
+          [[ -f "arch/$file.sha256" && "$(cat "arch/$file.sha256")" == "$sha  $file" ]] \
+            || fail "$file.sha256 is not '$sha  $file'"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Upload it and add it to latest.json
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILE: ${{ steps.pkg.outputs.file }}
+          SHA: ${{ steps.pkg.outputs.sha256 }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          mkdir feed
+          gh release download "$TAG" --pattern latest.json --dir feed
+          version="$(jq -er .version feed/latest.json)" || fail "the release's latest.json has no version"
+          [[ "v$version" == "$TAG" ]] || fail "the release's latest.json says $version, the tag $TAG"
+          url="https://github.com/${GH_REPO}/releases/download/${TAG}/${FILE}"
+          jq --arg file "$FILE" --arg url "$url" --arg sha "$SHA" \
+            '.arch = {file: $file, url: $url, sha256: $sha}' feed/latest.json > latest.json
+          # The package first, then the manifest that names its sha256.
+          gh release upload "$TAG" "arch/$FILE" "arch/$FILE.sha256" --clobber
           gh release upload "$TAG" latest.json --clobber

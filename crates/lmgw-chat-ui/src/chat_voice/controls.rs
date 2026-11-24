@@ -356,7 +356,7 @@ pub(crate) fn SpeakerButton(
             class:on=move || state.get().is_some()
             class:off=move || resting.get()
             // The text goes to a fallback now (the hold, a benchmark run):
-            // amber, as the composer's controls (review m6).
+            // the quiet resting look, still pressable; the title says why.
             class:warn=move || pv.tts_blocked.get()
             title=title
             aria-label=move || if state.get().is_some() { "Stop reading aloud" } else { "Read aloud" }

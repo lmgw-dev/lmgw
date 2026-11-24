@@ -14,9 +14,12 @@ use leptos::task::spawn_local;
 use lmgw_api_types::CorpusCreated;
 use serde_json::json;
 
-use crate::widgets::{use_toasts, Modal, ModalFooter, ModelPicker, Select};
+use crate::widgets::{
+    use_toasts, ActionRow, ComboRow, EntryRow, Modal, ModalFooter, ModelPicker, PrefGroup,
+    StackRow, SwitchRow,
+};
 
-use super::docs::{use_docs, CorpusJobLine, WizardSeed};
+use super::docs::{use_docs, CorpusJobRow, WizardSeed};
 
 /// The source kinds §8 lists, cheapest first — the order the ingest prompt
 /// tries them in.
@@ -147,14 +150,14 @@ fn WizardForm(seed: WizardSeed, open: RwSignal<bool>) -> impl IntoView {
         });
     };
 
-    let add_source = move |_| {
+    let add_source = move |()| {
         let key = next_key.get_value();
         next_key.set_value(key + 1);
         sources.update(|v| v.push(SourceDraft::new(key)));
     };
 
     view! {
-        <div class="wiz">
+        <div class="wiz docs-dialog">
             {(seed.reason.is_some() || seed.requested_by.is_some())
                 .then(|| {
                     view! {
@@ -183,9 +186,11 @@ fn WizardForm(seed: WizardSeed, open: RwSignal<bool>) -> impl IntoView {
                                     " created. Start the ingest from its card when you are ready."
                                 }}
                             </div>
-                            <CorpusJobLine id=id/>
+                            <PrefGroup>
+                                <CorpusJobRow id=id/>
+                            </PrefGroup>
                             <ModalFooter>
-                                <button class="btn" on:click=move |_| open.set(false)>
+                                <button class="btn suggested pill" on:click=move |_| open.set(false)>
                                     "Close"
                                 </button>
                             </ModalFooter>
@@ -194,69 +199,44 @@ fn WizardForm(seed: WizardSeed, open: RwSignal<bool>) -> impl IntoView {
                     }
                     None => {
                         view! {
-                            <div class="spec-grid">
-                                <div class="field">
-                                    <label>"Library"</label>
-                                    <input
-                                        class="input mono"
-                                        placeholder="axum"
-                                        prop:value=move || library.get()
-                                        on:input=move |ev| library.set(event_target_value(&ev))
-                                    />
-                                </div>
-                                <div class="field">
-                                    <label>"Version"</label>
-                                    <input
-                                        class="input mono"
-                                        placeholder="0.8"
-                                        prop:value=move || version.get()
-                                        on:input=move |ev| version.set(event_target_value(&ev))
-                                    />
-                                </div>
-                                // The same picker the corpus list's re-embed offers —
+                            <PrefGroup title="Library" desc="One library at one version">
+                                <EntryRow title="Library" value=library placeholder="axum" mono=true/>
+                                <EntryRow title="Version" value=version placeholder="0.8" mono=true/>
+                            </PrefGroup>
+                            <PrefGroup title="Models" desc="A corpus is a function of these two: both are checked before it exists">
+                                // The same picker the corpus's re-embed offers —
                                 // one definition of "what this gateway can embed
                                 // with", so the two forms cannot disagree.
-                                <div class="field">
-                                    <label>"Embedding model · pinned at ingest"</label>
+                                <StackRow title="Embedding model" sub="Pinned at ingest" class="kb-picker">
                                     <ModelPicker value=embed_model tasks=&["embedding"] recent_key="docs.embed"/>
-                                </div>
+                                </StackRow>
                                 // Small local models are the intended ones (§8) —
                                 // ingestion is batch work — but any chat model the
                                 // gateway serves will do.
-                                <div class="field">
-                                    <label>"Extraction model · drives the span emitter"</label>
+                                <StackRow title="Extraction model" sub="Drives the span emitter; a small local model will do" class="kb-picker">
                                     <ModelPicker value=ingest_model tasks=&["chat"] recent_key="docs.ingest"/>
-                                </div>
-                            </div>
-
-                            <div class="mini-head" style="margin-top:14px">
-                                "Sources — where the documents come from"
-                            </div>
+                                </StackRow>
+                            </PrefGroup>
                             <For each=move || sources.get() key=|s| s.key let:draft>
                                 <SourceFields key=draft.key sources=sources/>
                             </For>
-                            <div class="row" style="margin-top:8px">
-                                <button class="btn ghost" on:click=add_source>
-                                    "Add source"
-                                </button>
-                                <label class="row dim" style="gap:5px">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=move || start_now.get()
-                                        on:change=move |ev| start_now.set(event_target_checked(&ev))
-                                    />
-                                    "start ingesting as soon as the corpus exists"
-                                </label>
-                            </div>
+                            <PrefGroup>
+                                <ActionRow title="Add source" sub="Another root the documents come from" on_click=Callback::new(add_source)/>
+                                <SwitchRow
+                                    title="Start ingesting at once"
+                                    sub="As soon as the corpus exists"
+                                    value=start_now
+                                />
+                            </PrefGroup>
 
                             {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
 
                             <ModalFooter>
-                                <button class="btn ghost" on:click=move |_| open.set(false)>
+                                <button class="btn" on:click=move |_| open.set(false)>
                                     "Cancel"
                                 </button>
                                 <button
-                                    class="btn primary"
+                                    class="btn suggested pill"
                                     disabled=move || creating.get()
                                     on:click=create
                                 >
@@ -274,28 +254,18 @@ fn WizardForm(seed: WizardSeed, open: RwSignal<bool>) -> impl IntoView {
     }
 }
 
-/// One source row. The list is plain data in a single signal and every field
+/// One source as a group of rows. The list is plain data in a single signal and every field
 /// writes back into the row with this `key` — addressing by position would put
 /// a row's typing into its neighbour the moment one above it is removed.
 #[component]
 fn SourceFields(key: u32, sources: RwSignal<Vec<SourceDraft>>) -> impl IntoView {
     let read = move |f: fn(&SourceDraft) -> String| {
         sources
-            .get()
+            .get_untracked()
             .iter()
             .find(|s| s.key == key)
             .map(f)
             .unwrap_or_default()
-    };
-    let write = move |f: fn(&mut SourceDraft, String)| {
-        move |ev: web_sys::Event| {
-            let val = event_target_value(&ev);
-            sources.update(|v| {
-                if let Some(s) = v.iter_mut().find(|s| s.key == key) {
-                    f(s, val);
-                }
-            });
-        }
     };
 
     // `Select` writes a signal rather than firing an event, so the kind needs
@@ -316,42 +286,44 @@ fn SourceFields(key: u32, sources: RwSignal<Vec<SourceDraft>>) -> impl IntoView 
             .collect::<Vec<_>>()
     });
 
+    let n = move || sources.with(|v| v.iter().position(|s| s.key == key).map_or(0, |i| i + 1));
+    let root = RwSignal::new(read(|s| s.root.clone()));
+    let fence = RwSignal::new(read(|s| s.fence.clone()));
+    Effect::new(move |_| {
+        let r = root.get();
+        let f = fence.get();
+        sources.update(|v| {
+            if let Some(s) = v.iter_mut().find(|s| s.key == key) {
+                s.root = r;
+                s.fence = f;
+            }
+        });
+    });
     view! {
-        <div class="card" style="margin-top:8px">
-            <div class="spec-grid">
-                <div class="field">
-                    <label>"Root URL"</label>
-                    <input
-                        class="input mono"
-                        placeholder="https://docs.rs/axum/0.8.0/axum/"
-                        prop:value=move || read(|s| s.root.clone())
-                        on:input=write(|s, v| s.root = v)
-                    />
-                </div>
-                <div class="field">
-                    <label>"Kind"</label>
-                    <Select value=kind options=kind_opts/>
-                </div>
-                <div class="field" style="grid-column:1 / -1">
-                    <label>"Domain fence · empty = this root's own host, and nothing else"</label>
-                    <input
-                        class="input mono"
-                        placeholder="docs.rs, github.com"
-                        prop:value=move || read(|s| s.fence.clone())
-                        on:input=write(|s, v| s.fence = v)
-                    />
-                </div>
-            </div>
+        <PrefGroup title=Signal::derive(move || format!("Source {}", n()))>
+            <EntryRow
+                title="Root URL"
+                value=root
+                placeholder="https://docs.rs/axum/0.8.0/axum/"
+                mono=true
+                wide=true
+            />
+            <ComboRow title="Kind" value=kind options=kind_opts/>
+            <EntryRow
+                title="Domain fence"
+                sub="Empty: this root's own host, and nothing else"
+                value=fence
+                placeholder="docs.rs, github.com"
+                mono=true
+                wide=true
+            />
             <Show when=move || sources.with(|v| v.len() > 1)>
-                <div class="row" style="justify-content:flex-end; margin-top:8px">
-                    <button
-                        class="btn ghost"
-                        on:click=move |_| sources.update(|v| v.retain(|s| s.key != key))
-                    >
-                        "Remove source"
-                    </button>
-                </div>
+                <ActionRow
+                    title="Remove source"
+                    danger=true
+                    on_click=Callback::new(move |()| sources.update(|v| v.retain(|s| s.key != key)))
+                />
             </Show>
-        </div>
+        </PrefGroup>
     }
 }

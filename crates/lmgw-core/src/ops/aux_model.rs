@@ -116,6 +116,12 @@ pub struct AuxModelPatch {
     /// `ctx_size`, `ubatch_size`, `batch_size`, `mmproj_path`, `backend`,
     /// `threads`.
     pub clear: Option<String>,
+    /// The cards this model may run on (device-ledger design §8), by their
+    /// ids as `GET /api/vram` lists them (`devices[].id`, `GPU-<uuid>` for an
+    /// NVIDIA card): one card, it runs there or not at all; several, lmgw
+    /// chooses among them. Omitted: as it is. `clear: "gpu_pin"` (or an
+    /// empty list): lmgw chooses the card.
+    pub gpu_pin: Option<Vec<String>>,
 }
 
 /// The two things an aux row's *kind* decides, refused where they are typed
@@ -383,6 +389,8 @@ pub(super) async fn aux_model_get(
     let (threads_in_effect, threads_source) =
         crate::runtime::aux_models::threads_in_effect(m, crate::host::cpu());
     let licence = crate::modelinfo::licence::of_file(state, &models_dir, &m.gguf_path).await;
+    // Its pin, and the card it is on or would go on (device-ledger §8).
+    let (gpu_pin, command_line_note) = super::gpu_pin::read(state, Class::Aux, &m.model_id).await;
     Ok(Some(dto::AuxModelDetail {
         id: m.id,
         model_id: m.model_id.clone(),
@@ -416,6 +424,8 @@ pub(super) async fn aux_model_get(
         command_line,
         problems,
         fit_note: crate::modelinfo::refit::note_of(state, Class::Aux, m.id).await,
+        gpu_pin,
+        command_line_note,
     }))
 }
 
@@ -434,7 +444,10 @@ pub async fn aux_model_set(
 ) -> Result<dto::AuxModelSaved, String> {
     // From the snapshot the checks read to the commit (§14.2).
     let routing = state.routing_write().await;
-    aux_model_set_holding(state, routing, p).await
+    let pin = super::gpu_pin::patched(&p.action, &p.gpu_pin, p.clear.as_deref());
+    let saved = aux_model_set_holding(state, routing, p).await?;
+    super::gpu_pin::write(state, crate::runtime::Class::Aux, saved.id, pin).await?;
+    Ok(saved)
 }
 
 /// [`aux_model_set`] for a caller that already holds the routing-write lock

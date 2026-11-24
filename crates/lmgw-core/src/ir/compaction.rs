@@ -283,6 +283,10 @@ pub struct UsageIterations {
     /// Whether the top level carried `cache_creation_input_tokens`.
     #[serde(default)]
     pub top_cache_write: bool,
+    /// Whether the top level carried the `cache_creation` split
+    /// ([`super::cache_writes`]).
+    #[serde(default)]
+    pub top_cache_write_1h: bool,
 }
 
 /// The tokens the `compaction` entries of an Anthropic answer's
@@ -300,7 +304,7 @@ pub fn compaction_usage(iterations: &Value) -> Option<super::Usage> {
         }
         let n = |k: &str| e.get(k).and_then(Value::as_u64);
         let read = n("cache_read_input_tokens");
-        let write = n("cache_creation_input_tokens");
+        let write = super::cache_writes::total(e);
         let entry = super::Usage {
             prompt_tokens: Some(
                 n("input_tokens").unwrap_or(0) + read.unwrap_or(0) + write.unwrap_or(0),
@@ -308,9 +312,13 @@ pub fn compaction_usage(iterations: &Value) -> Option<super::Usage> {
             completion_tokens: Some(n("output_tokens").unwrap_or(0)),
             cached_input_tokens: read,
             cache_write_tokens: write,
+            cache_write_1h_tokens: super::cache_writes::one_hour(e),
             reasoning_tokens: None,
         };
         sum.get_or_insert_with(super::Usage::default).add(&entry);
     }
     sum
 }
+
+#[cfg(test)]
+mod tests;

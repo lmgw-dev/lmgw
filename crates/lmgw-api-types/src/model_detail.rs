@@ -87,6 +87,15 @@ pub struct AuxModelDetail {
     /// context isn't a fit's shorter one.
     #[serde(default)]
     pub fit_note: Option<crate::model_find::FitNote>,
+    /// The cards this model may run on (device-ledger design §8); `None`:
+    /// lmgw chooses the card.
+    #[serde(default)]
+    pub gpu_pin: Option<Vec<crate::DeviceId>>,
+    /// Under the command line (device-ledger design §7.1, §8): the card it
+    /// is pinned to, or that lmgw picks the card when it starts the model
+    /// and which it would pick now. `None` where there is nothing to say.
+    #[serde(default)]
+    pub command_line_note: Option<String>,
 }
 
 /// An image-generation pipeline read back.
@@ -131,6 +140,15 @@ pub struct ImageModelDetail {
     /// slowdowns: …", VRAM admission). Empty when there is nothing to say.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The cards this model may run on (device-ledger design §8); `None`:
+    /// lmgw chooses the card.
+    #[serde(default)]
+    pub gpu_pin: Option<Vec<crate::DeviceId>>,
+    /// Under the command line (device-ledger design §7.1, §8): the card it
+    /// is pinned to, or that lmgw picks the card when it starts the model
+    /// and which it would pick now. `None` where there is nothing to say.
+    #[serde(default)]
+    pub command_line_note: Option<String>,
 }
 
 /// An audio.cpp model read back.
@@ -194,6 +212,15 @@ pub struct AudioModelDetail {
     pub problems: Vec<String>,
     /// How to prove the model works.
     pub next_step: String,
+    /// The cards this model may run on (device-ledger design §8); `None`:
+    /// lmgw chooses the card.
+    #[serde(default)]
+    pub gpu_pin: Option<Vec<crate::DeviceId>>,
+    /// Under the command line (device-ledger design §7.1, §8): the card it
+    /// is pinned to, or that lmgw picks the card when it starts the model
+    /// and which it would pick now. `None` where there is nothing to say.
+    #[serde(default)]
+    pub command_line_note: Option<String>,
 }
 
 /// A running audio container.

@@ -3,22 +3,19 @@
   "nav": "/usage/keys"
  },
  {
-  "expect": "!!document.querySelector('.page-body > .devices-card')",
-  "label": "the Devices card is on Usage → Keys, a strip above the keys table"
+  "until": "document.querySelector('.kstatus')",
+  "timeout": 10,
+  "label": "the status page is up"
  },
  {
-  "expect": "document.querySelectorAll('.page-body .fill-pane').length === 1",
-  "label": "exactly one fill-pane"
- },
- {
-  "expect": "![...document.querySelectorAll('table.keys-table td a.key-link')].some(a => a.textContent.startsWith('device:'))",
-  "label": "device rows are on their own card, not in the keys table"
+  "expect": "[...document.querySelectorAll('.kstatus .pref-head h2')].some(h => h.textContent === 'Devices') && !!document.querySelector('.kstatus .dev-strip-row')",
+  "label": "pairing and the link strip are on the status page's Devices group"
  },
  {
   "shot": "keys"
  },
  {
-  "click": ".devices-card .card-head button.btn"
+  "js": "[...document.querySelectorAll('.kstatus .prow.action')].find(r => r.textContent.startsWith('Pair a device')).click(); 'pair'"
  },
  {
   "wait": 0.4
@@ -28,7 +25,7 @@
   "label": "Pair a device opens the form"
  },
  {
-  "expect": "[...document.querySelectorAll('dialog[open] .pair-form .lbl')].some(l => l.textContent === 'budget')",
+  "expect": "[...document.querySelectorAll('dialog[open] .pair-form .prow-title')].some(l => l.textContent === 'Budget')",
   "label": "the budget is on the form"
  },
  {
@@ -61,7 +58,7 @@
   "click": "dialog[open] .modal-foot button.primary"
  },
  {
-  "until": "document.querySelector('dialog[open] .pair-link')?.textContent.startsWith('lmgw-pair:?v=1&url=')",
+  "until": "document.querySelector('dialog[open] .pair-link')?.textContent.startsWith('lmgw-pair:?v=2&name=')",
   "timeout": 10,
   "label": "the link is shown once"
  },
@@ -70,11 +67,11 @@
   "label": "the link has a Copy button"
  },
  {
-  "expect": "document.querySelector('dialog[open] a.btn.primary')?.getAttribute('href')?.startsWith('lmgw-pair:')",
+  "expect": "[...document.querySelectorAll('dialog[open] a.btn')].some(a => a.textContent.startsWith('Open') && a.getAttribute('href')?.startsWith('lmgw-pair:'))",
   "label": "Open is a plain lmgw-pair: link"
  },
  {
-  "js": "(() => { const l = document.querySelector('dialog[open] .pair-link'); l.textContent = 'lmgw-pair:?v=1&url=…&name=…&key=(masked for the shot)'; return 'masked'; })()"
+  "js": "(() => { const l = document.querySelector('dialog[open] .pair-link'); l.textContent = 'lmgw-pair:?v=2&name=\u2026&url=\u2026&fp=\u2026&token=(masked for the shot)'; return 'masked'; })()"
  },
  {
   "expect": "!document.querySelector('dialog[open]').textContent.includes('lmgw-device-')",
@@ -84,39 +81,57 @@
   "shot": "pair-link"
  },
  {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "[...document.querySelectorAll('dialog[open] h2, dialog[open] .modal-title')].some(h => h.textContent.includes('End the pairing code?'))",
+  "label": "closing the card asks about the pairing code"
+ },
+ {
   "click": "dialog[open] .modal-foot button.primary"
  },
  {
   "wait": 0.4
  },
  {
-  "until": "[...document.querySelectorAll('.devices-table td .mono-sm')].some(s => s.textContent.startsWith('device:drive-'))",
+  "until": "!!([...document.querySelectorAll('.mlist .lrow')].find(r => r.querySelector('.lrow-name')?.textContent === window.__driveName))",
   "timeout": 10,
-  "label": "the new device is listed"
+  "label": "the new device is listed under Devices"
  },
  {
-  "expect": "document.querySelectorAll('.devices-table .chip.warn').length >= 1",
+  "js": "([...document.querySelectorAll('.mlist .lrow')].find(r => r.querySelector('.lrow-name')?.textContent === window.__driveName)).click(); 'open'"
+ },
+ {
+  "until": "document.querySelector('.kdetail .detail-hero h1')?.textContent === window.__driveName",
+  "timeout": 10,
+  "label": "its detail opens"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.kdetail .detail-hero .chip.warn')].some(c => c.textContent === 'every alias \u00b7 no budget')",
   "label": "an unscoped, unbudgeted device is flagged amber"
  },
  {
-  "click": ".devices-table .row-menu-btn",
-  "nth": 0
+  "expect": "[...document.querySelectorAll('.kdetail .prow-title')].some(t => t.textContent.startsWith('Hosts tools as')) && ![...document.querySelectorAll('.kdetail .prow-title')].some(t => t.textContent === 'Enabled')",
+  "label": "a device's policy edits its hosting label; Enabled is not a row (Disable asks first)"
  },
  {
-  "wait": 0.3
+  "shot": "device-detail"
  },
  {
-  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === 'Rotate…'); i.click(); return !!i; })()"
+  "js": "[...document.querySelectorAll('.kdetail .prow.action')].find(r => r.textContent.startsWith('Disable the device')).click(); 'disable'"
  },
  {
   "wait": 0.4
  },
  {
   "expect": "document.querySelector('dialog[open] .notice.warn')?.textContent.includes('close now')",
-  "label": "Rotate says what it ends before it does it"
+  "label": "Disable says what it ends before it does it"
  },
  {
-  "shot": "rotate-confirm"
+  "shot": "disable-confirm"
  },
  {
   "key": "Escape"
@@ -129,37 +144,7 @@
   "label": "Cancel ends nothing"
  },
  {
-  "click": ".devices-table td.actions .row-acts > button",
-  "nth": 0
- },
- {
-  "wait": 0.4
- },
- {
-  "expect": "[...document.querySelectorAll('dialog[open] .lbl')].some(l => l.textContent === 'hosts tools as')",
-  "label": "a device's policy dialog edits its hosting label"
- },
- {
-  "expect": "document.querySelector('dialog[open] label.row input[type=checkbox]')?.disabled === true",
-  "label": "a device is disabled on its card, behind the confirmation, not in the dialog"
- },
- {
-  "shot": "device-edit"
- },
- {
-  "key": "Escape"
- },
- {
-  "wait": 0.3
- },
- {
-  "js": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); row.querySelector('.row-menu-btn').click(); return !!row; })()"
- },
- {
-  "wait": 0.3
- },
- {
-  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === 'Delete…'); i.click(); return !!i; })()"
+  "js": "[...document.querySelectorAll('.kdetail .prow.action')].find(r => r.textContent.startsWith('Delete the device')).click(); 'delete'"
  },
  {
   "wait": 0.4
@@ -172,8 +157,8 @@
   "click": "dialog[open] .modal-foot button.danger"
  },
  {
-  "until": "![...document.querySelectorAll('.devices-table td .mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)",
+  "until": "location.pathname === '/usage/keys' && !([...document.querySelectorAll('.mlist .lrow')].find(r => r.querySelector('.lrow-name')?.textContent === window.__driveName))",
   "timeout": 10,
-  "label": "the drive's device is deleted: no live credential is left behind"
+  "label": "the drive's device is deleted, its page closed: no live credential is left behind"
  }
 ]

@@ -117,11 +117,13 @@ fn join(
                 text: before,
                 citations: cited_before,
                 citations_scope: scope_before,
+                ..
             }),
             ContentPart::Text {
                 text: after,
                 citations: cited_after,
                 citations_scope: scope_after,
+                ..
             },
         ) = (prev.content.last_mut(), parts.remove(0))
         {
@@ -174,6 +176,7 @@ mod tests {
             source: crate::ir::ImageSource::Base64 {
                 data: "AAAA".into(),
             },
+            cache_control: None,
         }
     }
 

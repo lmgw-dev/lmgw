@@ -60,8 +60,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{Route, Upstream};
 use crate::ir::{
-    image_note, image_placeholder, tool_image_note, tool_image_placeholder, ChatRequest,
-    ContentPart, ToolResultBlock,
+    image_note, image_placeholder, tool_image_note, tool_image_placeholder, CacheControl,
+    ChatRequest, ContentPart, ToolResultBlock,
 };
 use crate::state::SharedState;
 
@@ -166,33 +166,51 @@ pub(crate) fn without_images(ir: &ChatRequest, up: &Upstream) -> (ChatRequest, V
     let mut out = ir.clone();
     for part in out.messages.iter_mut().flat_map(|m| &mut m.content) {
         match part {
-            ContentPart::Image { mime, source } => {
+            // The placeholder keeps the image's cache mark, so an
+            // Anthropic fallback's breakpoint stays where it was.
+            ContentPart::Image {
+                mime,
+                source,
+                cache_control,
+            } => {
                 dropped.push(image_note(mime, source));
+                let mark = cache_control.take();
                 *part = ContentPart::text(image_placeholder(mime, source, PLACEHOLDER_REASON));
+                if let ContentPart::Text { cache_control, .. } = part {
+                    *cache_control = mark;
+                }
             }
             // A Files API image the row is sent, as [`image_placeholder`]
             // words one.
             ContentPart::AnthropicBlock(b) if b.image_sent_to(up) => {
                 let note = file_image_note(b);
+                let mark = CacheControl::of(&b.block);
                 *part = ContentPart::text(format!("[{note} — omitted: {PLACEHOLDER_REASON}]"));
+                if let ContentPart::Text { cache_control, .. } = part {
+                    *cache_control = mark;
+                }
                 dropped.push(note);
             }
             ContentPart::ToolResult { content, .. } => {
                 for block in content.iter_mut() {
                     match block {
-                        ToolResultBlock::Image { mime, data } => {
+                        ToolResultBlock::Image {
+                            mime,
+                            data,
+                            cache_control,
+                        } => {
                             dropped.push(tool_image_note(mime, data));
-                            *block = ToolResultBlock::text(tool_image_placeholder(
-                                mime,
-                                data,
-                                PLACEHOLDER_REASON,
-                            ));
+                            *block = ToolResultBlock::Text {
+                                text: tool_image_placeholder(mime, data, PLACEHOLDER_REASON),
+                                cache_control: cache_control.take(),
+                            };
                         }
                         ToolResultBlock::AnthropicBlock(b) if b.image_sent_to(up) => {
                             let note = file_image_note(b);
-                            *block = ToolResultBlock::text(format!(
-                                "[{note} — omitted: {PLACEHOLDER_REASON}]"
-                            ));
+                            *block = ToolResultBlock::Text {
+                                text: format!("[{note} — omitted: {PLACEHOLDER_REASON}]"),
+                                cache_control: CacheControl::of(&b.block),
+                            };
                             dropped.push(note);
                         }
                         _ => {}

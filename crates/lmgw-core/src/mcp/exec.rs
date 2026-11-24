@@ -441,6 +441,7 @@ async fn resolve_as(
                 parameters: serde_json::to_value(&t.input_schema)
                     .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
                 strict: None,
+                anthropic_fields: Default::default(),
             });
         }
 
@@ -761,6 +762,7 @@ fn tool_def(entry: &Value) -> ToolDef {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"type": "object"})),
         strict: None,
+        anthropic_fields: Default::default(),
     }
 }
 
@@ -1522,6 +1524,7 @@ pub(crate) fn blocks_from_result(result: &rmcp::model::CallToolResult) -> Vec<To
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                cache_control: None,
             },
             Some("audio") => ToolResultBlock::Audio {
                 mime: raw

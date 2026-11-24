@@ -18,7 +18,7 @@
  {"until": "__shell().classList.contains('narrow')", "timeout": 10, "label": "700 px (560 CSS px): the Chat is narrow"},
  {"expect": "Math.round(__r(__shell()).width) < 520 && !document.querySelector('.chat-shell .dock-rail')", "label": "700 px: under 520 px of Chat and no rail"},
  {"expect": "__btn('list') && __btn('settings') && __btn('list').getAttribute('aria-expanded') === 'false' && __btn('settings').getAttribute('aria-expanded') === 'false'", "label": "the head's two buttons, both drawers shut"},
- {"expect": "(() => { const l = __r(__btn('list')), m = __r(document.querySelector('.chat-head .model-picker')), s = __r(__btn('settings')); return Math.abs(l.top - m.top) < 12 && Math.abs(s.top - m.top) < 12 && l.right <= m.left && m.right <= s.left; })()", "label": "the first line: the list's button, the model, the settings' button"},
+ {"expect": "(() => { const l = __r(__btn('list')), m = __r(document.querySelector('.chat-head .chat-title')), s = __r(__btn('settings')); return Math.abs(l.top - m.top) < 12 && Math.abs(s.top - m.top) < 12 && l.right <= m.left && m.right <= s.left; })()", "label": "the first line: the list's button, the title with the model under it, the settings' button"},
  {"expect": "__shell().scrollWidth <= __shell().clientWidth + 1 && document.querySelector('.chat-head').scrollWidth <= document.querySelector('.chat-head').clientWidth + 1", "label": "nothing wider than the column"},
  {"js": "(() => { const ta = document.querySelector('.composer-input'); ta.value = 'hello from a narrow window'; ta.dispatchEvent(new Event('input', {bubbles: true})); return 'typed'; })()"},
  {"wait": 0.3},

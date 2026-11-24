@@ -28,6 +28,8 @@ class Turn:
     reasoning: bool = False  # the answer carried reasoning / thinking content
     replay: list = field(default_factory=list)  # what a client appends to its history
     response_id: str = ""
+    raw_usage: dict = field(default_factory=dict)  # the answer's usage object, as on the wire
+    start_usage: object = None  # a streamed Messages answer's message_start.message.usage
 
 
 class Outcome(Exception):

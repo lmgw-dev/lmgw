@@ -325,7 +325,7 @@ pub fn tool_media(ir: &ChatRequest, webp: bool) -> u64 {
         })
         .flatten()
         .filter(|b| match b {
-            ToolResultBlock::Image { mime, data } => image_format(mime, data, webp).is_ok(),
+            ToolResultBlock::Image { mime, data, .. } => image_format(mime, data, webp).is_ok(),
             _ => false,
         })
         .count();

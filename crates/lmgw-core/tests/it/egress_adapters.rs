@@ -37,6 +37,7 @@ fn sample_ir() -> ChatRequest {
                     id: "call_1".into(),
                     name: "get_weather".into(),
                     args: json!({"city": "Berlin"}),
+                    cache_control: None,
                 }],
             },
             Message {
@@ -46,6 +47,7 @@ fn sample_ir() -> ChatRequest {
                     name: None,
                     content: ToolResultBlock::one("12°C"),
                     is_error: false,
+                    cache_control: None,
                 }],
             },
         ],
@@ -55,6 +57,7 @@ fn sample_ir() -> ChatRequest {
             description: Some("weather".into()),
             parameters: json!({"type":"object","properties":{"city":{"type":"string"}},"$schema":"x"}),
             strict: None,
+            anthropic_fields: Default::default(),
         }],
         tool_choice: Some(ToolChoice::Auto),
         stream: false,
@@ -65,6 +68,7 @@ fn sample_ir() -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -567,6 +571,7 @@ fn stored_blank_call_arguments_replay_as_an_empty_object() {
             id: "call_1".into(),
             name: "page_text".into(),
             args: stored.clone(),
+            cache_control: None,
         }];
         let up = upstream(Protocol::Anthropic, "https://api.anthropic.com/v1");
         let req = for_protocol(Protocol::Anthropic)
@@ -690,6 +695,7 @@ fn gemini_rejects_url_images() {
             source: ImageSource::Url {
                 url: "https://x/y.png".into(),
             },
+            cache_control: None,
         }],
     });
     let err = for_protocol(Protocol::Gemini)
@@ -1010,6 +1016,7 @@ fn ir_with_tool_result(blocks: Vec<ToolResultBlock>) -> ChatRequest {
                     id: "call_1".into(),
                     name: "shoot".into(),
                     args: json!({}),
+                    cache_control: None,
                 }],
             },
             Message {
@@ -1019,6 +1026,7 @@ fn ir_with_tool_result(blocks: Vec<ToolResultBlock>) -> ChatRequest {
                     name: None,
                     content: blocks,
                     is_error: false,
+                    cache_control: None,
                 }],
             },
         ],
@@ -1033,6 +1041,7 @@ fn ir_with_tool_result(blocks: Vec<ToolResultBlock>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -1075,6 +1084,7 @@ fn anthropic_passes_an_image_tool_result_through_natively() {
         ToolResultBlock::Image {
             mime: "image/png".into(),
             data: "aGVsbG8=".into(),
+            cache_control: None,
         },
     ]);
     let body = built(Protocol::Anthropic, &ir);
@@ -1103,6 +1113,7 @@ fn openai_replaces_a_binary_tool_result_with_a_named_placeholder() {
         ToolResultBlock::Image {
             mime: "image/png".into(),
             data: payload.clone(),
+            cache_control: None,
         },
     ]);
     let body = built(Protocol::OpenaiCompatible, &ir);
@@ -1184,6 +1195,7 @@ fn an_image_tool_result_round_trips_from_anthropic_ingress() {
         ToolResultBlock::Image {
             mime: "image/webp".into(),
             data: "d2VicA==".into(),
+            cache_control: None
         }
     );
 
@@ -1226,6 +1238,7 @@ fn ir_with_reasoning(signature: Option<&str>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -1260,6 +1273,7 @@ fn openai_replays_reasoning_as_reasoning_content() {
         id: "c1".into(),
         name: "search".into(),
         args: json!({"q": "teal"}),
+        cache_control: None,
     };
     let req = for_protocol(Protocol::OpenaiCompatible)
         .build_chat(&http, &up, "m", &ir, &Params::default(), false)
@@ -2083,6 +2097,7 @@ fn usage_merge_is_latest_wins_and_add_sums_the_subsets_too() {
         prompt_tokens: Some(10),
         cached_input_tokens: Some(4),
         cache_write_tokens: Some(2),
+        cache_write_1h_tokens: None,
         reasoning_tokens: Some(3),
         completion_tokens: Some(1),
     };

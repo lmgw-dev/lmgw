@@ -123,12 +123,21 @@ pub struct SettingsPatch {
     /// control is short, instead of queueing. On by default; turn off on
     /// shared-memory systems (APUs).
     pub fallback_on_external: Option<bool>,
-    /// `vram.headroom_mode`: `auto` (learned from this machine, the default)
-    /// or `fixed` (`headroom_mb` as written).
+    /// `vram.headroom_mode`: `auto` (from what other programs did on each
+    /// card, the default) or `fixed` (`headroom_mb` as written).
     pub headroom_mode: Option<lmgw_api_types::HeadroomMode>,
-    /// `vram.headroom_mb`: the fixed headroom in MiB, used in `fixed` mode
-    /// and by `auto` until it has learned enough.
+    /// `vram.headroom_mb`: the headroom's floor in MiB, kept free for other
+    /// programs on each graphics card — in `auto` no more than the most they
+    /// ever held there, with the learned room on top; in `fixed` as written.
     pub headroom_mb: Option<u64>,
+    /// `vram.keep_free`: what is kept free for other programs on a card, by
+    /// the card's id (`lmgw__settings`' `vram.headroom.cards[].id`):
+    /// `{"mode": "always", "mb": N}` (N MiB, never given up), `{"mode":
+    /// "nothing"}` (the card is lmgw's) or `{"mode": "automatic"}` (as
+    /// `headroom_mode` says; takes the card's amount out). Only the cards
+    /// given change. The self-admin tool takes it as a JSON-encoded object.
+    pub keep_free:
+        Option<std::collections::BTreeMap<lmgw_api_types::DeviceId, lmgw_api_types::KeepFree>>,
     /// How often the build update check runs, in hours; `0` turns it off.
     /// At most 8760.
     pub build_update_check_hours: Option<u32>,
@@ -137,6 +146,69 @@ pub struct SettingsPatch {
     /// the audio class's container definition, so not one of the dashboard-
     /// only container settings above.
     pub audio_catalog_revision: Option<String>,
+    /// `documents.tool_slots`, Settings › Documents' "Parallel tool runs":
+    /// how many document-conversion steps (tool runs, native reads) run at
+    /// once, gateway-wide. `0` = derived from the machine (the smaller of
+    /// the logical cores and the memory over the largest per-run memory
+    /// limit; `doc_tools`' `pool` shows both).
+    pub documents_tool_slots: Option<u32>,
+    /// `documents.job_storage_mib`, Settings › Documents' "Storage for
+    /// conversion jobs": the most bytes async conversion jobs store together,
+    /// in MiB. `0` = derived (half the space free on the data directory's
+    /// file system when lmgw started; `doc_tools`' `job_bounds` shows it).
+    pub documents_job_storage_mib: Option<u64>,
+    /// `documents.jobs_per_key`, Settings › Documents' "Jobs per key": the
+    /// most async conversion jobs one key has running or queued at once.
+    /// `0` = derived (the tool pool's size).
+    pub documents_jobs_per_key: Option<u32>,
+    /// `documents.fetch_sources`, Settings › Documents' "Let callers send
+    /// web addresses": whether the docling-serve adapter fetches `http`
+    /// sources from the allowed sites. Taken by this op only: the
+    /// lmgw__settings_set tool refuses it, as it decides where lmgw sends
+    /// requests for a caller.
+    pub documents_fetch_sources: Option<bool>,
+    /// `documents.source_hosts`, "Allowed sites": the hosts (each with an
+    /// optional `:port`) a docling web source may name; a private or
+    /// loopback address only when listed itself. Stored normalised; an
+    /// entry that is not a host refuses the save. Taken by this op only,
+    /// like `documents_fetch_sources`.
+    pub documents_source_hosts: Option<Vec<String>>,
+    /// `documents.onnx_layout`, Settings › Documents' "Use the layout
+    /// model": PDF pages are laid out from the regions docling's layout
+    /// model finds, on the processor. `true` is refused while the model's
+    /// file is not here (`doc_tools`' `models` says; `doc_model_add`
+    /// downloads it).
+    pub documents_onnx_layout: Option<bool>,
+    /// `documents.page_reader`, Settings › Documents' "Read pages with a
+    /// model": the lmgw name of the vision model that reads the pages a
+    /// conversion's tools read badly (pages without text, table pages).
+    /// `""` = off, the default: no conversion asks a model. Refused by name
+    /// when it does not resolve, is no chat model, or says it cannot see.
+    /// Taken by this op only: the lmgw__settings_set tool refuses it, as it
+    /// decides which model callers' document pages are sent to (D5: off
+    /// until the user picks).
+    pub documents_page_reader: Option<String>,
+    /// `documents.page_reader_doctags`: the page-reading model answers in
+    /// DocTags, docling's page format (a granite-docling model); it is asked
+    /// with docling's prompt and read by the DocTags reader. Its llama-server
+    /// must be started with `--special` (the model's extra llama-server
+    /// flags). Taken by this op only, like `documents_page_reader`.
+    pub documents_page_reader_doctags: Option<bool>,
+    /// `documents.picture_alias`, Settings › Documents' "Describe pictures
+    /// with": the lmgw name of the vision model that describes a
+    /// conversion's pictures when a request asks for descriptions. `""` =
+    /// off, the default: no picture is sent to a model. Refused by name when
+    /// it does not resolve, is no chat model, or says it cannot see. Taken
+    /// by this op only, like `documents_page_reader`: it decides which model
+    /// callers' document pictures are sent to.
+    pub documents_picture_alias: Option<String>,
+    /// `documents.asr_alias`, Settings › Documents' "Transcribe audio with":
+    /// the alias audio and video files are transcribed with in a
+    /// conversion, as the calling key; `""` = none (they are then not
+    /// transcribed). Must resolve to a model whose capability task is
+    /// `asr`. Taken by this op only: the lmgw__settings_set tool refuses
+    /// it, as it decides which model callers' audio is sent to (D5).
+    pub documents_asr_alias: Option<String>,
     /// `GET /v1/realtime`'s settings: any of its fields,
     /// checked as the dashboard's save checks them. The self-admin tool takes
     /// it as a JSON-encoded object (`hoist_json_arg`).
@@ -350,6 +422,10 @@ async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSave
         s.vram.headroom_mb = v;
         changed.push("headroom_mb");
     }
+    if let Some(k) = p.keep_free {
+        state.vram.merge_keep_free(&mut s.vram.keep_free, k)?;
+        changed.push("keep_free");
+    }
     if let Some(v) = p.build_update_check_hours {
         s.build_update_check_hours = crate::backends::updates::validate_check_hours(v)?;
         changed.push("build_update_check_hours");
@@ -360,6 +436,61 @@ async fn save(state: &SharedState, p: SettingsPatch) -> Result<dto::SettingsSave
         changed.push("audio_catalog_revision");
     }
 
+    if let Some(v) = p.documents_tool_slots {
+        s.documents.tool_slots = v;
+        changed.push("documents_tool_slots");
+    }
+    if let Some(v) = p.documents_job_storage_mib {
+        s.documents.job_storage_mib = v;
+        changed.push("documents_job_storage_mib");
+    }
+    if let Some(v) = p.documents_jobs_per_key {
+        s.documents.jobs_per_key = v;
+        changed.push("documents_jobs_per_key");
+    }
+    if let Some(v) = p.documents_fetch_sources {
+        s.documents.fetch_sources = v;
+        changed.push("documents_fetch_sources");
+    }
+    if let Some(v) = p.documents_source_hosts.as_deref() {
+        s.documents.source_hosts = crate::extract::convert::source_fetch::HostList::normalise(v)?;
+        changed.push("documents_source_hosts");
+    }
+    if let Some(v) = p.documents_onnx_layout {
+        if v {
+            crate::extract::convert::layout_model::status::can_switch_on(&s.aux_router.models_dir)?;
+        }
+        s.documents.onnx_layout = v;
+        changed.push("documents_onnx_layout");
+    }
+    if let Some(v) = p.documents_page_reader.as_deref() {
+        let alias = v.trim();
+        if !alias.is_empty() {
+            crate::extract::convert::model_help::settings::validate(state, alias).await?;
+        }
+        s.documents.page_reader = alias.to_string();
+        changed.push("documents_page_reader");
+    }
+    if let Some(v) = p.documents_page_reader_doctags {
+        s.documents.page_reader_doctags = v;
+        changed.push("documents_page_reader_doctags");
+    }
+    if let Some(v) = p.documents_picture_alias.as_deref() {
+        let alias = v.trim();
+        if !alias.is_empty() {
+            crate::extract::convert::describe::settings::validate(state, alias).await?;
+        }
+        s.documents.picture_alias = alias.to_string();
+        changed.push("documents_picture_alias");
+    }
+    if let Some(v) = p.documents_asr_alias.as_deref() {
+        let v = v.trim();
+        if !v.is_empty() {
+            validate_stt_alias(state, v).await?;
+        }
+        s.documents.asr_alias = v.to_string();
+        changed.push("documents_asr_alias");
+    }
     if let Some(r) = p.realtime {
         changed.extend(super::apply_realtime(state, &mut s.realtime, r).await?);
     }

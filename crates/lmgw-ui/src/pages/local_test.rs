@@ -177,7 +177,7 @@ pub(super) fn LoadTestCard(
                     {move || {
                         if testing.get() {
                             view! {
-                                <span class="chip live">
+                                <span class="chip info">
                                     <span class="dot"></span>
                                     "running"
                                 </span>

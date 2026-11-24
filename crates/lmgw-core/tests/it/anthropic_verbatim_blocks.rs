@@ -386,6 +386,7 @@ async fn the_thread_and_both_exports_show_a_record_without_them() {
                     id: "toolu_1".into(),
                     name: "lookup".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
             ],
         },
@@ -396,6 +397,7 @@ async fn the_thread_and_both_exports_show_a_record_without_them() {
                 name: Some("lookup".into()),
                 content: lmgw_core::ir::ToolResultBlock::one("KIWI"),
                 is_error: false,
+                cache_control: None,
             }],
         },
     ];

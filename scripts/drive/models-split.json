@@ -1,0 +1,353 @@
+[
+ {
+  "js": "'Models as a list beside the detail: the split view at a wide window (status page, a click selects, the arrows move the selection, the handle resizes and keeps its width), the filter popover (?show=), the search (/ and Ctrl+F focus it, Esc clears it, a second Esc goes back to the list), a dirty change on the first local chat model (the accent dot, the save toast, the guard asking when another row is picked, Ctrl+S saving, the saved value read back after a reload, then put back the same way), and the narrow window (one pane at a time, the back button). It SAVES: run it on a dev copy, never on production. Run: scripts/ui-drive.py scripts/drive/models-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr> --podman-guard <prefix>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.models.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow')",
+  "timeout": 15,
+  "label": "the list has rows"
+ },
+ {
+  "js": "window.__path = () => location.pathname + location.search; window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__first = () => document.querySelector('.mlist .lrow[data-key^=\"/models/local/\"]').dataset.key; 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.models-split:not(.narrow)') && document.querySelector('.mstatus') && __sel().length === 0",
+  "label": "wide: nothing selected shows the status page beside the list"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "click": ".mlist .lrow[data-key^=\"/models/local/\"]"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show') && !document.querySelector('dialog[open]')",
+  "label": "right after the click, before the form has loaded: no save toast and no dialog (an unloaded form has no changes)"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname !== __first() && __sel()[0] === location.pathname",
+  "timeout": 5,
+  "label": "an immediate ArrowDown moves on without the unsaved-changes dialog"
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]') && !document.querySelector('.save-toast.show')",
+  "label": "still no dialog and no toast after the immediate move"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "until": "location.pathname === __first() && document.querySelector('.mdetail-scroll .prow')",
+  "timeout": 10,
+  "label": "a click selects the row: its path, and its form is loaded (before that every field counts as changed, and a key move would ask)"
+ },
+ {
+  "expect": "__sel().length === 1 && __sel()[0] === __first() && document.querySelector('.mdetail-head .actions .btn')",
+  "label": "the row is highlighted and the detail has its actions"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.mlist') && getComputedStyle(document.querySelector('.mlist .lrow.sel')).backgroundColor !== getComputedStyle(document.querySelector('.mlist .lrow:not(.sel)')).backgroundColor",
+  "label": "the list has the focus: the selection takes the accent's tint"
+ },
+ {
+  "js": "window.__was = location.pathname; 'ok'"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname !== __was && __sel()[0] === location.pathname",
+  "timeout": 5,
+  "label": "ArrowDown moves the selection, and the detail follows"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "until": "location.pathname === __was",
+  "timeout": 5,
+  "label": "ArrowUp moves it back"
+ },
+ {
+  "js": "window.__w0 = document.querySelector('.mlist-pane').getBoundingClientRect().width; const h = document.querySelector('.mhandle'); const r = h.getBoundingClientRect(); const x = r.left + r.width / 2; const pe = (t, cx) => h.dispatchEvent(new PointerEvent(t, {pointerId: 9, pointerType: 'mouse', isPrimary: true, button: t === 'pointermove' ? -1 : 0, buttons: t === 'pointerup' ? 0 : 1, clientX: cx, clientY: 300, bubbles: true, cancelable: true})); pe('pointerdown', x); pe('pointermove', x + 40); pe('pointerup', x + 60); 'dragged'"
+ },
+ {
+  "until": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - (__w0 + 60)) <= 1 && +localStorage.getItem('lmgw.ui.models.list.width') === Math.round(__w0 + 60)",
+  "timeout": 5,
+  "label": "the handle resizes the list and keeps the width"
+ },
+ {
+  "dblclick": ".mhandle"
+ },
+ {
+  "until": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - __w0) <= 1 && localStorage.getItem('lmgw.ui.models.list.width') === null",
+  "timeout": 5,
+  "label": "a double-click forgets it"
+ },
+ {
+  "click": ".filter-btn"
+ },
+ {
+  "until": "document.querySelector('.menu-pop .menu-item[role=menuitemradio]')",
+  "timeout": 5,
+  "label": "the filter opens"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item .menu-label')].map(e => e.textContent).join('|').startsWith('All classes|Running|Disabled|Local chat')",
+  "label": "all, running, disabled, then the classes, each with its count"
+ },
+ {
+  "js": "[...document.querySelectorAll('.menu-pop .menu-item')].find(e => e.textContent.includes('Audio')).click(); 'audio'"
+ },
+ {
+  "until": "location.search.includes('show=audio')",
+  "timeout": 5,
+  "label": "a class filter is ?show="
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mlist .list-head')].length === 1 && document.querySelector('.mlist .list-head').textContent.startsWith('Audio') && document.querySelector('.filter-btn').textContent.startsWith('Audio')",
+  "label": "only that class's group, and the subtitle says it"
+ },
+ {
+  "click": ".filter-btn"
+ },
+ {
+  "until": "document.querySelector('.menu-pop .menu-item[role=menuitemradio]')",
+  "timeout": 5
+ },
+ {
+  "js": "document.querySelector('.menu-pop .menu-item').click(); 'all'"
+ },
+ {
+  "until": "!location.search.includes('show=')",
+  "timeout": 5,
+  "label": "All classes clears it"
+ },
+ {
+  "click": ".mlist .lrow.sel"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.msearch input')",
+  "timeout": 5,
+  "label": "/ focuses the search"
+ },
+ {
+  "type": "zzz-no-such-model"
+ },
+ {
+  "until": "document.querySelector('.mlist-empty') && document.querySelector('.mlist-empty').textContent.includes('No models match')",
+  "timeout": 5,
+  "label": "a search with no match says so"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelector('.msearch input').value === '' && document.querySelector('.mlist .lrow')",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.mlist')",
+  "timeout": 5,
+  "label": "a second Esc goes back to the list"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "f"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.msearch input')",
+  "timeout": 5,
+  "label": "Ctrl+F focuses the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow')",
+  "timeout": 15
+ },
+ {
+  "js": "window.__path = () => location.pathname + location.search; window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__first = () => document.querySelector('.mlist .lrow[data-key^=\"/models/local/\"]').dataset.key; window.__idle = () => [...document.querySelectorAll('.mdetail-scroll .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent === 'Unload when idle'); 'helpers'"
+ },
+ {
+  "click": ".mlist .lrow[data-key^=\"/models/local/\"]"
+ },
+ {
+  "until": "document.querySelector('.mdetail-scroll .prow') && location.pathname === __first()",
+  "timeout": 10
+ },
+ {
+  "js": "window.__idle0 = __idle().querySelector('input').value; __idle0"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show') && !document.querySelector('.mdetail-scroll .prow.dirty')",
+  "label": "a loaded row has no changes"
+ },
+ {
+  "js": "__idle().querySelectorAll('.spin-btn')[1].click(); 'plus'"
+ },
+ {
+  "until": "__idle().classList.contains('dirty') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "+ marks the row changed and shows the save toast"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent === '1 unsaved change'",
+  "label": "the toast counts it"
+ },
+ {
+  "js": "window.__there = location.pathname; [...document.querySelectorAll('.mlist .lrow')].find(r => r.dataset.key !== __there).click(); 'other row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on this model'))",
+  "timeout": 5,
+  "label": "picking another row asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "until": "location.pathname === __there && __idle().classList.contains('dirty') && !document.querySelector('dialog[open]')",
+  "timeout": 5,
+  "label": "Stay keeps the row and the change"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && !__idle().classList.contains('dirty')",
+  "timeout": 10,
+  "label": "Ctrl+S saves: no change left"
+ },
+ {
+  "js": "window.__idle1 = __idle().querySelector('input').value; __idle1"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mlist .lrow')].find(r => r.dataset.key !== __there).click(); 'another row'"
+ },
+ {
+  "until": "location.pathname !== __there && __idle()",
+  "timeout": 10,
+  "label": "no changes: another row opens without asking"
+ },
+ {
+  "js": "history.pushState(null, '', __there); dispatchEvent(new PopStateEvent('popstate')); 'back to it'"
+ },
+ {
+  "until": "__idle() && __idle().querySelector('input').value === __idle1 && __idle1 !== __idle0",
+  "timeout": 10,
+  "label": "after a reload the saved value is read back"
+ },
+ {
+  "js": "__idle().querySelectorAll('.spin-btn')[0].click(); 'minus'"
+ },
+ {
+  "until": "document.querySelector('.save-toast.show')",
+  "timeout": 5
+ },
+ {
+  "click": ".save-toast .btn.suggested"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && __idle().querySelector('input').value === __idle0",
+  "timeout": 10,
+  "label": "Save puts the value back"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow')",
+  "timeout": 15
+ },
+ {
+  "js": "window.__path = () => location.pathname + location.search; window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__first = () => document.querySelector('.mlist .lrow[data-key^=\"/models/local/\"]').dataset.key; window.__idle = () => [...document.querySelectorAll('.mdetail-scroll .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent === 'Unload when idle'); 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.models-split.narrow') && getComputedStyle(document.querySelector('.mdetail-pane')).display === 'none'",
+  "label": "narrow: the list alone"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "click": ".mlist .lrow[data-key^=\"/models/local/\"]"
+ },
+ {
+  "until": "location.pathname === __first() && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[title=\"Back to the list\"]')",
+  "timeout": 5,
+  "label": "narrow: opening a row shows its detail alone, with a back button"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-head h1').textContent.length > 0",
+  "label": "narrow: the detail's header has the row's name"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the list\"]"
+ },
+ {
+  "until": "location.pathname === '/models' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the list"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.mlist')",
+  "timeout": 3,
+  "label": "narrow: the list has the focus again"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname === '/models' && document.querySelectorAll('.mlist .lrow.sel').length === 1",
+  "timeout": 5,
+  "label": "narrow: the arrows move the highlight without opening"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "location.pathname.startsWith('/models/') && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none'",
+  "timeout": 5,
+  "label": "narrow: Enter opens it"
+ }
+]

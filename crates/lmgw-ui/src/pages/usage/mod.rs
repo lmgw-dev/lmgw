@@ -7,10 +7,10 @@
 //! one of them is a bug. Visual contract: `docs/design/ui-rebuild/usage-mockup.html`;
 //! rules: `docs/design/2026-09-18-usage-analytics-cost-policy-design.md`.
 //!
-//! Three routes: `/usage` is the charts under one filter row, `/usage/keys`
-//! owns every key (create, revoke, policy, rotate) and `/usage/prices` the
-//! price sheets — configuration that the filter row does not scope, so it is
-//! not under it.
+//! Three views: `/usage` is the charts under one filter row,
+//! `/usage/keys/:id?` owns every key (create, revoke, policy, rotate) as a
+//! list beside the selected key, and `/usage/prices` the price sheets —
+//! configuration that the filter row does not scope, so it is not under it.
 //!
 //! Two rules from that spec drive most of the code here:
 //!
@@ -24,9 +24,10 @@
 //! One page's worth of code, split by what it draws: [`shared`] holds the
 //! fetch wrapper, time/money formatters and chart furniture every part below
 //! reuses; [`tile_row`] and [`dashboard`] are the `/usage` overview; the
-//! `cards_*` modules are its chart cards, grouped by what they chart; `keys`,
-//! `key_line`, `key_editor`, `scope_editor` (the alias and tool pickers) and
-//! `devices` (the paired client apps) are `/usage/keys`; `prices` is `/usage/prices`.
+//! `cards_*` modules are its chart cards, grouped by what they chart; `keys`
+//! (the list, the status page, the detail), `key_line`, `key_editor`,
+//! `scope_editor` (the alias and tool pickers) and `devices` (the paired
+//! client apps) are `/usage/keys`; `prices` is `/usage/prices`.
 
 mod shared;
 use shared::*;
@@ -65,18 +66,17 @@ use cards_errors::*;
 mod keys;
 pub use keys::UsageKeys;
 
+/// What a key says about itself: kind, name, spend, scope, last use.
 mod key_line;
-use key_line::*;
 
-mod key_editor;
-use key_editor::*;
 /// A key's device-tools grant: the hosted labels it reaches.
 mod device_tools;
+/// A key's policy as preference rows, with its save toast.
+mod key_editor;
 mod scope_editor;
 
-/// The Devices card on `/usage/keys` (client-apps design §1.4).
+/// The paired devices on `/usage/keys` (client-apps design §1.4).
 mod devices;
-use devices::*;
 
 mod price_hosted;
 mod price_tiers;

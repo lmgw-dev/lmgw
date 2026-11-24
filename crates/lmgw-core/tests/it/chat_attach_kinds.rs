@@ -69,7 +69,7 @@ pub(crate) fn pdf_bytes(pages: &[Option<&str>]) -> Vec<u8> {
     out
 }
 
-fn docx(paragraph: &str) -> Vec<u8> {
+pub(crate) fn docx(paragraph: &str) -> Vec<u8> {
     let types = r#"<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
     let doc = format!(
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p></w:body></w:document>"#

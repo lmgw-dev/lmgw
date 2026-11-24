@@ -268,6 +268,7 @@ fn asked_again(parts: Vec<ContentPart>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 

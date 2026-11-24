@@ -152,18 +152,24 @@ fn group_line(g: &WebRtcGroupStatus) -> (&'static str, String, &'static str) {
     let (line, tone) = match g.state {
         WebRtcGroupState::Bound => (g.addrs.join(" and "), "ok"),
         WebRtcGroupState::Failed => (
-            format!("failed: {}", g.error.clone().unwrap_or_default()),
+            format!("Failed: {}", g.error.clone().unwrap_or_default()),
             "warn",
         ),
         WebRtcGroupState::Down => (
             match g.group {
-                WebRtcGroup::Plain => "not bound".to_string(),
-                WebRtcGroup::Tls => "not bound: the TLS listener is not serving".to_string(),
-                WebRtcGroup::Devices => "not bound: the device listener is off or moving".into(),
+                WebRtcGroup::Plain => "Not bound".to_string(),
+                WebRtcGroup::Tls => "Not bound: the TLS listener is not serving".to_string(),
+                WebRtcGroup::Devices => "Not bound: the device listener is off or moving".into(),
             },
             "off",
         ),
-        WebRtcGroupState::Off => ("off (realtime.webrtc_enabled)".into(), "off"),
+        WebRtcGroupState::Off => (
+            format!(
+                "off: the {} switch under Realtime turns it on",
+                labels::WEBRTC_CALLS
+            ),
+            "off",
+        ),
     };
     (label, line, tone)
 }

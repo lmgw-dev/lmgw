@@ -1,4 +1,7 @@
-//! The doc-request queue (quickdoc §7, §11).
+//! The doc-request queue (quickdoc §7, §11): a boxed list of rows, one per
+//! request (its library@version, reason, who asked, how often and when),
+//! each with Start ingest and a menu, under the Pending, Fulfilled,
+//! Dismissed and All toggle with their counts.
 //!
 //! `docs__request` is how an agent that missed a corpus says so; this is where
 //! the owner answers. Two things are deliberate here. **Start ingest** prefills
@@ -13,7 +16,7 @@ use lmgw_api_types::{Ack, DocRequestRow, DocRequestsResponse};
 use serde_json::json;
 
 use crate::fmt::hue_for;
-use crate::widgets::{use_toasts, Explain, MenuItem, RowMenu};
+use crate::widgets::{use_toasts, MenuItem, PrefGroup, RowMenu};
 
 use super::docs::{refresh_pending, use_docs, use_docs_pending, WizardSeed};
 
@@ -58,94 +61,84 @@ pub fn RequestQueue() -> impl IntoView {
     });
 
     view! {
-        <div class="docs-strip">
-            <div class="seg">
-                {STATUSES
-                    .into_iter()
-                    .map(|t| {
-                        view! {
-                            <button
-                                class=move || if filter.get() == t { "seg-btn active" } else { "seg-btn" }
-                                on:click=move |_| status.set(if t == "pending" { String::new() } else { t.to_string() })
-                            >
-                                {t}
-                                <span class=move || {
-                                    if t == "pending" && count(t) != 0 { "count attn" } else { "count" }
-                                }>{move || count(t)}</span>
-                            </button>
-                        }
-                    })
-                    .collect_view()}
-            </div>
-            <Explain summary="Filed by agents through docs__request; fulfilled when an ingest for it finishes." persist="docs.explain.requests">
-                "A repeat request for the same library@version bumps its counter instead of "
-                "piling up. Start ingest opens the wizard prefilled from the request — nothing "
-                "is created until you press Create there."
-            </Explain>
-        </div>
-
-        <div class="fill-pane hug card pad0">
-            <table class="data requests-table">
-                <thead>
-                    <tr>
-                        <th>"Library"</th>
-                        <th>"Reason"</th>
-                        <th class="col-p2">"Requested by"</th>
-                        <th class="num-h">"Times"</th>
-                        <th class="col-p3">"First seen"</th>
-                        <th class="col-p2">"Last seen"</th>
-                        <th class="actions"></th>
-                    </tr>
-                </thead>
-                <tbody>
+        <div class="fill-pane docs-scroll">
+            <div class="docs-flow">
+                <div class="docs-strip">
+                    <div class="seg" role="group" aria-label="Which requests">
+                        {STATUSES
+                            .into_iter()
+                            .map(|t| {
+                                view! {
+                                    <button
+                                        class=move || if filter.get() == t { "seg-btn active" } else { "seg-btn" }
+                                        aria-pressed=move || (filter.get() == t).to_string()
+                                        on:click=move |_| status.set(if t == "pending" { String::new() } else { t.to_string() })
+                                    >
+                                        {status_label(t)}
+                                        <span class=move || {
+                                            if t == "pending" && count(t) != 0 { "count attn" } else { "count" }
+                                        }>{move || count(t)}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                </div>
+                <PrefGroup
+                    title="Requests"
+                    desc="Filed by agents through docs__request when docs__resolve misses; fulfilled when an ingest for it finishes. A repeat request for the same library@version bumps its counter instead of piling up. Start ingest opens the wizard prefilled from the request — nothing is created until you press Create there."
+                >
                     {move || match requests.get() {
-                        None => {
-                            view! {
-                                <tr>
-                                    <td class="dim" colspan="7">"Loading…"</td>
-                                </tr>
-                            }
-                                .into_any()
-                        }
+                        None => view! { <div class="prow kb-none">"Loading…"</div> }.into_any(),
                         Some(Err(e)) => {
                             view! {
-                                <tr>
-                                    <td class="dim" colspan="7">
-                                        "Failed to load: " {e.to_string()} " "
-                                        <button class="link-btn" on:click=move |_| reload.update(|n| *n += 1)>
-                                            "Retry"
-                                        </button>
-                                    </td>
-                                </tr>
+                                <div class="prow problem-row">
+                                    "Failed to load: " {e.to_string()} " "
+                                    <button class="link-btn" on:click=move |_| reload.update(|n| *n += 1)>
+                                        "Retry"
+                                    </button>
+                                </div>
                             }
                                 .into_any()
                         }
                         Some(Ok(_)) => {
                             view! {
-                                <For
-                                    each=move || shown.get()
-                                    key=|r| (r.id, r.status.clone(), r.count)
-                                    let:row
-                                >
-                                    <RequestRow
-                                        r=row
-                                        on_change=move || reload.update(|n| *n += 1)
-                                    />
-                                </For>
+                                <div class="docs-rows">
+                                    <For
+                                        each=move || shown.get()
+                                        key=|r| (r.id, r.status.clone(), r.count)
+                                        let:row
+                                    >
+                                        <RequestRow
+                                            r=row
+                                            on_change=move || reload.update(|n| *n += 1)
+                                        />
+                                    </For>
+                                </div>
+                                <Show when=move || shown.with(Vec::is_empty)>
+                                    <div class="prow kb-none">
+                                        "Nothing here. Agents file requests with the "
+                                        <code>"docs__request"</code> " tool when " <code>"docs__resolve"</code>
+                                        " misses."
+                                    </div>
+                                </Show>
                             }
                                 .into_any()
                         }
                     }}
-                </tbody>
-            </table>
-            <Show when=move || requests.get().is_some_and(|r| r.is_ok()) && shown.with(Vec::is_empty)>
-                <div class="empty">
-                    "Nothing here. Agents file requests with the "
-                    <code>"docs__request"</code> " tool when " <code>"docs__resolve"</code>
-                    " misses."
-                </div>
-            </Show>
+                </PrefGroup>
+            </div>
         </div>
+    }
+}
+
+/// A view's name on its button.
+fn status_label(t: &str) -> &'static str {
+    match t {
+        "fulfilled" => "Fulfilled",
+        "dismissed" => "Dismissed",
+        "all" => "All",
+        _ => "Pending",
     }
 }
 
@@ -206,54 +199,54 @@ fn RequestRow(
         }
         v
     });
-    let reason = r.reason.clone().unwrap_or_else(|| "—".into());
+    let reason = r.reason.clone().unwrap_or_else(|| "No reason given".into());
     let has_menu = is_pending || is_dismissed;
     let asker = r
         .client_name
         .clone()
         .unwrap_or_else(|| "unnamed client".into());
-    // Who asked and when fold away on a narrow table; they stay readable
-    // here (par:PAR-6).
+    // Everything about the request, in one tooltip.
     let lead_title = format!(
         "{label}\nasked by {asker} · first {} · last {}",
         r.first_requested_at, r.last_requested_at
     );
 
+    let meta = format!(
+        "asked by {asker} · {} time{} · first {} · last {}",
+        r.count,
+        if r.count == 1 { "" } else { "s" },
+        r.first_requested_at,
+        r.last_requested_at
+    );
     view! {
-        <tr>
-            <td title=lead_title>
-                <span class="model-chip" style=format!("--hue:{hue}")>
-                    <i></i>
-                    {label.clone()}
+        <div class="prow docs-request" title=lead_title>
+            <span class="rail-dot" style=format!("--hue:{hue}")></span>
+            <div class="prow-text">
+                <span class="prow-title">
+                    <span class="mono-sm docs-request-lib">{label.clone()}</span>
+                    {(!is_pending)
+                        .then(|| {
+                            view! {
+                                " "
+                                <span class=if is_dismissed { "chip off" } else { "chip ok" }>
+                                    {r.status.clone()}
+                                </span>
+                            }
+                        })}
                 </span>
-                {(!is_pending)
-                    .then(|| {
-                        view! {
-                            " "
-                            <span class=if is_dismissed { "chip off" } else { "chip ok" }>
-                                <span class="dot"></span>
-                                {r.status.clone()}
-                            </span>
-                        }
-                    })}
-            </td>
-            <td class="dim clip" title=reason.clone()>{reason.clone()}</td>
-            <td class="dim mono-sm col-p2">{asker}</td>
-            <td class="num">{r.count}</td>
-            <td class="dim mono-sm col-p3">{r.first_requested_at.clone()}</td>
-            <td class="dim mono-sm col-p2">{r.last_requested_at.clone()}</td>
-            <td class="actions">
-                <span class="row-acts">
-                    <button
-                        class="btn sm"
-                        title="Open the ingest wizard prefilled from this request"
-                        on:click=start
-                    >
-                        "Start ingest"
-                    </button>
-                    {has_menu.then(|| view! { <RowMenu items=menu/> })}
-                </span>
-            </td>
-        </tr>
+                <span class="prow-sub">{reason.clone()}</span>
+                <span class="prow-sub docs-request-meta">{meta}</span>
+            </div>
+            <div class="prow-end">
+                <button
+                    class="btn"
+                    title="Open the ingest wizard prefilled from this request"
+                    on:click=start
+                >
+                    "Start ingest"
+                </button>
+                {has_menu.then(|| view! { <RowMenu items=menu/> })}
+            </div>
+        </div>
     }
 }

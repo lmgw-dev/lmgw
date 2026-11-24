@@ -38,8 +38,11 @@ use tokio::net::TcpStream;
 /// The scheme a listener speaks and a request came in with (§4.3).
 mod scheme;
 pub use scheme::scheme_of;
+/// The handle an answer's write deadline ends its connection with.
+mod cut;
 /// Whether a request came straight from this machine's loopback (§4.5).
 mod loopback;
+pub use cut::{Cuttable, Mark, WriteCut};
 
 /// Which listener a connection came in on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -95,6 +98,10 @@ pub struct Conn {
     /// The connection's socket options, while it lives; `None` on the plain
     /// listener and for a connection that has not authenticated.
     pub socket: Option<SocketHandle>,
+    /// What ends the connection when an answer on it is not read within
+    /// its write deadline ([`WriteCut`]); every listener's connection has
+    /// one, `None` only where a request did not come over a listener.
+    pub cut: Option<WriteCut>,
 }
 
 impl Conn {
@@ -108,6 +115,7 @@ impl Conn {
             local: canonical(local),
             device: None,
             socket: None,
+            cut: None,
         }
     }
 
@@ -141,7 +149,10 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Plai
     for Conn
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, PlainListener>) -> Self {
-        Self::of_plain_stream(stream.io(), *stream.remote_addr())
+        Self {
+            cut: Some(stream.io().cut()),
+            ..Self::of_plain_stream(stream.io().get_ref(), *stream.remote_addr())
+        }
     }
 }
 
@@ -172,11 +183,12 @@ impl Drop for PlainListener {
 }
 
 impl axum::serve::Listener for PlainListener {
-    type Io = TcpStream;
+    type Io = Cuttable<TcpStream>;
     type Addr = SocketAddr;
 
-    async fn accept(&mut self) -> (TcpStream, SocketAddr) {
-        axum::serve::Listener::accept(&mut self.inner).await
+    async fn accept(&mut self) -> (Self::Io, SocketAddr) {
+        let (io, peer) = axum::serve::Listener::accept(&mut self.inner).await;
+        (Cuttable::new(io), peer)
     }
 
     fn local_addr(&self) -> std::io::Result<SocketAddr> {

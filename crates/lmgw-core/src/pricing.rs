@@ -139,8 +139,21 @@ pub struct TokenUsage {
     pub completion: Option<u64>,
     pub cached_in: Option<u64>,
     pub cache_write: Option<u64>,
+    /// The part of `cache_write` written with Anthropic's 1-hour TTL, when
+    /// the upstream reported the split (`ir::Usage::cache_write_1h_tokens`):
+    /// priced at [`ONE_HOUR_WRITE_FACTOR`] times the input rate, not at the
+    /// cache-write rate.
+    pub cache_write_1h: Option<u64>,
     pub reasoning: Option<u64>,
 }
+
+/// What a 1-hour cache write costs, in multiples of the input rate:
+/// Anthropic's published prompt-caching prices, where a 5-minute write is
+/// 1.25x the base input price, a 1-hour write 2x and a read 0.1x. The price
+/// table has no 1-hour column yet, so this multiplier stands in for one,
+/// on the input rate of the row the request is priced at (its service
+/// tier's).
+pub const ONE_HOUR_WRITE_FACTOR: f64 = 2.0;
 
 impl TokenUsage {
     /// Input tokens billed at the plain input rate: the total minus the two
@@ -265,9 +278,21 @@ pub fn price_tokens(usage: &TokenUsage, prices: Option<&Prices>) -> Cost {
     let rate_cache_write = p.price_cache_write.unwrap_or(rate_in);
     let rate_out = p.price_out.unwrap_or(0.0);
 
+    // A 1-hour cache write is billed at 2x the input rate, every other write
+    // at the cache-write rate (`ONE_HOUR_WRITE_FACTOR`). Its part never
+    // exceeds the writes it is a part of: a split larger than its total is
+    // nonsense, priced as all-1-hour.
+    // A row with no input price has no base for the factor: its 1-hour part
+    // is charged at the cache-write rate like the rest of the writes.
+    let rate_1h = p
+        .price_in
+        .map_or(rate_cache_write, |r| r * ONE_HOUR_WRITE_FACTOR);
+    let writes = usage.cache_write.unwrap_or(0);
+    let writes_1h = usage.cache_write_1h.unwrap_or(0).min(writes);
     let in_micro = (usage.plain_in() as f64) * rate_in
         + (usage.cached_in.unwrap_or(0) as f64) * rate_cache_read
-        + (usage.cache_write.unwrap_or(0) as f64) * rate_cache_write;
+        + ((writes - writes_1h) as f64) * rate_cache_write
+        + (writes_1h as f64) * rate_1h;
     let out_micro = (usage.completion.unwrap_or(0) as f64) * rate_out;
 
     let in_micro = in_micro.round() as i64;
@@ -366,6 +391,74 @@ mod tests {
         let c = price_request(&u, Some(&sheet()));
         // 100k*3 + 800k*0.3 + 100k*3.75 = 300_000 + 240_000 + 375_000
         assert_eq!(c.in_micro, Some(915_000));
+    }
+
+    /// Anthropic's published prices: a 1-hour write is 2x the input rate,
+    /// the 5-minute rest stays at the cache-write rate (1.25x here). The
+    /// snapshot keeps the cache-write rate: the table has no 1-hour column.
+    #[test]
+    fn a_1h_cache_write_costs_twice_the_input_rate() {
+        let u = TokenUsage {
+            prompt: Some(1_000_000),
+            completion: Some(0),
+            cached_in: Some(800_000),
+            cache_write: Some(100_000),
+            cache_write_1h: Some(60_000),
+            ..Default::default()
+        };
+        let c = price_tokens(&u, Some(&sheet()));
+        // 100k*3 + 800k*0.3 + 40k*3.75 + 60k*3*2
+        assert_eq!(c.in_micro, Some(300_000 + 240_000 + 150_000 + 360_000));
+        assert_eq!(c.used.price_cache_write, Some(3.75));
+        // A zero split prices every write at the cache-write rate, as no
+        // split does.
+        let zero = TokenUsage {
+            cache_write_1h: Some(0),
+            ..u
+        };
+        let none = TokenUsage {
+            cache_write_1h: None,
+            ..u
+        };
+        assert_eq!(price_tokens(&zero, Some(&sheet())).in_micro, Some(915_000));
+        assert_eq!(price_tokens(&none, Some(&sheet())).in_micro, Some(915_000));
+        // Another tier's row: the 1-hour part follows that row's input rate.
+        let flex = Prices {
+            price_in: Some(1.5),
+            ..sheet()
+        };
+        let c = price_tokens(&u, Some(&flex));
+        // 100k*1.5 + 800k*0.3 + 40k*3.75 + 60k*1.5*2
+        assert_eq!(c.in_micro, Some(150_000 + 240_000 + 150_000 + 180_000));
+    }
+
+    /// A row with no input price has no base for the 1-hour factor: the
+    /// 1-hour part is charged at the cache-write rate like the other writes.
+    #[test]
+    fn a_1h_cache_write_without_an_input_price_costs_the_cache_write_rate() {
+        let p = Prices {
+            price_in: None,
+            price_out: Some(15.0),
+            price_cache_read: Some(0.3),
+            price_cache_write: Some(3.75),
+            source: PriceSource::Manual,
+        };
+        let u = TokenUsage {
+            prompt: Some(1_000_000),
+            completion: Some(0),
+            cached_in: Some(800_000),
+            cache_write: Some(100_000),
+            cache_write_1h: Some(60_000),
+            ..Default::default()
+        };
+        let c = price_tokens(&u, Some(&p));
+        // 100k plain at 0 + 800k*0.3 + (40k + 60k)*3.75
+        assert_eq!(c.in_micro, Some(240_000 + 375_000));
+        let none = TokenUsage {
+            cache_write_1h: None,
+            ..u
+        };
+        assert_eq!(price_tokens(&none, Some(&p)).in_micro, c.in_micro);
     }
 
     #[test]

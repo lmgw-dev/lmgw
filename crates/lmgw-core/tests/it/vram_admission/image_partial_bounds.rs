@@ -48,7 +48,9 @@ async fn an_own_budget_is_given_whole_or_takes_the_normal_path() {
         0,
     )
     .await;
-    drop(super::image_pipeline_peak::acquire_model(&f, Class::Chat, "chat-model").await);
+    // A request has run on it, so it keeps no start margin beside it (in
+    // every mode since WP13), as a model in use does not.
+    assert_eq!(chat(&f.gateway).await.status(), 200);
     let why = refused(&f, "big").await;
     assert!(
         why.contains(
@@ -107,13 +109,14 @@ async fn an_own_budget_of_zero_needs_the_whole() {
     assert!(w.contains("which leaves it unbounded"), "{got}");
 }
 
-/// Item 5: `--max-vram` is per device and the ledger pools the cards, so a
-/// partial grant needs exactly one card in the engine's view. Two named
-/// cards take the whole-pipeline path, and say partial fitting on several
-/// cards is not done yet; one named card fits partially.
+/// Item 5: `--max-vram` is per device, so a partial grant needs exactly
+/// one card in the engine's view. A row whose arguments name two cards is
+/// placed on one of them (device-ledger design WP5), started on that card
+/// alone, and fits partially there; so does a row that names one card.
 #[tokio::test]
-async fn on_several_cards_it_takes_the_whole_pipeline_path() {
+async fn on_several_cards_it_is_placed_on_one_and_fits_there() {
     let f = fixture(4 * GIB, GIB, GIB, 512).await;
+    f.world().cards = vec![("card 0".into(), 4 * GIB), ("card 1".into(), 4 * GIB)];
     let id = add_pipeline(
         &f,
         "turbo",
@@ -130,11 +133,19 @@ async fn on_several_cards_it_takes_the_whole_pipeline_path() {
         ]}),
     )
     .await;
-    let why = refused(&f, "turbo").await;
-    assert!(
-        why.contains("its engine would see 2 cards")
-            && why.contains("fitting it partially on several cards is not done yet"),
-        "{why}"
+    let out = start(&f, "turbo").await;
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(max_vram(&f, "turbo"), (Some("2.500".into()), 1));
+    let argv = f.world().argv.get("turbo").cloned().unwrap_or_default();
+    let named: Vec<&String> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--device")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(
+        named,
+        vec![&format!("nvidia.com/gpu={}", card_id(0).0)],
+        "{argv:?}"
     );
 
     patch(
@@ -145,7 +156,6 @@ async fn on_several_cards_it_takes_the_whole_pipeline_path() {
     .await;
     let out = start(&f, "turbo").await;
     assert_eq!(out["ok"], true, "{out}");
-    assert_eq!(max_vram(&f, "turbo"), (Some("2.500".into()), 1));
 }
 
 /// Item 3: a generation that fails under a grant at least the working
@@ -243,7 +253,9 @@ async fn learned_figures_belong_to_the_engine() {
         0,
     )
     .await;
-    drop(super::image_pipeline_peak::acquire_model(&f, Class::Chat, "chat-model").await);
+    // A request has run on it, so it keeps no start margin beside it (in
+    // every mode since WP13), as a model in use does not.
+    assert_eq!(chat(&f.gateway).await.status(), 200);
     set_learned(&f, id, store::LearnedFigure::Idle, Some(5 * MIB)).await;
     set_learned(&f, id, store::LearnedFigure::Work, Some(256 * MIB)).await;
     let out = start(&f, "huge").await;

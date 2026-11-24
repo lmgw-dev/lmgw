@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use lmgw_api_types::chat_voice::{AUDIO_INPUTS, TURN_DETECTIONS};
 
 use super::{f, labels, Ctl, Def, Page};
-use crate::widgets::Field;
+use crate::pages::settings::prow::SetField as Field;
 
 /// The Chat's TTS model, then realtime's: what the voice and style fields
 /// read their model from.
@@ -62,7 +62,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
         Ctl::Voice(CHAT_TTS),
     )
     .hint(
-        "a voice of the Chat's text-to-speech model; empty = the Realtime voice (when the Chat \
+        "A voice of the Chat's text-to-speech model; empty = the Realtime voice (when the Chat \
          speaks with the Realtime model), then the model's default",
     )
     .terms("chat voice speaker preset"),
@@ -74,7 +74,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
         Ctl::SpeechStyle(CHAT_TTS),
     )
     .ph("calm, warm, unhurried")
-    .hint("what the voice is told; empty = the Realtime speech style; a thread can say none")
+    .hint("What the voice is told; empty = the Realtime speech style; a thread can say none")
     .terms("chat speech instructions style tone voice design description"),
     f(
         "chat",
@@ -86,7 +86,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
     .ph("de")
     .unit("ISO 639-1")
     .hint(
-        "the language you speak: speech recognition hears it where the model takes a language; \
+        "The language you speak: speech recognition hears it where the model takes a language; \
          empty = it detects; replies are in it too unless Replies in says otherwise; a thread \
          can override it",
     )
@@ -101,7 +101,7 @@ pub(super) const CHAT_VOICE: &[Def] = &[
     .ph("as I speak")
     .unit("ISO 639-1")
     .hint(
-        "the language the model answers in and the voice speaks; empty = the language you speak \
+        "The language the model answers in and the voice speaks; empty = the language you speak \
          (with neither, the reply follows you); a thread can override it",
     )
     .terms("chat voice reply answer output language tts locale german english"),

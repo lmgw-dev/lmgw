@@ -18,14 +18,14 @@
   "type": "drive-key"
  },
  {
-  "click": ".key-create > button.ghost"
+  "click": ".key-create .switch"
  },
  {
   "wait": 1.0
  },
  {
-  "expect": "!!document.querySelector('.key-create-scope')",
-  "label": "the Scope section opens under the create row"
+  "expect": "!!document.querySelector('.key-create-scope .scope-mode')",
+  "label": "Fence it now shows the scope rows in the New key form"
  },
  {
   "click": ".key-create-scope .select > button",
@@ -64,17 +64,19 @@
   "shot": "key-scope-create"
  },
  {
-  "click": ".key-create > button.btn:not(.ghost)"
+  "click": ".key-create .key-create-go .btn.suggested"
  },
  {
-  "wait": 1.0
+  "until": "/^\\/usage\\/keys\\/\\d+$/.test(location.pathname) && document.querySelector('.kdetail .mcp-pick')",
+  "timeout": 10,
+  "label": "the create opens the new key's detail"
  },
  {
-  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-key')&&r.textContent.includes('tools allow docs__*'))",
-  "label": "the row stores tools allow docs__*"
+  "expect": "(async()=>{const r=await (await fetch('/api/usage/keys')).json();const k=(r.keys||[]).find(k=>k.name==='drive-key');return !!k&&k.tool_scope_mode==='allow'&&k.tool_scope_patterns==='docs__*'})()",
+  "label": "the key stores tools allow docs__*"
  },
  {
-  "js": "[...document.querySelector('tr:has(.key-acts)') ? [...document.querySelectorAll('tr')].find(r=>r.textContent.includes('drive-key')).querySelectorAll('button') : []].find(b=>b.textContent.trim()==='Edit').click()"
+  "wait": 0.2
  },
  {
   "wait": 1.0
@@ -83,15 +85,15 @@
   "shot": "key-scope-editor"
  },
  {
-  "expect": "document.querySelector('dialog[open] .mcp-pick input[type=checkbox]')?.checked===true",
-  "label": "the editor shows docs ticked"
+  "expect": "document.querySelector('.kdetail .mcp-pick input[type=checkbox]')?.checked===true",
+  "label": "the detail shows docs ticked"
  },
  {
-  "expect": "(()=>{const t=document.querySelector('dialog[open]').textContent,i=window.__inv;return i.docs===i.all?t.includes('Sees all '+i.all+' tools on /mcp'):t.includes('Sees '+i.docs+' of '+i.all+' tools on /mcp')})()",
+  "expect": "(()=>{const t=document.querySelector('.kdetail').textContent,i=window.__inv;return i.docs===i.all?t.includes('Sees all '+i.all+' tools on /mcp'):t.includes('Sees '+i.docs+' of '+i.all+' tools on /mcp')})()",
   "label": "the preview counts what the scope admits (the docs tools, of everything /mcp serves)"
  },
  {
-  "js": "document.querySelector('dialog[open] details.lab-details summary').click()"
+  "js": "document.querySelector('.kdetail .scope-pick details.lab-details summary').click()"
  },
  {
   "wait": 0.2
@@ -100,49 +102,58 @@
   "shot": "key-scope-editor-advanced"
  },
  {
-  "click": "dialog[open] details.lab-details textarea"
+  "click": ".kdetail .scope-pick details.lab-details textarea"
  },
  {
   "type": "git*"
  },
  {
-  "click": "dialog[open] .btn.primary"
+  "click": ".save-toast .btn.suggested"
  },
  {
-  "wait": 1.0
+  "until": "!document.querySelector('.save-toast.show')",
+  "timeout": 10,
+  "label": "Save takes the change"
  },
  {
-  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-key')&&r.textContent.includes('tools allow docs__*, git*'))",
+  "expect": "(async()=>{const r=await (await fetch('/api/usage/keys')).json();const k=(r.keys||[]).find(k=>k.name==='drive-key');return !!k&&k.tool_scope_patterns.split('\\n').sort().join(', ')==='docs__*, git*'})()",
   "label": "the ticked source and the hand-written glob are both stored"
  },
  {
   "shot": "key-scope-saved"
  },
  {
-  "js": "[...document.querySelector('tr:has(.key-acts)') ? [...document.querySelectorAll('tr')].find(r=>r.textContent.includes('drive-key')).querySelectorAll('button') : []].find(b=>b.textContent.trim()==='Edit').click()"
+  "js": "location.reload(); 'reload'"
  },
  {
-  "wait": 1.0
+  "until": "document.querySelector('.kdetail .scope-pick details.lab-details textarea')",
+  "timeout": 15
  },
  {
-  "expect": "document.querySelector('dialog[open] details.lab-details textarea').value==='git*'",
+  "js": "(async()=>{const r=await (await fetch('/api/tools')).json();const n=r.tools.filter(t=>t.plane==='/mcp'&&t.available&&!t.stale).map(t=>t.name);window.__inv={all:n.length,docs:n.filter(x=>x.startsWith('docs__')).length};return JSON.stringify(window.__inv)})()"
+ },
+ {
+  "expect": "document.querySelector('.kdetail .scope-pick details.lab-details textarea').value==='git*'",
   "label": "the hand-written glob comes back in Advanced patterns"
  },
  {
-  "click": "dialog[open] .mcp-tools input",
+  "click": ".kdetail .mcp-tools input",
   "nth": 1
  },
  {
   "wait": 0.3
  },
  {
-  "expect": "new RegExp('Sees [12] of '+window.__inv.all+' tools').test(document.querySelector('dialog[open]').textContent)",
+  "expect": "new RegExp('Sees [12] of '+window.__inv.all+' tools').test(document.querySelector('.kdetail').textContent)",
   "label": "narrowing to single tools narrows the preview"
  },
  {
   "shot": "key-scope-narrowed"
  },
  {
-  "key": "Escape"
+  "js": "[...document.querySelectorAll('.save-toast .btn')].find(b=>b.textContent==='Discard').click(); 'discard'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');for(const k of (r.keys||[]))if(k.name==='drive-key')await j('/api/op/key_delete',{id:k.id});return 'removed'})()"
  }
 ]

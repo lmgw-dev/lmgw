@@ -40,7 +40,7 @@ pub(super) fn StateCard(lab: Lab) -> impl IntoView {
         }
     };
     view! {
-        <div class="card dl-state">
+        <section class="pref-group lab-card dl-state">
             <div class="dl-card-head">
                 <h3 class="lab-h3">"State"</h3>
                 <div class="seg">
@@ -52,25 +52,27 @@ pub(super) fn StateCard(lab: Lab) -> impl IntoView {
                     )}
                 </div>
             </div>
-            <textarea
-                class="input ta mono dl-state-ta"
-                spellcheck="false"
-                placeholder=move || match f.mode.get() {
-                    StateMode::Text => "What the questions are about: a message, a ticket, a transcript…",
-                    StateMode::Json => "[{\"role\": \"user\", \"content\": \"…\"}]",
-                }
-                prop:value=move || f.state.get()
-                on:input=move |ev| f.state.set(event_target_value(&ev))
-            ></textarea>
-            {move || {
-                let (text, bad) = f.state.with(|s| state_line(f.mode.get(), s));
-                view! {
-                    <p class="mini-note dl-state-line" class:bad=bad>
-                        {text}
-                    </p>
-                }
-            }}
-        </div>
+            <div class="boxed lab-box">
+                <textarea
+                    class="input ta mono lab-prompt-field dl-state-ta"
+                    spellcheck="false"
+                    placeholder=move || match f.mode.get() {
+                        StateMode::Text => "What the questions are about: a message, a ticket, a transcript…",
+                        StateMode::Json => "[{\"role\": \"user\", \"content\": \"…\"}]",
+                    }
+                    prop:value=move || f.state.get()
+                    on:input=move |ev| f.state.set(event_target_value(&ev))
+                ></textarea>
+                {move || {
+                    let (text, bad) = f.state.with(|s| state_line(f.mode.get(), s));
+                    view! {
+                        <p class="mini-note dl-state-line" class:bad=bad>
+                            {text}
+                        </p>
+                    }
+                }}
+            </div>
+        </section>
     }
 }
 

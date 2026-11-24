@@ -121,7 +121,7 @@ pub async fn open(
     };
     if unserved {
         warnings.push(format!(
-            "this gateway does not currently serve the model '{alias}'; the thread opened anyway \
+            "This gateway does not currently serve the model '{alias}'; the thread opened anyway \
              — pick a model in the thread header, or fix the agent's config."
         ));
     }
@@ -134,14 +134,14 @@ pub async fn open(
     for r in surface.check(&m.tools) {
         if !r.registered {
             warnings.push(format!(
-                "this thread attaches '{}', which is not a registered MCP server here (available: \
+                "This thread attaches '{}', which is not a registered MCP server here (available: \
                  {}); its tools will not resolve until it is.",
                 r.label,
                 surface.labels().join(", ")
             ));
         } else if !r.missing_tools.is_empty() {
             warnings.push(format!(
-                "the '{}' toolset does not currently list: {}; the thread attaches what it has.",
+                "The '{}' toolset does not currently list: {}; the thread attaches what it has.",
                 r.label,
                 r.missing_tools.join(", ")
             ));
@@ -150,7 +150,7 @@ pub async fn open(
     let dropped = dropped_params(m);
     if !dropped.is_empty() {
         warnings.push(format!(
-            "a chat thread carries the model alias, the system prompt, the tools and the \
+            "A chat thread carries the model alias, the system prompt, the tools and the \
              temperature; the manifest's {} {} not applied.",
             dropped.join(", "),
             if dropped.len() == 1 { "is" } else { "are" }

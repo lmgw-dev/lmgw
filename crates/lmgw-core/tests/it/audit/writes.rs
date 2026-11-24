@@ -132,3 +132,72 @@ async fn a_writing_tool_call_is_written_by_its_name_and_a_reading_one_is_not() {
     // `/mcp/admin` itself is not the gate's to write.
     assert_eq!(count(&state).await, before + 1);
 }
+
+/// Forgetting one card's learned headroom (device-ledger design ruling 10):
+/// the entry names the card by name and index, its id and the figure that
+/// was dropped; forgetting every card's names each; a refused forget names
+/// the card asked for.
+#[tokio::test]
+async fn a_headroom_forget_names_the_card_and_what_was_dropped() {
+    use lmgw_core::store::OutsideHour;
+    use lmgw_core::vram::nvml::DeviceId;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let state = AppState::init_for_tests().await.unwrap();
+    let gw = serve(state.clone()).await;
+    let session = turn_on(&gw).await;
+    // A day of readings on two cards no device read has listed (the suite's
+    // probe has no telemetry): card 0 held 2 GiB more once, card 1 never.
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            / 3600,
+    )
+    .unwrap();
+    for (id, rise) in [("GPU-a", 2 * GIB), ("GPU-b", 0)] {
+        state.vram.seed_outside_hours(
+            &DeviceId::new(id),
+            (1..31)
+                .map(|h| OutsideHour {
+                    hour: now - h,
+                    low_bytes: GIB,
+                    high_bytes: GIB + if h == 5 { rise } else { 0 },
+                    rise_bytes: if h == 5 { rise } else { 0 },
+                })
+                .collect(),
+        );
+    }
+
+    let (status, body) = op_as(&gw, &session, "headroom_forget", json!({ "card": "GPU-a" })).await;
+    assert_eq!(status, 200, "{body}");
+    let e = with_action(&gw, "headroom_forget").await;
+    assert_eq!(
+        e[0]["target"],
+        json!({
+            "card": "card 0",
+            "card_id": "GPU-a",
+            "dropped": "readings of other programs up to 3.0 GiB, from 30 hours, with 2.0 GiB \
+                        of learned room kept free",
+        }),
+        "{e:?}"
+    );
+
+    let (status, _) = op_as(&gw, &session, "headroom_forget", json!({})).await;
+    assert_eq!(status, 200);
+    let e = with_action(&gw, "headroom_forget").await;
+    assert_eq!(e[0]["target"]["card"], "every card", "{e:?}");
+    assert!(
+        e[0]["target"]["dropped"]
+            .as_str()
+            .unwrap()
+            .starts_with("card 0 (GPU-b): readings of other programs up to 1.0 GiB, from 30 hours"),
+        "{e:?}"
+    );
+
+    let (status, _) = op_as(&gw, &session, "headroom_forget", json!({ "card": "GPU-x" })).await;
+    assert_eq!(status, 400);
+    let e = with_action(&gw, "headroom_forget").await;
+    assert_eq!(e[0]["target"], json!({ "card": "GPU-x" }), "{e:?}");
+    assert_eq!(e[0]["outcome"], 400);
+}

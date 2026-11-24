@@ -733,6 +733,7 @@ mod tests {
     fn readings_fold_over_devices_and_a_missing_one_is_unknown() {
         let t0 = Instant::now();
         let mem = |used| GpuMemory {
+            id: crate::vram::nvml::DeviceId("GPU-0".into()),
             index: 0,
             name: "GPU".into(),
             total_bytes: 100,

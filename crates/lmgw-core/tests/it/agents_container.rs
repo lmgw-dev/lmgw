@@ -853,7 +853,7 @@ async fn an_owner_without_podman_is_told_so_before_the_run_starts() {
     assert_ne!(status, 200, "{res}");
     let msg = res.to_string();
     assert!(
-        msg.contains("podman is required for container agents"),
+        msg.contains("Podman is required for container agents"),
         "{msg}"
     );
     assert!(msg.contains("podman_unavailable"), "{msg}");

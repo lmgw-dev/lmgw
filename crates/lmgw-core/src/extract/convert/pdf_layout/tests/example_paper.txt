@@ -1,0 +1,162 @@
+page
+1 56.8 42.9 250.4 8 0|Example Journal of Layout Studies, volume 0 (example.org)
+2 119.0 66.5 476.0 18 1|An Example Paper About Example Things
+3 75.7 95.5 519.4 10 0|Ada Example, Example University, ada@example.org — Ben Sample, Sample Institute, ben@sample.example
+4 56.8 129.6 105.4 12 1|Abstract
+5 311.4 131.9 328.8 9 0|Fruit
+6 387.9 131.9 409.8 9 0|Count
+7 464.4 131.9 490.1 9 0|Weight
+8 56.8 147.7 286.2 10 0|This example paper exists to give a layout model
+8 56.8 159.3 286.1 10 0|something to look at. It has two columns, section
+8 56.8 170.8 285.7 10 0|headings, lists, a table, a drawn figure, a formula and a
+8 56.8 182.4 285.8 10 0|piece of code, and nothing in it means anything. Every
+8 56.8 193.9 285.9 10 0|name in it is an example name and every number is
+8 56.8 205.5 143.6 10 0|made up for the page.
+9 311.4 147.3 333.3 9 0|Apple
+10 387.9 147.3 396.9 9 0|12
+11 464.4 147.3 486.9 9 0|1.5 kg
+12 311.4 162.7 327.3 9 0|Pear
+13 387.9 162.7 392.4 9 0|7
+14 464.4 162.7 486.9 9 0|0.9 kg
+15 311.4 178.1 330.3 9 0|Plum
+16 387.9 178.1 396.9 9 0|31
+17 464.4 178.1 486.9 9 0|1.1 kg
+18 311.4 193.5 336.3 9 0|Cherry
+19 387.9 193.5 396.9 9 0|58
+20 464.4 193.5 486.9 9 0|0.4 kg
+21 56.8 231.1 136.7 12 1|1 Introduction
+22 309.1 206.7 538.2 10 0|Figure 1 shows the same example values as bars. The
+22 309.1 218.2 538.2 10 0|bars are drawn, not photographed, so no image is stored
+22 309.1 229.8 386.5 10 0|in the file for them.
+23 56.8 249.2 285.8 10 0|Example documents are written so that tests can read
+23 56.8 260.8 285.9 10 0|them. The first paragraph of this section talks about the
+23 56.8 272.3 285.9 10 0|weather in Example City, which is always mild, and
+23 56.8 283.9 286.1 10 0|about the example river that runs through it from the
+23 56.8 295.4 258.6 10 0|north to the south without ever changing its width.
+24 56.8 312.6 285.9 10 0|The second paragraph lists what the example reader
+24 56.8 324.2 216.9 10 0|should look for in the pages that follow:
+25 65.3 341.4 281.4 10 0|• a first example item about apples and their colours;
+26 65.3 358.6 286.1 10 0|• a second example item that is long enough to wrap
+26 76.7 370.1 240.6 10 0|onto a second line of the narrow column;
+27 65.3 387.3 209.8 10 0|• a third example item about pears.
+28 356.2 351.8 380.6 10 0|Apple
+29 399.2 351.8 417.0 10 0|Pear
+30 437.2 351.8 458.3 10 0|Plum
+31 475.0 351.8 502.7 10 0|Cherry
+32 309.1 388.7 519.6 9 0|Figure 1: Example counts by example fruit, drawn as bars.
+33 56.8 413.0 162.0 12 1|2 Example Method
+34 309.1 416.0 435.6 12 1|4 Example Discussion
+35 56.8 431.1 285.9 10 0|The example method has three steps, each of which is
+35 56.8 442.6 93.7 10 0|made up:
+36 309.1 434.1 538.4 10 0|The example results show that cherries are counted more
+36 309.1 445.7 538.2 10 0|often than plums in Example City, which surprises
+36 309.1 457.2 538.1 10 0|nobody who has been there in the example summer. The
+36 309.1 468.8 538.2 10 0|example authors therefore suggest that the example
+36 309.1 480.3 334.0 10 0|reader
+37 65.3 459.8 270.1 10 0|1. Collect example values from the example table.
+38 65.3 477.0 239.6 10 0|2. Add them up with the example formula.
+39 65.3 494.2 242.9 10 0|3. Print the sum with the example program.
+40 56.8 511.4 286.1 10 0|The sum of the example values is given by the following
+40 56.8 523.0 249.8 10 0|formula, which is as simple as a formula can be:
+41 137.3 545.8 205.0 10 0|s = a + b + c (1)
+42 56.8 563.0 286.1 10 0|The example program below prints that sum. It is written
+42 56.8 574.6 286.1 10 0|in no language in particular and would not run
+42 56.8 586.1 98.4 10 0|anywhere:
+43 56.8 602.9 176.8 8 0|fn example_sum(a, b, c) {
+43 76.0 611.9 162.4 8 0|let s = a + b + c;
+43 76.0 621.0 152.8 8 0|print("sum", s);
+43 56.8 630.0 61.6 8 0|}
+44 56.8 648.0 162.7 12 1|3 Example Results
+45 56.8 666.1 285.8 10 0|Table 1 lists the example values. They were chosen so
+45 56.8 677.6 285.7 10 0|that no two of them are the same and so that a reader can
+45 56.8 689.2 190.8 10 0|tell the columns apart at a glance.
+46 56.8 709.2 209.2 9 0|Table 1: Example values by example fruit.
+47 56.8 790.6 147.6 8 0|Page 1 of the example paper
+48 309.1 497.5 538.2 10 0|The discussion goes on for a while so that the text
+48 309.1 509.1 538.5 10 0|reaches the second page. A long example paragraph
+48 309.1 520.6 538.1 10 0|follows, and it says the same thing several times in
+48 309.1 532.2 538.5 10 0|slightly different words, because the only thing that
+48 309.1 543.7 538.4 10 0|matters about it is its length and the place where the page
+48 309.1 555.3 538.4 10 0|ends. The example river is still as wide as it was. The
+48 309.1 566.8 538.1 10 0|example weather is still mild. The example fruit is still
+48 309.1 578.4 538.2 10 0|counted every example morning by the same example
+48 309.1 589.9 538.1 10 0|people, who write the example numbers into the same
+48 309.1 601.5 538.2 10 0|example table and never make an example mistake while
+48 309.1 613.0 538.0 10 0|they do it, as far as anyone at Example University can
+48 309.1 624.6 429.2 10 0|tell from the example records.
+49 309.1 641.8 538.0 10 0|A second long example paragraph makes sure of it. The
+49 309.1 653.3 538.1 10 0|example city has an example market on every example
+49 309.1 664.9 538.3 10 0|day of the example week, and the example fruit is sold
+49 309.1 676.4 538.4 10 0|there by example weight. Nobody has ever measured the
+49 309.1 688.0 538.3 10 0|example weight twice and found two different example
+49 309.1 699.5 538.3 10 0|numbers, which is one more reason to trust the example
+49 309.1 711.1 538.2 10 0|table above. The paragraph ends on the next page, where
+49 309.1 722.6 537.9 10 0|its last words are, so that a reader of the converted text
+49 309.1 734.2 537.9 10 0|can see whether a paragraph that is cut in two by a page
+49 309.1 745.7 538.3 10 0|break comes out as one paragraph or as two separate
+49 309.1 757.3 538.1 10 0|ones in the middle of a sentence, which would be the
+@ text 0.98 0.094 0.176 0.480 0.256
+@ section_header 0.95 0.518 0.494 0.731 0.509
+@ table 0.95 0.519 0.156 0.905 0.244
+@ list_item 0.95 0.109 0.425 0.480 0.451
+@ section_header 0.94 0.095 0.154 0.177 0.166
+@ section_header 0.94 0.095 0.491 0.271 0.506
+@ text 0.94 0.095 0.511 0.480 0.538
+@ section_header 0.94 0.095 0.769 0.272 0.784
+@ text 0.94 0.095 0.791 0.479 0.830
+@ text 0.94 0.095 0.607 0.480 0.633
+@ section_header 0.94 0.095 0.274 0.229 0.286
+@ text 0.93 0.126 0.114 0.872 0.126
+@ list_item 0.92 0.110 0.547 0.452 0.559
+@ caption 0.92 0.518 0.462 0.871 0.473
+@ picture 0.92 0.538 0.291 0.884 0.442
+@ list_item 0.92 0.109 0.460 0.352 0.472
+@ list_item 0.91 0.109 0.566 0.402 0.578
+@ list_item 0.91 0.109 0.405 0.473 0.417
+@ list_item 0.89 0.109 0.587 0.406 0.598
+@ text 0.88 0.095 0.668 0.480 0.708
+@ code 0.87 0.095 0.715 0.296 0.758
+@ page_header 0.87 0.095 0.051 0.420 0.062
+@ text 0.87 0.518 0.514 0.904 0.909
+@ text 0.86 0.095 0.842 0.350 0.854
+@ page_footer 0.85 0.095 0.939 0.248 0.949
+@ section_header 0.85 0.199 0.080 0.799 0.101
+@ text 0.75 0.518 0.245 0.904 0.283
+@ text 0.74 0.094 0.295 0.480 0.395
+@ code 0.73 0.229 0.647 0.344 0.658
+@ text 0.73 0.095 0.372 0.480 0.397
+@ text 0.70 0.094 0.297 0.481 0.363
+@ text 0.68 0.518 0.515 0.904 0.581
+@ text 0.62 0.518 0.762 0.904 0.910
+@ title 0.58 0.199 0.080 0.799 0.101
+@ text 0.58 0.519 0.592 0.904 0.753
+@ caption 0.57 0.518 0.245 0.904 0.283
+@ text 0.50 0.095 0.051 0.420 0.062
+@ text 0.44 0.229 0.647 0.344 0.658
+@ text 0.42 0.095 0.667 0.480 0.758
+@ text 0.39 0.095 0.939 0.248 0.949
+@ formula 0.33 0.229 0.647 0.344 0.658
+page
+50 56.8 42.9 250.4 8 0|Example Journal of Layout Studies, volume 0 (example.org)
+51 56.8 66.3 285.7 10 0|wrong way to read it, and this sentence keeps going for
+51 56.8 77.8 286.0 10 0|exactly that reason until the page is full and the text has
+51 56.8 89.4 285.9 10 0|to continue in the next column or on the next page of this
+51 56.8 100.9 285.8 10 0|example paper, where it says a few more example words
+51 56.8 112.5 285.8 10 0|about the example market, the example fruit and the
+51 56.8 124.0 286.1 10 0|example people who count it, before it finally comes to
+51 56.8 135.6 122.0 10 0|its example end.
+52 56.8 790.6 147.6 8 0|Page 2 of the example paper
+53 309.1 66.2 437.0 12 1|5 Example Conclusion
+54 309.1 84.3 538.4 10 0|Nothing was learned, as planned. The example paper
+54 309.1 95.9 538.4 10 0|ends here, with a last example paragraph that thanks the
+54 309.1 107.4 538.1 10 0|example reader for the patience and wishes the layout
+54 309.1 119.0 400.1 10 0|model a pleasant page.
+55 309.1 136.2 538.2 10 0|Example footnotes would go here if the example authors
+55 309.1 147.7 467.6 10 0|had anything to add, which they do not.
+@ text 0.96 0.518 0.097 0.904 0.186
+@ text 0.95 0.095 0.077 0.480 0.170
+@ page_footer 0.91 0.095 0.937 0.248 0.947
+@ section_header 0.89 0.519 0.076 0.733 0.090
+@ page_header 0.85 0.095 0.049 0.420 0.059
+@ list_item 0.37 0.519 0.076 0.733 0.090
+@ text 0.31 0.095 0.049 0.420 0.059

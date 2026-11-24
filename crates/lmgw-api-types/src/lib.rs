@@ -114,6 +114,13 @@ pub mod device_link;
 pub mod engine_releases;
 pub mod image_lab;
 // The labs-store design record, §1.
+/// Settings › Documents (document-conversion design §4.4, §8): what this
+/// computer can turn into text, the optional tools found, and what
+/// installing a missing one would give.
+pub mod documents;
+/// The Documents lab: its form (the route, the options, the files) and the
+/// fields each route is sent (document-conversion design WP12).
+pub mod documents_lab;
 /// The Knowledge bases API: bases, files, uploads, jobs' answers, the source
 /// viewer and the search playground.
 pub mod knowledge;

@@ -2,10 +2,12 @@
 
 mod switch;
 
+pub use self::switch::upsert;
+
 use leptos::prelude::*;
 use lmgw_api_types::chat_profiles::{Profile, ProfileList, BUILTIN_CONCISE};
 
-use self::switch::{after_stored, asks, back_from_new, upsert, Pick};
+use self::switch::{after_stored, asks, back_from_new, Pick};
 use super::api;
 use super::editor::ProfileEditor;
 use crate::scope::Scope;
@@ -14,6 +16,11 @@ use crate::widgets::{Modal, ModalFooter};
 /// The list of profiles (name order, as the gateway answers it) with the
 /// editor for the picked one, "New profile", and a way to add the built-in
 /// back after it was deleted. It reads and writes only the profile routes.
+///
+/// The dashboard no longer uses it (its `/chat/profiles` is a list and a
+/// detail of its own on the shared split view, over [`ProfileEditor`]); the
+/// desktop client's Personality page does. The editor's save toast is
+/// anchored on `.pf-pane`.
 ///
 /// `thread_id` and `test_model` go to every editor ([`ProfileEditor`]);
 /// `on_changed` gets the fresh list after any create, save or delete, so
@@ -197,6 +204,7 @@ pub fn ProfilesPanel(
                                     on_saved=saved
                                     on_discard_new=discard_new
                                     dirty=dirty
+                                    hero=true
                                 />
                             })
                         }
@@ -210,6 +218,7 @@ pub fn ProfilesPanel(
                                     on_saved=saved
                                     on_deleted=deleted
                                     dirty=dirty
+                                    hero=true
                                 />
                             })
                         }

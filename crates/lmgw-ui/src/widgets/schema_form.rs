@@ -484,9 +484,12 @@ fn hint_of(f: &AgentField) -> String {
     } else if f.format == QUESTION_SET_FORMAT {
         parts.push("question set".to_string());
     } else if !f.format.is_empty() {
-        parts.push(f.format.clone());
+        // A schema format is a wire token (`model_alias`, `multiline`): the
+        // control already says what it is, so an unknown one prints nothing.
     } else if f.ty == "array" {
         parts.push("comma-separated".to_string());
+    } else if f.ty == "integer" {
+        parts.push("whole number".to_string());
     } else if f.ty != "string" {
         parts.push(f.ty.clone());
     }
@@ -539,11 +542,16 @@ pub fn default_label(f: &AgentField) -> String {
 // The view
 // ---------------------------------------------------------------------------
 
-/// Render one agent's config form as rows of label | control | help (the
-/// help drops under its control when the form is narrow). Every `model_alias`
-/// field picks from the shared model catalog. `decide` is the batch output's
-/// question-set view (labs-store design §4), which notes on the categories
-/// field that a chosen set replaces it.
+/// Render one agent's config form as preference rows: the label (with what
+/// kind of value it takes, quiet, after it) and its explanation on the left,
+/// the control at the row's end — or under the title across the row for a
+/// control that wants the width (a list, a prompt, a mount's path and its
+/// buttons). A changed field carries the accent dot. Every `model_alias`
+/// field picks from the shared model catalog. `decide` is the batch
+/// output's question-set view (labs-store design §4), which notes on the
+/// categories field that a chosen set replaces it.
+///
+/// The rows go straight into the caller's boxed group.
 #[component]
 pub fn SchemaForm(
     #[prop(into)] fields: Signal<Vec<AgentField>>,
@@ -561,21 +569,19 @@ pub fn SchemaForm(
     };
     view! {
         <Show when=move || !fields.get().is_empty() fallback=|| view! {
-            <div class="dim">"This agent has no config form — nothing to fill in."</div>
+            <div class="prow notice-row">"This agent has no config form — nothing to fill in."</div>
         }>
             <div class="form-rows">
-                <div class="fr-grid">
-                    <For
-                        each=rows
-                        key=|(generation, f)| format!("{generation}:{}", f.name)
-                        let:row
-                    >
-                        {
-                            let (_, f) = row;
-                            view! { <FieldControl field=f draft=draft decide=decide.get_value()/> }
-                        }
-                    </For>
-                </div>
+                <For
+                    each=rows
+                    key=|(generation, f)| format!("{generation}:{}", f.name)
+                    let:row
+                >
+                    {
+                        let (_, f) = row;
+                        view! { <FieldControl field=f draft=draft decide=decide.get_value()/> }
+                    }
+                </For>
             </div>
         </Show>
     }
@@ -600,9 +606,22 @@ fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) ->
     // question the Start buttons ask of it (§5.8).
     let mount = is_mount(&field).then(|| StoredValue::new(field.clone()));
     let control = control_for(&field, draft);
+    let me = StoredValue::new(field.name.clone());
+    let dirty = Memo::new(move |_| me.with_value(|n| draft.changed().contains(n)));
+    let wide = is_wide(&field);
+    // A long help stacks the row too: beside a control it would run down a
+    // narrow column. The length is a layout threshold, not a cap on the text.
+    let long_help = field.ty != "boolean" && desc.chars().count() > 160;
     view! {
-        <div class="fr" class:wide=is_wide(&field)>
-            <label class="fr-label">
+        <div
+            class="prow fr"
+            class:stack=wide || long_help
+            class:wide=wide
+            class:dirty=move || dirty.get()
+            class:check-row=field.ty == "boolean"
+        >
+            <div class="prow-text">
+            <label class="prow-title fr-label">
                 {label_of(&field)}
                 {(!hint.is_empty()).then(|| view! { " " <span class="fname">{hint}</span> })}
                 // Whether a secret is stored belongs on the label, not beside
@@ -631,8 +650,7 @@ fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) ->
                         }
                     })}
             </label>
-            <div class="fr-ctl">{control}</div>
-            <div class="fr-help">
+            <div class="prow-sub fr-help">
                 {(!desc.trim().is_empty()).then(|| view! { <div>{desc}</div> })}
                 {move || {
                     on_categories
@@ -656,7 +674,7 @@ fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) ->
                     .is_some()
                     .then(|| {
                         view! {
-                            <div class="dim">
+                            <div class="dim run-text">
                                 "Question sets are made and measured in the "
                                 <a href="/decision-lab">"Decision lab"</a>
                                 "."
@@ -676,6 +694,8 @@ fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) ->
                         }
                     })}
             </div>
+            </div>
+            <div class="prow-end fr-ctl">{control}</div>
         </div>
     }
 }
@@ -683,17 +703,21 @@ fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) ->
 fn control_for(f: &AgentField, draft: Draft) -> AnyView {
     let name = StoredValue::new(f.name.clone());
     match (f.ty.as_str(), f.format.as_str()) {
-        ("boolean", _) => view! {
-            <label class="check">
-                <input
-                    type="checkbox"
-                    prop:checked=move || draft.flag(&name.get_value())
-                    on:change=move |ev| draft.set_flag(&name.get_value(), event_target_checked(&ev))
-                />
-                {move || if draft.flag(&name.get_value()) { "on" } else { "off" }}
-            </label>
+        ("boolean", _) => {
+            // The kit's switch, on a signal of its own that writes the draft;
+            // a discard or a re-read rebuilds the row (`generation`), and
+            // with it this signal from the draft.
+            let on = RwSignal::new(untrack(|| draft.flag(&name.get_value())));
+            Effect::new(move |prev: Option<bool>| {
+                let v = on.get();
+                if prev.is_some() {
+                    draft.set_flag(&name.get_value(), v);
+                }
+                v
+            });
+            let label = label_of(f);
+            view! { <super::Switch value=on label=label/> }.into_any()
         }
-        .into_any(),
         ("string", "secret") => {
             let stored = f.has_value;
             view! {
@@ -1270,11 +1294,9 @@ mod tests {
         notes.required = true;
         assert!(is_wide(&notes));
         assert_eq!(hint_of(&notes), "required");
-        // Every other format still says what it is there.
-        assert_eq!(
-            hint_of(&field("system", "string", "multiline")),
-            "multiline"
-        );
+        // Another format is a wire token the control already shows, so the
+        // note leaves it out.
+        assert_eq!(hint_of(&field("system", "string", "multiline")), "");
     }
 
     /// A bound path is an ordinary string both ways, and an emptied box is an
@@ -1309,6 +1331,6 @@ mod tests {
         assert_eq!(label_of(&f), "concurrency");
         f.title = "Parallel calls".into();
         assert_eq!(label_of(&f), "Parallel calls");
-        assert_eq!(hint_of(&f), "integer · min 1 · required");
+        assert_eq!(hint_of(&f), "whole number · min 1 · required");
     }
 }

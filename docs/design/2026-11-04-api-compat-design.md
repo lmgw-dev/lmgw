@@ -136,6 +136,8 @@ catalogue.
 | `prev_response` | turn 2 through `previous_response_id` | responses | both |
 | `count_tokens` | the route's counter (`/v1/count_tokens`, `/v1/messages/count_tokens`, `/v1/responses/input_tokens`) | all | plain |
 | `compaction` *(2026-11-05)* | on-demand compaction (beta `compact-2026-09-04`): one turn, a compaction request (the block alone, `stop_reason: compaction`), then the block sent back first and a question only the summary answers | messages | both |
+| `prompt_cache` *(2026-11-12)* | prompt caching: a system prefix of at least 5,000 tokens with a `cache_control` mark, sent twice in a row | messages | both |
+| `prompt_cache_1h` *(2026-11-12)* | the same with the 1-hour TTL (`cache_control` `ttl: "1h"`) and a prefix text of its own, so it has its own cache entry | messages | both |
 | `error_unknown_model` | an unknown alias: 404 and the dialect's error shape | all, once per route | plain |
 | `error_malformed` | a truncated JSON body: 400 and the dialect's error shape | all, once per route | plain |
 
@@ -157,6 +159,26 @@ take the block, its `compaction_delta` and the `compaction` stop reason. Thresho
 not a scenario yet: its trigger is at least 50,000 input tokens, about $0.01 a run on
 `claude-haiku-5-5` before the compaction itself, against well under a tenth of a cent for the
 on-demand scenario (a few hundred tokens in and out over its three requests).
+
+`prompt_cache` *(2026-11-12)* sends one request twice: a deterministic system prefix of at
+least 5,000 tokens (generated in `scripts/compat_live/caching.py`, above every current model's
+minimum cacheable length) as a text block with `cache_control: {type: ephemeral}`, and a
+one-word question. It passes when the second answer's `cache_read_input_tokens` is above zero
+and the first answer wrote or read the cache (another cell of the same model may have written
+it a moment before); streamed, each answer's `message_start.message.usage` also has to show
+input or cache tokens above zero (gateway design §6.2). A route that is not
+Anthropic-protocol names `cache_control` in `x-lmgw-params-ignored` on the first answer and
+caches nothing: the cell is skipped with that reason, and the second request is not sent. The
+prefix (about 25,000 characters, 6,000 to 8,000 tokens) costs one cache write and one cache
+read of that size per model and mode.
+
+`prompt_cache_1h` *(2026-11-12)* is the same shape with `cache_control: {type: ephemeral, ttl:
+"1h"}` on a prefix of another text (`caching.prefix(label=...)`, so it does not share the
+5-minute scenario's cache entry). It passes when the first answer shows
+`usage.cache_creation.ephemeral_1h_input_tokens` above zero or read the cache, and the second
+answer's `cache_read_input_tokens` is above zero; the skip rule and the streamed
+`message_start` check are `prompt_cache`'s. It costs one more write and read of the same size,
+the write at the 1-hour price.
 
 **Preset.** `--preset default` is `kilo/anthropic/claude-haiku-5.5`, `kilo/openai/gpt-6-luna`,
 `kilo/google/gemini-3.8-flash` (an OpenAI-compatible aggregator upstream) and
@@ -429,8 +451,8 @@ adaptive thinking.
 
 - Level 1 (§2) as a whole.
 - `/v1/completions`, `/v1/embeddings`, `/v1/models`, `/v1/realtime`, audio and images routes.
-- Anthropic prompt caching (`cache_control`), PDFs and documents, citations, server tools
-  (web search), `pause_turn` continuation, and the batch and files APIs.
+- Anthropic PDFs and documents, citations, server tools (web search), `pause_turn`
+  continuation, and the batch and files APIs.
 - Responses: built-in tools, `background`, retrieving a stored response
   (`GET /v1/responses/{id}`), the `input_items` listing, `conversation`.
 - OpenAI `n > 1`, `logprobs`, `seed`, audio output, `parallel_tool_calls: false`, and

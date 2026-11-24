@@ -439,22 +439,22 @@ fn the_cost_line_shows_spend_without_a_model_call() {
     assert!(free.is_some(), "a known 0 is a cost, not nothing");
 }
 
-/// The inline report says what happened and then every warning verbatim —
+/// The inline report says what happened and then every warning as the server wrote it —
 /// errors block a save, warnings never do (§5).
 #[test]
 fn the_report_leads_with_the_outcome_then_the_warnings() {
     let r = AgentImportReport {
         ok: true,
         id: "mail-labeler".into(),
-        warnings: vec!["no MCP server with label 'gws' is registered".into()],
+        warnings: vec!["No MCP server with label 'gws' is registered".into()],
         replaced: true,
         ..Default::default()
     };
     assert_eq!(
         report_lines(&r),
         vec![
-            "saved 'mail-labeler'.".to_string(),
-            "no MCP server with label 'gws' is registered".to_string(),
+            "Saved 'mail-labeler'.".to_string(),
+            "No MCP server with label 'gws' is registered".to_string(),
         ]
     );
 
@@ -465,7 +465,7 @@ fn the_report_leads_with_the_outcome_then_the_warnings() {
     };
     assert_eq!(
         report_lines(&checked),
-        vec!["'x' checks out — nothing written."]
+        vec!["Checks out: 'x' — nothing written."]
     );
 
     // A slot the file could not carry is the one thing left to do, and it
@@ -478,7 +478,7 @@ fn the_report_leads_with_the_outcome_then_the_warnings() {
     let lines = report_lines(&unbound);
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(
-        lines[1].starts_with("slots to bind after import: notes, archive"),
+        lines[1].starts_with("Slots to bind after import: notes, archive"),
         "{lines:?}"
     );
 }
@@ -537,7 +537,7 @@ fn the_unbound_line_names_the_slots_or_stays_away() {
     assert_eq!(unbound_line(&[]), None);
     let line = unbound_line(&["notes".to_string(), "archive".to_string()]).unwrap();
     assert!(
-        line.starts_with("slots to bind after import: notes, archive"),
+        line.starts_with("Slots to bind after import: notes, archive"),
         "{line}"
     );
     assert_eq!(line.lines().count(), 1, "{line}");
@@ -621,12 +621,12 @@ fn a_required_field_the_form_has_nothing_in_blocks_the_start() {
     assert_eq!(config_gap(&[]), None);
     assert_eq!(
         config_gap(&["MODEL".into()]),
-        Some("set MODEL in Config above — this agent ships no default for it".to_string())
+        Some("Set MODEL in Config below — this agent ships no default for it".to_string())
     );
     // Every one of them, not just the first: filling one in and being
     // refused again for the next is the worst way to learn there were two.
     let two = config_gap(&["MODEL".into(), "Mailbox".into()]).unwrap();
-    assert!(two.starts_with("set MODEL and Mailbox in Config"), "{two}");
+    assert!(two.starts_with("Set MODEL and Mailbox in Config"), "{two}");
 }
 
 /// An output that can decide through a question set needs the model or a
@@ -663,7 +663,7 @@ fn a_classify_needs_the_model_or_a_question_set() {
         draft.load(&fields, &json!({}));
         assert_eq!(
             unfilled_model_and_set(&fields, draft, &decide).as_deref(),
-            Some("set Model or Question set in Config above — a classify needs one of them")
+            Some("Set Model or Question set in Config below — a classify needs one of them")
         );
         draft.load(&fields, &json!({ "decision_set": 3 }));
         assert_eq!(unfilled_model_and_set(&fields, draft, &decide), None);
@@ -800,4 +800,46 @@ fn a_run_names_a_set_when_its_rows_carry_one() {
         stamped[1].for_apply(&Default::default())["set"]["id"],
         json!(3)
     );
+}
+
+/// Two quick moves of the selection (to b, then to c) have two reads out:
+/// c's answer is applied however late b's lands, and b's never is.
+#[test]
+fn only_the_newest_read_of_the_selected_agent_is_applied() {
+    let owner = leptos::prelude::Owner::new();
+    owner.with(|| {
+        let reads = DetailReads::new();
+        reads.forget();
+        let b = reads.begin().unwrap();
+        reads.forget();
+        let c = reads.begin().unwrap();
+        // c answers first: the first of its selection, so it fills the drafts.
+        assert_eq!(reads.accept(c, "c", "c"), Some(true));
+        // b's late answer is dropped, both as the older read and as another
+        // agent than the one selected.
+        assert_eq!(reads.accept(b, "b", "c"), None);
+        // A re-read of c (a save, a run's end) keeps the drafts' edits.
+        let again = reads.begin().unwrap();
+        assert_eq!(reads.accept(again, "c", "c"), Some(false));
+        // Away and back: a, then c again, is a fresh selection.
+        reads.forget();
+        let back = reads.begin().unwrap();
+        assert_eq!(reads.accept(back, "c", "c"), Some(true));
+        // The newest read of an agent the list has since left is dropped too.
+        let left = reads.begin().unwrap();
+        assert_eq!(reads.accept(left, "c", "d"), None);
+    });
+    owner.cleanup();
+}
+
+#[test]
+fn a_run_in_flight_is_busy_in_the_hero_as_in_the_list() {
+    let d = AgentDetail {
+        enabled: true,
+        requires_ok: true,
+        ..Default::default()
+    };
+    let (dot, word) = hero::detail_state(&d, true);
+    assert_eq!((dot, word.as_str()), (crate::widgets::Dot::Busy, "Running"));
+    assert_eq!(dot.chip_class(), "chip info");
 }

@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// What a running image or audio call is doing (`ToolProgressFrame::phase`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +134,16 @@ pub struct ToolProgressFrame {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub free_bytes: Option<u64>,
+    /// `waiting_for_room` and `unloading` on a computer with several
+    /// graphics cards: the card or cards it happens on, in words ("NVIDIA
+    /// RTX 6000 Ada Generation (card 2)"). Absent on one card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub on: Option<String>,
+    /// `unloading`: another card holds the model being unloaded, and lmgw
+    /// starts it again there.
+    #[serde(skip_serializing_if = "is_false")]
+    pub moves: bool,
     /// Since the call started.
     pub elapsed_ms: u64,
     /// What a cancel would do now, while an image job runs; absent before

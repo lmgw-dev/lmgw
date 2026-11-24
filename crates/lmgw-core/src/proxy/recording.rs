@@ -556,6 +556,9 @@ pub(super) fn price_call(
         completion: usage.completion_tokens,
         cached_in: usage.cached_input_tokens,
         cache_write: usage.cache_write_tokens,
+        // Priced, not recorded: the row keeps one cache-write count, and
+        // its split by TTL is not stored yet.
+        cache_write_1h: usage.cache_write_1h_tokens,
         reasoning: usage.reasoning_tokens,
     };
     let sheet = snap.sheet_for(
@@ -974,8 +977,20 @@ pub(super) async fn record_refusal(
 /// `e` as the client's protocol answers it: its status and body, and an
 /// upstream rate refusal's rate-limit headers (openai egress design §8).
 pub(super) fn error_response(proto: ClientProto, e: &GatewayError) -> Response {
+    error_response_with(proto, e, None)
+}
+
+/// [`error_response`] for an error that is an upstream's own answer, with
+/// that upstream's request id in the body (`request_id` in Anthropic's
+/// envelope, gateway design §6.2); the header goes on with the gate's
+/// ([`crate::gate::GateHeaders::stamp`]).
+pub(super) fn error_response_with(
+    proto: ClientProto,
+    e: &GatewayError,
+    request_id: Option<&str>,
+) -> Response {
     let status = proto.error_status(e);
-    let body = proto.serialize_error(e);
+    let body = proto.serialize_error_with(e, request_id);
     let mut resp = (status, axum::Json(body)).into_response();
     e.stamp_rate_hints(&mut resp);
     resp
@@ -996,6 +1011,10 @@ pub const FALLBACK_CHAIN_HEADER: &str = "x-lmgw-fallback-chain";
 /// §4.1): its model id. Never next to [`FALLBACK_HEADER`] —
 /// [`crate::gate::GateHeaders::stamp`] writes one or the other.
 pub const CANDIDATE_HEADER: &str = "x-lmgw-candidate";
+/// Anthropic's own request id (`req_…`), relayed on a `/v1/messages` answer
+/// an Anthropic upstream gave (gateway design §6.2) —
+/// [`crate::gate::GateHeaders::stamp`] writes it.
+pub const REQUEST_ID_HEADER: &str = "request-id";
 
 /// Reasoning controls the answering route cannot express (§5.3), and
 /// `enabled` for an off fitted to the model in another form (§5.6). Comma
@@ -1158,8 +1177,10 @@ pub fn params_ignored(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Annotations {
     pub ignored: Vec<&'static str>,
-    /// [`params_ignored`]: the modelled samplers the route does not send.
-    pub params_ignored: Vec<&'static str>,
+    /// [`params_ignored`]: the modelled samplers the route does not send,
+    /// then the request's own fields it does not send
+    /// ([`crate::ir::ChatRequest::fields_ignored`]).
+    pub params_ignored: Vec<String>,
     /// [`PARAMS_REFUSED_HEADER`]: the parameters the model refused, left out.
     pub params_refused: Vec<&'static str>,
     pub max_tokens_defaulted: Option<u32>,
@@ -1243,7 +1264,7 @@ pub(crate) fn with_annotations(mut resp: Response, a: &Annotations) -> Response 
     if !a.params_ignored.is_empty() || !a.blocks_ignored.is_empty() {
         // A unary answer's own blocks were named on the response already
         // ([`name_answer_blocks`]); they follow what the send left out.
-        let mut names: Vec<String> = a.params_ignored.iter().map(|s| s.to_string()).collect();
+        let mut names: Vec<String> = a.params_ignored.clone();
         names.extend(a.blocks_ignored.iter().cloned());
         if let Some(answer) = resp
             .headers()
@@ -1686,6 +1707,9 @@ pub(super) use quantities::{quantity_column, with_requests_default};
 
 mod write;
 pub(super) use write::summary as row_summary;
+/// A row of a request that is no model call (a document conversion,
+/// `server/documents`): written as a task of its own, the gauge closed by it.
+pub(crate) use write::write_row;
 
 #[cfg(test)]
 mod tests;

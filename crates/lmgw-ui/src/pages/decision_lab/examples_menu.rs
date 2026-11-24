@@ -39,7 +39,8 @@ pub(super) fn ExamplesMenu(lab: Lab) -> impl IntoView {
             <RowMenu
                 items=items
                 title="Load a built-in example into the form"
-                label=Signal::derive(|| "Examples ▾".to_string())
+                label=Signal::derive(|| "Examples".to_string())
+                chevron=true
             />
             <span class="mini-note dim">
                 {move || if lab.form.dirty() { "edited" } else { "" }}

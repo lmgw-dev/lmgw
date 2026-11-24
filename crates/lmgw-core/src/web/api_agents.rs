@@ -1170,8 +1170,8 @@ fn degraded_detail(
         portability: dto::AgentPortability {
             portable: false,
             notes: vec![
-                "this agent's manifest could not be read by this build, so whether an export \
-                 of it lands on another box cannot be judged here"
+                "This agent's manifest could not be read by this build, so whether an export \
+                 of it lands on another box cannot be judged here."
                     .to_string(),
             ],
         },
@@ -1326,6 +1326,10 @@ pub(crate) async fn detail_inner(
                     .map_err(|e| e.to_string())?
                     .is_some(),
                 scope_note: token::scope_note(mode, &patterns),
+                scope_models: match mode {
+                    crate::config::ScopeMode::All => Vec::new(),
+                    _ => patterns.split('\n').map(str::to_string).collect(),
+                },
             }
         },
         currency: state.snapshot().settings.currency.clone(),
@@ -1913,7 +1917,7 @@ async fn import_now(
         // rather than discovered by pressing Import afterwards.
         if existing.is_some() && !replace {
             warnings.push(format!(
-                "an agent with id '{}' already exists; importing this file would need replace=1 \
+                "An agent with id '{}' already exists; importing this file would need replace=1 \
                  (its stored config would be kept).",
                 m.id
             ));
@@ -1962,7 +1966,7 @@ async fn import_now(
                     .map_err(|e| e.to_string())?;
             if !dropped_config.is_empty() {
                 warnings.push(format!(
-                    "the stored config values {} are not declared by the new manifest and were \
+                    "The stored config values {} are not declared by the new manifest and were \
                      removed with the old one; everything else was kept.",
                     dropped_config.join(", ")
                 ));
@@ -2001,7 +2005,7 @@ async fn import_now(
     // it up would serve the previous agent under the new one's name.
     if let Some(stopped) = agents::service::stop(state, &m.id, "the manifest was replaced").await {
         warnings.push(format!(
-            "this agent's app was started from the manifest the import just replaced, so it was \
+            "This agent's app was started from the manifest the import just replaced, so it was \
              stopped ({}). The next request to {} starts the new one.",
             stopped.describe(),
             {
@@ -2021,7 +2025,7 @@ async fn import_now(
             // next time someone read the Run tab.
             if !values.is_empty() {
                 warnings.push(format!(
-                    "the file's config_values ({}) were ignored: replacing an agent keeps the \
+                    "The file's config_values ({}) were ignored: replacing an agent keeps the \
                      config it already has.",
                     values.keys().cloned().collect::<Vec<_>>().join(", ")
                 ));
@@ -2037,7 +2041,7 @@ async fn import_now(
                     stored_config = values;
                 }
                 Err(e) => warnings.push(format!(
-                    "the file's config_values were not applied: {e}. Set them on the Run tab."
+                    "The file's config_values were not applied: {e}. Set them on the Run tab."
                 )),
             }
         }
@@ -2268,7 +2272,7 @@ pub(crate) fn manifest_arg(v: Option<&Value>) -> Result<(String, Option<String>)
         Some(obj @ Value::Object(_)) => Ok((
             obj.to_string(),
             Some(
-                "the manifest arrived as a JSON object, so its config form is in the key order \
+                "The manifest arrived as a JSON object, so its config form is in the key order \
                  the object parsed into — alphabetical, not the order the fields were written \
                  in. Pass the manifest as a JSON string to keep the author's order."
                     .to_string(),
@@ -2421,14 +2425,14 @@ async fn record_install(
     let digest = package::image_digest(state, &image).await;
     if digest.is_none() {
         report.warnings.push(format!(
-            "podman could not report a digest for '{image}', so this row records none. \
+            "Podman could not report a digest for '{image}', so this row records none. \
              'Pull image' will fill it in once it can."
         ));
     }
     if let Some(declared) = &declared {
         if declared != &image {
             report.warnings.push(format!(
-                "the manifest inside '{image}' names run.image '{declared}'. The manifest wins — \
+                "The manifest inside '{image}' names run.image '{declared}'. The manifest wins — \
                  that is the image a run, an apply and the app start — and the install is \
                  recorded against '{image}'."
             ));
@@ -2648,7 +2652,7 @@ async fn reimport_tail(
         .map_err(|e| e.message)?;
     if !changed {
         report.warnings.push(format!(
-            "the image's manifest is identical to the one already stored, so nothing about \
+            "The image's manifest is identical to the one already stored, so nothing about \
              '{id}' changed."
         ));
     }

@@ -108,6 +108,7 @@ fn stopped_record() -> String {
                     id: "c1".into(),
                     name: "stub__lookup".into(),
                     args: json!({"q": "x"}),
+                    cache_control: None,
                 },
             ],
         },
@@ -118,6 +119,7 @@ fn stopped_record() -> String {
                 name: Some("stub__lookup".into()),
                 content: ToolOutcome::error("abandoned when the run was cancelled").blocks,
                 is_error: true,
+                cache_control: None,
             }],
         },
     ];

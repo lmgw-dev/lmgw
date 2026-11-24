@@ -105,9 +105,17 @@ pub(crate) fn frame(call_id: &str, p: &MediaProgress, elapsed_ms: u64) -> ToolPr
             f.total_bytes = *total;
             f.size_note = size_note.clone();
         }
-        MediaProgress::Stage { phase, model, room } => {
+        MediaProgress::Stage {
+            phase,
+            model,
+            room,
+            on,
+            moves,
+        } => {
             f.phase = Some(*phase);
             f.model = Some(model.clone());
+            f.on = on.clone();
+            f.moves = *moves;
             if let Some((needs, free)) = room {
                 f.needs_bytes = Some(*needs);
                 f.free_bytes = Some(*free);

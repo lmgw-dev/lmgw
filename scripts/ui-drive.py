@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Usage: scripts/ui-drive.py STEPS.json [--size 1440x900] [--dsf 1] [--shots DIR] [--base URL] [--block-writes]
-#                            [--fake-mic WAV] [--mute-audio] [--init-script JS ...]
+#                            [--fake-mic WAV] [--mute-audio] [--init-script JS ...] [--transparent]
+#                            [--var NAME=VALUE ...]
 """Drive the dashboard through a scripted interaction and check what it did.
 
 ui-matrix.py answers "does every page fit at every size"; this answers "does
@@ -45,6 +46,10 @@ STEPS.json is a list of objects, run in order:
   {"until": "expr", "timeout": 30}    re-evaluate (a promise is awaited) every 0.25 s until truthy (PASS) or
                                       the timeout runs out (FAIL) — for work that
                                       finishes on its own time, like an ingest
+  "abort": true on an expect or until  a FAIL ends the run there (the rest of the
+                                      steps would act on a state that is not there:
+                                      a demo that sends the next prompt while the
+                                      last reply still streams)
   {"shot": "name"}                    viewport PNG to --shots/name.png
   {"repeat": 10, "steps": [...]}      run the inner steps n times
   {"snap": "a"}                       garbage-collect, then record the leak
@@ -74,6 +79,17 @@ no real microphone is opened and nothing is audible. For the chat voice drives
 records it in window.__blocked, so a destructive control can be pressed (a
 double-click on Delete) without anything reaching the server.
 
+--transparent draws the page on a fully transparent canvas instead of white
+(DevTools' default background override, alpha 0), so a shot keeps what the
+page leaves clear as alpha: the rounded corners of the framed-window state
+(scripts/drive/window-frame.js, scripts/readme-shots.sh).
+
+--var NAME=VALUE (repeatable) puts VALUE where the steps say @NAME@, escaped
+for a JavaScript regex and a JavaScript string in the step file's JSON, so one
+placeholder serves `/^@NAME@(\\s|$)/` and `'@NAME@'` alike (a `.` matches
+itself, a `/`, `'` or `\\` stays one character). A step file that still has an
+@NAME@ no --var filled is refused.
+
 --init-script JS (repeatable) evaluates the file in every new document
 before the page's own scripts: a fake the app reads as it boots, such as
 scripts/drive/machine-fake.js (the machine check's answers, and the app
@@ -102,7 +118,9 @@ import argparse
 import asyncio
 import base64
 import json
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -201,6 +219,10 @@ BLOCK_WRITES = r"""(() => {
     return f.apply(this, arguments);
   };
 })();"""
+
+class Aborted(Exception):
+    """A failed step marked "abort": the run ends there."""
+
 
 PANIC_MARKS = ("panicked at", "RuntimeError: unreachable", "already been disposed")
 
@@ -364,6 +386,9 @@ async def run(args, steps, token) -> int:
                            modifiers=held["mods"])
 
             await resize(args.size)
+            if args.transparent:
+                await call("Emulation.setDefaultBackgroundColorOverride",
+                           color={"r": 0, "g": 0, "b": 0, "a": 0})
             await call("Page.enable")
             await call("Network.enable")
             await call("Runtime.enable")
@@ -488,6 +513,8 @@ async def run(args, steps, token) -> int:
                     failures += 0 if ok else 1
                     print(f"{tag} {'PASS' if ok else 'FAIL'} {st.get('label', st['expect'])}"
                           + ("" if ok else f"  -> {json.dumps(r)[:300]}"))
+                    if not ok and st.get("abort"):
+                        raise Aborted(tag)
                 elif "until" in st:
                     deadline = time.monotonic() + st.get("timeout", 30)
                     ok = False
@@ -501,6 +528,8 @@ async def run(args, steps, token) -> int:
                         await asyncio.sleep(0.25)
                     failures += 0 if ok else 1
                     print(f"{tag} {'PASS' if ok else 'FAIL'} {st.get('label', st['until'])}")
+                    if not ok and st.get("abort"):
+                        raise Aborted(tag)
                 elif "wait" in st:
                     await asyncio.sleep(st["wait"])
                 elif "shot" in st and args.shots:
@@ -509,7 +538,10 @@ async def run(args, steps, token) -> int:
                     path.write_bytes(base64.b64decode(shot["data"]))
                     print(f"{tag} shot {path}")
 
-            await run_steps(steps)
+            try:
+                await run_steps(steps)
+            except Aborted as a:
+                print(f"{a} FAIL with \"abort\": the remaining steps are not run")
             # Events that arrived after the last step still count.
             await ev("1")
             if panics:
@@ -531,6 +563,22 @@ async def run(args, steps, token) -> int:
     return failures
 
 
+def fill_vars(raw: str, pairs: list) -> str:
+    """The step file's text with every @NAME@ of a --var NAME=VALUE replaced by VALUE, escaped for
+    a JS regex (punctuation gets a backslash, which a JS string literal drops again) and a quote
+    inside one, then for the JSON string it sits in. An @NAME@ left over is an error."""
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            sys.exit(f"--var wants NAME=VALUE with an upper-case NAME, got {pair!r}")
+        js = re.sub(r"([.*+?^${}()|\[\]\\/'\"])", r"\\\1", value)
+        raw = raw.replace(f"@{name}@", json.dumps(js)[1:-1])
+    left = sorted(set(re.findall(r"@[A-Z][A-Z0-9_]*@", raw)))
+    if left:
+        sys.exit(f"the steps use {', '.join(left)}, which no --var fills")
+    return raw
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -548,20 +596,32 @@ def main() -> int:
     ap.add_argument("--init-script", action="append", default=[], metavar="JS",
                     help="evaluate JS in every new document before the page's own scripts "
                          "(repeatable): an in-page fake the app reads as it boots")
+    ap.add_argument("--transparent", action="store_true",
+                    help="a transparent page background: shots keep what the page leaves clear as alpha")
     ap.add_argument("--fake-mic", metavar="WAV",
                     help="a fake microphone playing WAV once; the browser muted")
     ap.add_argument("--mute-audio", action="store_true",
                     help="mute the browser and let audio start without a gesture (a script's click "
                          "may then start playback); with --fake-mic too")
+    ap.add_argument("--var", action="append", default=[], metavar="NAME=VALUE",
+                    help="put VALUE where the steps say @NAME@, escaped for a JS regex and string")
     ap.add_argument("--podman-guard", default="lmgw-dev", metavar="PREFIX",
-                    help="container names to compare before/after ('' disables)")
+                    help="container names to compare before/after ('' disables); a dev copy "
+                         "made with LMGW_DEV_COPY_PREFIX needs that prefix here")
     args = ap.parse_args()
 
     token = args.token or Path(args.token_file).read_text().strip()
     raw = sys.stdin.read() if args.steps == "-" else Path(args.steps).read_text()
-    steps = json.loads(raw)
+    steps = json.loads(fill_vars(raw, args.var))
     if args.shots:
         Path(args.shots).mkdir(parents=True, exist_ok=True)
+
+    # A TERM, or an INT the parent shell left ignored (a background job of a script), would end
+    # Python without unwinding: run()'s finally would not stop Chrome nor remove its profile
+    # under /tmp (RAM). As KeyboardInterrupt they unwind through it.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
 
     before = podman_names(args.podman_guard)
     failures = asyncio.run(asyncio.wait_for(run(args, steps, token), timeout=1800))

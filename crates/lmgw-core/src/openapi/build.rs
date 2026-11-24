@@ -40,8 +40,22 @@ static V1_DOC: OnceLock<Value> = OnceLock::new();
 /// and `serve.rs` serializes it once too — a caller that wants its own copy
 /// to edit says so with `.clone()` (review R2 #1: the handlers used to clone
 /// the whole tree per request).
+///
+/// In a debug build, a test run can share one build of it between its test
+/// processes ([`super::doc_cache`]).
 pub fn admin_doc() -> &'static Value {
+    #[cfg(debug_assertions)]
+    return ADMIN_DOC.get_or_init(|| super::doc_cache::admin(build_admin));
+    #[cfg(not(debug_assertions))]
     ADMIN_DOC.get_or_init(build_admin)
+}
+
+/// The admin document built now, never read from a cache: what
+/// `tests/it/openapi_doc_cache.rs` holds the cached one to.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn build_admin_doc() -> Value {
+    build_admin()
 }
 
 /// The developer document: the admin document filtered to the operations
@@ -493,6 +507,20 @@ fn request_body(
             "required": true,
             "content": { mime: { "schema": { "type": "string", "format": "binary" } } },
         })),
+        Req::MultipartOrJson { multipart, json } => {
+            let form = schemas::embed(g, multipart);
+            let mut body = schemas::embed(g, json);
+            if let Some(ex) = example {
+                body["example"] = ex;
+            }
+            Some(json!({
+                "required": true,
+                "content": {
+                    "multipart/form-data": { "schema": form },
+                    "application/json": { "schema": body },
+                },
+            }))
+        }
         Req::RawOrMultipart { raw, multipart } => {
             let mut schema = schemas::embed(g, multipart);
             if let Some(ex) = example {
@@ -1117,8 +1145,15 @@ fn prune_v1_root(doc: &mut Value) {
 /// classification test both read, so a new public route has to be put on one
 /// side or the test fails. A device's enrolment is a client's (device link
 /// design §3.4): the token decides, not a session.
-const PUBLIC_DEVELOPER_OPS: &[(&str, &str)] =
-    &[("get", "/api/version"), ("post", "/devices/enrol")];
+const PUBLIC_DEVELOPER_OPS: &[(&str, &str)] = &[
+    ("get", "/api/version"),
+    ("post", "/devices/enrol"),
+    // docling-serve's health and version routes (document-conversion design
+    // §7.4.1): what a docling client checks the server with.
+    ("get", "/health"),
+    ("get", "/ready"),
+    ("get", "/version"),
+];
 
 /// Which operations belong in the developer document: everything intended for
 /// external clients and agents building on lmgw, i.e. every operation a

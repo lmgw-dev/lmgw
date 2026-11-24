@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model_find::{FileFit, FitMeasure, FitNote};
+use crate::model_find::{FileFit, FitMeasure, FitNote, GetChoice, GetLayout};
 use crate::{EngineDownload, HfCompanion, QueuedDownload};
 
 /// `model_get`'s arguments (the op's and `lmgw__model_get`'s).
@@ -26,6 +26,13 @@ pub struct ModelGetArgs {
     /// The model's id; absent, the repo's name in lower case without a
     /// trailing `-GGUF` (D28). A taken one gets `-2`, `-3` and so on.
     pub model_id: Option<String>,
+    /// How to set it up where no single card holds its full context
+    /// (device-ledger design WP12): `split` over several cards at the full
+    /// context, `one_card` at the largest context one card holds, or
+    /// `experts_in_ram` (a mixture-of-experts model) at the full context.
+    /// Absent for such a file, Get it downloads nothing and answers with
+    /// `choices`; a file one card holds is set up as before.
+    pub layout: Option<GetLayout>,
 }
 
 /// The models directory's free space against what the files need (D125):
@@ -90,6 +97,15 @@ pub struct ModelGetStarted {
     /// A get of this file was already under way, and this answer is that
     /// one's: nothing new was queued.
     pub joined: bool,
+    /// No single card holds the file at its full context, and no `layout`
+    /// was given: nothing was downloaded or created, and these are the ways
+    /// it can be set up, with their numbers (device-ledger design WP12).
+    /// Call again with one's `layout`.
+    pub choices: Vec<GetChoice>,
+    /// The way chosen, as given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub layout: Option<GetLayout>,
     pub message: String,
 }
 
@@ -105,6 +121,11 @@ pub enum ModelGetStage {
     /// connection, or cut and not started again. `waiting` says which and
     /// why.
     Paused,
+    /// The files are here, and the engine image the class's models run in
+    /// is still downloading: the row is created once it is here, so the
+    /// create can read the engine's flags (device-ledger design, ruling
+    /// 13). A download of it that fails does not fail the get.
+    WaitingForEngine,
     /// The files are here: planning, fitting and creating the row.
     SettingUp,
     /// The row is there.
@@ -183,6 +204,11 @@ pub struct ModelGetDone {
     pub note: Option<FitNote>,
     /// The plan's and the create's warnings, each a sentence.
     pub warnings: Vec<String>,
+    /// The way it was set up, where Get it asked (WP12); `None` for a file
+    /// one card holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub layout: Option<GetLayout>,
     pub next_step: String,
 }
 

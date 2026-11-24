@@ -54,8 +54,30 @@ pub fn checked(password: &str) -> Result<String, String> {
     Ok(n)
 }
 
+/// Set in a debug build (nextest's setup script sets it for lmgw-core's
+/// `it` tests), hashes are made with argon2's smallest parameters
+/// (m = 8 KiB, t = 1, p = 1): those tests sign in hundreds of times. The
+/// unit tests here run without it and hold the hashes to RFC 9106's set.
+#[cfg(debug_assertions)]
+pub const FAST_FOR_TESTS_ENV: &str = "LMGW_TEST_ARGON2_FAST";
+
+/// The (m, t, p) a hash is made with: [`ARGON2_M_KIB`], [`ARGON2_T`],
+/// [`ARGON2_P`], or the test set of [`FAST_FOR_TESTS_ENV`].
+fn current() -> (u32, u32, u32) {
+    #[cfg(debug_assertions)]
+    {
+        static FAST: LazyLock<bool> =
+            LazyLock::new(|| std::env::var_os(FAST_FOR_TESTS_ENV).is_some());
+        if *FAST {
+            return (8, 1, 1);
+        }
+    }
+    (ARGON2_M_KIB, ARGON2_T, ARGON2_P)
+}
+
 fn params() -> Params {
-    Params::new(ARGON2_M_KIB, ARGON2_T, ARGON2_P, None).expect("RFC 9106's parameter set is valid")
+    let (m, t, p) = current();
+    Params::new(m, t, p, None).expect("the parameter set is valid")
 }
 
 fn argon2() -> Argon2<'static> {
@@ -103,9 +125,11 @@ pub fn verify(password: &str, stored: Option<&str>) -> Verified {
     {
         return Verified::Bad;
     }
-    let current = Params::try_from(&parsed).ok().is_some_and(|p| {
-        p.m_cost() == ARGON2_M_KIB && p.t_cost() == ARGON2_T && p.p_cost() == ARGON2_P
-    }) && parsed.algorithm.as_str() == "argon2id";
+    let (m, t, p) = current();
+    let current = Params::try_from(&parsed)
+        .ok()
+        .is_some_and(|h| h.m_cost() == m && h.t_cost() == t && h.p_cost() == p)
+        && parsed.algorithm.as_str() == "argon2id";
     Verified::Good((!current).then(|| hash(&normalized).ok()).flatten())
 }
 

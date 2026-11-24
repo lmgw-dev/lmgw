@@ -16,6 +16,7 @@ fn fitted() -> Fitted {
             ctx: Some(8192),
             n_cpu_moe: None,
             n_gpu_layers: Some(34),
+            split: None,
         },
     }
 }

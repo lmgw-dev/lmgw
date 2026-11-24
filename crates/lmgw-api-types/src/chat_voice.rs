@@ -127,9 +127,9 @@ pub struct ModelState {
 /// `store::TurnDetection` parses exactly these names (its tests keep the
 /// two in step).
 pub const TURN_DETECTIONS: &[(&str, &str)] = &[
-    ("semantic_vad", "Smart Turn (semantic_vad)"),
-    ("server_vad", "silence only (server_vad)"),
-    ("push_to_talk", "push to talk"),
+    ("semantic_vad", "Smart Turn"),
+    ("server_vad", "Silence only"),
+    ("push_to_talk", "Push to talk"),
 ];
 
 /// The label of a turn-detection name; the name itself when it is none of
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_turn_detection_label_falls_back_to_the_name() {
-        assert_eq!(turn_detection_label("push_to_talk"), "push to talk");
+        assert_eq!(turn_detection_label("push_to_talk"), "Push to talk");
         assert_eq!(turn_detection_label("auto"), "auto");
     }
 }

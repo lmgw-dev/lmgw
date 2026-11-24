@@ -6,7 +6,7 @@ use axum::body::Bytes;
 
 /// One file part: its field name, file name, declared type and bytes.
 #[derive(Debug, Clone)]
-pub(super) struct FilePart {
+pub(in crate::web) struct FilePart {
     pub field: String,
     pub filename: String,
     pub content_type: Option<String>,
@@ -18,7 +18,7 @@ pub(super) struct FilePart {
 /// closing quote) or the header line (CR, LF, any control character).
 /// Dropped rather than escaped, because the name is a label here — the
 /// bytes are the upload.
-fn header_safe(name: &str) -> String {
+pub(in crate::web) fn header_safe(name: &str) -> String {
     name.chars()
         .filter(|c| !matches!(c, '"' | '\\') && !c.is_control())
         .collect()
@@ -31,12 +31,20 @@ fn header_safe(name: &str) -> String {
 /// rather than an outgoing reqwest call — `reqwest::multipart::Form` can only
 /// be handed to a `RequestBuilder`, and `proxy::handle_image_edit` takes the
 /// request a client would have sent.
-pub(super) fn multipart_body(
+pub(in crate::web) fn multipart_body(
     boundary: &str,
     fields: &[(String, String)],
     files: &[FilePart],
 ) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
+    // Sized once: the files, the fields and a header's worth per part.
+    let size = files.iter().map(|f| f.bytes.len() + 256).sum::<usize>()
+        + fields
+            .iter()
+            .map(|(n, v)| n.len() + v.len() + 128)
+            .sum::<usize>()
+        + boundary.len()
+        + 16;
+    let mut out: Vec<u8> = Vec::with_capacity(size);
     for (name, value) in fields {
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         out.extend_from_slice(

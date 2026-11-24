@@ -314,15 +314,15 @@ impl fmt::Display for TlsRefusal {
             Self::Unproven => f.write_str(
                 "the handshake failed with a certificate_required alert before lmgw proved \
                  itself, so this says nothing about the pairing link: try again (if it keeps \
-                 failing, make a new link on lmgw's Devices card)",
+                 failing, make a new link in lmgw under Usage → Keys & budgets)",
             ),
             Self::AuthorityChanged => {
                 f.write_str("lmgw's device authority changed, or this is not your lmgw: pair again")
             }
             Self::HostNotNamed { host } => write!(
                 f,
-                "lmgw's certificate does not name {}: add this URL to the device's row on lmgw's \
-                 Devices card",
+                "lmgw's certificate does not name {}: add this URL to the device's URLs on its \
+                 page in lmgw (Usage → Keys & budgets)",
                 host.as_deref().unwrap_or("this URL's host")
             ),
             Self::ServerCertificateDates => f.write_str(

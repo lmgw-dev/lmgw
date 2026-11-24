@@ -5,7 +5,7 @@
 //! (D34) and "Get it", which turns into its progress (§6.1).
 
 use leptos::prelude::*;
-use lmgw_api_types::model_find::{FileFit, FindAnswer, FitMark, FitMeasure, ModelCard};
+use lmgw_api_types::model_find::{FileFit, FindAnswer, FitMark, FitMeasure, GetLayout, ModelCard};
 
 use super::share::{PrivateLine, SendToFriend};
 use super::shown::{self, Choice, Shown};
@@ -13,12 +13,22 @@ use super::words::{self, Checked};
 use super::{no_card, progress, Finder, Getting};
 use crate::pages::wizard::marks;
 use crate::pages::wizard::{HfWizard, PickedFile};
+use crate::widgets::fit_signals::{FitSignals, FreeChip};
 use crate::widgets::machine_check::MachineInCard;
 use crate::widgets::Modal;
 
+/// A way of setting a file up, as Get it asks it (WP12).
+fn layout_name(l: GetLayout) -> &'static str {
+    match l {
+        GetLayout::Split => "Split over several cards, full context",
+        GetLayout::OneCard => "One card, shorter context",
+        GetLayout::ExpertsInRam => "Experts in RAM, full context",
+    }
+}
+
 /// Who makes room for a fit on the whole card, by the card's reading or,
 /// before the marks, by what the fit says is beside it.
-fn who(s: &Shown) -> &'static str {
+fn who(s: &Shown) -> String {
     match &s.card {
         Some(c) => marks::who(Some(c)),
         None => {
@@ -27,9 +37,10 @@ fn who(s: &Shown) -> &'static str {
                 .beside
                 .as_ref()
                 .or(s.other.as_ref().and_then(|o| o.fit.beside.as_ref()));
-            marks::who_of(
+            marks::who_on(
                 b.and_then(|b| b.outside_bytes),
                 b.is_some_and(|b| b.residents_bytes > 0),
+                s.fit.card.as_ref(),
             )
         }
     }
@@ -79,7 +90,7 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
 
     let head = move || {
         let s = shown.get();
-        let (text, tone) = words::chip(&s.fit, who(&s), checked.get());
+        let (text, tone) = words::chip(&s.fit, &who(&s), checked.get());
         let tip = marks::tip(&s.fit, None);
         view! { <span class=format!("chip {tone} mf-mark") title=tip>{text}</span> }
     };
@@ -100,6 +111,12 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
                 <p class="mf-line" title=marks::tip(&s.fit, None)>{l}</p>
             }
         })
+    };
+    // WP12: Min. cards, Free VRAM and the experts in RAM, as badges.
+    let signals = move || {
+        shown
+            .with(|s| s.fit.cards.clone())
+            .map(|c| view! { <div class="mf-signals"><FitSignals c=c/></div> })
     };
     // D120: the other measure's pick in one line, with the switch to it.
     let other = move || {
@@ -318,7 +335,10 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
             )
     };
     let fits = move || {
-        shown.with(|s| !matches!(s.fit.mark, FitMark::DoesNotFit | FitMark::DoesNotFitBySize))
+        shown.with(|s| {
+            !matches!(s.fit.mark, FitMark::DoesNotFit | FitMark::DoesNotFitBySize)
+                || s.fit.cards.as_ref().is_some_and(|c| c.asks())
+        })
     };
     let get_it = move |_| {
         if !has_file {
@@ -330,7 +350,22 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
             return;
         }
         frozen.set(Some(s.clone()));
-        card.with_value(|c| progress::start(f, c, &s));
+        // No single card holds it at its full context: the person chooses
+        // how it is set up, with the numbers (WP12).
+        if let Some(c) = s.fit.cards.as_ref().filter(|c| c.asks()) {
+            f.get.set(Getting::Asks(c.choices.clone()));
+            return;
+        }
+        card.with_value(|c| progress::start(f, c, &s, None));
+    };
+    let choose = move |layout: GetLayout| {
+        let s = shown.get_untracked();
+        frozen.set(Some(s.clone()));
+        card.with_value(|c| progress::start(f, c, &s, Some(layout)));
+    };
+    let not_now = move |_| {
+        frozen.set(None);
+        f.get.set(Getting::Idle);
     };
 
     view! {
@@ -345,6 +380,7 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
             {can}
             <p class="mf-line">{ctx_line}</p>
             {uses}
+            {signals}
             {other}
             {has_file.then_some(download)}
             {licence}
@@ -430,17 +466,55 @@ pub(super) fn FinderCard(f: Finder, card: ModelCard, answer: FindAnswer) -> impl
                     }
                         .into_any()
                 }
-                Getting::Starting => view! {
-                    <footer class="mf-actions"><span class="dim">"Queueing the download…"</span></footer>
+                Getting::Asks(choices) => view! {
+                    <div class="mf-ask mf-layouts" role="group" aria-label="How to set it up">
+                        <p class="mf-line">
+                            "No single graphics card holds this file at its full context. Choose how lmgw sets it up; nothing is downloaded until you do."
+                        </p>
+                        <ul class="mf-choices">
+                            {choices
+                                .into_iter()
+                                .map(|c| {
+                                    let layout = c.layout;
+                                    view! {
+                                        <li>
+                                            <button class="mf-choice" on:click=move |_| choose(layout)>
+                                                <span class="mf-choice-name">{layout_name(layout)}</span>
+                                                <span class="mf-choice-detail">{c.sentence.clone()}</span>
+                                                <FreeChip f=c.free.clone()/>
+                                            </button>
+                                        </li>
+                                    }
+                                })
+                                .collect_view()}
+                        </ul>
+                        <footer class="mf-actions">
+                            <span class="mf-spacer"></span>
+                            <button class="btn" on:click=not_now>"Not now"</button>
+                        </footer>
+                    </div>
+                }
+                    .into_any(),
+                Getting::Starting { reads_header } => view! {
+                    <footer class="mf-actions mf-starting">
+                        <div class="progress indeterminate mf-wait" aria-hidden="true"><i></i></div>
+                        <span class="dim">
+                            {if reads_header {
+                                "Reading the start of the file (a few MiB) to see which graphics cards hold it, then queueing the download…"
+                            } else {
+                                "Checking which graphics cards hold it, then queueing the download…"
+                            }}
+                        </span>
+                    </footer>
                 }
                     .into_any(),
                 Getting::Running(started) => {
                     let rate = card.with_value(|c| c.download.rate_bytes_per_sec);
-                    view! { <progress::GetProgress f=f started=started rate=rate/> }.into_any()
+                    view! { <progress::GetProgress f=f started=*started rate=rate/> }.into_any()
                 }
                 Getting::Done(done) => {
                     let name = card.with_value(|c| c.name.clone());
-                    view! { <progress::Ready f=f done=done kind=kind name=name/> }.into_any()
+                    view! { <progress::Ready f=f done=*done kind=kind name=name/> }.into_any()
                 }
             }}
         </article>

@@ -14,6 +14,19 @@ use lmgw_core::state::AppState;
 /// integer can be (a PIN), so integers are asked about too.
 const NOT_SECRET: &[(&str, &str)] = &[
     (
+        "documents_jobs_per_key",
+        "how many conversion jobs one API key may have running or queued: a count, not a key",
+    ),
+    (
+        "jobs_per_key",
+        "the settings' name of documents_jobs_per_key: a count per API key, not a key",
+    ),
+    (
+        "gpu_pin",
+        "the graphics cards a model may run on, by their ids (device-ledger design §8): a \
+         pin to a card, not a PIN",
+    ),
+    (
         "public_key",
         "a device's enrolment public key: public by definition (device link design §3.4)",
     ),

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::page::{Facts, Lab};
 use crate::api;
-use crate::widgets::Select;
+use crate::widgets::{ActionRow, ComboRow, EntryRow, PrefGroup, StackRow};
 
 #[component]
 pub(super) fn FormCards(lab: Lab) -> impl IntoView {
@@ -28,7 +28,7 @@ fn Notices(lab: Lab) -> impl IntoView {
         {move || match lab.facts.get() {
             Facts::Failed(e) => Some(view! {
                 <div class="notice err">
-                    {format!("⚠ {e}")}
+                    {e}
                     <button class="btn ghost sm" on:click=move |_| lab.load_facts()>"Retry"</button>
                 </div>
             }),
@@ -36,7 +36,7 @@ fn Notices(lab: Lab) -> impl IntoView {
         }}
         {move || {
             let e = lab.run_err.get();
-            (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
+            (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
         }}
     }
 }
@@ -79,35 +79,49 @@ fn VoiceCard(lab: Lab) -> impl IntoView {
             .unwrap_or_else(|| "model default".into())
     };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Voice"</h3>
-            {move || match mode() {
-                None => view! {
-                    <p class="dim mini-note">"Pick a model: the form shows what it takes."</p>
-                }
-                .into_any(),
-                Some((desc, required, takes_voice)) => {
-                    let (label, hint) = description_words(desc, required);
-                    view! {
-                        {(desc != VoiceDescriptionMode::None).then(|| view! {
-                            <div class="field">
-                                <label>{label}</label>
-                                <textarea
-                                    class="input ta vl-desc"
-                                    placeholder="e.g. a warm, calm female voice in her forties, \
-                                                 slightly husky, unhurried"
-                                    prop:value=move || lab.description.get()
-                                    on:input=move |ev| lab.description.set(event_target_value(&ev))
-                                ></textarea>
-                                <div class="field-hint">{hint}</div>
-                            </div>
-                        })}
+        {move || match mode() {
+            None => view! {
+                <PrefGroup title="Voice">
+                    <StackRow>
+                        <span class="dim">"Pick a model: the form shows what it takes."</span>
+                    </StackRow>
+                </PrefGroup>
+            }
+            .into_any(),
+            Some((desc, required, takes_voice)) => {
+                let (label, hint) = description_words(desc, required);
+                let note = match (desc == VoiceDescriptionMode::None, takes_voice) {
+                    (true, false) => "This model takes neither a description nor a voice.",
+                    (true, true) => "This model reads no voice description.",
+                    _ => "",
+                };
+                view! {
+                    {(desc != VoiceDescriptionMode::None).then(|| view! {
+                        <section class="pref-group lab-prompt">
+                            <div class="pref-head"><h2>{label}</h2></div>
+                            <p class="pref-desc">{hint}</p>
+                            <textarea
+                                class="input ta lab-prompt-field vl-desc"
+                                aria-label=label
+                                placeholder="e.g. a warm, calm female voice in her forties, \
+                                             slightly husky, unhurried"
+                                prop:value=move || lab.description.get()
+                                on:input=move |ev| lab.description.set(event_target_value(&ev))
+                            ></textarea>
+                        </section>
+                    })}
+                    {(takes_voice || !note.is_empty()).then(|| view! {
+                    <PrefGroup title="Voice" desc=note>
                         {takes_voice.then(|| view! {
-                            <div class="field" style="margin-top:10px">
-                                <label>"Voice"</label>
+                            <ActionRow
+                                title="Voice"
+                                sub="A voice the model speaks: one it ships, a preset, or a library sample"
+                            >
                                 <input
-                                    class="input"
+                                    class="prow-entry vl-voice"
                                     list="vl-voices"
+                                    aria-label="Voice"
+                                    spellcheck="false"
                                     placeholder=placeholder
                                     prop:value=move || lab.voice.get()
                                     on:input=move |ev| lab.voice.set(event_target_value(&ev))
@@ -121,22 +135,14 @@ fn VoiceCard(lab: Lab) -> impl IntoView {
                                             .collect_view()
                                     }}
                                 </datalist>
-                                <div class="field-hint">
-                                    "A voice the model speaks: one it ships, a preset, or a library sample."
-                                </div>
-                            </div>
+                            </ActionRow>
                         })}
-                        {(desc == VoiceDescriptionMode::None && !takes_voice).then(|| view! {
-                            <p class="dim mini-note">"This model takes neither a description nor a voice."</p>
-                        })}
-                        {(desc == VoiceDescriptionMode::None && takes_voice).then(|| view! {
-                            <p class="dim mini-note">"This model reads no voice description."</p>
-                        })}
-                    }
-                    .into_any()
+                    </PrefGroup>
+                    })}
                 }
-            }}
-        </div>
+                .into_any()
+            }
+        }}
     }
 }
 
@@ -192,28 +198,32 @@ fn TextCard(lab: Lab) -> impl IntoView {
             .unwrap_or_else(|| lab.language.get())
     };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Text"</h3>
-            <div class="field-grid" style="--field-min:180px">
-                <div class="field">
-                    <label>"Language"</label>
-                    <Select value=lab.language options=options placeholder="pick a language"/>
-                </div>
+        <PrefGroup title="Text">
+            <ComboRow title="Language" value=lab.language options=options placeholder="pick a language"/>
+        </PrefGroup>
+        <section class="pref-group lab-prompt">
+            <div class="pref-head">
+                <h2>"What every candidate says"</h2>
+                <span class="pref-suffix dim vl-sentence-state">
+                    {move || match entry() {
+                        Some(s) if s.saved => "your saved sentence".to_string(),
+                        Some(_) => "the built-in sentence".to_string(),
+                        None => "no sentence for this language".to_string(),
+                    }}
+                </span>
             </div>
-            <div class="field" style="margin-top:10px">
-                <label>"What every candidate says"</label>
-                <textarea
-                    class="input ta vl-text"
-                    placeholder="No sentence for this language yet: write one, then save it for the language."
-                    prop:value=move || lab.text.get()
-                    on:input=move |ev| lab.text.set(event_target_value(&ev))
-                ></textarea>
-                <div class="field-hint">
-                    "A cloning model learns the voice from this clip, so a phonetically rich passage "
-                    "of about ten seconds works best. It becomes the sample's transcript as the model was sent it, "
-                    "so listen to the end before saving: a model that skips words leaves a transcript a cloning model trips over."
-                </div>
-            </div>
+            <textarea
+                class="input ta lab-prompt-field vl-text"
+                aria-label="What every candidate says"
+                placeholder="No sentence for this language yet: write one, then save it for the language."
+                prop:value=move || lab.text.get()
+                on:input=move |ev| lab.text.set(event_target_value(&ev))
+            ></textarea>
+            <p class="pref-desc vl-text-hint">
+                "A cloning model learns the voice from this clip, so a phonetically rich passage "
+                "of about ten seconds works best. It becomes the sample's transcript as the model was sent it, "
+                "so listen to the end before saving: a model that skips words leaves a transcript a cloning model trips over."
+            </p>
             <div class="row vl-text-actions">
                 <Show when=move || edited() && !lab.text.get().trim().is_empty()>
                     <button
@@ -225,7 +235,7 @@ fn TextCard(lab: Lab) -> impl IntoView {
                         {move || format!("Save as the {} sentence", name())}
                     </button>
                     <button
-                        class="btn ghost sm"
+                        class="btn flat sm"
                         title="Put the language's sentence back in the box"
                         on:click=move |_| lab.text.set(in_effect())
                     >
@@ -234,7 +244,7 @@ fn TextCard(lab: Lab) -> impl IntoView {
                 </Show>
                 <Show when=move || entry().is_some_and(|s| s.saved && s.builtin.is_some())>
                     <button
-                        class="btn ghost sm"
+                        class="btn flat sm"
                         disabled=move || saving.get()
                         title="Drop your saved sentence: the built-in one is the prefill again"
                         on:click=move |_| save(String::new())
@@ -242,81 +252,46 @@ fn TextCard(lab: Lab) -> impl IntoView {
                         "Back to the built-in sentence"
                     </button>
                 </Show>
-                <span class="dim mini-note">
-                    {move || match entry() {
-                        Some(s) if s.saved => "your saved sentence".to_string(),
-                        Some(_) => "the built-in sentence".to_string(),
-                        None => "no sentence for this language".to_string(),
-                    }}
-                </span>
             </div>
             {move || {
                 let e = lab.sentences_err.get();
                 (!e.is_empty()).then(|| view! {
-                    <div class="notice err vl-file-err">{format!("⚠ Your saved sentences are not used: {e}")}</div>
+                    <div class="notice err vl-file-err">{format!("Your saved sentences are not used: {e}")}</div>
                 })
             }}
             {move || {
                 lab.facts()
                     .and_then(|f| f.language_note)
-                    .map(|n| view! { <div class="field-hint vl-warn">{n}</div> })
+                    .map(|n| view! { <p class="pref-desc vl-warn">{n}</p> })
             }}
-        </div>
+        </section>
     }
 }
 
 #[component]
 fn CandidatesCard(lab: Lab) -> impl IntoView {
     let reads_seed = move || lab.facts().is_some_and(|f| f.reads_seed);
+    let desc = move || match lab.facts() {
+        Some(f) if f.reads_seed && f.row_pins_seed => {
+            "Each candidate is sent a seed of its own (the next ones count up from \
+             the first). This row also pins a seed in its default request options."
+        }
+        Some(f) if f.reads_seed => {
+            "Each candidate is sent a seed of its own; the next ones count up from \
+             the first. Rendered one after another."
+        }
+        Some(f) if !f.local => {
+            "A cloud model is sent no seed: its candidates differ by its own chance."
+        }
+        Some(_) => "This engine takes no seed: its candidates may come out alike.",
+        None => "Rendered one after another.",
+    };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Candidates"</h3>
-            <div class="field-grid" style="--field-min:160px">
-                <div class="field">
-                    <label>"How many"</label>
-                    <input
-                        class="input w-num"
-                        type="number"
-                        min="1"
-                        step="1"
-                        prop:value=move || lab.count.get()
-                        on:input=move |ev| lab.count.set(event_target_value(&ev))
-                    />
-                </div>
-                <Show when=reads_seed>
-                    <div class="field">
-                        <label>"First seed"</label>
-                        <input
-                            class="input"
-                            inputmode="numeric"
-                            placeholder="random per candidate"
-                            prop:value=move || lab.seed.get()
-                            on:input=move |ev| lab.seed.set(event_target_value(&ev))
-                        />
-                    </div>
-                </Show>
-            </div>
-            <div class="field-hint">
-                {move || {
-                    match lab.facts() {
-                        Some(f) if f.reads_seed && f.row_pins_seed => {
-                            "Each candidate is sent a seed of its own (the next ones count up from \
-                             the first). This row also pins a seed in its default request options."
-                        }
-                        Some(f) if f.reads_seed => {
-                            "Each candidate is sent a seed of its own; the next ones count up from \
-                             the first. Rendered one after another."
-                        }
-                        Some(f) if !f.local => {
-                            "A cloud model is sent no seed: its candidates differ by its own chance."
-                        }
-                        Some(_) => {
-                            "This engine takes no seed: its candidates may come out alike."
-                        }
-                        None => "Rendered one after another.",
-                    }
-                }}
-            </div>
-        </div>
+        <PrefGroup title="Candidates" desc=desc>
+            <EntryRow title="How many" value=lab.count/>
+            <Show when=reads_seed>
+                <EntryRow title="First seed" value=lab.seed placeholder="random per candidate"/>
+            </Show>
+        </PrefGroup>
     }
 }

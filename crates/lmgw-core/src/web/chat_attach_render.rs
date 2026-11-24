@@ -84,6 +84,7 @@ fn image_part(mime: &str, bytes: &[u8]) -> ContentPart {
         source: ImageSource::Base64 {
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
         },
+        cache_control: None,
     }
 }
 
@@ -248,9 +249,23 @@ async fn push_page_images(
         let png = match cached {
             Some(png) => png,
             None => match pdf::render_page(bytes.clone(), page).await {
-                Ok(png) => {
-                    if let Err(e) = repo.put_page_png(state, att.id, page, &png).await {
-                        tracing::warn!(attachment = att.id, page, "chat: page not cached: {e}");
+                Ok(rendered) => {
+                    // Run again under poppler's wide limit, or an image it
+                    // drew blank (`pdf::wide`): said beside the page. Such a
+                    // page is not cached (the cache keeps no notes yet), so
+                    // every send renders it again and says it again.
+                    for n in &rendered.notes {
+                        out.note(format!(
+                            "\"{}\": {}",
+                            escape_attr(&att.name),
+                            n.said(&n.where_())
+                        ));
+                    }
+                    let png = rendered.png;
+                    if rendered.notes.is_empty() {
+                        if let Err(e) = repo.put_page_png(state, att.id, page, &png).await {
+                            tracing::warn!(attachment = att.id, page, "chat: page not cached: {e}");
+                        }
                     }
                     png
                 }

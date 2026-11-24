@@ -254,7 +254,11 @@ async fn a_failed_bind_leaves_the_plain_listener_serving_and_says_why() {
     assert_eq!(listener["state"], "error", "{listener}");
     let error = listener["error"].as_str().unwrap();
     assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
-    assert!(error.contains("devices.port"), "{error}");
+    assert!(
+        error.starts_with("Binding the device listener on "),
+        "{error}"
+    );
+    assert!(!error.contains("devices."), "{error}");
     // The plain listener served that very request; and a freed port is
     // taken by the next save.
     drop(taken);

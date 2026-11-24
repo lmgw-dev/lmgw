@@ -567,10 +567,15 @@ pub async fn upload(
         }
         let sniffed = match crate::extract::sniff_async(bytes.clone()).await {
             Ok(s) => s,
-            Err(e) => {
-                items.push(refuse(e.to_string()));
-                continue;
-            }
+            // Read through the conversion's table where it has a reader
+            // (document-conversion WP7), else refused in its words.
+            Err(e) => match crate::extract::convert::own::accepted(state, &bytes, e).await {
+                Ok(s) => s,
+                Err(why) => {
+                    items.push(refuse(why));
+                    continue;
+                }
+            },
         };
         if let Some(why) = sections::accepts(&sniffed) {
             items.push(refuse(why));

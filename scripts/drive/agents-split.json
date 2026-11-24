@@ -1,0 +1,488 @@
+[
+ {
+  "js": "'Agents as a list beside the detail (modern design WP6): the split view at a wide window (the status page, a click selects, the arrows move the selection, a read answered late after the selection moved on is dropped (the page holds the docs librarian's answer 1.5 s), the handle resizes and keeps its width), the detail's tabs carrying the list's search, a re-read (Enable, then Disable from the menu, which it puts back) moving the list row and the hero but leaving the config field and the manifest editor with its unsaved text in place, the search (/ and Ctrl+F focus it, Esc clears it, a second Esc goes back to the list), deep links (a tab path selects its row and shows its tab, the old ?tab= link lands on the tab path), the header tabs, a dirty change in the mail labeler config (the accent dot, the save toast, the guard asking when another row is picked, Ctrl+S saving, the saved value read back after a reload, then put back), and the narrow window (one pane at a time, the back button). It SAVES the mail labeler config: run it on a dev copy, never on production. Nothing starts a run or a container. Run: scripts/ui-drive.py scripts/drive/agents-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.agents.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/agents"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow[data-key=\"/agents/mail-labeler\"]')",
+  "timeout": 15,
+  "label": "the list has the mail labeler"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.agents-split:not(.narrow)') && document.querySelector('.astatus') && __sel().length === 0",
+  "label": "wide: nothing selected shows the status page beside the list"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mlist .list-head')].map(h => h.firstChild.textContent).every(t => ['Chat agents', 'Batch agents', 'Container agents', 'Not readable'].includes(t))",
+  "label": "the rows sit under their run kind's heading"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/agents/mail-labeler\"]"
+ },
+ {
+  "until": "location.pathname === '/agents/mail-labeler' && document.querySelector('.agent-hero')",
+  "timeout": 10,
+  "label": "a click selects the row: its path, and the detail's hero"
+ },
+ {
+  "expect": "__sel().length === 1 && __sel()[0] === '/agents/mail-labeler' && document.querySelector('.mdetail-head .head-tabs .sub-nav') && document.querySelector('.mdetail-head .actions .btn')",
+  "label": "the row is highlighted; the detail's header has the tabs and the run buttons"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.mlist')",
+  "label": "the list has the focus"
+ },
+ {
+  "js": "window.__was = location.pathname; 'ok'"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname !== __was && __sel()[0] === location.pathname",
+  "timeout": 5,
+  "label": "ArrowDown moves the selection, and the detail follows"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "until": "location.pathname === __was",
+  "timeout": 5,
+  "label": "ArrowUp moves it back"
+ },
+ {
+  "js": "(() => { const f = window.fetch; window.__fetch0 = f; window.fetch = (u, o) => { const url = String((u && u.url) || u); return /\\/api\\/agents\\/docs-librarian$/.test(url) ? new Promise(r => setTimeout(r, 1500)).then(() => f(u, o)) : f(u, o); }; return 'the docs librarian answers 1.5 s late'; })()"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "js": "window.fetch = window.__fetch0; 'fetch as it was'"
+ },
+ {
+  "expect": "location.pathname === __was && document.querySelector('.agent-hero h1').textContent === 'Mail labeler' && document.querySelector('.config-group')",
+  "label": "a read that lands after the selection moved on is dropped: the selected agent stays on its page"
+ },
+ {
+  "js": "history.pushState(null, '', __was + '?q=mail'); dispatchEvent(new PopStateEvent('popstate')); 'searched'"
+ },
+ {
+  "until": "[...document.querySelectorAll('.mdetail-head .sub-nav a')].filter(a => a.getAttribute('aria-current') !== 'page').every(a => a.getAttribute('href').endsWith('?q=mail')) && document.querySelector('.mdetail-head .sub-nav a[aria-current=\"page\"]')",
+  "timeout": 5,
+  "label": "the detail's tabs carry the list's search, and the shown tab is still marked"
+ },
+ {
+  "js": "history.pushState(null, '', __was); dispatchEvent(new PopStateEvent('popstate')); document.querySelector('.mlist').focus(); 'unsearched'"
+ },
+ {
+  "until": "location.search === '' && __keys().length > 1",
+  "timeout": 5
+ },
+ {
+  "js": "window.__row = () => document.querySelector('.mlist .lrow[data-key=\"/agents/mail-labeler\"]').textContent; window.__menu = (t) => { document.querySelector('.mdetail-head .actions button[title=\"More\"]').click(); return new Promise(r => setTimeout(() => { const m = [...document.querySelectorAll('.menu-item')].find(e => e.checkVisibility() && e.textContent.trim() === t); if (m) m.click(); r(!!m); }, 300)); }; 're-read helpers'"
+ },
+ {
+  "js": "window.__inp = __input(); 'the Label prefix field'"
+ },
+ {
+  "expect": "__menu('Enable')",
+  "label": "menu Enable"
+ },
+ {
+  "until": "!document.querySelector('.agent-hero .chips').textContent.includes('Disabled')",
+  "timeout": 10,
+  "label": "the re-read after Enable reached the hero"
+ },
+ {
+  "until": "!__row().includes('Disabled')",
+  "timeout": 10,
+  "label": "the list row follows its card"
+ },
+ {
+  "expect": "__input() === __inp",
+  "label": "the config field was not rebuilt by the re-read"
+ },
+ {
+  "click": ".mdetail-head .sub-nav a[href^=\"/agents/mail-labeler/definition\"]"
+ },
+ {
+  "until": "document.querySelector('.def-pane textarea')",
+  "timeout": 10
+ },
+ {
+  "js": "window.__ta = document.querySelector('.def-pane textarea'); __ta.value = __ta.value + ' '; __ta.dispatchEvent(new Event('input', {bubbles: true})); __ta.focus(); __ta.setSelectionRange(5, 5); 'edited'"
+ },
+ {
+  "expect": "__menu('Disable')",
+  "label": "menu Disable"
+ },
+ {
+  "until": "__row().includes('Disabled')",
+  "timeout": 10,
+  "label": "the re-read after Disable reached the list"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelector('.def-pane textarea') === __ta && __ta.value.endsWith(' ')",
+  "label": "the manifest editor kept its element and its unsaved text through the re-read"
+ },
+ {
+  "js": "[...document.querySelectorAll('.save-toast button')].find(b => b.textContent.trim() === 'Discard').click(); 'discarded'"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "the edit is discarded"
+ },
+ {
+  "click": ".mdetail-head .sub-nav a[href^=\"/agents/mail-labeler\"]:not([href*=\"/definition\"]):not([href*=\"/runs\"])"
+ },
+ {
+  "until": "__input() && location.pathname === '/agents/mail-labeler'",
+  "timeout": 10,
+  "label": "back on the Run tab"
+ },
+ {
+  "js": "window.__w0 = document.querySelector('.mlist-pane').getBoundingClientRect().width; const h = document.querySelector('.mhandle'); const r = h.getBoundingClientRect(); const x = r.left + r.width / 2; const pe = (t, cx) => h.dispatchEvent(new PointerEvent(t, {pointerId: 9, pointerType: 'mouse', isPrimary: true, button: t === 'pointermove' ? -1 : 0, buttons: t === 'pointerup' ? 0 : 1, clientX: cx, clientY: 300, bubbles: true, cancelable: true})); pe('pointerdown', x); pe('pointermove', x + 30); pe('pointerup', x + 40); 'dragged'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - (__w0 + 40)) <= 1 && +localStorage.getItem('lmgw.ui.agents.list.width') === Math.round(__w0 + 40)",
+  "label": "the handle resizes the list and keeps the width"
+ },
+ {
+  "dblclick": ".mhandle"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - __w0) <= 1 && localStorage.getItem('lmgw.ui.agents.list.width') === null",
+  "label": "a double-click forgets it"
+ },
+ {
+  "click": ".mlist .lrow.sel"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "/ focuses the search"
+ },
+ {
+  "type": "zzz-no-such-agent"
+ },
+ {
+  "until": "document.querySelector('.mlist-empty') && document.querySelector('.mlist-empty').textContent.includes('No agents match') && location.search.includes('q=zzz')",
+  "timeout": 5,
+  "label": "a search with no match says so, and is ?q="
+ },
+ {
+  "expect": "document.querySelector('.mlist-head .sub').textContent.startsWith('0 of ')",
+  "label": "the title's line says what the search holds back"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelector('.msearch input').value === '' && document.querySelector('.mlist .lrow')",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.mlist')",
+  "label": "a second Esc goes back to the list"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "f"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "Ctrl+F focuses the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "nav": "/agents/mail-labeler/definition"
+ },
+ {
+  "until": "document.querySelector('.def-bar') && document.querySelector('.mlist .lrow.sel')",
+  "timeout": 10,
+  "label": "a deep link to a tab opens it"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "expect": "__sel()[0] === '/agents/mail-labeler' && document.querySelector('.mdetail-head .sub-nav a[aria-current=\"page\"]').textContent.startsWith('Definition')",
+  "label": "the deep link's row is selected and its tab is current"
+ },
+ {
+  "nav": "/agents/mail-labeler?tab=runs"
+ },
+ {
+  "until": "location.pathname === '/agents/mail-labeler/runs'",
+  "timeout": 10,
+  "label": "an old ?tab= link lands on the tab's path"
+ },
+ {
+  "click": ".mdetail-head .sub-nav a[href=\"/agents/mail-labeler\"]"
+ },
+ {
+  "until": "location.pathname === '/agents/mail-labeler' && document.querySelector('.config-group')",
+  "timeout": 10,
+  "label": "the Run tab from the header"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "until": "__field() && __input()",
+  "timeout": 10,
+  "label": "the config has the Label prefix row"
+ },
+ {
+  "js": "sessionStorage.setItem('wp6.v0', __input().value); sessionStorage.getItem('wp6.v0')"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show') && !document.querySelector('.config-group .prow.dirty')",
+  "label": "a loaded agent has no changes"
+ },
+ {
+  "js": "const i = __input(); i.focus(); i.setSelectionRange(i.value.length, i.value.length); 'focused'"
+ },
+ {
+  "type": "-wp6"
+ },
+ {
+  "until": "__field().classList.contains('dirty') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "typing marks the row changed and shows the save toast"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent === '1 unsaved change' && document.querySelector('.save-toast .btn.suggested').textContent === 'Save config'",
+  "label": "the toast counts it and offers Save config"
+ },
+ {
+  "shot": "dirty"
+ },
+ {
+  "js": "window.__there = location.pathname; document.querySelector('.mlist .lrow:not(.sel)').click(); 'other row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on this agent'))",
+  "timeout": 5,
+  "label": "picking another row asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname === __there && __field().classList.contains('dirty')",
+  "label": "Stay keeps the agent and the change"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && !__field().classList.contains('dirty')",
+  "timeout": 10,
+  "label": "Ctrl+S saves: no change left"
+ },
+ {
+  "nav": "/agents/mail-labeler"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "until": "__field() && __input().value === sessionStorage.getItem('wp6.v0') + '-wp6'",
+  "timeout": 10,
+  "label": "after a reload the saved value is read back"
+ },
+ {
+  "js": "const i = __input(); i.value = sessionStorage.getItem('wp6.v0'); i.dispatchEvent(new Event('input', {bubbles: true})); 'restored'"
+ },
+ {
+  "until": "document.querySelector('.save-toast.show')",
+  "timeout": 5
+ },
+ {
+  "click": ".save-toast .btn.suggested"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show')",
+  "timeout": 10
+ },
+ {
+  "nav": "/agents/mail-labeler"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "until": "__field() && __input().value === sessionStorage.getItem('wp6.v0')",
+  "timeout": 10,
+  "label": "Save puts the value back, read back after a reload"
+ },
+ {
+  "click": ".mdetail-head .actions button[title=\"More\"]"
+ },
+ {
+  "until": "[...document.querySelectorAll('.menu-item')].some(e => e.textContent.includes('Export manifest'))",
+  "timeout": 5,
+  "label": "the header's menu has the agent's acts"
+ },
+ {
+  "expect": "(() => { const l = [...document.querySelectorAll('.menu-item')].filter(e => e.checkVisibility()).map(e => e.textContent.trim()); return (l.includes('Enable') || l.includes('Disable')) && ['Export manifest', 'Export with config values', 'Duplicate…', 'Copy agent token', 'Rotate token…'].every(x => l.includes(x)) && l[l.length - 1] === 'Delete agent…'; })()",
+  "label": "Enable or Disable, the exports, Duplicate, the token, and Delete last"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mdetail-scroll .prow.danger')].find(r => r.textContent.includes('Delete agent')).click(); 'delete row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Delete this agent'))",
+  "timeout": 5,
+  "label": "the Delete row asks first"
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .btn')].find(b => b.textContent === 'Cancel').click(); 'cancel'"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]') && location.pathname === '/agents/mail-labeler'",
+  "timeout": 5,
+  "label": "Cancel keeps the agent"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/agents"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow')",
+  "timeout": 15
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__keys = () => [...document.querySelectorAll('.mlist .lrow')].map(r => r.dataset.key); window.__field = () => [...document.querySelectorAll('.config-group .prow.fr')].find(r => r.querySelector('.fr-label') && r.querySelector('.fr-label').textContent.startsWith('Label prefix')); window.__input = () => __field().querySelector('.fr-ctl input.input'); 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.agents-split.narrow') && getComputedStyle(document.querySelector('.mdetail-pane')).display === 'none'",
+  "label": "narrow: the list alone"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/agents/mail-labeler\"]"
+ },
+ {
+  "until": "location.pathname === '/agents/mail-labeler' && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[title=\"Back to the agents\"]')",
+  "timeout": 5,
+  "label": "narrow: opening a row shows its detail alone, with a back button"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-head h1').textContent === document.querySelector('.agent-hero h1').textContent",
+  "label": "narrow: the header has the agent's name"
+ },
+ {
+  "expect": "(() => { const h = document.querySelector('.mdetail-head'); return h.scrollWidth <= h.clientWidth + 1 && h.getBoundingClientRect().height <= 60; })()",
+  "label": "narrow: the header's title, tabs and buttons fit on one line"
+ },
+ {
+  "shot": "narrow-detail"
+ },
+ {
+  "js": "history.pushState(null, '', '/agents/folder-chat'); dispatchEvent(new PopStateEvent('popstate')); 'folder chat'"
+ },
+ {
+  "until": "document.querySelector('.agent-hero') && location.pathname === '/agents/folder-chat'",
+  "timeout": 10
+ },
+ {
+  "until": "(() => { const h = document.querySelector('.mdetail-head'); return h.scrollWidth <= h.clientWidth + 1 && h.getBoundingClientRect().height <= 60 && document.querySelectorAll('.mdetail-head .sub-nav a').length === 4 && [...document.querySelectorAll('.mdetail-head .sub-nav a')].some(a => a.textContent.startsWith('Runs') && a.querySelector('span')); })()",
+  "timeout": 5,
+  "label": "narrow: four tabs and the run button fit too, and the next agent's runs are read (the Runs tab counts them)"
+ },
+ {
+  "shot": "narrow-folder"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the agents\"]"
+ },
+ {
+  "until": "location.pathname === '/agents' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the list"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.mlist')",
+  "timeout": 3,
+  "label": "narrow: the list has the focus again"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "expect": "location.pathname === '/agents' && document.querySelectorAll('.mlist .lrow.sel').length === 1",
+  "label": "narrow: the arrows move the highlight without opening"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "location.pathname.startsWith('/agents/') && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none'",
+  "timeout": 5,
+  "label": "narrow: Enter opens the highlighted agent"
+ }
+]

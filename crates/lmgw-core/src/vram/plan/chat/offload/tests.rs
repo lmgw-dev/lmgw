@@ -282,6 +282,7 @@ fn files(s: ModelSummary) -> ChatFiles {
             missing: Vec::new(),
         },
         draft: None,
+        projector: false,
     }
 }
 
@@ -604,6 +605,7 @@ fn qwen38_files() -> ChatFiles {
             missing: Vec::new(),
         },
         draft: None,
+        projector: false,
     }
 }
 
@@ -651,4 +653,33 @@ fn measured_qwen38_rows_are_covered() {
     // CUDA ran out of memory allocating the projector after the model.
     let oom = row(&["--n-cpu-moe", "43"], 2048, Some(2048));
     assert!(oom > CARD_FREE, "{oom} MiB fits {CARD_FREE}");
+}
+
+/// What each layer holds on the card (device-ledger design §4.3): the
+/// routed experts `--n-cpu-moe` keeps in host memory come off the first
+/// layers. A `block_count` the tensor list cannot back — a corrupt or
+/// crafted header — is no size to allocate by: nothing is taken apart.
+#[test]
+fn layer_bytes_follow_the_overrides_and_are_bounded_by_the_tensor_list() {
+    let mut s = moe();
+    s.block_count = Some(12);
+    let all = layer_bytes(&s, &[]).unwrap();
+    assert_eq!(all.len(), 12);
+    let ov = overrides(Some(2), &[], Whose::Model);
+    let some = layer_bytes(&s, &ov).unwrap();
+    assert_eq!(all[0] - some[0], experts(0..1));
+    assert_eq!(all[1] - some[1], experts(1..2));
+    assert_eq!(all[2], some[2]);
+
+    s.block_count = Some(1 << 32);
+    assert_eq!(layer_bytes(&s, &[]), None, "no 2^32-long vector");
+    s.block_count = Some(u64::MAX);
+    assert_eq!(layer_bytes(&s, &[]), None);
+    let f = files(s);
+    let p = LlamaParams {
+        ctx_size: Some(4096),
+        ..Default::default()
+    };
+    let fp = footprint(&f, "m.gguf", &Shape::of(&p, &[]));
+    assert!(fp.by_layer.is_none());
 }

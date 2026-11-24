@@ -40,10 +40,33 @@ pub struct Staged {
     /// Less than the whole, or a fitted placement: [`PartialGrant`].
     pub grant: Option<PartialGrant>,
     /// A warning a start that got all of its charge goes ahead with: the
-    /// learned growth of other programs' use that was not kept free beside
+    /// learned room for other programs that was not kept free beside
     /// it (`vram::headroom`). Kept on the entry for its life, like a grant's.
     pub note: Option<String>,
+    /// What admission charged the start, on the cards the model sees
+    /// (device-ledger design §3.2, WP4): kept on the entry, recorded on its
+    /// container ([`crate::vram::charge::PLACEMENT_LABEL`]).
+    pub charge: Option<CardCharge>,
+    /// A model started again on another card to make room
+    /// ([`Registry::stage_moved`], device-ledger design §6.2): it keeps
+    /// its age. `None` for every other start.
+    pub moved: Option<Moved>,
 }
+
+/// What a model moved to another card keeps of the container it had
+/// (device-ledger design §6.2, D21): its age in the eviction order and the
+/// idle timeout, and a sentence for its warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// The `last_used` of the container it had: the new one is given it,
+    /// and keeps it until a request has used it.
+    pub last_used: std::time::Instant,
+    /// "Moved from … to … to make room for …", kept on the entry for its
+    /// life.
+    pub note: String,
+}
+
+pub use crate::vram::CardCharge;
 
 impl Registry {
     /// Stage `staged` for the next entry `class`/`model_id` creates, under
@@ -52,6 +75,15 @@ impl Registry {
     pub fn stage_grant(&self, class: Class, model_id: &str, id: u64, staged: Staged) {
         self.staged()
             .insert((class, model_id.to_string()), (id, staged));
+    }
+
+    /// Mark what is staged for `class`/`model_id` as a move
+    /// ([`Staged::moved`]): the entry its start creates keeps `moved`'s
+    /// age. Nothing where nothing is staged.
+    pub fn stage_moved(&self, class: Class, model_id: &str, moved: Moved) {
+        if let Some((_, s)) = self.staged().get_mut(&(class, model_id.to_string())) {
+            s.moved = Some(moved);
+        }
     }
 
     /// Drop what reservation `id` staged and no entry took: its start never
@@ -78,6 +110,55 @@ impl Registry {
 
     fn staged(&self) -> MutexGuard<'_, HashMap<Key, (u64, Staged)>> {
         self.staged.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The cards a start of `rt` that no decision stood behind is handed
+    /// (device-ledger design §5.7: a pin applies without a decision): its
+    /// pin's, where lmgw can hand a card — a container on the GPU whose run
+    /// arguments pass NVIDIA cards through CDI or `--gpus`, pinned to NVIDIA
+    /// cards by UUID. `None` everywhere else, where the arguments are used
+    /// as written. The bytes are none of a decision's: the ledger charges
+    /// an entry its estimate on the cards its charge names.
+    ///
+    /// A row's own `--tensor-split` (device-ledger design §7.2, rulings 11
+    /// and 16) is kept where a chat row's pin has as many cards as it has
+    /// entries; otherwise it is not passed, and the second value is what
+    /// the start's warnings say of it.
+    pub(super) fn pinned_cards(
+        &self,
+        rt: &crate::runtime::descriptor::ModelRuntime,
+    ) -> Option<(CardCharge, Option<String>)> {
+        let pin = rt.gpu_pin.as_ref().filter(|p| !p.is_empty())?;
+        let handable = self.launcher.runs_containers()
+            && rt.placement().is_gpu()
+            && crate::runtime::argv::passes_cdi(&rt.extra_run_args)
+            && pin.iter().all(|c| c.as_str().starts_with("GPU-"));
+        if !handable {
+            return None;
+        }
+        let fate = rt.llama.as_ref().and_then(|l| match l {
+            crate::runtime::argv::LlamaArgs::Chat { args, .. } => {
+                crate::vram::place::own_fate(Class::Chat, args, Some((pin.len(), &[])))
+            }
+            crate::runtime::argv::LlamaArgs::Aux { args, .. } => {
+                crate::vram::place::own_fate(Class::Aux, args, Some((pin.len(), &[])))
+            }
+        });
+        let charge = CardCharge::over(pin.clone(), 0);
+        Some(match fate {
+            Some(f) if f.kept() => (charge.keeping_own_split(), None),
+            Some(f) => (charge.handed(), f.start_note()),
+            None => (charge.handed(), None),
+        })
+    }
+
+    /// The charge of the start `of` names, while the entry is still its own
+    /// ([`Staged::charge`]).
+    pub(super) fn card_charge_of(&self, of: super::start_of::StartOf<'_>) -> Option<CardCharge> {
+        self.map()
+            .get(of.key)
+            .filter(|e| of.owns(e))
+            .and_then(|e| e.card_charge.clone())
     }
 
     /// The grant of the start `of` names, while the entry is still its own.

@@ -214,6 +214,12 @@ pub struct SettingsFullPatch {
     retention_max_rows: Option<i64>,
     jobs_retention_days: Option<i64>,
     jobs_max_rows: Option<i64>,
+    /// Days an ended async document-conversion job and its results are
+    /// kept. `0` keeps them.
+    documents_job_retention_days: Option<i64>,
+    /// Settings › Documents' "Transcribe audio with": the alias audio and
+    /// video files are transcribed with in a conversion; `""` = none.
+    documents_asr_alias: Option<String>,
     /// Keep hourly usage rollups this many months. `0` = forever.
     usage_retention_months: Option<i64>,
     /// The label every amount on the Usage page is shown under. One currency,
@@ -374,6 +380,11 @@ pub struct VramSettingsPatch {
     /// `auto` (learned from this machine) or `fixed` (`headroom_mb`).
     headroom_mode: Option<lmgw_api_types::HeadroomMode>,
     headroom_mb: Option<u64>,
+    /// What is kept free for other programs on a card, by the card's id
+    /// (WP13): only the cards given change; `automatic` takes a card's
+    /// amount out. Merged by `VramScheduler::merge_keep_free`.
+    keep_free:
+        Option<std::collections::BTreeMap<lmgw_api_types::DeviceId, lmgw_api_types::KeepFree>>,
     budget_mb: Option<u64>,
     queue_timeout_seconds: Option<u64>,
     load_timeout_seconds: Option<u64>,
@@ -716,6 +727,23 @@ async fn save_full(
     if let Some(v) = p.jobs_max_rows {
         s.jobs_max_rows = v;
     }
+    if let Some(v) = p.documents_job_retention_days {
+        if v < 0 {
+            return Err(
+                format!("documents_job_retention_days {v} is negative; 0 keeps the jobs").into(),
+            );
+        }
+        s.documents.job_retention_days = v;
+    }
+    if let Some(v) = p.documents_asr_alias {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            crate::ops::validate_stt_alias(st, &v)
+                .await
+                .map_err(|e| format!("documents_asr_alias: {e}"))?;
+        }
+        s.documents.asr_alias = v;
+    }
     if let Some(v) = p.usage_retention_months {
         s.usage_retention_months = v;
     }
@@ -873,8 +901,11 @@ async fn save_full(
         }
         s.docs_rerank_model = v;
     }
-    if let Some(v) = p.vram {
+    if let Some(mut v) = p.vram {
         let unload = s.vram.unload_timeout_seconds;
+        if let Some(k) = v.keep_free.take() {
+            st.vram.merge_keep_free(&mut s.vram.keep_free, k)?;
+        }
         v.apply(&mut s.vram)?;
         // A longer unload timeout lengthens the quit (headless server design
         // D20): said when it no longer fits what the server's unit gives.

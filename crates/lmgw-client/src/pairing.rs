@@ -72,7 +72,7 @@ impl Fingerprint {
         &self.0
     }
 
-    /// The short form the gateway's log line and Devices card show:
+    /// The short form the gateway's log line and the device's page show:
     /// `sha256:9f2c…41ab`, the first and last four hex digits.
     pub fn short(&self) -> String {
         let hex = self.hex();
@@ -189,7 +189,7 @@ impl fmt::Display for LinkError {
                 "the link has no `v` parameter; this client reads v={LINK_VERSION} links"
             ),
             Self::PairedBeforeTls => f.write_str(
-                "this link is from a pairing before TLS; make a new one on lmgw's Devices card",
+                "this link is from a pairing before TLS; make a new one in lmgw under Usage → Keys & budgets",
             ),
             Self::UnsupportedVersion(v) => write!(
                 f,

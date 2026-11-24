@@ -530,9 +530,13 @@ pub fn ModelPicker(
                         None if v.is_empty() => {
                             let l = empty_label.get_value();
                             let dim = l.is_none();
+                            // A block, so a long label ellipsizes (a flex
+                            // box's bare text cannot), whole in its tooltip.
+                            let l = l.unwrap_or_else(|| "pick a model".to_string());
+                            let tip = l.clone();
                             view! {
-                                <span class="mp-val" class:dim=dim>
-                                    {l.unwrap_or_else(|| "pick a model".to_string())}
+                                <span class="mp-val mp-empty" class:dim=dim title=tip>
+                                    {l}
                                 </span>
                             }
                                 .into_any()

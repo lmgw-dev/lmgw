@@ -150,6 +150,10 @@ pub struct ExportMessage {
         schemars(transform = crate::openapi_ext::non_null)
     )]
     pub images_note: Option<String>,
+    /// A reply's notices: the attached labels that offered its turn no
+    /// tools. Absent when there were none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<crate::chat_frames::LabelNotice>,
     pub voice: Option<MessageVoice>,
     /// A user message's origin: where its client said the user wrote it.
     pub origin: Option<String>,

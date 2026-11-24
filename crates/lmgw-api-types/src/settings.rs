@@ -14,6 +14,21 @@ pub struct SettingsFull {
     pub retention_max_rows: i64,
     pub jobs_retention_days: i64,
     pub jobs_max_rows: i64,
+    /// Days an ended async document-conversion job and its stored results
+    /// are kept; `0` keeps them (document-conversion design §7.3).
+    pub documents_job_retention_days: i64,
+    /// The page-reading model (Settings › Documents › Model help, "Read
+    /// pages with a model"); empty: none chosen. Read only here: the
+    /// `settings_set` op is its one writer.
+    pub documents_page_reader: String,
+    /// The picture-description model (Settings › Documents › Model help,
+    /// "Describe pictures with"); empty: none chosen. Read only here, like
+    /// `documents_page_reader`.
+    pub documents_picture_alias: String,
+    /// Settings › Documents' "Transcribe audio with": the alias audio and
+    /// video files are transcribed with in a conversion; empty: none chosen,
+    /// so they are not transcribed (document-conversion design §4.4, WP7).
+    pub documents_asr_alias: String,
     /// Keep hourly usage rollups this many months; `0` = forever.
     pub usage_retention_months: i64,
     /// The label every amount on the Usage page is shown under. One currency,
@@ -267,9 +282,16 @@ pub struct VramSettingsDto {
     /// How the headroom is set: learned from this machine (`auto`, the
     /// default) or `headroom_mb` as written (`fixed`).
     pub headroom_mode: HeadroomMode,
-    /// The fixed headroom in MiB: the headroom in `fixed` mode, and in
-    /// `auto` mode until enough has been learned (`headroom_now`).
+    /// The headroom's floor in MiB, kept free for other programs on each
+    /// graphics card: in `auto` mode no more than the most they ever held on
+    /// that card, with the learned room on top; in `fixed` mode as written
+    /// (`headroom_now`).
     pub headroom_mb: u64,
+    /// What is kept free for other programs on a card, by the card's id,
+    /// where the owner declared it (Settings → GPU, device-ledger design
+    /// §9.1): `always` an amount, or `nothing`. A card not listed is
+    /// `automatic`, as `headroom_mode` says.
+    pub keep_free: std::collections::BTreeMap<crate::DeviceId, KeepFree>,
     /// `0` = the device's real total, as the driver reports it (NVML on
     /// NVIDIA, amdgpu sysfs on AMD).
     pub budget_mb: u64,
@@ -292,51 +314,171 @@ fn default_fallback_on_external() -> bool {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum HeadroomMode {
-    /// Learned: the largest growth of other programs' GPU memory seen on
-    /// this machine, plus a margin for each model still starting or not
-    /// measured yet. The fixed value until enough has been learned.
+    /// Per graphics card, from what other programs did there: a floor
+    /// (`headroom_mb`, no more than the most they ever held on the card)
+    /// always kept free, and on top the learned room — the most they held
+    /// there in the last 7 days less what they hold now — which lmgw gives
+    /// up last, only when nothing else fits.
     #[default]
     Auto,
-    /// `headroom_mb` as written, for everything.
+    /// `headroom_mb` as written, on every card.
     Fixed,
+}
+
+/// What VRAM admission keeps free for other programs on one graphics card,
+/// as the owner declared it (Settings → GPU; device-ledger design §9.1,
+/// WP13).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct KeepFree {
+    pub mode: KeepFreeMode,
+    /// With `always`: the amount kept free, in MiB, at least 1. Not read
+    /// otherwise.
+    pub mb: u64,
+}
+
+/// How a card's room for other programs is set ([`KeepFree`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum KeepFreeMode {
+    /// As `headroom_mode` says: in `auto` the floor and the learned room, in
+    /// `fixed` `headroom_mb`.
+    #[default]
+    Automatic,
+    /// `mb` always, without exception: a model that would need it waits,
+    /// goes on another card or falls back.
+    Always,
+    /// Nothing: the card is lmgw's. No floor and no learned room; a model
+    /// still starting keeps its margin.
+    Nothing,
 }
 
 /// What VRAM admission keeps free now and why (`GET /api/settings-full`'s
 /// `headroom_now`, `lmgw__settings`' `vram.headroom`).
+///
+/// The headroom is kept per card (device-ledger design §9.1): a floor that
+/// is never given up, and the learned room on top, which is given up last.
+/// The top-level figures are the cards' sums; on a machine of one card they
+/// are that card's.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HeadroomNow {
     pub mode: HeadroomMode,
-    /// What is kept free for other programs' growth now, in bytes.
+    /// What is kept free for other programs now, in bytes, every card's
+    /// together: the floors and the learned room.
     pub bytes: u64,
-    /// The auto value is in use: learned, with the margin per starting or
-    /// unmeasured model on top. False in `fixed` mode and while learning.
-    pub learned_in_use: bool,
-    /// The largest growth of other programs' GPU memory seen in the window,
-    /// in bytes; `None` where nothing could be measured (no per-process
-    /// GPU figures).
-    pub learned_bytes: Option<u64>,
-    /// When other programs grew by `learned_bytes`: the hour, in the
-    /// machine's local time (`YYYY-MM-DD HH:00`), so the owner can tell what
-    /// taught it (a game, a render).
-    pub learned_at: Option<String>,
+    /// Of `bytes`, what is always kept free: each card's floor, its fixed
+    /// value or its declared amount.
+    pub floor_bytes: u64,
+    /// Of `bytes`, the learned room: given up last, when nothing else fits.
+    pub room_bytes: u64,
     /// What other programs hold at rest, in bytes: the lowest reading of the
-    /// window. A model is judged too large for the card against the card
-    /// less this and its margin, never against the learned growth.
+    /// window, each card's together. A model is judged too large for a card
+    /// against the card less this, the floor and its margin, never against
+    /// the learned room.
     pub at_rest_bytes: Option<u64>,
-    /// Hours of the window with readings, and how many auto needs.
+    /// Hours of the window with readings — on several cards, of the card
+    /// watched least.
     pub hours_seen: u64,
-    pub hours_needed: u64,
     /// The window, in days.
     pub window_days: u64,
     /// How often other programs' use is read, in seconds.
     pub sample_seconds: u64,
-    /// The margin a model gets while it starts or is not measured yet, per
-    /// class, with its source.
+    /// The margin a model gets on top while it starts or is not measured
+    /// yet, per class, with its source. It rides in every mode.
     pub margins: Vec<HeadroomMargin>,
     /// The whole of it in one sentence, as Settings shows it.
     pub sentence: String,
+    /// Each card's part, in the driver's order: empty while no card is
+    /// known (no device read and no reading yet).
+    pub cards: Vec<HeadroomCard>,
+    /// What a llama.cpp model is charged on each card for the engine itself
+    /// (device-ledger design §4.2, ruling 17), in one sentence: each card by
+    /// name and index with its figure, learned or the stated default.
+    /// Empty while no card is known.
+    pub engine_sentence: String,
+}
+
+/// One card's headroom (device-ledger design §9.1): what is kept free there
+/// for other programs, and what it rests on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HeadroomCard {
+    /// The card's stable id, which `headroom_forget`'s `card` and
+    /// `vram.keep_free` take. Not a label: the card is shown by its name and
+    /// index.
+    pub id: crate::DeviceId,
+    pub index: u32,
+    /// The driver's name for the card; empty for a card with readings that
+    /// no device read has listed yet.
+    pub name: String,
+    /// What the owner declared for this card (`vram.keep_free`):
+    /// `automatic` where nothing is.
+    pub keep: KeepFree,
+    /// What is kept free here for other programs, in bytes: `floor_bytes`
+    /// and `room_bytes`.
+    pub bytes: u64,
+    /// Always kept free here: the floor, the fixed value or the declared
+    /// amount.
+    pub floor_bytes: u64,
+    /// The learned room here, given up last: the most other programs held
+    /// here in the window less what they hold now. 0 outside `auto`.
+    pub room_bytes: u64,
+    /// The most other programs held here in the window, in bytes; `None`
+    /// without readings here.
+    pub most_bytes: Option<u64>,
+    /// When they held `most_bytes` (the first hour they did), in local time.
+    pub most_at: Option<String>,
+    /// What they hold now: the newest reading, else at rest.
+    pub now_bytes: Option<u64>,
+    /// What other programs hold here at rest, in bytes.
+    pub at_rest_bytes: Option<u64>,
+    /// Hours of the window with readings here.
+    pub hours_seen: u64,
+    /// This card's part in one sentence, as Settings shows it beside the
+    /// card's name.
+    pub sentence: String,
+    /// An amount to declare for this card, from what was seen here; `None`
+    /// where nothing suggests one.
+    pub suggest: Option<KeepFreeSuggestion>,
+    /// What a llama.cpp model is charged on this card for the engine itself
+    /// (device-ledger design §4.2), in bytes: the largest of the card's last
+    /// five readings, once it has one.
+    pub engine_bytes: u64,
+    /// When the newest of those readings was taken on this card, in local
+    /// time; `None` while the figure is the backend's stated default.
+    pub engine_learned_at: Option<String>,
+}
+
+/// An amount Settings suggests keeping free on a card always
+/// ([`HeadroomCard::suggest`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct KeepFreeSuggestion {
+    /// The amount, in MiB: the card's floor and the most other programs
+    /// used here beyond what they hold now, rounded up — "always" replaces
+    /// the floor, so the amount carries it.
+    pub mb: u64,
+    /// The separate times in the window they used more than they hold now
+    /// and the floor together.
+    pub times: u64,
+    /// The suggestion as Settings asks it.
+    pub sentence: String,
+}
+
+/// `headroom_forget`'s arguments (device-ledger design ruling 10).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HeadroomForgetArgs {
+    /// The card whose readings are forgotten, by its id (`HeadroomCard.id`);
+    /// absent: every card's.
+    pub card: Option<crate::DeviceId>,
 }
 
 /// One class's margin for a model still starting or not measured yet.

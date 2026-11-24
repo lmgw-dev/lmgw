@@ -14,7 +14,9 @@ use super::aux_save::{save_body, takes_no_pooling, Draft};
 use super::run_args_note;
 use crate::model_ops::ContainerStatusRow;
 use crate::pages::fallback_field::{fallback_value, same_type_tasks, FallbackField, Saves};
-use crate::widgets::{use_toasts, ImageClass, ImagePicker, Modal, ModalFooter, ModalSize, Select};
+use crate::widgets::{
+    use_toasts, Ico, Icon, ImageClass, ImagePicker, Modal, ModalFooter, ModalSize, Select,
+};
 
 #[component]
 pub fn AuxEditor(
@@ -47,7 +49,7 @@ pub fn AuxEditor(
 }
 
 #[component]
-fn AuxForm(
+pub(crate) fn AuxForm(
     m: AuxModel,
     open: RwSignal<bool>,
     on_saved: impl Fn() + Copy + Send + Sync + 'static,
@@ -105,6 +107,13 @@ fn AuxForm(
             .ok()
         }
     });
+    // The cards it may run on (device-ledger design §8), from its read.
+    let pin = crate::pages::gpu_pin::EditorPin::new(create);
+    Effect::new(move |_| {
+        if let Some(d) = detail.get().flatten() {
+            pin.read(d.gpu_pin.as_deref());
+        }
+    });
     let saving = RwSignal::new(false);
     let planning = RwSignal::new(false);
     let plan = RwSignal::new(None::<ShownPlan>);
@@ -130,7 +139,7 @@ fn AuxForm(
     });
     let pooling_opts = Signal::derive(|| {
         [
-            ("", "model default"),
+            ("", "Model default"),
             ("none", "none"),
             ("mean", "mean"),
             ("cls", "cls"),
@@ -172,13 +181,14 @@ fn AuxForm(
             fallback: fallback.get_untracked(),
             fields: fields.draft(),
         });
-        let body = match body {
+        let mut body = match body {
             Ok(b) => b,
             Err(e) => {
                 toasts.err(e);
                 return;
             }
         };
+        pin.add_to(&mut body);
         saving.set(true);
         spawn_local(async move {
             let res = crate::api::post::<AuxModelSaved, _>("/api/op/aux_model_set", &body).await;
@@ -324,6 +334,7 @@ fn AuxForm(
                             )
                         }
                     >
+                        <Icon ico=Ico::Wand/>
                         {move || if planning.get() { "Planning…" } else { "Fill from plan" }}
                     </button>
                 </div>
@@ -346,7 +357,7 @@ fn AuxForm(
                         prop:checked=move || warm_start.get()
                         on:change=move |ev| warm_start.set(event_target_checked(&ev))
                     />
-                    "start at boot (warm start)"
+                    "Start at boot (warm start)"
                 </label>
                 <FallbackField
                     value=fallback
@@ -393,6 +404,12 @@ fn AuxForm(
                 <p class="dim mini-note">
                     "Blank image/args inherit the aux class settings (Settings → Runtimes → Aux)." " " {run_args_note::OVERRIDE_REPLACES}
                 </p>
+                <crate::pages::gpu_pin::GpuPinField
+                    value=pin.value
+                    note=Signal::derive(move || {
+                        detail.get().flatten().and_then(|d| d.command_line_note)
+                    })
+                />
                 <ContainerStatusRow class="aux" model_id=saved_model_id/>
             </section>
         </div>

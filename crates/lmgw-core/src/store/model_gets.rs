@@ -19,6 +19,9 @@ pub struct ModelGetRow {
     /// An aux get's kind (`embed | rerank | decision`), from the header;
     /// `None` for chat.
     pub kind: Option<String>,
+    /// How it is set up where Get it asked (migration 0112: `one_card |
+    /// split | experts_in_ram`); `None` for a file one card holds.
+    pub layout: Option<String>,
     /// The `hf_models` ids of every file of the get; empty until the op
     /// queued them.
     pub download_ids: Vec<i64>,
@@ -50,6 +53,7 @@ fn model_get_from_row(row: &sqlx::sqlite::SqliteRow) -> ModelGetRow {
         measure: row.get("measure"),
         model_id: row.get("model_id"),
         kind: row.get("kind"),
+        layout: row.get("layout"),
         download_ids: serde_json::from_str(&ids).unwrap_or_default(),
         queued_ids: serde_json::from_str(&queued).unwrap_or_default(),
         note: row.get("note"),
@@ -70,6 +74,7 @@ pub struct NewModelGet<'a> {
     pub measure: &'a str,
     pub model_id: &'a str,
     pub kind: Option<&'a str>,
+    pub layout: Option<&'a str>,
 }
 
 /// Insert a `running` get with no downloads yet, unless one of the same
@@ -77,8 +82,8 @@ pub struct NewModelGet<'a> {
 /// the caller joins that one ([`running_model_get`]).
 pub async fn insert_model_get(pool: &SqlitePool, g: &NewModelGet<'_>) -> DbResult<Option<i64>> {
     let row = sqlx::query(
-        "INSERT INTO model_gets (repo, file, target, measure, model_id, kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO model_gets (repo, file, target, measure, model_id, kind, layout)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT DO NOTHING RETURNING id",
     )
     .bind(g.repo)
@@ -87,6 +92,7 @@ pub async fn insert_model_get(pool: &SqlitePool, g: &NewModelGet<'_>) -> DbResul
     .bind(g.measure)
     .bind(g.model_id)
     .bind(g.kind)
+    .bind(g.layout)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| r.get("id")))

@@ -236,6 +236,14 @@ fn asked(lab: LabKind, g: &LabGroupView, run: &LabRunView) -> Asked {
                 pcm: Pcm::read("", "", "", None),
             }
         }
+        // A conversion's files are named after the route and the title (its
+        // first file's name).
+        LabKind::Documents => Asked {
+            task: run.variant.clone(),
+            voice: None,
+            text: Some(g.title.clone()),
+            pcm: Pcm::read("", "", "", None),
+        },
         _ => {
             let form = serde_json::from_value::<AudioLabForm>(g.form.clone()).unwrap_or_default();
             let speech = &form.settings.speech;

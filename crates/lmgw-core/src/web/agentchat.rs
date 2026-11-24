@@ -789,6 +789,10 @@ pub(super) async fn run_send(
                 ..Default::default()
             };
             let _ = tx.send(TurnFrame::of("error", &error)).await;
+            // Said beside the reply after the stream too: saved with it.
+            if let Some(notice) = error.label_notice() {
+                turn.notice(notice);
+            }
         }
         // A thread may attach the same self-admin toolset an admin thread gets
         // automatically; the set is what dispatches, so duplicates are inert.
@@ -1083,7 +1087,7 @@ pub(super) async fn run_send(
         // happened, and the model must learn that they did, or it makes a
         // side-effecting call again.
         Err(e) => {
-            sink.usage = e.usage;
+            sink.usage = *e.usage;
             let record = e.messages[base_len.min(e.messages.len())..].to_vec();
             (record, Some(e.error))
         }

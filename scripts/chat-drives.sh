@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Usage: scripts/chat-drives.sh [--matrix] [--webkit] [--voice] [--only NAME[,NAME…]] [--addr HOST:PORT]
 #                               [--mock-port N] [--shots DIR] [--dsf SCALE]
-# Runs the 17 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
+# Runs the 21 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
 # mock upstream, leak listener), prints a PASS/FAIL table, exits non-zero on any FAIL. Everything
 # it starts is stopped by pid/process group on exit and its scratch dir (data, Chrome profiles) removed.
-# --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes and the narrow
-# window's drive (scripts/drive/chat-narrow.json: WebKit at 125 %, the Chat's drawers, D37), after the drives.
+# --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes, the narrow
+# window's drive (scripts/drive/chat-narrow.json: WebKit at 125 %, the Chat's drawers, D37) and the streaming
+# reply's scroll drive (scripts/drive/chat-stream-scroll.json: the pane stays at the end), after the drives.
 # --voice adds the voice panel's drives that need no model (an in-page bound session, scripts/realtime-mock.js,
 # and a fake microphone; muted): chat-voice-panel, chat-voice-reasoning, chat-voice-viz. The panel and reasoning
 # drives need target/chat-voice/fixtures/voice-de.js (scripts/drive/make-voice-fixtures.py, once, on a gateway
@@ -72,10 +73,18 @@ wait_http() { # URL
     echo "timed out waiting for $1" >&2; return 1
 }
 
-start_mock() { # STREAM_DELAY
-    ECHO=1 EMBED_DIMS=64 STREAM_DELAY="$1" start mock python3 scripts/mock-openai.py "$MOCK_PORT"
+MOCK_CONF=""
+start_mock() { # STREAM_DELAY [VAR=VALUE…]: the mock's environment beside ECHO=1 (a VAR here wins)
+    MOCK_CONF="$*"
+    local delay="$1"; shift
+    start mock env ECHO=1 EMBED_DIMS=64 STREAM_DELAY="$delay" "$@" python3 scripts/mock-openai.py "$MOCK_PORT"
     MOCK_PID=$LAST_PID
     wait_http "http://127.0.0.1:$MOCK_PORT/v1/models"
+}
+mock_as() { # STREAM_DELAY [VAR=VALUE…]: restart the mock on the same port unless it runs so already
+    [ "$*" = "$MOCK_CONF" ] && return 0
+    stop_pid "$MOCK_PID"
+    start_mock "$@"
 }
 
 LMGW_DATA_DIR="$WORK/data" start gateway scripts/dev-instance.sh "$ADDR"
@@ -98,23 +107,27 @@ op alias_set "{\"action\":\"create\",\"alias\":\"fake-novision\",\"upstream_id\"
 op alias_set "{\"action\":\"create\",\"alias\":\"fake-vision\",\"upstream_id\":$UP_ID,\"upstream_model\":\"triage\",\"capabilities_override\":{\"capabilities\":{\"task\":\"chat\",\"vision\":true,\"input_modalities\":[\"text\",\"image\"]}}}"
 op settings_set '{"chat_pdf_mode":"ask"}'
 
-DRIVES=(chat-render chat-actions chat-sampling chat-folders chat-ongoing chat-live chat-search chat-knowledge knowledge
+DRIVES=(chat-render chat-toast chat-actions chat-sampling chat-folders chat-ongoing chat-live chat-search chat-knowledge knowledge
     chat-attachments chat-export chat-security chat-leave-midstream key-scope-editor key-scope-create-deny
-    chat-voice-render chat-profiles-discard)
+    chat-voice-render chat-profiles-discard chat-stream-return chat-notices chat-morph)
 VOICE_FIXTURES=target/chat-voice/fixtures/voice-de.js
 [ "$VOICE" = 1 ] && DRIVES+=(chat-voice-panel chat-voice-reasoning chat-voice-viz)
 declare -A RESULT
 FAILS=0
 for d in "${DRIVES[@]}"; do
     if [ -n "$ONLY" ] && [[ ",$ONLY," != *",$d,"* ]]; then continue; fi
-    if [ "$d" = chat-leave-midstream ]; then # needs a slow stream: restart the mock on the same port
-        stop_pid "$MOCK_PID"
-        start_mock 4
-    fi
+    case "$d" in
+    chat-leave-midstream) mock_as 4 ;; # a slow stream
+    # A model that reads its prompt for 5 s, then 2 tokens a second.
+    chat-stream-return | chat-notices) mock_as 0.5 PREFILL_DELAY=5 ;;
+    *) mock_as 0.02 ;;
+    esac
     if [ "$d" = chat-voice-render ]; then # spoken turns, written into the scratch database
-        stop_pid "$MOCK_PID"
-        start_mock 0.02
         python3 scripts/chat-voice-seed.py "$BASE" "$TOKEN" "$WORK/data/lmgw.sqlite" fake-echo >/dev/null
+    fi
+    if [ "$d" = chat-notices ]; then # a server that answers and one that cannot be reached
+        op mcp_server_set "{\"action\":\"create\",\"name\":\"notes\",\"transport\":\"stdio\",\"command\":\"python3\",\"args\":\"$PWD/scripts/mock-mcp.py\",\"tool_prefix\":\"notes\"}"
+        op mcp_server_set '{"action":"create","name":"down","transport":"http","url":"http://127.0.0.1:9/mcp","tool_prefix":"down"}'
     fi
     EXTRA=()
     case "$d" in
@@ -141,9 +154,11 @@ for d in "${DRIVES[@]}"; do
     fi
 done
 
-for x in matrix webkit narrow; do
+for x in matrix webkit narrow stream; do
     [ "$x" = matrix ] && [ "$MATRIX" = 0 ] && continue
     [ "$x" != matrix ] && [ "$WEBKIT" = 0 ] && continue
+    # A long answer with a code block, streamed: the pane must not jump while it grows.
+    [ "$x" = stream ] && mock_as 0.03 ECHO=0 STREAM_TOKENS=300
     case "$x" in
     matrix) cmd=(python3 scripts/ui-matrix.py --routes all --token "$TOKEN" --base "$BASE") ;;
     webkit) cmd=(python3 scripts/webkit-check.py --backend broadway --shots "${SHOTS:-$WORK}/webkit" --token "$TOKEN"
@@ -151,6 +166,8 @@ for x in matrix webkit narrow; do
     # exit 2 when an expect failed
     narrow) cmd=(python3 scripts/webkit-check.py --backend broadway --zoom 1.25 --drive scripts/drive/chat-narrow.json
         --shots "${SHOTS:-$WORK}/narrow" --token "$TOKEN" --base "$BASE") ;;
+    stream) cmd=(python3 scripts/webkit-check.py --backend broadway --drive scripts/drive/chat-stream-scroll.json
+        --shots "${SHOTS:-$WORK}/stream" --token "$TOKEN" --base "$BASE") ;;
     esac
     if "${cmd[@]}" >"target/drive-logs-$x.log" 2>&1; then RESULT[$x]=PASS; else RESULT[$x]=FAIL; FAILS=$((FAILS + 1)); fi
     tail -5 "target/drive-logs-$x.log"
@@ -158,7 +175,7 @@ done
 
 echo
 printf '%-26s %s\n' DRIVE RESULT
-for d in "${DRIVES[@]}" matrix webkit narrow; do
+for d in "${DRIVES[@]}" matrix webkit narrow stream; do
     [ -n "${RESULT[$d]:-}" ] && printf '%-26s %s\n' "$d" "${RESULT[$d]}"
 done
 echo "$FAILS FAIL"

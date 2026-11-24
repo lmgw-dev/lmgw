@@ -13,7 +13,7 @@ use super::page::{enc, Lab};
 use super::rounds::secs;
 use crate::api;
 use crate::fmt::fmt_bytes;
-use crate::widgets::ConfirmButton;
+use crate::widgets::{AudioPlayer, ConfirmButton, Ico, Icon};
 
 /// The record as labelled lines, in reading order.
 pub(super) fn provenance_rows(p: &VoiceProvenance) -> Vec<(&'static str, String)> {
@@ -104,12 +104,12 @@ pub(super) fn Library(lab: Lab) -> impl IntoView {
             }}
             {move || {
                 let e = lab.samples_err.get();
-                (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
+                (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
             }}
             {move || {
                 let e = lab.records_err.get();
                 (!e.is_empty()).then(|| view! {
-                    <div class="notice err">{format!("⚠ How the samples were made is not shown: {e}")}</div>
+                    <div class="notice err">{format!("How the samples were made is not shown: {e}")}</div>
                 })
             }}
             <Show
@@ -136,11 +136,10 @@ pub(super) fn Library(lab: Lab) -> impl IntoView {
                     .get()
                     .map(|name| {
                         view! {
-                            <audio
-                                controls
-                                autoplay
-                                src=format!("/audio-lab/api/refs/{}", enc(&name))
-                            ></audio>
+                            <AudioPlayer
+                                src=Some(format!("/audio-lab/api/refs/{}", enc(&name)))
+                                autoplay=true
+                            />
                         }
                     })
             }}
@@ -182,15 +181,21 @@ fn SampleRow(lab: Lab, s: VoiceSample, preview: RwSignal<Option<String>>) -> imp
     view! {
         <div class="vl-sample">
             <div class="clip-item" title=s.clip.server_path.clone()>
-                <span class="n">{s.clip.voice.clone()}</span>
+                <span class="n" title=s.clip.voice.clone()>{s.clip.voice.clone()}</span>
                 <span class="dim mono-sm">{fmt_bytes(s.clip.size)}</span>
-                <button class="btn ghost" title="Play" on:click=move |_| preview.set(Some(n1.clone()))>
-                    "▸"
+                <button
+                    class="icon-btn sm"
+                    title="Play"
+                    aria-label="Play"
+                    on:click=move |_| preview.set(Some(n1.clone()))
+                >
+                    <Icon ico=Ico::Play/>
                 </button>
                 <ConfirmButton
-                    label="✕"
-                    confirm="Delete this sample from the library?"
-                    class="btn ghost sm del"
+                    label=""
+                    icon=|| view! { <Icon ico=Ico::Trash/> }
+                    confirm="Delete?"
+                    class="icon-btn sm del"
                     title="Delete this clip and its transcript from the voice library"
                     on_confirm=delete
                 />

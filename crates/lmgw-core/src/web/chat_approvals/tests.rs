@@ -43,11 +43,13 @@ async fn gated_thread(state: &SharedState) -> (ChatThread, i64) {
                     id: "call_1".into(),
                     name: "desktop__echo".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
                 ContentPart::ToolUse {
                     id: "call_2".into(),
                     name: "desktop__notify".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
             ],
         },
@@ -82,7 +84,7 @@ async fn closing(state: &SharedState, tid: i64, id: i64) -> Vec<(String, String)
         .iter()
         .filter_map(|p| match p {
             ContentPart::ToolResult { id, content, .. } => match content.as_slice() {
-                [ToolResultBlock::Text { text }] => Some((id.clone(), text.clone())),
+                [ToolResultBlock::Text { text, .. }] => Some((id.clone(), text.clone())),
                 _ => None,
             },
             _ => None,

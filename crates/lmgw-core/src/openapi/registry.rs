@@ -89,6 +89,13 @@ pub(crate) enum Req {
         raw: &'static str,
         multipart: SchemaFn,
     },
+    /// A `multipart/form-data` body whose parts `multipart` describes, or
+    /// the same as JSON (`json`): `POST /v1/documents/convert`, files as
+    /// parts or as base64.
+    MultipartOrJson {
+        multipart: SchemaFn,
+        json: SchemaFn,
+    },
 }
 
 /// A response body's shape (§4.2).
@@ -160,6 +167,9 @@ pub(crate) enum Dialect {
     /// The Audio lab's own routes: the dashboard's dialect, but a failure is
     /// `{"error": "...", "code"?}` ([`lmgw_api_types::audio_lab::LabError`]).
     Lab,
+    /// docling-serve's routes (document-conversion design §7.4): a failure is
+    /// `{"detail": …}` ([`lmgw_api_types::documents::docling::DoclingError`]).
+    DoclingServe,
 }
 
 impl Dialect {
@@ -171,6 +181,7 @@ impl Dialect {
             Self::JsonRpc => lmgw_api_types::openapi_ext::dialect::JSONRPC,
             Self::Dashboard => lmgw_api_types::openapi_ext::dialect::DASHBOARD,
             Self::Lab => lmgw_api_types::openapi_ext::dialect::LAB,
+            Self::DoclingServe => lmgw_api_types::openapi_ext::dialect::DOCLING,
         }
     }
 
@@ -184,6 +195,7 @@ impl Dialect {
             Self::JsonRpc => "JsonRpcError",
             Self::Dashboard => "ApiError",
             Self::Lab => "LabError",
+            Self::DoclingServe => "DoclingError",
         }
     }
 }
@@ -226,6 +238,7 @@ pub(crate) fn all_routes() -> Vec<DocRoute> {
     routes.extend(super::planes::agents::routes());
     routes.extend(super::planes::audio_lab::routes());
     routes.extend(super::planes::image_lab::routes());
+    routes.extend(super::planes::documents_lab::routes());
     routes.extend(super::planes::decision_lab::routes());
     routes.extend(super::planes::voice_lab::routes());
     routes.extend(super::planes::labs_store::routes());

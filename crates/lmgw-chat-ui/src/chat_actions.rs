@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use super::chat::{in_owner, new_msg, scroll_down, Msg, ThreadDetail};
 use super::chat_approvals::{self, Verdicts};
 use super::chat_knowledge::KbDraftChips;
+use super::chat_reply::answer_note;
 use super::chat_turn::{run_turn, Turn, TurnEnv};
 use lmgw_ui_kit::widgets::{use_toasts, ConfirmButton};
 
@@ -177,6 +178,7 @@ impl ActionEnv {
                         m.model.set(r.model.clone());
                         m.answered_by.set(r.answered_by.clone());
                         m.images_note.set(r.images_note.clone());
+                        m.notices.set(r.notices.clone());
                     }
                     if m.voice.with_untracked(|v| *v != r.voice) {
                         m.voice.set(r.voice.clone());
@@ -473,6 +475,9 @@ pub(super) struct MsgOps {
     pub delete: Callback<u64>,
     /// Verdicts for the calls a reply waits on (`chat_approvals`).
     pub decide: Callback<Verdicts>,
+    /// The model the open thread's header shows: a reply's meta line names
+    /// its model only when it is another one.
+    pub thread_model: Signal<String>,
 }
 
 const ICON_COPY: &str = "M5.5 5.5h7v8h-7z M3.5 10.5v-8h7";
@@ -505,6 +510,7 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
     let own_streaming = m.streaming;
     let unsaved = m.unsaved;
     let m_voice = m.voice;
+    let (tokens, model, answered_by) = (m.tokens, m.model, m.answered_by);
     let off = Signal::derive(move || ops.busy.get() || db_id.get().is_none() || editing.get());
     let off_title = move |what: &'static str| {
         move || {
@@ -650,6 +656,25 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                     on_confirm=Callback::new(move |()| ops.delete.run(key))
                 />
                 </Show>
+                // A reply's tokens and, when it is not the thread's own, its
+                // model: one dim text at the row's right end.
+                {(!is_user && !is_result).then(|| view! {
+                    <span class="msg-meta dim">
+                        {move || tokens.get().map(|(p, c)| format!("{p} → {c} tokens"))}
+                        {move || {
+                            let note = answer_note(
+                                model.get().as_deref(),
+                                answered_by.get().as_deref(),
+                                &ops.thread_model.get(),
+                            );
+                            let sep = tokens.get().is_some() && note.is_some();
+                            note.map(|l| view! {
+                                {sep.then_some(" · ")}
+                                <span class="msg-answered-by">{l}</span>
+                            })
+                        }}
+                    </span>
+                })}
             </div>
         </Show>
     }

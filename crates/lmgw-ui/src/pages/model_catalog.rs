@@ -16,14 +16,14 @@ use leptos::task::spawn_local;
 use lmgw_api_types::{AliasView, ModelVisibilitySaved, UpstreamModelEntry, UpstreamModelsResponse};
 use serde_json::json;
 
-use super::models::{ModelsData, ModelsTabs};
+use super::models::ModelsData;
 use crate::catalog::{use_model_catalog, ModelCatalog};
 use crate::fmt::{grouped, hue_for, local_datetime, of, per_mtok, price};
 use crate::url_state::use_query_signal;
 use crate::widgets::model_picker::ctx_label;
 use crate::widgets::{
-    filter_words, use_toasts, ConfirmButton, FilterBar, GroupRow, MenuItem, PageFrame, PageMode,
-    RowMenu, Select, Toasts,
+    filter_words, use_toasts, ConfirmButton, FilterBar, GroupRow, Ico, Icon, MenuItem, PageFrame,
+    PageMode, RowMenu, Select, Toasts,
 };
 
 const COLS: u32 = 8;
@@ -677,7 +677,8 @@ pub fn ModelCatalogPage() -> impl IntoView {
                             title="Clear the selection"
                             on:click=move |_| selected.set(HashSet::new())
                         >
-                            {format!("✕ {} selected", grouped(selected.with(HashSet::len) as u64))}
+                            <Icon ico=Ico::Close/>
+                            {format!("{} selected", grouped(selected.with(HashSet::len) as u64))}
                         </button>
                     }
                 })}
@@ -702,13 +703,6 @@ pub fn ModelCatalogPage() -> impl IntoView {
         v
     });
 
-    let configured = Signal::derive(move || {
-        data.full.with(|f| {
-            f.as_ref().map(|f| {
-                f.local.len() + f.aux.len() + f.audio.len() + f.image.len() + f.aliases.len()
-            })
-        })
-    });
     // Hidden ids a loaded catalog no longer offers: the upstream retired the
     // model. They stay in the hidden set, where no row can ever show them or
     // unhide them, so they are named apart with a way to forget them (review
@@ -756,6 +750,26 @@ pub fn ModelCatalogPage() -> impl IntoView {
             .with(Option::is_some)
             .then_some((n, all - gone, failed))
     });
+
+    // The header's line: how many models the catalogs offer, how many of
+    // them are hidden, and how many catalogs failed to load.
+    let catalog_sub = move || match catalog_counts.get() {
+        None => "every model the passthrough upstreams offer, fetched live".to_string(),
+        Some((n, hidden, failed)) => {
+            let mut s = format!(
+                "{} · {} hidden",
+                crate::fmt::count_of(n, "models"),
+                grouped(hidden as u64)
+            );
+            if failed > 0 {
+                s.push_str(&format!(
+                    " · {} failed to load",
+                    crate::fmt::count_of(failed, "catalogs")
+                ));
+            }
+            s
+        }
+    };
 
     let upstream_by_id =
         move |id: i64| upstreams.with(|us| us.iter().find(|u| u.id == id).cloned());
@@ -899,10 +913,31 @@ pub fn ModelCatalogPage() -> impl IntoView {
 
     view! {
         <PageFrame
-            title="Models"
-            sub="every model the passthrough upstreams offer, fetched live"
+            title="Upstream catalogs"
+            sub=catalog_sub
             mode=PageMode::Split
-            head_extra=move || view! { <ModelsTabs configured=configured catalogs=catalog_counts/> }
+            class="catalog-page"
+            actions=move || {
+                view! {
+                    <button
+                        type="button"
+                        class="icon-btn"
+                        title="Read the upstreams and fetch every catalog again"
+                        aria-label="Fetch every catalog again"
+                        on:click=move |_| {
+                            data.load();
+                            for u in upstreams.get_untracked() {
+                                fetch(u);
+                            }
+                        }
+                    >
+                        <Icon ico=Ico::Refresh/>
+                    </button>
+                    <a class="icon-btn" href="/models" title="Models: everything the gateway serves" aria-label="Models">
+                        <Icon ico=Ico::Models/>
+                    </a>
+                }
+            }
             toolbar=move || {
                 view! {
                     <FilterBar
@@ -1053,8 +1088,8 @@ pub fn ModelCatalogPage() -> impl IntoView {
                             }
                         })
                 }}
-                <div class="fill-pane card pad0">
-                    <table class="data">
+                <div class="fill-pane card pad0 catalog-box">
+                    <table class="data cat-table">
                         <thead>
                             <tr>
                                 <th class="pick">

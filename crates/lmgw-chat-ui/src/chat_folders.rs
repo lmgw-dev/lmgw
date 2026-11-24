@@ -34,7 +34,8 @@ use lmgw_api_types::chat::{Ack, Thread};
 use lmgw_api_types::chat_folders::{CurrentThread, FolderOngoing, FolderPatched};
 use lmgw_ui_kit::scope::Scope;
 use lmgw_ui_kit::widgets::{
-    use_toasts, ConfirmButton, MenuItem, Modal, ModalFooter, ModelPicker, RowMenu, Toasts,
+    use_toasts, ConfirmButton, Ico, Icon, MenuItem, Modal, ModalFooter, ModelPicker, RowMenu,
+    Toasts,
 };
 use ongoing::{ApplyToCurrent, OngoingDraft, OngoingFields};
 
@@ -690,7 +691,7 @@ pub(super) fn FolderHeader(row: FolderRow, env: FolderEnv) -> impl IntoView {
             }
         >
             <span class="folder-chev" class:collapsed=collapsed aria-hidden="true">
-                "▾"
+                <Icon ico=Ico::Down/>
             </span>
             <Show
                 when=move || renaming.get()

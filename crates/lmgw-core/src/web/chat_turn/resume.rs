@@ -35,6 +35,9 @@ pub(crate) struct Prior {
     content: String,
     reasoning: String,
     record: Vec<Message>,
+    /// Its notices (`ChatMessageRow::notices`), which the resumed turn's
+    /// join.
+    notices: Vec<lmgw_api_types::chat_frames::LabelNotice>,
     /// With the decisions that resumed it.
     pub pending: PendingApprovals,
 }
@@ -72,6 +75,7 @@ pub(super) fn prior(history: &[ChatMessageRow], message_id: i64) -> Option<Prior
         content: last.content.clone(),
         reasoning: last.reasoning.clone(),
         record,
+        notices: last.notices.clone(),
         pending,
     })
 }
@@ -79,7 +83,8 @@ pub(super) fn prior(history: &[ChatMessageRow], message_id: i64) -> Option<Prior
 impl Prior {
     /// The reply as saved: `added` (what the resumed turn said and did, its
     /// record the loop's new messages) after what was there, and the
-    /// pending state with a new stop's calls, if the turn stopped again.
+    /// pending state with a new stop's calls, if the turn stopped again;
+    /// its notices with the resumed turn's new ones after them.
     pub(super) fn merged(&self, added: ChatReply, stopped: Option<PendingApprovals>) -> ChatReply {
         let new_record: Vec<Message> = added
             .ir_messages
@@ -97,6 +102,7 @@ impl Prior {
             reasoning: format!("{}{}", self.reasoning, added.reasoning),
             ir_messages: serde_json::to_string(&record).ok(),
             pending_approvals: Some(pending),
+            notices: crate::store::merged_notices(&self.notices, &added.notices),
             ..added
         }
     }

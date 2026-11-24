@@ -9,6 +9,7 @@
 //! capped or split here: several CPU rows busy at once each run their own
 //! pool.
 
+use crate::labels::backend_label;
 use leptos::prelude::*;
 use lmgw_api_types::{AudioModel, AudioSettings, HostCpu, SettingsFull};
 use serde_json::{json, Value};
@@ -89,11 +90,14 @@ fn parse_threads(raw: &str) -> Result<Option<i64>, String> {
 /// The "Runs on" choices, the class default named by its backend.
 fn runs_on_options(class_backend: Option<&str>) -> Vec<(String, String)> {
     let default = match class_backend {
-        Some("cpu") => "Class default: CPU".to_string(),
-        Some(b) if !b.is_empty() => format!("Class default: GPU ({b})"),
+        Some("cpu") => format!("Class default: {}", backend_label("cpu")),
+        Some(b) if !b.is_empty() => format!("Class default: GPU ({})", backend_label(b)),
         _ => "Class default".to_string(),
     };
-    vec![(String::new(), default), ("cpu".into(), "CPU".into())]
+    vec![
+        (String::new(), default),
+        ("cpu".into(), backend_label("cpu")),
+    ]
 }
 
 /// What a blank thread count runs with, and where that comes from — the
@@ -278,7 +282,7 @@ mod tests {
     fn the_class_default_is_named_by_its_backend() {
         assert_eq!(
             runs_on_options(Some("cuda"))[0].1,
-            "Class default: GPU (cuda)"
+            "Class default: GPU (CUDA)"
         );
         assert_eq!(runs_on_options(Some("cpu"))[0].1, "Class default: CPU");
         assert_eq!(runs_on_options(None)[0].1, "Class default");

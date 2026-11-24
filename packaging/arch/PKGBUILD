@@ -1,0 +1,147 @@
+# Arch Linux package for the lmgw desktop app.
+#
+# Installs the same files as the RPM (see ci/rpm-allowlist.toml): the app in
+# /usr/bin, the root helper and the document reader at the paths polkit's
+# policy and the gateway name (/usr/libexec/lmgw, hard-wired, so not
+# /usr/lib), the polkit policy, the desktop entry, the hicolor icons and the
+# third-party licences.
+#
+# trunk and tauri-cli are the prebuilt releases ci/install-build-deps.sh pins,
+# with the same hashes, so this package is built with the tools the RPM is.
+# A bump there is a bump here.
+#
+# pkgver is the release's: scripts/release.sh sets it with the other versions,
+# and ci/build-arch.sh refuses a tree whose Cargo.toml says otherwise.
+#
+# Two ways to build:
+#   from a release tag     cd packaging/arch && makepkg -si
+#                          (builds the tag in pkgver, which carries this file)
+#   from a checkout        LMGW_PKG_TREE=/abs/path/to/checkout makepkg
+#                          (ci/build-arch.sh: the tree as it is, version
+#                          stamped, with the caller's CARGO_HOME, update feed
+#                          and profile overrides)
+pkgname=lmgw
+pkgver=0.8.0
+pkgrel=1
+pkgdesc='Local model gateway: your GPU behind OpenAI- and Anthropic-compatible APIs'
+arch=('x86_64')
+url='https://github.com/lmgw-dev/lmgw'
+license=('MIT' 'BSD-2-Clause') # lmgw is MIT; the bundled smart-turn model's licence is BSD 2-Clause
+depends=(
+  'gcc-libs' 'glibc' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'cairo' 'pango'
+  'gdk-pixbuf2' 'glib2' 'opus'
+  'libayatana-appindicator' # tray icon, loaded at runtime
+  # The webview's media backend is GStreamer, and webkit2gtk-4.1 depends only on
+  # its libraries. Chat voice (microphone capture, worklets) and audio playback
+  # in the dashboard need the elements: audioconvert and playback from base,
+  # the PulseAudio/PipeWire source and sink from good. The RPM gets the same
+  # set, because Fedora's webkit2gtk4.1 recommends gstreamer1-plugins-good.
+  'gst-plugins-base' 'gst-plugins-good'
+  'polkit'                  # starts lmgw-machine-helper
+  'podman'                  # every local model runs in its own container
+  'git'                     # engine builds from git refs
+)
+# lmgw runs without these. The first three are the RPM's `recommends`, and
+# Settings > Documents names what is missing.
+optdepends=(
+  'poppler: PDF text and page images for documents (poppler-utils on Fedora)'
+  'tesseract: text recognition in scanned pages and pictures'
+  'tesseract-data-osd: turns pages scanned on their side upright'
+  'gst-plugins-bad: more codecs for audio played in the webview (gstreamer1-plugins-bad-free on Fedora)'
+  'gst-plugin-pipewire: native PipeWire capture and playback for chat voice in the webview'
+  'vulkan-icd-loader: Vulkan engine images on AMD and Intel GPUs'
+  'nvidia-container-toolkit: CUDA engine images on NVIDIA GPUs'
+)
+makedepends=('git' 'rust' 'rust-wasm' 'curl')
+# !strip: the release profile strips the binaries already, and the package's
+# copies then stay byte for byte the files target/release holds, which
+# ci/arch_guard.py compares.
+options=('!lto' '!debug' '!strip')
+_trunk_ver=0.21.14
+_tauri_cli_ver=2.12.0
+source=(
+  "trunk-$_trunk_ver.tar.gz::https://github.com/trunk-rs/trunk/releases/download/v$_trunk_ver/trunk-x86_64-unknown-linux-gnu.tar.gz"
+  "cargo-tauri-$_tauri_cli_ver.tgz::https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$_tauri_cli_ver/cargo-tauri-x86_64-unknown-linux-gnu.tgz"
+  'lmgw.desktop'
+)
+noextract=("trunk-$_trunk_ver.tar.gz" "cargo-tauri-$_tauri_cli_ver.tgz")
+sha256sums=('f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b'
+            '8544e19c4312f653e80f92241ee4212b4d928ad33461bfb1d2997c52560c418f'
+            'SKIP')
+if [[ -z ${LMGW_PKG_TREE:-} ]]; then
+  source+=("$pkgname::git+$url.git#tag=v$pkgver")
+  sha256sums+=('SKIP')
+fi
+
+# The source tree: the tag's clone, or the checkout LMGW_PKG_TREE names.
+_tree() {
+  if [[ -n ${LMGW_PKG_TREE:-} ]]; then
+    printf '%s\n' "$LMGW_PKG_TREE"
+  else
+    printf '%s\n' "$srcdir/$pkgname"
+  fi
+}
+
+# The tag's build keeps its cargo home in $srcdir; a checkout's build keeps the
+# caller's (CI caches it).
+_cargo_env() {
+  if [[ -z ${LMGW_PKG_TREE:-} ]]; then
+    export CARGO_HOME="$srcdir/cargo-home"
+  fi
+  export PATH="$srcdir/tools:${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+}
+
+prepare() {
+  mkdir -p tools
+  tar -xzf "trunk-$_trunk_ver.tar.gz" -C tools trunk
+  tar -xzf "cargo-tauri-$_tauri_cli_ver.tgz" -C tools cargo-tauri
+
+  cd "$(_tree)"
+  _cargo_env
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+  cargo fetch --locked --target wasm32-unknown-unknown
+}
+
+build() {
+  local tree
+  tree="$(_tree)"
+  cd "$tree"
+  _cargo_env
+  # Panic locations would otherwise carry the build directories (the source
+  # tree and the cargo home), which makepkg reports as references to $srcdir.
+  local remap="--remap-path-prefix=$srcdir=/build --remap-path-prefix=$tree=/build/lmgw"
+  [[ -n ${CARGO_HOME:-} ]] && remap+=" --remap-path-prefix=$CARGO_HOME=/build/cargo-home"
+  export RUSTFLAGS="${RUSTFLAGS:-} $remap"
+
+  # lmgw-core embeds crates/lmgw-ui/dist, so the dashboard comes first.
+  (cd crates/lmgw-ui && trunk build --release)
+  [[ -f crates/lmgw-ui/dist/index.html ]] || { echo 'trunk produced no dist/index.html' >&2; return 1; }
+
+  cargo build --release --locked -p lmgw-machine-helper
+  cargo build --release --locked -p lmgw-doc-reader
+  cargo tauri build --no-bundle -- --locked
+}
+
+package() {
+  cd "$(_tree)"
+  install -Dm755 target/release/lmgw "$pkgdir/usr/bin/lmgw"
+  install -Dm755 target/release/lmgw-machine-helper \
+    "$pkgdir/usr/libexec/lmgw/lmgw-machine-helper"
+  install -Dm755 target/release/lmgw-doc-reader "$pkgdir/usr/libexec/lmgw/lmgw-doc-reader"
+  install -Dm644 crates/lmgw-machine-helper/polkit/io.github.lmgw-dev.lmgw.machine-setup.policy \
+    -t "$pkgdir/usr/share/polkit-1/actions"
+
+  install -Dm644 "$srcdir/lmgw.desktop" -t "$pkgdir/usr/share/applications"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/lmgw.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/lmgw.png"
+
+  local lic="$pkgdir/usr/share/licenses/$pkgname" rt=crates/lmgw-core/assets/realtime
+  install -Dm644 LICENSE.md "$lic/LICENSE"
+  install -Dm644 "$rt/LICENSE-onnxruntime" "$lic/onnxruntime/LICENSE"
+  install -Dm644 "$rt/ThirdPartyNotices-onnxruntime.txt" "$lic/onnxruntime/ThirdPartyNotices.txt"
+  install -Dm644 "$rt/LICENSE-silero" "$lic/silero-vad/LICENSE"
+  install -Dm644 "$rt/LICENSE-smart-turn" "$lic/smart-turn/LICENSE"
+  install -Dm644 "$rt/LICENSE-whisper" "$lic/smart-turn/LICENSE-whisper"
+}

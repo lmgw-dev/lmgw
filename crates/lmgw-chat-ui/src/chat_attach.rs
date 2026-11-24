@@ -12,7 +12,7 @@ use serde_json::json;
 use super::chat::ThreadDetail;
 use super::chat_bytes::{attachment_path, ChatImg, Saver};
 use lmgw_ui_kit::scope::Scope;
-use lmgw_ui_kit::widgets::use_toasts;
+use lmgw_ui_kit::widgets::{use_toasts, Ico, Icon};
 
 /// A file picked, dropped or pasted into the composer: uploads the instant
 /// it is picked, so what sits on screen is always what a Send would bind —
@@ -590,9 +590,10 @@ fn DraftChipView(
                 type="button"
                 class="chip-x"
                 title="Remove"
+                aria-label="Remove"
                 on:click=move |_| on_remove.run(remove_chip.clone())
             >
-                "✕"
+                <Icon ico=Ico::Close/>
             </button>
         </span>
     }

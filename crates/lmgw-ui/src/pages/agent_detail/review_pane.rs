@@ -223,7 +223,7 @@ pub(super) fn short_local_date(unix_s: i64) -> String {
 #[component]
 pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
     let run = ctx.run;
-    let (has_apply, apply_tools, ceiling) = ctx.shape.with_value(|s| {
+    let (has_apply, apply_tools, ceiling) = ctx.shape.with_untracked(|s| {
         (
             s.has_apply,
             s.apply_tools.join(", "),
@@ -582,13 +582,13 @@ pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
                     .then(|| view! { <p class="dim mini-note">{format!("{apply_verb} {tools}.")}</p> })
             }
             <p class="dim mini-note">
-                {match ctx.runtime.get_value() {
+                {move || match ctx.runtime.get() {
                     // Principle 5 covers both: a container's bounds are its
                     // cgroup limits and its deadline, not the Responses pair a
                     // turn runs under.
                     Some(r) => bounds_line(&r).into_any(),
                     None => {
-                        let b = ctx.budget.get_value();
+                        let b = ctx.budget.get();
                         view! {
                             {format!(
                                 "Budget: {} tool calls, {} s (",

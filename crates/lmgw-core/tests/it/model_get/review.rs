@@ -96,6 +96,7 @@ async fn waiting_get(w: &World) -> (i64, i64) {
             measure: "beside",
             model_id: "demo-chat",
             kind: None,
+            layout: None,
         },
     )
     .await

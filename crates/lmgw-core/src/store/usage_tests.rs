@@ -109,6 +109,32 @@ async fn an_unpriced_request_adds_nothing_to_cost_and_shows_in_the_remainder() {
     assert_eq!(c, None);
 }
 
+/// Every listener's name is one the `via` column takes (migrations 0081 and
+/// 0108): a request over the main TLS listener was refused by the column's
+/// CHECK and left no row, so nothing on a server behind TLS was logged or
+/// counted.
+#[tokio::test]
+async fn a_request_on_every_listener_gets_its_row() {
+    use crate::server::Via;
+    let pool = db().await;
+    for via in [Via::Plain, Via::Tls, Via::Devices] {
+        let mut row = log("a", 10, 1, Cost::unknown());
+        row.via = via;
+        insert_request_log(&pool, &row)
+            .await
+            .unwrap_or_else(|e| panic!("a request on the {via} listener: {e}"));
+    }
+    let stored: Vec<String> = sqlx::query("SELECT via FROM request_logs ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get("via"))
+        .collect();
+    assert_eq!(stored, ["plain", "tls", "devices"]);
+    assert_eq!(usage_totals(&pool, &window()).await.unwrap().requests, 3);
+}
+
 #[tokio::test]
 async fn a_tool_row_is_not_an_unpriced_model_call() {
     let pool = db().await;

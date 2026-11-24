@@ -182,7 +182,7 @@ pub fn FilterBar(
                                     title="Remove this filter"
                                     on:click=move |_| item.1.run(())
                                 >
-                                    "✕"
+                                    <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
                                 </button>
                             </span>
                         </For>

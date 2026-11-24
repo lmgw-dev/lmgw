@@ -19,6 +19,7 @@
 files = [
   "/usr/bin/lmgw",
   "/usr/libexec/lmgw/lmgw-machine-helper",
+  "/usr/libexec/lmgw/lmgw-doc-reader",
   "/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.policy",
   "/usr/share/applications/lmgw.desktop",
   "/usr/share/icons/hicolor/32x32/apps/lmgw.png",
@@ -60,6 +61,14 @@ scriptlets = []
 mode = "0755"
 built = "target/release/lmgw-machine-helper"
 
+# lmgw's document reader (document-conversion design §5.2, §6.1): the executable the gateway
+# starts, as the desktop user, for every web page, e-book, e-mail, old Excel file and picture
+# it converts. Never run as root; pinned like the helper because it sits beside it in
+# /usr/libexec and the gateway runs whatever is at this path.
+[pinned."/usr/libexec/lmgw/lmgw-doc-reader"]
+mode = "0755"
+built = "target/release/lmgw-doc-reader"
+
 [pinned."/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.policy"]
 mode = "0644"
 # crates/lmgw-machine-helper/polkit/io.github.lmgw-dev.lmgw.machine-setup.policy
@@ -72,7 +81,7 @@ sha256 = "7ebb93accf7ab9a4649a5f2cc2e914b6149e836640a5ce9aa99449374502f531"
 # refuses the first outright and the others unless listed. tauri.conf.json's
 # bundle.linux.rpm `depends`, `provides`, `obsoletes` and `conflicts` reach the package
 # unchanged, so a change there shows up here; ci/rpm_guard_test.py checks `requires` against
-# `depends`. The three sonames are what tauri-bundler adds for the GTK/WebKit/tray
+# `depends` and `recommends` against `recommends`. The three sonames are what tauri-bundler adds for the GTK/WebKit/tray
 # libraries (read off an installed lmgw 0.5.0 package). A dependency is written `name`, then
 # ` (pre)` etc. for Requires(pre), then ` >= 1.2` for a version. `rpmlib(...)` Requires are
 # rpm's own feature checks and are not compared.
@@ -80,7 +89,6 @@ sha256 = "7ebb93accf7ab9a4649a5f2cc2e914b6149e836640a5ce9aa99449374502f531"
 requires = [
   "git",
   "podman",
-  "poppler-utils",
   "opus",
   # pkexec, which the updater's install and the root helper's start need (D19).
   "polkit",
@@ -91,7 +99,14 @@ requires = [
 # Beyond the package's own name and NAME(ARCH), which are always allowed. A user(),
 # group() or groupmember() Provides is refused whatever this says.
 provides = []
-recommends = []
+# The optional document tools (document-conversion design §6.1, D1, D2): PDF text and text
+# recognition, with tesseract's orientation data (10 MiB) that turns pages scanned on their side
+# upright. Without them lmgw still runs, and Settings > Documents names what is missing.
+recommends = [
+  "poppler-utils",
+  "tesseract",
+  "tesseract-osd",
+]
 suggests = []
 supplements = []
 enhances = []

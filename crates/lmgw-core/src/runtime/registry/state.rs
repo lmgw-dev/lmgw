@@ -202,6 +202,21 @@ pub(super) struct Entry {
     /// row's figures by while it runs. Set once it is ready; `None` before
     /// that and for every other class.
     pub(super) engine_key: Option<String>,
+    /// What this container is charged on the cards, as admission staged it
+    /// for its start (`admission_grant::Staged::charge`) or as its label
+    /// recorded it where it was adopted ([`crate::vram::charge`], device-ledger
+    /// design §3.3): kept for the entry's life, a climb's new container
+    /// included. `None` for a start no decision stood behind and a
+    /// container adopted without the label: the ledger charges those on the
+    /// cards their arguments pass.
+    pub(super) card_charge: Option<crate::vram::CardCharge>,
+    /// Started on another card to make room for another model
+    /// (device-ledger design §6.2, `admission_grant::Moved`), and no claim
+    /// has been taken on it since: its `last_used` is the container's it
+    /// replaced, which its own start's claim leaves as it was, and it is
+    /// not moved again (D21). A claim on it once it is ready ends it. False
+    /// for every other start, and for an adoption.
+    pub(super) moved: bool,
 }
 
 /// Serializable snapshot of one entry, for the status/ops surfaces (§8).
@@ -301,6 +316,13 @@ pub struct RuntimeView {
     /// [`Entry::engine_key`]. Not published.
     #[serde(skip)]
     pub engine_key: Option<String>,
+    /// [`Entry::card_charge`]. Not published: the ledger's resident is its
+    /// outside form.
+    #[serde(skip)]
+    pub card_charge: Option<crate::vram::CardCharge>,
+    /// [`Entry::moved`]. Not published: the entry's warnings say it.
+    #[serde(skip)]
+    pub moved: bool,
 }
 
 fn is_zero(n: &u32) -> bool {

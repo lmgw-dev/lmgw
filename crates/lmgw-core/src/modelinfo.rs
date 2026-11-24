@@ -28,6 +28,7 @@ use crate::store;
 
 mod aux_batch;
 mod aux_plan;
+pub mod cards_fit;
 mod class_check;
 pub(crate) mod decision;
 pub mod fit;
@@ -898,11 +899,12 @@ pub async fn model_inspect(
     let kv_note = if chat {
         "KV figures are for context_length tokens in one slot at llama-server's default ubatch, \
          laid out as a chat row's footprint lays it out: q8_0 at its real 8.5 bits, \
-         sliding-window layers at window + ubatch cells, layers that reuse another's cache and \
-         an MLA model's V not counted, and a hybrid's recurrent layers at one state each (0 \
-         where the header has no ssm keys to size it). Weights leave out the input embeddings \
-         llama.cpp keeps in host memory. Compute buffers depend on the row's slots and batch \
-         sizes, so they are not in these figures; the plan's footprint has them."
+         sliding-window layers at window + ubatch cells, a looped model's core once per pass, \
+         layers that reuse another's cache and an MLA model's V not counted, and a hybrid's \
+         recurrent layers at one state each (0 where the header has no ssm keys to size it). \
+         Weights leave out the input embeddings llama.cpp keeps in host memory. Compute buffers \
+         depend on the row's slots and batch sizes, so they are not in these figures; the \
+         plan's footprint has them."
     } else {
         "KV figures are for context_length tokens and exclude quantization scale overhead, so \
          treat them as a lower bound. Sliding-window layers are counted at the window size, and \
@@ -933,6 +935,12 @@ pub async fn model_inspect(
         quant: s.quant.clone(),
         context_length: s.context_length,
         block_count: s.block_count,
+        layer_loop: s.layer_loop.map(|l| dto::LayerLoop {
+            start: l.start,
+            end: l.end,
+            count: l.count,
+            cache_layers: l.cache_layers(s.block_count.unwrap_or(0)),
+        }),
         head_count: s.head_count,
         head_count_kv: s.head_count_kv,
         head_count_kv_per_layer: s.head_count_kv_per_layer.clone(),
@@ -2031,6 +2039,7 @@ pub async fn local_model_test(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let mut probe_params = probe_ir.params.clone();
     let mut lease = match probe {
@@ -2523,6 +2532,7 @@ async fn generate_probe(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let mut probe_params = probe_ir.params.clone();
     let mut lease = match crate::gate::fit_chat(

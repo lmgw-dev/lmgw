@@ -1,27 +1,93 @@
 [
  {
+  "js": "'README gallery shots (scripts/readme-shots.sh). Every document is in the app window framed state (scripts/drive/window-frame.js with the shell page script) on a transparent canvas; scripts/window-frame.py adds the frame afterwards. @CHAT_MODEL@ is README_CHAT_MODEL (ui-drive.py --var CHAT_MODEL=...). Every shot waits for the live status first, so no page shows a state the demo has left.'"
+ },
+ {
   "size": "1536x864"
  },
  {
   "nav": "/"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.5
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the overview shot"
  },
  {
   "shot": "overview"
  },
  {
+  "nav": "/chat"
+ },
+ {
+  "until": "document.querySelectorAll('.msg-user-text').length > 0",
+  "timeout": 30,
+  "label": "the newest demo thread is open"
+ },
+ {
+  "js": "(()=>{const u=[...document.querySelectorAll('.msg-user-text')].pop(); u.scrollIntoView({block:'start'}); let s=u.parentElement; while(s && !/auto|scroll/.test(getComputedStyle(s).overflowY)) s=s.parentElement; if(s) s.scrollTop -= 28; return 'ok'})()"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the chat shot"
+ },
+ {
+  "shot": "chat"
+ },
+ {
   "nav": "/models"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "!![...document.querySelectorAll('.lrow')].find(r=>r.querySelector('.lrow-name')?.textContent.trim()==='@CHAT_MODEL@')",
+  "timeout": 20,
+  "label": "the model list is there"
  },
  {
-  "wait": 2.5
+  "expect": "(()=>{const r=[...document.querySelectorAll('.lrow')].find(r=>r.querySelector('.lrow-name')?.textContent.trim()==='@CHAT_MODEL@'); r?.click(); return !!r})()",
+  "label": "the demo chat model opens"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
+ },
+ {
+  "until": "(()=>{const r=[...document.querySelectorAll('.lrow')].find(r=>r.querySelector('.lrow-name')?.textContent.trim()==='@CHAT_MODEL@'); const d=document.querySelector('.mdetail-pane'); return !!r && /Running/.test(r.innerText) && !!d && /@CHAT_MODEL@/.test(d.innerText) && !/\\bStopped\\b/.test(d.innerText)})()",
+  "timeout": 20,
+  "label": "the demo model's row and detail say it runs, not Stopped",
+  "abort": true
+ },
+ {
+  "js": "(()=>{const list=document.querySelector('.mlist'), sel=list.querySelector('.lrow.sel'); const lt=()=>list.getBoundingClientRect().top; list.scrollTop += sel.getBoundingClientRect().top - lt() - list.clientHeight / 3; const head=[...list.querySelectorAll('.list-head')].filter(h=>h.getBoundingClientRect().top <= lt() + 1).pop(); const hb=head ? head.getBoundingClientRect().bottom : lt(); const first=[...list.querySelectorAll('.lrow')].find(r=>r.getBoundingClientRect().bottom > hb + 1); if (first) list.scrollTop += first.getBoundingClientRect().top - hb; return 'first visible row ' + (first ? first.querySelector('.lrow-name')?.textContent : '-')})()"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "(()=>{const list=document.querySelector('.mlist'), sel=list.querySelector('.lrow.sel'), lr=list.getBoundingClientRect(); const head=[...list.querySelectorAll('.list-head')].filter(h=>h.getBoundingClientRect().top <= lr.top + 1).pop(); const hb=head ? head.getBoundingClientRect().bottom : lr.top; const rows=[...list.querySelectorAll('.lrow')].map(r=>r.getBoundingClientRect()).filter(r=>r.bottom > hb + 1 && r.top < lr.bottom); const s=sel.getBoundingClientRect(); return rows.length > 0 && rows[0].top >= hb - 1 && s.top >= hb - 1 && s.bottom <= lr.bottom + 1})()",
+  "label": "the list's first visible row is whole under its group header, and the selected row is in view"
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the models shot"
  },
  {
   "shot": "models"
@@ -30,10 +96,17 @@
   "nav": "/usage"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.5
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the usage shot"
  },
  {
   "shot": "usage"
@@ -42,10 +115,26 @@
   "nav": "/traffic"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "document.querySelectorAll('.lrow').length > 1",
+  "timeout": 20,
+  "label": "the request list is there"
+ },
+ {
+  "expect": "(()=>{const r=[...document.querySelectorAll('.lrow')].find(r=>/\\b[1-9]\\d{2,} tok\\b/.test(r.innerText)); r?.click(); return !!r})()",
+  "label": "a demo request with a long reply opens"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.5
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the traffic shot"
  },
  {
   "shot": "traffic"
@@ -54,59 +143,84 @@
   "nav": "/backends"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.5
  },
  {
-  "shot": "backends"
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the engines shot"
+ },
+ {
+  "shot": "engines"
  },
  {
   "nav": "/mcp-servers"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.5
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the mcp-servers shot"
  },
  {
   "shot": "mcp-servers"
  },
  {
-  "nav": "/chat"
- },
- {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
- },
- {
-  "until": "document.querySelectorAll('.msg-user-text').length > 0",
-  "timeout": 60
- },
- {
-  "js": "(()=>{const u=[...document.querySelectorAll('.msg-user-text')].pop(); if(!u) return 'no thread'; u.scrollIntoView({block:'start'}); return 'ok'})()"
- },
- {
-  "wait": 1.5
- },
- {
-  "shot": "chat"
- },
- {
   "nav": "/api-reference"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
+  "until": "!!document.querySelector('.api-row')",
+  "timeout": 20,
+  "label": "the endpoint list is there"
  },
  {
-  "wait": 2.5
+  "expect": "(()=>{const r=[...document.querySelectorAll('.api-row')].find(r=>r.querySelector('.lrow-name')?.textContent.trim()==='/v1/chat/completions'); r?.click(); return !!r})()",
+  "label": "POST /v1/chat/completions opens"
  },
  {
-  "js": "(()=>{const a=[...document.querySelectorAll('*')].filter(e=>e.children.length<3&&e.offsetParent&&/\\/v1\\/chat\\/completions$/.test(e.textContent.trim())); a[0]?.click(); return a.length})()"
+  "until": "!!document.querySelector('.mdetail-pane button.mp-btn')",
+  "timeout": 10,
+  "label": "the request panel has its model picker"
+ },
+ {
+  "click": ".mdetail-pane button.mp-btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^@CHAT_MODEL@(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "the demo chat model is offered in the request panel"
+ },
+ {
+  "until": "(()=>{const b=document.querySelector('.mdetail-pane button.mp-btn'); return /^@CHAT_MODEL@(\\s|$)/.test(b.innerText.trim()) && !/not served/.test(b.innerText)})()",
+  "timeout": 5,
+  "label": "the request panel names the demo model, served"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 2.0
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the api-reference shot"
  },
  {
   "shot": "api-reference"

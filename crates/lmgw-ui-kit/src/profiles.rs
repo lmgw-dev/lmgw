@@ -5,11 +5,14 @@
 //! (plus the pickers' `/v1/models` and `/v1/audio/voices`), relative to the
 //! base [`crate::http::configure`] sets.
 //!
-//! - [`ProfileEditor`]: one profile (or a new one): fields, the static
-//!   part with Count, Test, Speak a sample, built-in badge and Reset, a
-//!   two-click delete that says what it clears.
-//! - [`ProfilesPanel`]: the list with the editor beside it, for a page or a
-//!   settings tab that has nothing else to show.
+//! - [`ProfileEditor`]: one profile (or a new one) as preference groups
+//!   with the save toast: fields, the static part with Count, Test, Speak a
+//!   sample, an optional hero with the built-in, usage and default chips,
+//!   Reset, and a delete that asks in a dialog what it clears.
+//! - [`ProfilesPanel`]: the list with the editor beside it, for a settings
+//!   tab that has nothing else to show (the dashboard has its own list and
+//!   detail on the shared split view).
+//! - [`upsert`]: a stored row into a list, in the gateway's order.
 //!
 //! The state and the wire shaping are in [`model`] and [`api`] and tested
 //! without a browser. A host links `assets/profiles.css` after `kit.css`.
@@ -22,4 +25,4 @@ mod panel;
 mod try_panel;
 
 pub use editor::ProfileEditor;
-pub use panel::ProfilesPanel;
+pub use panel::{upsert, ProfilesPanel};

@@ -95,7 +95,9 @@ async fn a_followed_wait_names_the_model_it_evicts() {
         vec![
             WaitPhase::Measuring,
             WaitPhase::Evicting {
-                victim: "chat/chat-model".into()
+                victim: "chat/chat-model".into(),
+                cards: Vec::new(),
+                moves: false,
             },
             WaitPhase::Starting,
         ]
@@ -216,7 +218,7 @@ async fn a_waiting_request_is_visible_in_the_queue() {
     let gateway = f.gateway.clone();
     let waiting = tokio::spawn(async move { embed(&gateway).await.status() });
 
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    queue_holds(&f.gateway, "the wait in the queue", 1).await;
     let v = vram_status(&f.gateway).await;
     let queue = v["queue"].as_array().cloned().unwrap_or_default();
     assert_eq!(
@@ -228,7 +230,11 @@ async fn a_waiting_request_is_visible_in_the_queue() {
     assert_eq!(queue[0]["model"], "embed-model");
     assert_eq!(queue[0]["container"], "aux");
     assert_eq!(queue[0]["alias"], "embed/embed-model");
-    assert_eq!(queue[0]["needs_bytes"], 3 * GIB + 512 * 1024 * 1024);
+    // Its footprint, the floor and its margin (in every mode since WP13).
+    assert_eq!(
+        queue[0]["needs_bytes"],
+        3 * GIB + 512 * 1024 * 1024 + lmgw_core::vram::headroom::LLAMA_MARGIN
+    );
     assert!(queue[0]["waiting_ms"].as_u64().unwrap_or(0) > 0);
     assert!(!queue[0]["stage"].as_str().unwrap_or_default().is_empty());
 
@@ -253,25 +259,16 @@ async fn a_disconnected_client_leaves_the_queue() {
     let started = std::time::Instant::now();
     let gateway = f.gateway.clone();
     let waiting = tokio::spawn(async move { embed(&gateway).await.status() });
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let v = vram_status(&f.gateway).await;
-    assert_eq!(
-        v["queue"].as_array().map_or(0, |q| q.len()),
-        1,
-        "the wait must be queued before the client goes away: {v}"
-    );
+    // The wait is queued before the client goes away.
+    queue_holds(&f.gateway, "the wait in the queue", 1).await;
 
     // The client goes away: aborting the task drops the request future and
     // with it the connection.
     waiting.abort();
     let _ = waiting.await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let v = vram_status(&f.gateway).await;
-    assert!(
-        v["queue"].as_array().is_none_or(|q| q.is_empty()),
-        "a cancelled wait must not linger in the queue: {v}"
-    );
+    // A cancelled wait does not linger in the queue: it empties, and before
+    // the queue timeout (below).
+    queue_holds(&f.gateway, "the cancelled wait out of the queue", 0).await;
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "the queue must have emptied on the disconnect, not on the timeout"
@@ -334,4 +331,13 @@ async fn admissions_of_two_models_overlap_through_the_gate_and_the_start() {
         vec!["chat-model".to_string(), "embed-model".to_string()]
     );
     assert!(f.stops().is_empty(), "16 GiB fits both");
+}
+
+/// Until `/api/vram` lists `n` waits in its queue.
+async fn queue_holds(gateway: &Gw, what: &str, n: usize) {
+    common::patience::until_async(what, || async {
+        let v = vram_status(gateway).await;
+        v["queue"].as_array().map_or(0, Vec::len) == n
+    })
+    .await;
 }

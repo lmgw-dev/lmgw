@@ -1,4 +1,4 @@
-//! One run whole (`?run=<id>`, benchmark design §8.2): what went wrong or is
+//! One run whole (`/benchmarks/<id>`, benchmark design §8.2): what went wrong or is
 //! worth knowing first (status, partial, throttled), the headline numbers
 //! with their change against the previous comparable run, what the run was
 //! (identity, settings, command line, notes), the probes, one chart per
@@ -18,16 +18,19 @@ use lmgw_api_types::bench_ops::{
 use lmgw_api_types::{LocalModel, ModelsFull};
 
 use super::delta::{tally, DeltaTable, HeadlineTiles, ThresholdControl};
+use super::frame::BnFrame;
 use super::identity::IdentityCards;
 use super::notes::NotesEditor;
 use super::phase_charts::{PhaseCharts, RunLine};
 use super::probes::ProbesList;
 use super::timeline::TimelineCard;
-use super::{build_words, compare_href, fmt_ms, phase_label, tokens_short, use_bn, Bn};
+use super::{
+    build_words, compare_href, fmt_ms, phase_label, status_look, tokens_short, use_bn, Bn,
+};
 use crate::bench_api as api;
 use crate::pages::backends::{ago, local_ts};
 use crate::scope::{Latest, Scope};
-use crate::widgets::{ConfirmButton, PageFrame, Section};
+use crate::widgets::{ConfirmButton, Dot, Ico, Icon, MenuItem, Section, StateChip};
 
 /// The detail's reads: one in flight at a time, the newest answer applied.
 #[derive(Clone, Copy)]
@@ -174,49 +177,36 @@ pub fn DetailView(id: i64) -> impl IntoView {
                 .and_then(|d| d.comparison.as_ref().map(|c| c.base_run_id))
         })
     });
+    let status_chip = move || {
+        if let Some(v) = live.get() {
+            let words = match v.percent {
+                Some(p) => format!("{} {p}%", v.phase_word()),
+                None => v.phase_word(),
+            };
+            return view! { <StateChip dot=Dot::Busy word=words title=v.stage.clone()/> }
+                .into_any();
+        }
+        run.with(|r| {
+            r.as_ref().map(|r| {
+                let (dot, words, title) = status_look(
+                    r.status,
+                    r.results.complete,
+                    r.gpu.throttled,
+                    r.status_reason.as_deref(),
+                    r.error.as_deref(),
+                );
+                view! { <StateChip dot=dot word=words title=title/> }
+            })
+        })
+        .into_any()
+    };
     let actions = move || {
-        let del = move || {
-            if running.get() {
-                view! {
-                    <ConfirmButton
-                        label="Cancel run"
-                        confirm=format!("Cancel run {id}?")
-                        class="btn"
-                        title="Stop the run: its container is removed, the GPU released, the phases measured so far kept"
-                        on_confirm=Callback::new(move |()| bn.cancel(id))
-                    />
-                }
-                .into_any()
-            } else {
-                view! {
-                    <ConfirmButton
-                        label="Delete"
-                        confirm=format!("Delete run {id}?")
-                        class="btn"
-                        title="Delete the run and everything it measured"
-                        on_confirm=Callback::new(move |()| {
-                            bn.delete(id, Some(Callback::new(move |()| bn.go("/benchmarks".into()))))
-                        })
-                    />
-                }
-                .into_any()
-            }
-        };
         view! {
-            <A href="/benchmarks" attr:class="btn ghost">"All runs"</A>
-            {move || {
-                base.get()
-                    .map(|b| {
-                        view! {
-                            <A href=compare_href(&[b, id]) attr:class="btn" attr:title="Overlay this run on the previous comparable one">
-                                "Compare with previous"
-                            </A>
-                        }
-                    })
-            }}
             <button
-                class="btn"
-                title="The New benchmark modal with this run's row, rung, image, overrides, phases and repetitions"
+                type="button"
+                class="icon-btn"
+                title="Benchmark again: the New benchmark modal with this run's row, rung, image, overrides, phases and repetitions"
+                aria-label="Benchmark again"
                 disabled=move || run.with(Option::is_none)
                 on:click=move |_| {
                     if let Some(r) = run.get_untracked() {
@@ -224,18 +214,67 @@ pub fn DetailView(id: i64) -> impl IntoView {
                     }
                 }
             >
-                "Benchmark again…"
+                <Icon ico=Ico::Refresh/>
             </button>
-            {del}
+            <Show when=move || running.get()>
+                <ConfirmButton
+                    label="Cancel run"
+                    confirm=format!("Cancel run {id}?")
+                    class="btn"
+                    title="Stop the run: its container is removed, the GPU released, the phases measured so far kept"
+                    on_confirm=Callback::new(move |()| bn.cancel(id))
+                />
+            </Show>
         }
     };
+    let more = Signal::derive(move || {
+        let prev = base.get();
+        let mut items = vec![
+            MenuItem::new("Compare with previous", move || {
+                if let Some(b) = prev {
+                    bn.go(compare_href(&[b, id]));
+                }
+            })
+            .disabled(prev.is_none())
+            .title(match prev {
+                Some(_) => "Overlay this run on the previous comparable one".to_string(),
+                None => "No earlier comparable run: same weights, settings, suite and GPU".into(),
+            }),
+            MenuItem::new("Notes…", move || {
+                bn.notes.set(Some((
+                    id,
+                    run.with_untracked(|r| r.as_ref().map(|r| r.notes.clone()).unwrap_or_default()),
+                )))
+            }),
+        ];
+        if running.get() {
+            items.push(
+                MenuItem::new("Cancel run", move || bn.cancel(id))
+                    .danger()
+                    .title("Stop the run; the phases measured so far are kept"),
+            );
+        } else {
+            items.push(
+                MenuItem::new("Delete run", move || {
+                    bn.delete(
+                        id,
+                        Some(Callback::new(move |()| bn.go("/benchmarks".into()))),
+                    )
+                })
+                .danger()
+                .title("Delete the run and everything it measured"),
+            );
+        }
+        items
+    });
 
     view! {
-        <PageFrame
-            title=format!("Run {id}")
+        <BnFrame
+            title=Signal::derive(move || format!("Run {id}"))
             sub=Signal::derive(sub)
-            class="bench"
-            actions=actions
+            chips=ViewFn::from(status_chip)
+            actions=ViewFn::from(actions)
+            more=more
         >
             {move || {
                 l.err
@@ -253,7 +292,7 @@ pub fn DetailView(id: i64) -> impl IntoView {
             <Show when=move || run.with(Option::is_some) fallback=move || view! { <div class="empty">"Loading…"</div> }>
                 <Body id=id l=l run=run row=row/>
             </Show>
-        </PageFrame>
+        </BnFrame>
     }
 }
 
@@ -287,7 +326,7 @@ fn LiveStrip(stage: String, done: u64, total: Option<u64>, pct: Option<u64>) -> 
     view! {
         <div class="card bn-live-card">
             <div class="bn-live-line">
-                <span class="chip live"><span class="dot"></span>"running"</span>
+                <span class="chip info"><span class="dot"></span>"running"</span>
                 <span class="bn-stage" title=tip>{stage}</span>
                 <span class="dim">{steps}</span>
                 <div class="progress bn-progress" title=pct.map(|p| format!("{p}%"))>

@@ -100,6 +100,7 @@ pub(crate) async fn rich_thread(state: &SharedState, title: &str) -> i64 {
             model: Some("m-earlier".into()),
             answered_by: Some("cloud-fb".into()),
             images_note: None,
+            notices: Vec::new(),
             voice: None,
             pending_approvals: None,
             tool_files: Vec::new(),

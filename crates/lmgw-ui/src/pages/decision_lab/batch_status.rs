@@ -30,7 +30,7 @@ use crate::widgets::ConfirmButton;
 pub(super) fn status_chip(status: BatchStatus, p: Progress) -> (&'static str, String) {
     let at = format!("{} of {}", grouped(p.done), grouped(p.total));
     match status {
-        BatchStatus::Running => ("chip live", "running".into()),
+        BatchStatus::Running => ("chip info", "running".into()),
         BatchStatus::Done => ("chip ok", "done".into()),
         BatchStatus::Canceled => ("chip warn", format!("canceled at {at}")),
         BatchStatus::Interrupted => ("chip warn", format!("interrupted at {at}")),
@@ -453,7 +453,7 @@ mod tests {
             status_chip(BatchStatus::Interrupted, p(340, 0, 0)).1,
             "interrupted at 340 of 1\u{202F}000"
         );
-        assert_eq!(status_chip(BatchStatus::Running, p(1, 0, 0)).0, "chip live");
+        assert_eq!(status_chip(BatchStatus::Running, p(1, 0, 0)).0, "chip info");
         assert_eq!(
             status_chip(BatchStatus::Canceled, p(2, 0, 0)).1,
             "canceled at 2 of 1\u{202F}000"

@@ -416,6 +416,13 @@ pub fn y_grid_ticks(
         .collect()
 }
 
+/// Whether band `i` of `n` carries a label: every `every`-th band, and the
+/// last; a regular label closer to the last than a full step is dropped, so the
+/// last never sits nearer to its neighbour than the regular ones do.
+fn x_label_shown(i: usize, n: usize, every: usize) -> bool {
+    i + 1 == n || (i.is_multiple_of(every) && n - 1 - i >= every)
+}
+
 /// Band-centred x labels, every `every`-th band (and always the last).
 pub fn x_labels(p: &Plot, labels: &[String], every: usize) -> Vec<AnyView> {
     let n = labels.len();
@@ -423,7 +430,7 @@ pub fn x_labels(p: &Plot, labels: &[String], every: usize) -> Vec<AnyView> {
     labels
         .iter()
         .enumerate()
-        .filter(|(i, _)| i % every == 0 || *i == n - 1)
+        .filter(|(i, _)| x_label_shown(*i, n, every))
         .map(|(i, l)| {
             let x = p.band_mid(i, n);
             let l = l.clone();
@@ -456,6 +463,8 @@ pub struct LegendItem {
     /// to a per-series link: chart segments are pointer-sized, and some of them
     /// are two pixels tall.
     pub href: Option<String>,
+    /// A tooltip for the entry: what its words stand for.
+    pub title: Option<String>,
 }
 
 impl LegendItem {
@@ -466,6 +475,7 @@ impl LegendItem {
             line: false,
             opacity: 1.0,
             href: None,
+            title: None,
         }
     }
     pub fn rule(color: impl Into<String>, label: impl Into<String>) -> Self {
@@ -475,6 +485,7 @@ impl LegendItem {
             line: true,
             opacity: 1.0,
             href: None,
+            title: None,
         }
     }
     pub fn at(mut self, opacity: f64) -> Self {
@@ -483,6 +494,10 @@ impl LegendItem {
     }
     pub fn linking(mut self, href: impl Into<String>) -> Self {
         self.href = Some(href.into());
+        self
+    }
+    pub fn titled(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 }
@@ -500,14 +515,14 @@ pub fn legend(items: Vec<LegendItem>) -> AnyView {
             let cls = if i.line { "line" } else { "" };
             match i.href {
                 Some(href) => view! {
-                    <a class="legend-link" href=href>
+                    <a class="legend-link" href=href title=i.title>
                         <i class=cls style=style></i>
                         {i.label}
                     </a>
                 }
                 .into_any(),
                 None => view! {
-                    <span>
+                    <span title=i.title>
                         <i class=cls style=style></i>
                         {i.label}
                     </span>
@@ -855,6 +870,19 @@ mod tests {
 
     fn keys(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_last_x_label_never_overprints_the_one_before_it() {
+        // 22 days, a label every 4th: 20 sits right before the last (21) and goes.
+        let shown: Vec<usize> = (0..22).filter(|i| x_label_shown(*i, 22, 4)).collect();
+        assert_eq!(shown, vec![0, 4, 8, 12, 16, 21]);
+        // Every 3rd: the last is itself a regular one.
+        let shown: Vec<usize> = (0..22).filter(|i| x_label_shown(*i, 22, 3)).collect();
+        assert_eq!(shown, vec![0, 3, 6, 9, 12, 15, 18, 21]);
+        // 20 days: 18 is one band before the last (19) and goes.
+        let shown: Vec<usize> = (0..20).filter(|i| x_label_shown(*i, 20, 3)).collect();
+        assert_eq!(shown, vec![0, 3, 6, 9, 12, 15, 19]);
     }
 
     #[test]

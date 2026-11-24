@@ -535,6 +535,42 @@ pub(crate) fn place(
     Some(p)
 }
 
+/// What of each repeating layer of `s` is on the card under `overrides`
+/// (device-ledger design §4.3, a split): every `blk.N.…` tensor's bytes,
+/// less those a CPU override keeps in host memory, matched as [`place`]
+/// matches them (the first override whose pattern is found in the name; one
+/// after an unreadable pattern to a device stays on the card). Indexed by
+/// layer, `block_count` long; `None` without a layer count or a complete
+/// tensor list, and for a `block_count` more than the tensor list can back
+/// (every layer has a tensor of its own): the header's word is no size to
+/// allocate by, and a corrupt or crafted one would ask for any amount.
+pub(crate) fn layer_bytes(s: &ModelSummary, overrides: &[Override]) -> Option<Vec<u64>> {
+    let n = usize::try_from(s.block_count.filter(|b| *b > 0)?).ok()?;
+    let list = &s.tensor_list;
+    if list.tensors.is_empty() || !list.complete(s.split_count) || n > list.tensors.len() {
+        return None;
+    }
+    let matchers: Vec<Matcher> = overrides.iter().map(Matcher::of).collect();
+    let shadow = overrides
+        .iter()
+        .zip(&matchers)
+        .position(|(o, m)| matches!(m, Matcher::Unreadable(_)) && !o.cpu());
+    let mut out = vec![0u64; n];
+    for (name, bytes) in &list.tensors {
+        let Some(l) = layer_of(name).and_then(|l| usize::try_from(l).ok()) else {
+            continue;
+        };
+        let off = matchers
+            .iter()
+            .position(|m| m.matches(name))
+            .is_some_and(|k| overrides[k].cpu() && !shadow.is_some_and(|d| k > d));
+        if let (false, Some(slot)) = (off, out.get_mut(l)) {
+            *slot = slot.saturating_add(*bytes);
+        }
+    }
+    Some(out)
+}
+
 /// The note for input embeddings an override to a device charges.
 fn onto_note(whose: &str, bytes: u64) -> String {
     format!(

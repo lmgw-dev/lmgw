@@ -37,7 +37,7 @@ use super::chat::{parse_utc_ts, scroll_down, Msg};
 use super::chat_actions::{ActionEnv, MsgActions, MsgOps};
 use super::chat_turn::{run_turn, Turn};
 use lmgw_ui_kit::scope::Scope;
-use lmgw_ui_kit::widgets::{ConfirmButton, Toasts};
+use lmgw_ui_kit::widgets::{ConfirmButton, Ico, Icon, Toasts};
 
 /// The open thread's tasks, tagged with the thread they were read for: a
 /// read that lands after the owner moved on shows nowhere.
@@ -640,7 +640,7 @@ pub(super) fn TaskStrip(env: TaskEnv, said: RwSignal<Option<String>>) -> impl In
                                 aria-label="Dismiss"
                                 on:click=move |_| st.said.set(None)
                             >
-                                "✕"
+                                <Icon ico=Ico::Close/>
                             </button>
                         </div>
                     }

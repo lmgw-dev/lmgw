@@ -86,7 +86,7 @@ fn text_block(image: &Value) -> Value {
     let field = |k: &str| src.and_then(|s| s.get(k)).and_then(Value::as_str);
     let text = match field("type") {
         Some("url") => match crate::ingress::openai::parse_image_url(field("url").unwrap_or("")) {
-            ContentPart::Image { mime, source } => {
+            ContentPart::Image { mime, source, .. } => {
                 image_placeholder(&mime, &source, PLACEHOLDER_REASON)
             }
             _ => format!("[image — omitted: {PLACEHOLDER_REASON}]"),

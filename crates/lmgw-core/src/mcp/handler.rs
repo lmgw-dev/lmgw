@@ -345,6 +345,7 @@ pub fn ir_from_create_message(params: &CreateMessageRequestParams, alias: &str) 
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 

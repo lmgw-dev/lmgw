@@ -69,11 +69,15 @@ mod tests {
             model: model.into(),
             state: "ready".into(),
             estimated_bytes: gib * GIB,
+            charge: crate::vram::CardCharge::over(Vec::new(), gib * GIB),
             in_flight: 0,
             idle_seconds: Some(0),
             peak_extra_bytes: None,
             pending_bytes: None,
             note: None,
+            cards: Vec::new(),
+            generation: None,
+            kept_bytes: 0,
         }
     }
 

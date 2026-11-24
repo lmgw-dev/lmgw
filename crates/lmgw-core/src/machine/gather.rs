@@ -63,6 +63,11 @@ pub(super) struct CardFacts {
     /// container was started with the NVIDIA card (headless server design
     /// §7).
     pub nvidia_nodes: bool,
+    /// `/dev/nvidiactl` is there but `stat` on it fails with EACCES or
+    /// EPERM: the host's SELinux policy keeps the container's type from the
+    /// card's device nodes (headless server design §7). `nvidia_nodes` is
+    /// false then.
+    pub nvidia_denied: bool,
 }
 
 impl CardFacts {
@@ -80,6 +85,26 @@ pub(super) struct SpecFacts {
     /// no spec.
     pub now: Option<Judgement>,
     pub stamp: Option<Stamp>,
+    /// How many cards the spec names by index, and how many by UUID
+    /// (device-ledger design §7.1): lmgw passes a card it placed a model on
+    /// by its UUID. `None` without a spec that parses.
+    pub cards_named: Option<(usize, usize)>,
+}
+
+/// How many cards a spec names by index and how many by UUID.
+pub(super) fn cards_named(spec: &[u8]) -> Option<(usize, usize)> {
+    let s = lmgw_machine::cdi::Spec::parse(spec, lmgw_machine::cdi::spec::Format::Json).ok()?;
+    let index = s
+        .devices
+        .iter()
+        .filter(|d| d.name.parse::<u32>().is_ok())
+        .count();
+    let uuid = s
+        .devices
+        .iter()
+        .filter(|d| d.name.starts_with("GPU-"))
+        .count();
+    Some((index, uuid))
 }
 
 /// NVIDIA's software source not loading (§3.2, "A section that stopped
@@ -213,6 +238,7 @@ fn card_facts(f: &dyn Facts) -> CardFacts {
         .flatten()
         .collect();
     let render_nodes = render_nodes(f);
+    let nodes = f.stat(Path::new(super::container::NVIDIACTL));
     let driver = DriverState::read(f);
     let no_module = matches!(driver, DriverState::NoModule { .. });
     CardFacts {
@@ -226,7 +252,10 @@ fn card_facts(f: &dyn Facts) -> CardFacts {
         nvml: None,
         amd: None,
         kfd: lmgw_machine::facts::exists(f, Path::new(KFD)),
-        nvidia_nodes: lmgw_machine::facts::exists(f, Path::new(super::container::NVIDIACTL)),
+        nvidia_nodes: nodes.is_ok(),
+        nvidia_denied: nodes
+            .as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
         render_nodes,
         pci,
     }
@@ -376,6 +405,7 @@ fn spec_facts(f: &dyn Facts, state: &AppState) -> SpecFacts {
     let cdi = state.cdi();
     let prefix = state.snapshot().settings.container_prefix.clone();
     let paths = cdi.paths(&prefix);
+    let mut named = None;
     let (now, stamp) = match (&paths, cdi.why_unmanaged()) {
         (Some(p), None) => {
             let stamp_bytes = std::fs::read(&p.stamp);
@@ -383,8 +413,10 @@ fn spec_facts(f: &dyn Facts, state: &AppState) -> SpecFacts {
                 .as_ref()
                 .ok()
                 .and_then(|b| serde_json::from_slice::<Stamp>(b).ok());
+            let spec = std::fs::read(&p.spec);
+            named = spec.as_deref().ok().and_then(cards_named);
             let on_disk = OnDisk {
-                spec: std::fs::read(&p.spec),
+                spec,
                 stamp: stamp_bytes,
                 spec_dir: std::fs::read_dir(&p.spec_dir).and_then(|d| {
                     let mut names = d
@@ -404,6 +436,7 @@ fn spec_facts(f: &dyn Facts, state: &AppState) -> SpecFacts {
         paths,
         now,
         stamp,
+        cards_named: named,
     }
 }
 
@@ -815,4 +848,21 @@ pub(super) async fn gather(
         deployment,
         mounts,
     })
+}
+
+#[cfg(test)]
+mod cards_named_tests {
+    use super::cards_named;
+
+    /// The cards a spec names by index and by UUID (device-ledger design
+    /// §7.1): `all` is neither.
+    #[test]
+    fn a_spec_names_its_cards_by_index_and_by_uuid() {
+        let spec = br#"{"cdiVersion":"0.5.0","kind":"nvidia.com/gpu","devices":[
+            {"name":"0","containerEdits":{}},{"name":"1","containerEdits":{}},
+            {"name":"GPU-aaaa","containerEdits":{}},{"name":"all","containerEdits":{}}],
+            "containerEdits":{}}"#;
+        assert_eq!(cards_named(spec), Some((2, 1)));
+        assert_eq!(cards_named(b"not json"), None);
+    }
 }

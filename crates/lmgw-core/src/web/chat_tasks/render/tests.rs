@@ -346,6 +346,7 @@ fn a_tool_turn_s_record_before_a_result_stays_valid() {
                 id: "call_1".into(),
                 name: "desktop__build".into(),
                 args: serde_json::json!({}),
+                cache_control: None,
             }],
         },
         Message {
@@ -355,6 +356,7 @@ fn a_tool_turn_s_record_before_a_result_stays_valid() {
                 name: Some("desktop__build".into()),
                 content: ToolResultBlock::one("started, job t41"),
                 is_error: false,
+                cache_control: None,
             }],
         },
     ])

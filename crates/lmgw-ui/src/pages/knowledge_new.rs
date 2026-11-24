@@ -1,4 +1,4 @@
-//! New knowledge base: the dialog. The API validates before the row exists —
+//! New knowledge base: the dialog, the base's fields as preference groups. The API validates before the row exists —
 //! the model must resolve and answer a probe (that is how its identity is
 //! pinned), and a chunk size above what it takes per input is refused — so a
 //! failure here is the server's own sentence, printed as it came.
@@ -24,7 +24,7 @@ pub fn NewKbModal(open: RwSignal<bool>, on_created: Callback<()>) -> impl IntoVi
 #[component]
 fn NewForm(open: RwSignal<bool>, on_created: Callback<()>) -> impl IntoView {
     let toasts = use_toasts();
-    let navigate = leptos_router::hooks::use_navigate();
+    let page = super::knowledge::use_kb_page();
     let scope = crate::scope::Scope::new();
     let form = KbForm::blank();
     let busy = RwSignal::new(false);
@@ -44,7 +44,6 @@ fn NewForm(open: RwSignal<bool>, on_created: Callback<()>) -> impl IntoView {
         };
         busy.set(true);
         error.set(None);
-        let navigate = navigate.clone();
         leptos::task::spawn_local(async move {
             let res = crate::api::post::<Kb, _>("/api/knowledge/bases", &body).await;
             match res {
@@ -57,8 +56,10 @@ fn NewForm(open: RwSignal<bool>, on_created: Callback<()>) -> impl IntoView {
                         }
                         open.set(false);
                         on_created.run(());
+                        // Through the page's guard: another base's unsaved
+                        // Settings ask before the move leaves them.
+                        page.go(&format!("/knowledge/{}", kb.id), false);
                     }
-                    navigate(&format!("/knowledge/{}", kb.id), Default::default());
                 }
                 Err(e) => {
                     if scope.alive() {
@@ -70,14 +71,21 @@ fn NewForm(open: RwSignal<bool>, on_created: Callback<()>) -> impl IntoView {
         });
     });
 
+    let blocked = move || busy.get() || form.invalid() != 0;
     view! {
-        <KbFields form=form/>
+        <div class="kb-new">
+            <KbFields form=form/>
+        </div>
         {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
         <ModalFooter>
-            <button class="btn ghost" on:click=move |_| open.set(false)>
+            <button class="btn" on:click=move |_| open.set(false)>
                 "Cancel"
             </button>
-            <button class="btn primary" disabled=move || busy.get() on:click=move |_| create.run(())>
+            <button
+                class="btn suggested pill"
+                disabled=blocked
+                on:click=move |_| create.run(())
+            >
                 {move || if busy.get() { "Creating…" } else { "Create knowledge base" }}
             </button>
         </ModalFooter>

@@ -86,86 +86,89 @@ pub(super) fn ImagesCard(lab: Lab) -> impl IntoView {
     let over = RwSignal::new(false);
     view! {
         <Show when=shown>
-            <div class="card dl-images">
+            <section class="pref-group lab-card dl-images">
                 <h3 class="lab-h3">"Images"</h3>
-                <label
-                    class="dl-drop"
-                    class:over=move || over.get()
-                    on:dragover=move |ev: web_sys::DragEvent| {
-                        ev.prevent_default();
-                        over.set(true);
-                    }
-                    on:dragleave=move |_| over.set(false)
-                    on:drop=move |ev: web_sys::DragEvent| {
-                        ev.prevent_default();
-                        over.set(false);
-                        let files = file_list(ev.data_transfer().and_then(|d| d.files()));
-                        add_files(lab, files);
-                    }
-                >
-                    <input
-                        type="file"
-                        accept="image/*"
-                        multiple
-                        class="dl-file"
-                        on:change=move |ev| {
-                            let el: web_sys::HtmlInputElement = event_target(&ev);
-                            add_files(lab, file_list(el.files()));
-                            el.set_value("");
+                <div class="boxed lab-box">
+                    <label
+                        class="dl-drop"
+                        class:over=move || over.get()
+                        on:dragover=move |ev: web_sys::DragEvent| {
+                            ev.prevent_default();
+                            over.set(true);
                         }
-                    />
-                    <span>"Drop images here, or "</span>
-                    <span class="link">"pick files"</span>
-                </label>
-                <div class="dl-thumbs">
-                    <For each=move || f.images.get() key=|i| i.uid let:img>
-                        {
-                            let uid = img.uid;
-                            let name = img.input.name().to_string();
-                            let kept = matches!(img.input, ImageInput::Artifact { .. });
-                            view! {
-                                <figure class="dl-thumb">
-                                    <img src=img.src.clone() alt=name.clone()/>
-                                    <figcaption>
-                                        <span class="n" title=name.clone()>
-                                            {name.clone()}
-                                        </span>
-                                        <span class="dim mono-sm">
-                                            {fmt_bytes(img.size)}
-                                            {kept.then_some(" · kept")}
-                                        </span>
-                                        <button
-                                            class="btn ghost sm del"
-                                            title="Remove this image from the form"
-                                            on:click=move |_| f.images.update(|v| v.retain(|i| i.uid != uid))
-                                        >
-                                            "✕"
-                                        </button>
-                                    </figcaption>
-                                </figure>
+                        on:dragleave=move |_| over.set(false)
+                        on:drop=move |ev: web_sys::DragEvent| {
+                            ev.prevent_default();
+                            over.set(false);
+                            let files = file_list(ev.data_transfer().and_then(|d| d.files()));
+                            add_files(lab, files);
+                        }
+                    >
+                        <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            class="dl-file"
+                            on:change=move |ev| {
+                                let el: web_sys::HtmlInputElement = event_target(&ev);
+                                add_files(lab, file_list(el.files()));
+                                el.set_value("");
                             }
-                        }
-                    </For>
+                        />
+                        <span>"Drop images here, or "</span>
+                        <span class="link">"pick files"</span>
+                    </label>
+                    <div class="dl-thumbs">
+                        <For each=move || f.images.get() key=|i| i.uid let:img>
+                            {
+                                let uid = img.uid;
+                                let name = img.input.name().to_string();
+                                let kept = matches!(img.input, ImageInput::Artifact { .. });
+                                view! {
+                                    <figure class="dl-thumb">
+                                        <img src=img.src.clone() alt=name.clone()/>
+                                        <figcaption>
+                                            <span class="n" title=name.clone()>
+                                                {name.clone()}
+                                            </span>
+                                            <span class="dim mono-sm">
+                                                {fmt_bytes(img.size)}
+                                                {kept.then_some(" · kept")}
+                                            </span>
+                                            <button
+                                                class="btn ghost sm del"
+                                                title="Remove this image from the form"
+                                                aria-label="Remove this image from the form"
+                                                on:click=move |_| f.images.update(|v| v.retain(|i| i.uid != uid))
+                                            >
+                                                <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
+                                            </button>
+                                        </figcaption>
+                                    </figure>
+                                }
+                            }
+                        </For>
+                    </div>
+                    {move || {
+                        let a = asked.get();
+                        let none = blind(&a);
+                        let n = f.images.with(Vec::len);
+                        (!none.is_empty() && (n > 0 || a.len() > 1))
+                            .then(|| {
+                                view! {
+                                    <p class="mini-note dl-warn-line">
+                                        {format!(
+                                            "{} {} no images: {} sent all the same, and llama.cpp answers 501.",
+                                            none.join(", "),
+                                            if none.len() == 1 { "reads" } else { "read" },
+                                            if n == 1 { "the image is" } else { "the images are" },
+                                        )}
+                                    </p>
+                                }
+                            })
+                    }}
                 </div>
-                {move || {
-                    let a = asked.get();
-                    let none = blind(&a);
-                    let n = f.images.with(Vec::len);
-                    (!none.is_empty() && (n > 0 || a.len() > 1))
-                        .then(|| {
-                            view! {
-                                <p class="mini-note dl-warn-line">
-                                    {format!(
-                                        "{} {} no images: {} sent all the same, and llama.cpp answers 501.",
-                                        none.join(", "),
-                                        if none.len() == 1 { "reads" } else { "read" },
-                                        if n == 1 { "the image is" } else { "the images are" },
-                                    )}
-                                </p>
-                            }
-                        })
-                }}
-            </div>
+            </section>
         </Show>
     }
 }

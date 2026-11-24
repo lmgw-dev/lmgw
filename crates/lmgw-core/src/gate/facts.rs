@@ -191,6 +191,7 @@ mod tests {
             image_model: None,
             sdcpp_caps: None,
             rung: None,
+            gpu_pin: None,
         }
     }
 

@@ -50,6 +50,7 @@ pub(super) fn chat_runtime(model_id: &str, extra_run_args: Vec<String>) -> Model
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 

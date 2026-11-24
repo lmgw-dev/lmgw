@@ -35,8 +35,12 @@ pub(super) async fn llama_vocabulary(
         // VRAM admission fits a row in `--fit`'s place only where the
         // image has it (`vram::fit_vocab`).
         .inspect(|caps| state.vram.note_llama_vocab(image, caps))
-        .map_err(|e| format!("{e} — the extra args and flag values were not validated"))
+        .map_err(|e| format!("{e}{NOT_VALIDATED}"))
 }
+
+/// What ends the warning [`llama_vocabulary`] gives when it could not read
+/// the vocabulary.
+pub(crate) const NOT_VALIDATED: &str = " — the extra args and flag values were not validated";
 
 /// Non-fatal problems with the freeform extra args and the enum-ish fields,
 /// checked against the `--help` of the image the model runs.

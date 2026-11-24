@@ -1,16 +1,21 @@
-//! The layout the Audio, Image and Decision labs share (UX plan Phase 5
-//! task 3).
+//! The layout the Audio, Image, Decision and Voices labs share (UX plan
+//! Phase 5 task 3, restyled in the modern design's WP5).
 //!
-//! One head line — the model, the task, the model's state — then the form
-//! column beside the run history, with the lab's reference panel folded to a
-//! rail on the right below a 1600px pane. The form column scrolls on its own
-//! and ends in a pinned action bar: the run button and the line that says
-//! what it will call, or why it cannot yet — so the button is on screen at
-//! any window height, and a request override that does not parse says so
-//! there rather than inside a folded preview. The results column is every
-//! run of the session, newest first, with the count and a Clear; the run in
-//! flight leads it. Below a 760px body the two columns become one, switched
-//! by a "Form | Results (N)" seg.
+//! The header bar: the lab's name with its model as the picker under it
+//! (libadwaita's subtitle with a dropdown), the lab's own controls after
+//! them (a task menu, a model's facts), its actions at the end as flat icon
+//! buttons and pills (the model's state, the presets menu, Reload). Under
+//! it the form column beside the run history, with the lab's reference
+//! panel folded to a rail on the right below a 1600px pane. The form
+//! column is a preferences pane: boxed groups of rows on the page's tone,
+//! the prompt a rounded field. It scrolls on its own and ends in a pinned
+//! action bar: the run button and the line that says what it will call, or
+//! why it cannot yet — so the button is on screen at any window height, and
+//! a request override that does not parse says so there rather than inside
+//! a folded preview. The results column, in the view's tone, is every run
+//! of the session, newest first, as cards, under a head with the count and
+//! a Clear; the run in flight leads it. Below a 760px body the two columns
+//! become one, switched by a "Form | Results (N)" toggle.
 //!
 //! A lab on the lab store (labs-store design §2.1) passes `kept`: its results
 //! are the kept history, the head says so with the runs and the size, Clear
@@ -22,7 +27,7 @@ use leptos::prelude::*;
 use lmgw_api_types::lab_store::LabUsage;
 
 use super::lab_history::{clear_confirm, kept_note, kept_title};
-use crate::widgets::{popover, ConfirmButton, Popover, Side, SplitPane};
+use crate::widgets::{popover, ConfirmButton, HeadBar, Ico, Icon, Popover, Side, SplitPane};
 
 /// The main pane's floor beside the reference panel: a 1600px pane less the
 /// panel's 360px ceiling. Below it the panel folds to its rail.
@@ -80,19 +85,6 @@ pub(super) struct TaskGroup {
 enum MenuLine {
     Head(&'static str),
     Opt(TaskOpt),
-}
-
-/// A request field's wire name after its label, breakable after each `.` and
-/// `_`: in a narrow form column `sample_params.guidance.txt_cfg` wraps at its
-/// dots rather than mid-word or past the column's edge.
-#[component]
-pub(super) fn Fname(name: &'static str) -> impl IntoView {
-    let parts: Vec<&'static str> = name.split_inclusive(['.', '_']).collect();
-    view! {
-        <i class="fname">
-            {parts.into_iter().map(|p| view! { {p} <wbr/> }).collect_view()}
-        </i>
-    }
 }
 
 /// A Select-shaped button over a grouped list of tasks, some of them greyed
@@ -325,6 +317,8 @@ pub(super) struct OwnKeep {
 /// are the frame's.
 #[component]
 pub(super) fn LabFrame(
+    /// The header bar's title: the lab's name.
+    title: &'static str,
     /// `lmgw.ui.side.<persist>` for the reference panel.
     persist: &'static str,
     #[prop(into)] side_label: TextProp,
@@ -334,9 +328,16 @@ pub(super) fn LabFrame(
     /// The reference panel.
     #[prop(into)]
     side: ViewFn,
-    /// The head line's controls.
+    /// The line under the title: the lab's model picker.
     #[prop(into)]
-    head: ViewFn,
+    model: ViewFn,
+    /// The header bar's controls after the title (a task menu, facts).
+    #[prop(optional, into)]
+    head: Option<ViewFn>,
+    /// The header bar's actions at its end (the model's state, the presets
+    /// menu, Reload).
+    #[prop(optional, into)]
+    actions: Option<ViewFn>,
     /// The form column: notices, cards, the request preview.
     #[prop(into)]
     form: ViewFn,
@@ -372,6 +373,12 @@ pub(super) fn LabFrame(
     /// Voices lab's library); [`SIDE_FOLDS_BELOW`] otherwise.
     #[prop(optional)]
     side_folds_below: Option<u32>,
+    /// The empty results column's glyph.
+    glyph: Ico,
+    /// The empty results column's sentence; a lab with `own_keep` says its
+    /// own there instead.
+    #[prop(optional)]
+    empty: &'static str,
 ) -> impl IntoView {
     let is_kept = kept.is_some();
     let usage = move || kept.and_then(|k| k.get());
@@ -386,7 +393,7 @@ pub(super) fn LabFrame(
 
     view! {
         <div class="lab-shell density-dense">
-            <div class="lab-head">{head.run()}</div>
+            <HeadBar title=title sub_view=Some(model) head_extra=head actions=actions/>
             <SplitPane
                 side=Side::Right
                 persist=persist
@@ -437,12 +444,12 @@ pub(super) fn LabFrame(
                                 {move || {
                                     if running.get() {
                                         view! {
-                                            <span class="chip live">
+                                            <span class="chip info" data-state="running">
                                                 <i class="dot"></i>
                                                 "running…"
                                             </span>
                                             <button
-                                                class="btn danger"
+                                                class="btn destructive danger"
                                                 on:click=move |ev| {
                                                     if stop_counts(ev.detail()) {
                                                         on_stop.run(());
@@ -456,10 +463,11 @@ pub(super) fn LabFrame(
                                     } else {
                                         view! {
                                             <button
-                                                class="btn primary"
+                                                class="btn suggested primary lab-run"
                                                 disabled=move || !ready()
                                                 on:click=move |_| on_run.run(())
                                             >
+                                                <Icon ico=Ico::Play/>
                                                 {move || run_label.get()}
                                             </button>
                                         }
@@ -470,8 +478,11 @@ pub(super) fn LabFrame(
                         </section>
                         <section class="lab-results">
                             <div class="results-head">
-                                <span class="results-title">"Results"</span>
-                                <span class="count">{shown_n}</span>
+                                <div class="results-text">
+                                <span class="results-title">
+                                    "Results"
+                                    <span class="count">{shown_n}</span>
+                                </span>
                                 {if let Some(own) = own_keep {
                                     view! {
                                         <span class="results-note dim" title=own.title>
@@ -497,6 +508,7 @@ pub(super) fn LabFrame(
                                     }
                                         .into_any()
                                 }}
+                                </div>
                                 <span class="results-tools">
                                 {results_tools.map(|t| t.run())}
                                 <Show when=any_held>
@@ -505,7 +517,7 @@ pub(super) fn LabFrame(
                                             <ConfirmButton
                                                 label="Clear"
                                                 confirm=move || own.clear_confirm.get()
-                                                class="btn ghost sm"
+                                                class="btn ghost"
                                                 title=own.clear_title
                                                 on_confirm=on_clear
                                             />
@@ -520,7 +532,7 @@ pub(super) fn LabFrame(
                                                 confirm=move || {
                                                     clear_confirm(usage().as_ref(), results_n.get())
                                                 }
-                                                class="btn ghost sm"
+                                                class="btn ghost"
                                                 title="Delete this lab's whole kept history on the server"
                                                 on_confirm=on_clear
                                             />
@@ -534,7 +546,7 @@ pub(super) fn LabFrame(
                                             <ConfirmButton
                                                 label="Clear"
                                                 confirm=move || format!("Drop all {}?", results_n.get())
-                                                class="btn ghost sm"
+                                                class="btn ghost"
                                                 title="Drop every finished result of this session"
                                                 on_confirm=on_clear
                                             />
@@ -546,26 +558,13 @@ pub(super) fn LabFrame(
                             </div>
                             <div class="results-list">
                                 <Show when=move || shown_n() == 0>
-                                    {if let Some(own) = own_keep {
-                                        view! { <div class="empty">{own.empty}</div> }.into_any()
-                                    } else if is_kept {
-                                        view! {
-                                            <div class="empty">
-                                                "Every ask lands here, newest first, and is kept on "
-                                                "the server until you delete it: one group from its "
-                                                "card, or all of them with Clear."
-                                            </div>
-                                        }
-                                            .into_any()
-                                    } else {
-                                        view! {
-                                            <div class="empty">
-                                                "Every run of this session lands here, newest first. Nothing "
-                                                "is kept on the server — download what you want to keep."
-                                            </div>
-                                        }
-                                            .into_any()
-                                    }}
+                                    <div class="lab-empty">
+                                        <span class="glyph">
+                                            <Icon ico=glyph/>
+                                        </span>
+                                        <h2>"No runs yet"</h2>
+                                        <p>{own_keep.map_or(empty, |own| own.empty)}</p>
+                                    </div>
                                 </Show>
                                 {results.run()}
                             </div>

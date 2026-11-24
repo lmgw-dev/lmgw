@@ -71,8 +71,8 @@ pub enum ExternalVerdict {
     Unavailable(String),
 }
 
-/// The numbers behind an [`ExternalVerdict::External`], pooled over every
-/// device the way the ledger pools them.
+/// The numbers behind an [`ExternalVerdict::External`]: of the card (or the
+/// cards together) with the most room the model may go on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExternalShortfall {
     pub class: Class,

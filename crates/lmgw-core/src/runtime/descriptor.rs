@@ -97,6 +97,11 @@ pub struct ModelRuntime {
     /// facts, the ledger's charge, adoption — so none of them re-derives it
     /// from a row that may have been edited since.
     pub rung: Option<RungPos>,
+    /// The row's GPU pin (device-ledger design §8): the cards it may run
+    /// on, by id; `None` where lmgw chooses. A start no decision stands
+    /// behind is handed these cards where lmgw can hand a card (§5.7,
+    /// [`Self::pinned_cards`]).
+    pub gpu_pin: Option<Vec<crate::vram::nvml::DeviceId>>,
 }
 
 /// A rung's place in its ladder: `index` is 0-based (0 is the base, ladder
@@ -181,6 +186,18 @@ impl ModelRuntime {
             of: pos.of,
             gguf_path: gguf_path.clone(),
             ctx_size: params.ctx_size,
+        })
+    }
+
+    /// This descriptor with the speculative type a drafter without one gets
+    /// (ruling 18, [`LlamaArgs::with_default_spec_type`]); `None` where the
+    /// row needs none. Whether the image knows the value is the caller's to
+    /// have established.
+    pub fn with_default_spec_type(&self) -> Option<ModelRuntime> {
+        let llama = self.llama.as_ref()?.with_default_spec_type()?;
+        Some(ModelRuntime {
+            llama: Some(llama),
+            ..self.clone()
         })
     }
 
@@ -288,6 +305,7 @@ impl ModelRuntime {
                 }),
                 health_path: IMAGE_HEALTH_PATH,
                 fitted: None,
+                charge: None,
             });
         }
         let (engine, config_mount, health_path) = match (&self.llama, &self.audio) {
@@ -338,6 +356,7 @@ impl ModelRuntime {
             engine,
             health_path,
             fitted: None,
+            charge: None,
         })
     }
 }
@@ -457,6 +476,10 @@ fn chat_runtime(snap: &Snapshot, m: &LocalModel, rung: usize) -> ModelRuntime {
             index,
             of: m.top_rung() + 1,
         }),
+        gpu_pin: snap
+            .gpu_pins
+            .get(&(Class::Chat, m.model_id.clone()))
+            .cloned(),
     }
 }
 
@@ -502,6 +525,10 @@ pub(crate) fn aux_runtime(snap: &Snapshot, m: &AuxModel) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: snap
+            .gpu_pins
+            .get(&(Class::Aux, m.model_id.clone()))
+            .cloned(),
     }
 }
 
@@ -524,6 +551,10 @@ fn audio_runtime(snap: &Snapshot, m: &AudioModel) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: snap
+            .gpu_pins
+            .get(&(Class::Audio, m.model_id.clone()))
+            .cloned(),
     }
 }
 
@@ -556,5 +587,9 @@ fn image_runtime(snap: &Snapshot, m: &ImageModel) -> ModelRuntime {
         // vocabulary.
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: snap
+            .gpu_pins
+            .get(&(Class::Image, m.model_id.clone()))
+            .cloned(),
     }
 }

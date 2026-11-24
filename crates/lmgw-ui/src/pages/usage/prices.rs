@@ -10,8 +10,8 @@ use serde_json::json;
 
 use crate::fmt::grouped;
 use crate::widgets::{
-    use_toasts, ConfirmButton, Explain, Facet, FacetSet, FilterBar, GroupRow, Modal, ModalFooter,
-    PageFrame, PageMode, Select,
+    use_toasts, ComboRow, ConfirmButton, EntryRow, Explain, Facet, FacetSet, FilterBar, GroupRow,
+    Ico, Icon, InfoRow, Modal, ModalFooter, PageFrame, PageMode, PrefGroup,
 };
 
 use super::price_hosted::{HostedFeeLine, HostedFeeRow};
@@ -142,6 +142,17 @@ pub fn UsagePrices() -> impl IntoView {
         }
     });
     let price_it = Callback::new(move |name: String| load(None, name));
+    // A new row's unit follows the model it names until the owner picks one.
+    Effect::new(move |prev: Option<String>| {
+        let key = scope_key.get();
+        if prev.as_ref().is_some_and(|p| *p != key)
+            && edit_id.get_untracked() == 0
+            && !unit_picked.get_untracked()
+        {
+            unit.set(task_unit(&key));
+        }
+        key
+    });
     // A model that answered at a tier with no row: a new row on the scope
     // the gateway named, at that tier, in tokens.
     // The unit is the first the gateway named as missing at that tier.
@@ -269,7 +280,7 @@ pub fn UsagePrices() -> impl IntoView {
                     .iter()
                     .map(|(id, n)| Facet {
                         id: id.clone(),
-                        label: id.clone(),
+                        label: crate::labels::capitalise(id),
                         count: *n,
                     })
                     .collect()
@@ -361,21 +372,35 @@ pub fn UsagePrices() -> impl IntoView {
     view! {
         <PageFrame
             title="Usage"
-            sub="what each unit costs, per alias and per upstream model"
+            sub="What each unit costs, per alias and per upstream model"
             mode=PageMode::Fill
+            class="usage-prices"
             head_extra=move || view! { <UsageTabs keys=keys prices=prices/> }
             actions=move || {
                 view! {
                     <button
-                        class="btn ghost"
+                        class="icon-btn price-sync"
+                        class:busy=move || syncing.get()
                         disabled=move || syncing.get()
-                        title="re-read every upstream's catalog and write the prices it advertises"
+                        title=move || {
+                            if syncing.get() {
+                                "Syncing prices…"
+                            } else {
+                                "Sync prices: re-read every upstream's catalog and write the prices it advertises"
+                            }
+                        }
+                        aria-label="Sync prices"
                         on:click=move |_| sync()
                     >
-                        {move || if syncing.get() { "Syncing…" } else { "Sync prices" }}
+                        <Icon ico=Ico::Refresh/>
                     </button>
-                    <button class="btn" on:click=move |_| load(None, String::new())>
-                        "Add price"
+                    <button
+                        class="icon-btn price-add"
+                        title="Add price: a manual row, which always wins over a catalog row"
+                        aria-label="Add price"
+                        on:click=move |_| load(None, String::new())
+                    >
+                        <Icon ico=Ico::Plus/>
                     </button>
                 }
             }
@@ -410,7 +435,7 @@ pub fn UsagePrices() -> impl IntoView {
                 "unpriced and is listed under Hosted tool fees."
             </Explain>
             <CardErr err=prices.err/>
-            <div class="fill-pane card pad0" class:stale=move || prices.stale()>
+            <div class="fill-pane boxed price-box" class:stale=move || prices.stale()>
                 <table class="data price-table">
                     <thead>
                         <tr>
@@ -451,120 +476,120 @@ pub fn UsagePrices() -> impl IntoView {
                 </table>
             </div>
             <Modal open=open title="Price sheet" guard=true>
-                <div class="form">
-                    <div class="row">
-                        <span class="lbl">"scope"</span>
-                        // Scope and unit are an existing row's key: the op
-                        // writes by them, so changing either would write a
-                        // second row and leave this one standing (§8.1).
-                        <Select
-                            value=scope_kind
-                            options=Signal::derive(|| {
-                                vec![
-                                    ("alias".to_string(), "alias".to_string()),
-                                    ("upstream_model".into(), "upstream model".into()),
-                                ]
-                            })
-                            disabled=Signal::derive(move || edit_id.get() != 0)
-                        />
-                        <input
-                            class="input mono"
-                            style="flex:1"
-                            placeholder="claude-opus-5"
-                            prop:disabled=move || edit_id.get() != 0
-                            prop:value=move || scope_key.get()
-                            on:input=move |ev| {
-                                let key = event_target_value(&ev);
-                                // A new row's unit follows the model it names
-                                // until the owner picks one.
-                                if edit_id.get_untracked() == 0 && !unit_picked.get_untracked() {
-                                    unit.set(task_unit(&key));
+                <div class="form price-form">
+                    <PrefGroup>
+                        // Scope, unit and tier are an existing row's key: the
+                        // op writes by them, so changing one would write a
+                        // second row and leave this one standing (§8.1, openai
+                        // egress design §5.3). An existing row shows them.
+                        <Show
+                            when=move || edit_id.get() == 0
+                            fallback=move || {
+                                view! {
+                                    <InfoRow
+                                        title="Scope"
+                                        value=Signal::derive(move || scope_kind.get().replace('_', " "))
+                                    />
+                                    <InfoRow title="Model" value=Signal::derive(move || scope_key.get()) mono=true/>
+                                    <InfoRow
+                                        title="Unit"
+                                        value=Signal::derive(move || {
+                                            price_units::parse(&unit.get())
+                                                .map(|u| u.label().to_string())
+                                                .unwrap_or_else(|| unit.get())
+                                        })
+                                    />
+                                    <InfoRow
+                                        title="Service tier"
+                                        value=Signal::derive(move || price_units::tier_label(&tier.get()))
+                                    />
+                                    <div class="prow notice-row">
+                                        "Scope, unit and tier are fixed for an existing row: Add price writes another beside it."
+                                    </div>
                                 }
-                                scope_key.set(key);
                             }
-                        />
-                    </div>
-                    <div class="row price-unit-row">
-                        <span class="lbl">"unit"</span>
-                        // A row's unit is part of its key (§8.1): editing one
-                        // in place would leave the old row standing, so an
-                        // existing row's is fixed and another unit is a new row.
-                        <span class="price-unit-pick" on:change=move |_| unit_picked.set(true)>
-                            <Select
-                                value=unit
-                                options=Signal::derive(price_units::unit_options)
-                                disabled=Signal::derive(move || edit_id.get() != 0)
+                        >
+                            <ComboRow
+                                title="Scope"
+                                value=scope_kind
+                                options=Signal::derive(|| {
+                                    vec![
+                                        ("alias".to_string(), "Alias".to_string()),
+                                        ("upstream_model".into(), "Upstream model".into()),
+                                    ]
+                                })
                             />
-                        </span>
-                        <span class="dim mini-note price-unit-note">
-                            {move || {
-                                if edit_id.get() != 0 {
-                                    "scope, unit and tier are fixed for an existing row — Add price writes another beside it"
-                                        .to_string()
-                                } else {
-                                    price_units::parse(&unit.get())
-                                        .map(|u| format!("priced {}", u.scale()))
-                                        .unwrap_or_default()
-                                }
-                            }}
-                        </span>
-                    </div>
-                    <div class="row price-unit-row">
-                        <span class="lbl">"tier"</span>
-                        // Part of the row's key too (openai egress design
-                        // §5.3): a flex row stands beside the standard one.
-                        <Select
-                            value=tier
-                            options=Signal::derive(price_units::tier_options)
-                            disabled=Signal::derive(move || edit_id.get() != 0)
-                        />
-                        <span class="dim mini-note price-unit-note">
-                            "OpenAI's service tier; every other provider's rows are Standard"
-                        </span>
-                    </div>
-                    {move || {
-                        match price_units::parse(&unit.get()) {
-                            Some(u) if !u.is_tokens() => {
-                                view! {
-                                    <div class="field-grid" style="--field-min:220px; margin-top:12px">
-                                        <PriceField label=u.scale() value=p_price/>
-                                    </div>
-                                }
-                                    .into_any()
-                            }
-                            _ => {
-                                view! {
-                                    <div class="field-grid" style="--field-min:120px; margin-top:12px">
-                                        <PriceField label="in" value=p_in/>
-                                        <PriceField label="out" value=p_out/>
-                                        <PriceField label="cache read" value=p_cr/>
-                                        <PriceField label="cache write" value=p_cw/>
-                                    </div>
-                                }
-                                    .into_any()
-                            }
-                        }
-                    }}
-                    <div class="mini-note dim">
-                        {move || {
+                            <EntryRow
+                                title="Model"
+                                sub=Signal::derive(move || {
+                                    if scope_kind.get() == "upstream_model" {
+                                        "<upstream id>:<model>".to_string()
+                                    } else {
+                                        "The alias as clients ask for it".to_string()
+                                    }
+                                })
+                                value=scope_key
+                                placeholder="claude-opus-5"
+                                mono=true
+                            />
+                            <div class="prow-wrap" on:change=move |_| unit_picked.set(true)>
+                                <ComboRow
+                                    title="Unit"
+                                    sub=Signal::derive(move || {
+                                        price_units::parse(&unit.get())
+                                            .map(|u| format!("Priced {}", u.scale()))
+                                            .unwrap_or_default()
+                                    })
+                                    value=unit
+                                    options=Signal::derive(price_units::unit_options)
+                                />
+                            </div>
+                            <ComboRow
+                                title="Service tier"
+                                sub="OpenAI's service tier; every other provider's rows are Standard"
+                                value=tier
+                                options=Signal::derive(price_units::tier_options)
+                            />
+                        </Show>
+                    </PrefGroup>
+                    <PrefGroup
+                        title="Price"
+                        desc=Signal::derive(move || {
                             let cur = cur.get();
+                            let lead = match price_units::parse(&unit.get()) {
+                                Some(u) if !u.is_tokens() => format!(
+                                    "One rate, {}, in {cur}. A model's rows add up: this is paid on top of any other unit priced for it. ",
+                                    u.scale(),
+                                ),
+                                _ => format!("Per 1M tokens, in {cur}. "),
+                            };
+                            format!(
+                                "{lead}A manual row always wins over a catalog row for the same scope, unit and tier; leave a field empty and it stays unknown rather than becoming a zero."
+                            )
+                        })
+                    >
+                        {move || {
                             match price_units::parse(&unit.get()) {
                                 Some(u) if !u.is_tokens() => {
-                                    format!(
-                                        "One rate, {}, in {cur}. A model's rows add up: this is paid on top of any other unit priced for it. ",
-                                        u.scale(),
-                                    )
+                                    view! { <PriceField label=u.scale() value=p_price/> }.into_any()
                                 }
-                                _ => format!("Per 1M tokens, in {cur}. "),
+                                _ => {
+                                    view! {
+                                        <PriceField label="Input" value=p_in/>
+                                        <PriceField label="Output" value=p_out/>
+                                        <PriceField label="Cache read" value=p_cr/>
+                                        <PriceField label="Cache write" value=p_cw/>
+                                    }
+                                        .into_any()
+                                }
                             }
                         }}
-                        "A manual row always wins over a catalog row for the same scope, unit and tier; leave a field empty and it stays unknown rather than becoming a zero."
-                    </div>
+                    </PrefGroup>
                     <ModalFooter>
                         <button class="btn ghost" on:click=move |_| open.set(false)>
                             "Cancel"
                         </button>
-                        <button class="btn primary" on:click=save>
+                        <button class="btn suggested" on:click=save>
                             "Save"
                         </button>
                     </ModalFooter>
@@ -664,19 +689,11 @@ fn price_field(label: &str, text: &str) -> Result<Option<f64>, String> {
         })
 }
 
+/// One price as a row: its label, the number, why it is not one.
 #[component]
 fn PriceField(label: &'static str, value: RwSignal<String>) -> impl IntoView {
-    view! {
-        <label class="field">
-            <span class="lbl">{label}</span>
-            <input
-                class="input mono"
-                inputmode="decimal"
-                prop:value=move || value.get()
-                on:input=move |ev| value.set(event_target_value(&ev))
-            />
-        </label>
-    }
+    let err = Signal::derive(move || value.with(|v| price_field(label, v).err()));
+    view! { <EntryRow title=label value=value placeholder="unknown" mono=true error=err/> }
 }
 
 /// One price as the table prints it: numbers through `fmt::price`, the
@@ -1031,7 +1048,8 @@ fn PriceRow(r: PriceLine, edit: Callback<i64>, delete: Callback<i64>) -> impl In
                         "Edit"
                     </button>
                     <ConfirmButton
-                        label="✕"
+                        label=""
+                        icon=|| view! { <Icon ico=Ico::Close/> }
                         confirm="Remove this price?"
                         title="Remove this price"
                         on_confirm=Callback::new(move |()| delete.run(id))
@@ -1065,7 +1083,7 @@ fn UnpricedRow(u: UnpricedLine, price: Callback<String>) -> impl IntoView {
             <td class="actions">
                 <div class="row-acts">
                     <button
-                        class="btn sm"
+                        class="btn sm row-main"
                         title="Write a price for this model"
                         on:click=move |_| price.run(name.clone())
                     >

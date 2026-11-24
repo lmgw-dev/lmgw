@@ -142,6 +142,10 @@ pub(crate) mod chat_wire;
 /// The Decision lab's server (labs-store design §2): `/decision-lab/api/*`,
 /// in process through `/v1/systemone`.
 pub(crate) mod decision_lab;
+/// The Documents lab's server (document-conversion design WP12):
+/// `/documents-lab/api/*`, in process through `/v1/documents/convert` and
+/// `/v1/convert/file`.
+mod documents_lab;
 /// Visible to [`crate::ops`] so the tool plane drives the same download,
 /// re-download and update-check paths as the dashboard rather than a parallel
 /// implementation of them.
@@ -400,7 +404,7 @@ fn chat_routes() -> Router<SharedState> {
         )
 }
 
-/// The Audio, Image and Decision labs — the playgrounds the owner drives by
+/// The Audio, Image, Decision and Documents labs — the playgrounds the owner drives by
 /// hand — and the lab store they keep their history in.
 /// [`Cap::Admin`](crate::principal::Cap::Admin): they spend money on the
 /// owner's aliases with no key of their own, and no device ever holds them.
@@ -468,6 +472,19 @@ fn labs_routes() -> Router<SharedState> {
             post(image_lab::create_edit).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/image-lab/api/groups/{id}/run", post(image_lab::run))
+        // Documents lab: the document-conversion playground (WP12). A group
+        // is made from the form and the uploads first, then run. The group
+        // route drops axum's body limit as the Image lab's does: the files
+        // are as large as they are, and the run holds them to the route's
+        // own `max_body_mb`, so a file past it gets the route's 413.
+        .route(
+            "/documents-lab/api/groups",
+            post(documents_lab::create).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/documents-lab/api/groups/{id}/run",
+            post(documents_lab::run),
+        )
         // Decision lab: the System One playground (labs-store design §2). The
         // count and the Ask take a form that can carry images, so they drop
         // axum's body limit as the other labs' dispatch routes do; a cell has

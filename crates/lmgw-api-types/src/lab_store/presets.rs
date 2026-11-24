@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::LabKind;
 use crate::audio_lab::AudioSettings;
 use crate::decision_lab::QuestionSet;
+use crate::documents_lab::DocumentsLabSettings;
 use crate::image_lab::ImageGenForm;
 
 /// What a preset holds.
@@ -22,10 +23,17 @@ pub enum LabPresetKind {
     ImagePrompt,
     /// The Audio lab's speech panel and the PCM format of a stream.
     AudioSettings,
+    /// The Documents lab's options and route.
+    DocumentOptions,
 }
 
 impl LabPresetKind {
-    pub const ALL: [Self; 3] = [Self::QuestionSet, Self::ImagePrompt, Self::AudioSettings];
+    pub const ALL: [Self; 4] = [
+        Self::QuestionSet,
+        Self::ImagePrompt,
+        Self::AudioSettings,
+        Self::DocumentOptions,
+    ];
 
     /// The stored spelling.
     pub fn as_str(self) -> &'static str {
@@ -33,6 +41,7 @@ impl LabPresetKind {
             Self::QuestionSet => "question_set",
             Self::ImagePrompt => "image_prompt",
             Self::AudioSettings => "audio_settings",
+            Self::DocumentOptions => "document_options",
         }
     }
 
@@ -46,6 +55,7 @@ impl LabPresetKind {
             Self::QuestionSet => LabKind::Decision,
             Self::ImagePrompt => LabKind::Image,
             Self::AudioSettings => LabKind::Audio,
+            Self::DocumentOptions => LabKind::Documents,
         }
     }
 }
@@ -60,6 +70,7 @@ pub enum LabPresetBody {
     // every view of a preset would carry the largest.
     ImagePrompt(Box<ImageGenForm>),
     AudioSettings(Box<AudioSettings>),
+    DocumentOptions(Box<DocumentsLabSettings>),
 }
 
 impl LabPresetBody {
@@ -68,6 +79,7 @@ impl LabPresetBody {
             Self::QuestionSet(_) => LabPresetKind::QuestionSet,
             Self::ImagePrompt(_) => LabPresetKind::ImagePrompt,
             Self::AudioSettings(_) => LabPresetKind::AudioSettings,
+            Self::DocumentOptions(_) => LabPresetKind::DocumentOptions,
         }
     }
 
@@ -77,6 +89,7 @@ impl LabPresetBody {
             Self::QuestionSet(s) => s.check(),
             Self::ImagePrompt(f) => f.check_fields(),
             Self::AudioSettings(a) => a.check(),
+            Self::DocumentOptions(d) => d.check(),
         }
     }
 }

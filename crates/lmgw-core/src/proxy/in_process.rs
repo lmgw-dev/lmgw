@@ -25,6 +25,9 @@ use crate::telemetry::RequestClass;
 
 use super::*;
 
+mod dropped;
+pub(crate) use dropped::Dropped;
+
 #[cfg(test)]
 mod tests;
 
@@ -287,6 +290,10 @@ async fn leaving_for<F: std::future::Future>(
 /// Erased ([`crate::erased`]), as [`stream_once_on`] is: a unary turn's
 /// whole send path behind one future. A re-route calls it again through
 /// that same indirection.
+///
+/// Dropped before its row is written, the call closes the in-flight gauge
+/// it opened and leaves no row ([`Dropped::Gauge`]); a caller that drops
+/// calls by design and wants the row uses [`sample_once_dropping`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sample_once_noting<'a>(
     state: &'a SharedState,
@@ -300,10 +307,55 @@ pub(crate) fn sample_once_noting<'a>(
     note: Option<&'a FallbackNote>,
     per_route: Option<(&'a dyn PerRoute, Option<&'a crate::gate::GateHeaders>)>,
 ) -> crate::erased::Erased<'a, Result<Completion, GatewayError>> {
+    sample_once_dropping(
+        state,
+        hold,
+        route,
+        fallback,
+        ir,
+        ingress_proto,
+        key,
+        deadline,
+        note,
+        per_route,
+        Dropped::Gauge,
+    )
+}
+
+/// [`sample_once_noting`], with what the call leaves behind when its future
+/// is dropped before its row is written (`dropped`, [`dropped`]'s module
+/// doc): the gauge closed, and for [`Dropped::Row`] a `499` row under the
+/// caller's key. A document conversion's page calls use it: they are dropped
+/// by design (the client gone, `document_timeout`, a cancelled job).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sample_once_dropping<'a>(
+    state: &'a SharedState,
+    hold: Option<&'a crate::vram::LocalHold>,
+    route: &'a Route,
+    fallback: Option<FallbackReason>,
+    ir: &'a ChatRequest,
+    ingress_proto: &'a str,
+    key: KeyRef,
+    deadline: Duration,
+    note: Option<&'a FallbackNote>,
+    per_route: Option<(&'a dyn PerRoute, Option<&'a crate::gate::GateHeaders>)>,
+    on_drop: Dropped,
+) -> crate::erased::Erased<'a, Result<Completion, GatewayError>> {
     futures::FutureExt::boxed(async move {
         let started = Instant::now();
         state.telemetry.request_started();
         let own = ir;
+        let mut in_flight = dropped::Open::running(
+            state,
+            (on_drop == Dropped::Row).then(|| dropped::Row {
+                key: key.clone(),
+                ingress_proto,
+                alias: &own.model_alias,
+                route,
+                started,
+                fallback,
+            }),
+        );
 
         // Budget and scope for work the gateway does on its own behalf (§4.4).
         // Before the call, so an unattended loop stops rather than discovering the
@@ -317,6 +369,7 @@ pub(crate) fn sample_once_noting<'a>(
         )
         .await
         {
+            in_flight.recording();
             record_in_process(
                 InProcessLog {
                     key: key.clone(),
@@ -341,6 +394,7 @@ pub(crate) fn sample_once_noting<'a>(
                 state,
             )
             .await;
+            in_flight.recorded();
             return Err(e);
         }
 
@@ -514,13 +568,13 @@ pub(crate) fn sample_once_noting<'a>(
             // 45): the turn is that call's, row and gauge included — this one
             // sent nothing and logs nothing.
             Ok(Turn::Rerouted(Ok(opened))) => {
-                state.telemetry.request_abandoned();
+                in_flight.handed_on();
                 if let (Some(note), Some(_)) = (note, opened.headers.fallback()) {
                     note.note(opened.headers.chain().clone());
                 }
                 let left =
                     deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-                let rerouted = sample_once_noting(
+                let rerouted = sample_once_dropping(
                     state,
                     opened.hold.as_ref(),
                     &opened.route,
@@ -531,6 +585,7 @@ pub(crate) fn sample_once_noting<'a>(
                     left,
                     note,
                     per_route.map(|(p, _)| (p, Some(&opened.headers))),
+                    on_drop,
                 );
                 return leaving_for(hold, rerouted).await;
             }
@@ -563,6 +618,7 @@ pub(crate) fn sample_once_noting<'a>(
             }
             _ => None,
         };
+        in_flight.recording();
         record_in_process_counted(
             InProcessLog {
                 key,
@@ -595,6 +651,7 @@ pub(crate) fn sample_once_noting<'a>(
             state,
         )
         .await;
+        in_flight.recorded();
 
         result
     })

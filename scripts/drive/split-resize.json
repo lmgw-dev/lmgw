@@ -1423,7 +1423,7 @@
   "wait": 0.4
  },
  {
-  "js": "(() => { const head = document.querySelector('.chat-head'); for (const t of ['3 mcp', 'kb: 2', 'reasoning: high', 'folder\\'s model']) { const s = document.createElement('span'); s.className = 'type-badge probe-pill'; s.textContent = t; head.insertBefore(s, head.querySelector('.export-menu')); } return 1; })()",
+  "js": "(() => { const head = document.querySelector('.chat-head'); for (const t of ['3 mcp', 'kb: 2', 'reasoning: high', 'folder\\'s model']) { const s = document.createElement('span'); s.className = 'type-badge probe-pill'; s.textContent = t; head.insertBefore(s, head.querySelector(':scope > .chat-head-end')); } return 1; })()",
   "label": "pills in the header at the widest list (act)"
  },
  {

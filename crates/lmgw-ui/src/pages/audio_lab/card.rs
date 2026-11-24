@@ -286,7 +286,7 @@ fn LiveRun(lab: Lab, note: Memo<Option<String>>) -> impl IntoView {
                 .then(|| {
                     view! {
                         <div class="dl-status">
-                            <span class="chip live">
+                            <span class="chip info" data-state="running">
                                 <i class="dot"></i>
                                 "running…"
                             </span>
@@ -313,16 +313,16 @@ fn LiveRun(lab: Lab, note: Memo<Option<String>>) -> impl IntoView {
 fn runless_view(state: Runless) -> AnyView {
     let (chip, text) = match state {
         Runless::Live | Runless::InFlight => (
-            "chip live",
+            "chip info",
             "in flight — its answer is on its way".to_string(),
         ),
         Runless::NotKept(why) => ("chip warn", why),
         Runless::Stopped => ("chip warn", "stopped — nothing came back".to_string()),
     };
-    let live = chip == "chip live";
+    let live = chip == "chip info";
     view! {
         <div class="dl-status">
-            <span class=chip>{live.then(|| view! { <i class="dot"></i> })} {text}</span>
+            <span class=chip data-state=live.then_some("running")>{live.then(|| view! { <i class="dot"></i> })} {text}</span>
         </div>
     }
     .into_any()
@@ -460,7 +460,7 @@ fn KeptRun(lab: Lab, run: LabRunView, form: AudioLabForm) -> impl IntoView {
     view! {
         {move || {
             let e = fetch_error.get();
-            (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
+            (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
         }}
         {move || {
             read.with(|r| {

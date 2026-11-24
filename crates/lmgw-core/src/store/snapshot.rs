@@ -26,6 +26,11 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
             .fetch_all(pool)
             .await?;
     snap.settings = load_settings(pool).await?;
+    snap.gpu_pins = list_gpu_pins(pool)
+        .await?
+        .into_iter()
+        .map(|(class, model, pin)| ((class, model), pin))
+        .collect();
     snap.chat_profiles = chat_profiles::list_chat_profiles(pool).await?;
     snap.api_keys = key_rows.iter().map(api_key_from_row).collect();
     snap.accounts = list_accounts(pool).await?;

@@ -35,11 +35,12 @@ it saves a viewport PNG (`webkit_web_view_get_snapshot`).
 On /chat it opens an existing thread (never "New chat" — that POSTs a real
 thread) to reveal the model picker, clicks it, and checks the resulting
 `[popover]` is `:popover-open` and inside the viewport. On /mcp-servers it
-clicks a server's name (the row's only "edit" control) to open its `<dialog>`,
-checks it is open and its Save button's rect is inside the viewport — also at
-1440x600, a short window the standard size list does not cover — then closes
-it with the dialog's own Close (✕) button. Neither interaction saves, deletes,
-tests, starts, stops or toggles anything.
+clicks the first server in the list to open its detail, checks the detail's
+header and its first group are inside the viewport and the pane does not
+scroll sideways — also at 1440x600, a short window the standard size list
+does not cover — then goes back to the list (the narrow window's back
+button, or the bare path). Neither interaction saves, deletes, tests,
+starts, stops or toggles anything.
 
 --media runs the page-audio probe of chat-voice WP6 (and WP7's dictation
 round against a mock ASR answered in the page, and WP9's voice mode against
@@ -560,6 +561,10 @@ def report(backend: str, result: dict, args) -> None:
                 or d.get("dialog_open") is False
                 or d.get("inside_viewport") is False
                 or d.get("save_inside_viewport") is False
+                or d.get("detail_open") is False
+                or d.get("head_inside_viewport") is False
+                or d.get("group_inside_viewport") is False
+                or d.get("no_sideways_scroll") is False
             ))
             or i.get("drive_pass") is False
         )
@@ -678,30 +683,32 @@ POPOVER_CHECK_JS = r"""(() => {
 })()"""
 
 MCP_EDIT_CLICK_JS = r"""(() => {
-  const btn = document.querySelector('table.data tbody tr td button.link-btn');
-  if (!btn) return JSON.stringify({ error: 'no server row edit control found' });
-  btn.click();
-  return JSON.stringify({ clicked: true, server: btn.textContent.trim() });
+  const row = document.querySelector('.mlist .lrow[data-key^="/mcp-servers/"]:not([data-key*="/builtin/"])');
+  if (!row) return JSON.stringify({ error: 'no server row in the list' });
+  row.click();
+  return JSON.stringify({ clicked: true, server: row.querySelector('.lrow-name').textContent.trim() });
 })()"""
 
 MCP_DIALOG_CHECK_JS = r"""(() => {
-  const dlg = document.querySelector('dialog.modal[open]') || document.querySelector('dialog[open]');
-  if (!dlg) return JSON.stringify({ dialog_open: false });
-  const saveBtn = [...dlg.querySelectorAll('.modal-foot button')].find(b => /save/i.test(b.textContent));
-  const r = saveBtn ? saveBtn.getBoundingClientRect() : null;
-  const inside = r ? (r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1) : null;
+  const head = document.querySelector('.mdetail-pane .mdetail-head');
+  const group = document.querySelector('.mdetail-pane .pref-group');
+  const scroll = document.querySelector('.mdetail-pane .mdetail-scroll');
+  const rect = el => { if (!el) return null; const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; };
+  const inside = r => !!r && r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.top <= innerHeight + 1;
   return JSON.stringify({
-    dialog_open: dlg.open, save_label: saveBtn ? saveBtn.textContent.trim() : null,
-    save_rect: r ? { left: r.left, top: r.top, right: r.right, bottom: r.bottom } : null,
-    save_inside_viewport: inside, viewport: [innerWidth, innerHeight],
+    detail_open: /^\/mcp-servers\/\d+$/.test(location.pathname),
+    head_rect: rect(head), head_inside_viewport: inside(rect(head)),
+    group_inside_viewport: inside(rect(group)),
+    no_sideways_scroll: !!scroll && scroll.scrollWidth <= scroll.clientWidth + 1,
+    viewport: [innerWidth, innerHeight],
   });
 })()"""
 
 MCP_DIALOG_CLOSE_JS = r"""(() => {
-  const btn = document.querySelector('dialog[open] .modal-head button.btn.ghost');
-  if (!btn) return JSON.stringify({ error: 'no close (✕) button found' });
-  btn.click();
-  return JSON.stringify({ closed_clicked: true });
+  const back = document.querySelector('.mdetail-head .icon-btn[title="Back to the list"]');
+  if (back && back.offsetParent) { back.click(); return JSON.stringify({ back_clicked: true }); }
+  history.pushState(null, '', '/mcp-servers'); dispatchEvent(new PopStateEvent('popstate'));
+  return JSON.stringify({ went_to_list: true });
 })()"""
 
 
@@ -1129,11 +1136,11 @@ def worker_main(spec_path: str, result_path: str) -> int:
             if route == "/mcp-servers":
                 for w, h in sizes + [(1440, 600)]:
                     add(make_resize(w, h))
-                    add(make_click(MCP_EDIT_CLICK_JS, f"mcp_edit_click_{w}x{h}"))
+                    add(make_click(MCP_EDIT_CLICK_JS, f"mcp_server_click_{w}x{h}"))
                     add(make_wait(600))
-                    add(make_check(MCP_DIALOG_CHECK_JS, f"mcp_dialog_{w}x{h}"))
-                    add(make_snapshot(f"mcp_dialog_{w}x{h}"))
-                    add(make_click(MCP_DIALOG_CLOSE_JS, f"mcp_dialog_close_{w}x{h}"))
+                    add(make_check(MCP_DIALOG_CHECK_JS, f"mcp_detail_{w}x{h}"))
+                    add(make_snapshot(f"mcp_detail_{w}x{h}"))
+                    add(make_click(MCP_DIALOG_CLOSE_JS, f"mcp_detail_back_{w}x{h}"))
                     add(make_wait(400))
 
         def finish_run():

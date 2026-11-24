@@ -29,6 +29,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use crate::plan_pin;
+use crate::support::fake_machine::Machine;
 
 pub(crate) const REPO: &str = "demo-org/demo-GGUF";
 const COMMIT: &str = "1111111111111111111111111111111111111111";
@@ -133,13 +134,9 @@ struct Card {
 
 impl GpuProbe for Card {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
-        Ok(vec![GpuMemory {
-            index: 0,
-            name: "demo card".into(),
-            total_bytes: self.total,
-            used_bytes: self.used,
-            free_bytes: self.total - self.used,
-        }])
+        let mut m = Machine::one_card("demo card", self.total);
+        m.unlisted(0, self.used);
+        Ok(m.devices())
     }
 
     fn source(&self) -> String {
@@ -392,13 +389,15 @@ pub(crate) async fn fits_of(
     out
 }
 
-/// D7 and D120 across a repo's quants: on the whole card the widest file of
+/// D7 and D120 across a repo's quants: on an empty card the widest file of
 /// the Q8 class that keeps all 4096 tokens (the BF16 and F32 files fit too,
 /// and keep their marks); beside a program holding part of the card the
-/// Q8_0 fits only a shorter conversation, so the pick is the Q4_K_M. The
-/// 3-bit file is never the pick. The hold changes neither (D10). The other
-/// program's share is set between the Q4_K_M's and the Q8_0's footprints,
-/// read on an empty card first.
+/// Q8_0 fits only a shorter conversation, so the pick is the Q4_K_M — on
+/// the whole card too, which is the card with lmgw's models unloaded, not
+/// other programs' (2026-11-18: as admission and the one-card choice read
+/// it). The 3-bit file is never the pick. The hold changes neither (D10).
+/// The other program's share is set between the Q4_K_M's and the Q8_0's
+/// footprints, read on an empty card first.
 #[tokio::test]
 async fn the_pick_on_the_whole_card_and_beside_what_runs() {
     let _env = crate::common::process_env_lock().await;
@@ -411,6 +410,16 @@ async fn the_pick_on_the_whole_card_and_beside_what_runs() {
         empty[2].fit.whole_card.uses_bytes,
     );
     assert!(q4 < q8, "{q4} {q8}");
+    for f in &empty {
+        assert_eq!(f.fit.whole_card.mark, FitMark::Fits, "{f:?}");
+    }
+    let (whole, _) = hub_fit::pick_both(&empty);
+    assert_eq!(
+        whole.file.as_deref(),
+        Some("quants/demo-chat-Q8_0.gguf"),
+        "{whole:?}"
+    );
+    assert_eq!(whole.rule, PickRule::WholeContext);
     let used = total - 32 * MIB - (q4 + q8) / 2;
     for hold in [false, true] {
         let state = on_card(total, used, hold).await;
@@ -419,9 +428,8 @@ async fn the_pick_on_the_whole_card_and_beside_what_runs() {
             FitMeasure::WholeCard => fits[i].fit.whole_card.mark,
             FitMeasure::Beside => fits[i].fit.beside.mark,
         };
-        for f in &fits {
-            assert_eq!(f.fit.whole_card.mark, FitMark::Fits, "{f:?}");
-        }
+        // What the other program holds stays on the whole card.
+        assert_eq!(mark(2, FitMeasure::WholeCard), mark(2, FitMeasure::Beside));
         assert_eq!(fits[2].fit.whole_card.bits_per_weight, Some(8.5));
         assert_eq!(
             mark(1, FitMeasure::Beside),
@@ -438,12 +446,7 @@ async fn the_pick_on_the_whole_card_and_beside_what_runs() {
         let beside = &fits[2].fit.beside;
         assert_eq!(beside.beside.as_ref().unwrap().outside_bytes, Some(used));
         let (whole, by) = hub_fit::pick_both(&fits);
-        assert_eq!(
-            whole.file.as_deref(),
-            Some("quants/demo-chat-Q8_0.gguf"),
-            "{whole:?}"
-        );
-        assert_eq!(whole.rule, PickRule::WholeContext);
+        assert_eq!(whole.file, by.file, "{whole:?} {by:?}");
         assert_eq!(
             by.file.as_deref(),
             Some("quants/demo-chat-Q4_K_M.gguf"),

@@ -213,6 +213,37 @@ const SHAPED_ROUTES: &[(&str, &str)] = &[
 /// `x-lmgw-voices-source`'s one route.
 const VOICES_ROUTES: &[(&str, &str)] = &[("GET", "/v1/audio/voices")];
 
+/// The docling-serve routes that answer a conversion or a task (document
+/// conversion design §7.4.2, §7.4.3).
+const DOCLING_NOTES_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/convert/file"),
+    ("POST", "/v1/convert/file/async"),
+    ("POST", "/v1/convert/source"),
+    ("POST", "/v1/convert/source/async"),
+    ("POST", "/v1/convert/source/batch"),
+    ("GET", "/v1/result/{task_id}"),
+];
+
+/// The docling-serve routes that answer converted documents.
+const DOCLING_DOCUMENTS_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/convert/file"),
+    ("POST", "/v1/convert/source"),
+    ("GET", "/v1/result/{task_id}"),
+];
+
+/// The docling poll route, whose `wait` lmgw bounds (security round A).
+const DOCLING_POLL_ROUTES: &[(&str, &str)] = &[("GET", "/v1/status/poll/{task_id}")];
+
+/// The routes that write a conversion's answer under a write deadline
+/// (security round A review S6).
+const WRITE_DEADLINE_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/documents/convert"),
+    ("GET", "/v1/documents/jobs/{id}/result"),
+    ("POST", "/v1/convert/file"),
+    ("POST", "/v1/convert/source"),
+    ("GET", "/v1/result/{task_id}"),
+];
+
 /// The table (§4.9). In spec order: the reasoning trio, `x-lmgw-background`, then the two
 /// literal-only headers (`x-lmgw-run`, `x-lmgw-admin-token`), the internal
 /// `x-lmgw-face`, the gated-response trio and its images count, the four "route could not
@@ -220,6 +251,49 @@ const VOICES_ROUTES: &[(&str, &str)] = &[("GET", "/v1/audio/voices")];
 /// egress design §7.1), the ladder pair, and the new counter-approximation
 /// header.
 pub const LMGW_HEADERS: &[LmgwHeader] = &[
+    LmgwHeader {
+        name: "x-lmgw-poll-wait",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(DOCLING_POLL_ROUTES),
+        schema: HeaderSchema::Text,
+        description: "Set when the poll's wait was longer than lmgw waits on one request: the \
+            seconds it waited at most and the bound's name, 120 (POLL_WAIT_MAX_S). Poll again \
+            for longer.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-write-deadline",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(WRITE_DEADLINE_ROUTES),
+        schema: HeaderSchema::Text,
+        description: "Seconds the client has to read this answer, then the rule: 60 s plus 1 s \
+            per MiB (ANSWER_WRITE_GRACE_S + 1 s per ANSWER_MIN_RATE_BYTES_PER_S). Past it the \
+            connection is ended.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-option-notes",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(DOCLING_NOTES_ROUTES),
+        schema: HeaderSchema::Text,
+        description: "Every docling option the request set that lmgw did not do as docling \
+            does, with its outcome: name=mapped(what served it), name=not_yet, separated by \
+            '; ' (ocr_engine=mapped(easyocr->lmgw-ocr); do_picture_classification=not_yet). \
+            Absent when every option was honoured. docling's body stays docling's: the notes \
+            travel here, in the request's record (Settings › Documents, Who calls the docling \
+            route) and in one log line.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-documents",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(DOCLING_DOCUMENTS_ROUTES),
+        schema: HeaderSchema::Text,
+        description: "The files' outcomes, counted: converted=2, partial=0, failed=1, \
+            skipped=0. On a zip answer it is how a client learns that files are missing \
+            from converted_docs.zip (a failed or skipped file is absent, as in docling).",
+    },
     LmgwHeader {
         name: "x-lmgw-reasoning",
         direction: Direction::Request,
@@ -442,6 +516,7 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
             "context_management",
             "compaction",
             "thinking.display",
+            "cache_control",
         ]),
         description: "Comma-separated list of the request's sampling parameters (top_k, min_p, \
             repeat_penalty, presence_penalty, frequency_penalty, seed) the answering model's \
@@ -452,7 +527,12 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
             request's Anthropic context management and on-demand compaction, which only an \
             Anthropic model's route takes (both sent on as written), and \
             thinking.display, which goes only to an Anthropic model, beside a thinking type \
-            that takes it (adaptive or enabled). Also content.<type>, a /v1/messages \
+            that takes it (adaptive or enabled). Also cache_control, once, when a \
+            /v1/messages request carried an Anthropic prompt-caching mark (top-level, on a \
+            tool, a system block or a content block), which only an Anthropic model's route \
+            is sent, and tools.<field>, a /v1/messages tool's other Anthropic field \
+            (eager_input_streaming, input_examples, …; tools.field for a name that is no \
+            plain token), likewise. Also content.<type>, a /v1/messages \
             request's content block lmgw does not model (redacted_thinking, a type newer \
             than lmgw), which only an Anthropic model's route is sent, and answer.<type>, \
             such a block in an Anthropic model's whole answer, which a Chat Completions or \
@@ -633,7 +713,9 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
 /// eleven headers the old hand-written block carried plus
 /// `x-lmgw-count-approximate` (§5.1), `x-lmgw-speech`,
 /// `x-lmgw-sample-rate`, `x-lmgw-voices-source`, `x-lmgw-background` and
-/// `x-lmgw-params-ignored` (openai egress design §7.1). `Agent`, `Owner` and
+/// `x-lmgw-params-ignored` (openai egress design §7.1) and `x-lmgw-poll-wait`
+/// and `x-lmgw-write-deadline` (document-conversion security round A).
+/// `Agent`, `Owner` and
 /// `Internal` rows (`x-lmgw-run`, `x-lmgw-admin-token`, `x-lmgw-face`) are in
 /// the table for the drift guard to find, not for a client reading
 /// `/v1/models` to see.
@@ -652,7 +734,7 @@ mod tests {
     #[test]
     fn headers_block_has_exactly_the_client_rows() {
         let block = headers_block();
-        assert_eq!(block.len(), 20, "{block:#?}");
+        assert_eq!(block.len(), 24, "{block:#?}");
         assert!(block.contains_key("x-lmgw-fallback-chain"));
         assert!(block.contains_key("x-lmgw-count-approximate"));
         assert!(block.contains_key("x-lmgw-images-omitted"));

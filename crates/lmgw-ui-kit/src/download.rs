@@ -240,7 +240,7 @@ pub fn DlLine(
 pub fn DlChip(#[prop(into)] dl: Signal<Dl>) -> impl IntoView {
     let title = move || dl.with(|d| format!("{}\n{}", d.words(), d.title()));
     view! {
-        <span class="chip live" title=title data-gpu-download="">
+        <span class="chip info" title=title data-gpu-download="">
             <span class="dot"></span>
             {move || dl.with(Dl::chip)}
         </span>

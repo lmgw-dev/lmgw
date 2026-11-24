@@ -80,11 +80,17 @@ pub(super) enum Checked {
 
 /// The card's chip (§5): its words and its tone (`ok`, `warn`, `off`).
 /// `who` says who makes room for a fit on the whole card (`marks::who`).
+/// On a computer with several graphics cards it names the card the fit
+/// was measured against (device-ledger design §10).
 pub(super) fn chip(fit: &FileFit, who: &str, checked: Checked) -> (String, &'static str) {
     let whole = fit.measure == FitMeasure::WholeCard;
+    let card = fit.card.as_ref().map(|c| c.short());
     match fit.mark {
         FitMark::Fits | FitMark::FitsShorter if whole => (format!("fits once {who}"), "warn"),
-        FitMark::Fits | FitMark::FitsShorter => ("fits your graphics card".into(), "ok"),
+        FitMark::Fits | FitMark::FitsShorter => match card {
+            Some(c) => (format!("fits on {c}"), "ok"),
+            None => ("fits your graphics card".into(), "ok"),
+        },
         FitMark::FitsBySize => {
             let tail = match checked {
                 Checked::Checking => " · checking…",
@@ -93,12 +99,14 @@ pub(super) fn chip(fit: &FileFit, who: &str, checked: Checked) -> (String, &'sta
             if whole {
                 (format!("fits by size once {who}{tail}"), "warn")
             } else {
-                (format!("fits by size{tail}"), "off")
+                let on = card.map(|c| format!(" on {c}")).unwrap_or_default();
+                (format!("fits by size{on}{tail}"), "off")
             }
         }
-        FitMark::DoesNotFit | FitMark::DoesNotFitBySize => {
-            ("doesn't fit your graphics card".into(), "off")
-        }
+        FitMark::DoesNotFit | FitMark::DoesNotFitBySize => match card {
+            Some(c) => (format!("doesn't fit on {c}"), "off"),
+            None => ("doesn't fit your graphics card".into(), "off"),
+        },
         FitMark::Unknown => ("size unknown · not checked".into(), "off"),
         FitMark::NoCard => ("can't measure your graphics card yet".into(), "off"),
     }
@@ -133,30 +141,47 @@ pub(super) fn context_line(kind: CardKind, fit: &FileFit, checked: Checked) -> S
 /// "Uses 17.0 GiB of the 18.0 GiB free beside what runs now" (§5): the
 /// footprint with the headroom, against the measure's room, in the
 /// graphics card's units (D143). By size it is the files and the headroom,
-/// so "Needs about". `None` without a card or a size to say it with.
+/// so "Needs about". `None` without a card or a size to say it with. On a
+/// computer with several graphics cards it names the card by name and
+/// index (device-ledger design §10).
 pub(super) fn uses_line(fit: &FileFit) -> Option<String> {
     if matches!(fit.mark, FitMark::NoCard | FitMark::Unknown) || fit.capacity_bytes == 0 {
         return None;
     }
     let uses = fmt_bytes(fit.uses_bytes.saturating_add(fit.headroom_bytes));
     let room = fmt_bytes(fit.capacity_bytes);
+    let place = fit
+        .card
+        .as_ref()
+        .map_or_else(|| "your graphics card".to_string(), |c| c.named());
     if matches!(fit.mark, FitMark::DoesNotFit | FitMark::DoesNotFitBySize) {
         return Some(match fit.measure {
-            FitMeasure::Beside => format!(
-                "Needs {uses} on your graphics card, more than the {room} free beside what runs now"
-            ),
+            FitMeasure::Beside => {
+                format!("Needs {uses} on {place}, more than the {room} free beside what runs now")
+            }
             FitMeasure::WholeCard => {
-                format!("Needs {uses} on your graphics card, more than the {room} it has")
+                format!("Needs {uses} on {place}, more than the {room} it has")
             }
         });
     }
     let by_size = fit.mark == FitMark::FitsBySize;
     let what = if by_size { "Needs about" } else { "Uses" };
+    // What it takes counts what lmgw keeps free beside it; said apart, so a
+    // fit to the last MiB reads as the comparison it is, not as the card
+    // filled to the brim (2026-11-18).
+    let uses = match (by_size, fit.headroom_bytes) {
+        (false, k) if k > 0 => format!(
+            "{uses} ({} and {} kept free beside it)",
+            fmt_bytes(fit.uses_bytes),
+            fmt_bytes(k)
+        ),
+        _ => uses,
+    };
     Some(match fit.measure {
         FitMeasure::Beside => {
-            format!("{what} {uses} of the {room} free on your graphics card beside what runs now")
+            format!("{what} {uses} of the {room} free on {place} beside what runs now")
         }
-        FitMeasure::WholeCard => format!("{what} {uses} of the {room} your graphics card has"),
+        FitMeasure::WholeCard => format!("{what} {uses} of the {room} {place} has"),
     })
 }
 
@@ -436,6 +461,16 @@ mod tests {
             .0,
             "can't measure your graphics card yet"
         );
+        // On a computer with several cards the chip names the card.
+        let mut on = fit(FitMark::Fits, FitMeasure::Beside);
+        on.card = Some(lmgw_api_types::model_find::FitCard {
+            index: 2,
+            name: "NVIDIA RTX 6000 Ada Generation".into(),
+            of: 4,
+        });
+        assert_eq!(chip(&on, who, Checked::Header).0, "fits on card 2");
+        on.mark = FitMark::DoesNotFit;
+        assert_eq!(chip(&on, who, Checked::Header).0, "doesn't fit on card 2");
     }
 
     #[test]
@@ -473,7 +508,8 @@ mod tests {
         f.capacity_bytes = 18 * GIB;
         assert_eq!(
             uses_line(&f).unwrap(),
-            "Uses 17.0 GiB of the 18.0 GiB free on your graphics card beside what runs now"
+            "Uses 17.0 GiB (16.5 GiB and 512 MiB kept free beside it) of the 18.0 GiB free on \
+             your graphics card beside what runs now"
         );
         f.measure = FitMeasure::WholeCard;
         f.mark = FitMark::FitsBySize;
@@ -490,6 +526,20 @@ mod tests {
         // D9's "24" is GiB, as the question asks: the card then says 24.0 GiB.
         f.capacity_bytes = budget_mib(24.0).unwrap() * 1024 * 1024;
         assert!(uses_line(&f).unwrap().ends_with("the 24.0 GiB it has"));
+        // On a computer with several cards, the card by name and index.
+        f.mark = FitMark::Fits;
+        f.measure = FitMeasure::Beside;
+        f.capacity_bytes = 18 * GIB;
+        f.card = Some(lmgw_api_types::model_find::FitCard {
+            index: 2,
+            name: "NVIDIA RTX 6000 Ada Generation".into(),
+            of: 4,
+        });
+        assert_eq!(
+            uses_line(&f).unwrap(),
+            "Uses 17.0 GiB (16.5 GiB and 512 MiB kept free beside it) of the 18.0 GiB free on \
+             NVIDIA RTX 6000 Ada Generation (card 2) beside what runs now"
+        );
     }
 
     #[test]

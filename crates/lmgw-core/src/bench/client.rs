@@ -612,9 +612,8 @@ mod tests {
             .unwrap_err();
         assert!(resendable(&e), "{}", error_chain(&e));
 
-        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = gone.local_addr().unwrap();
-        drop(gone);
+        let (port, _held) = crate::refusing_port::refusing_port();
+        let addr = format!("127.0.0.1:{port}");
         let e = reqwest::Client::new()
             .get(format!("http://{addr}/props"))
             .send()

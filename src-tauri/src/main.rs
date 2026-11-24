@@ -29,6 +29,8 @@ mod reveal;
 #[cfg(any(windows, test))]
 mod shell_open;
 mod updater;
+/// The main window's own frame (the shell's by default on Linux, `LMGW_WINDOW=kwin` for the desktop's).
+mod window_chrome;
 mod window_size;
 
 use std::net::SocketAddr;
@@ -90,7 +92,14 @@ fn show_main_window(app: &tauri::AppHandle) {
         Err(why) => return gateway::not_serving(app, &why),
     };
     let state: tauri::State<SharedState> = app.state();
-    let url = login_url(&state, &addr);
+    // The design sample instead of the dashboard (`window_chrome::demo`):
+    // no login, the page is the shell's own.
+    let url = if window_chrome::demo::wanted() {
+        window_chrome::demo::url()
+    } else {
+        login_url(&state, &addr)
+    };
+    let frame = window_chrome::frame();
     // Every judgement of the window's document reads what this process
     // serves at that moment, not the origin the window was built for.
     let serving = gw.serving();
@@ -169,6 +178,9 @@ fn show_main_window(app: &tauri::AppHandle) {
             });
             return false;
         }
+        if window_chrome::demo::admits(url) {
+            return true;
+        }
         let Some(origin) = serving.origin() else {
             return false;
         };
@@ -193,6 +205,10 @@ fn show_main_window(app: &tauri::AppHandle) {
     // resize borders, like every other window. An undecorated window had none
     // of them and read as a picture pasted onto the screen.
     .decorations(true);
+    // The frame's page end (`window_chrome`), only when the shell draws it.
+    if frame == window_chrome::Frame::Csd {
+        builder = builder.initialization_script(window_chrome::PAGE_JS);
+    }
     // Hidden until the frame is settled (below): GTK picks client- or
     // server-side decorations when the window is realized, which showing it
     // does. And then until the app has drawn itself (reveal.rs).
@@ -215,16 +231,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         // The microphone for the voice features (chat-voice §13.1).
         #[cfg(target_os = "linux")]
         Ok(window) => {
-            // tao gives every Wayland window its own GtkHeaderBar, and a
-            // window with a custom titlebar is client-decorated: GTK draws
-            // the title bar and the shadow itself, in its theme's sizes. With
-            // no titlebar GTK asks the compositor to decorate (KDE's
-            // server-decoration protocol), so KWin draws the same frame as
-            // on every other window: its title bar, buttons, window menu.
-            if let Ok(gtk_window) = window.gtk_window() {
-                use gtk::prelude::GtkWindowExt;
-                gtk_window.set_titlebar(None::<&gtk::Widget>);
-            }
+            window_chrome::decorate(&window, frame);
             desktop_palette::follow(&window, desktop);
             context_menu::install(&window);
             reveal::when_mounted(&window);
@@ -495,7 +502,8 @@ fn shell_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
     tauri::generate_handler![
         audio_out::audio_outputs,
         audio_out::audio_output_set,
-        machine::machine_apply
+        machine::machine_apply,
+        window_chrome::window_chrome
     ]
 }
 
@@ -559,7 +567,7 @@ fn main() {
     }
     let commands = shell_commands();
 
-    tauri::Builder::default()
+    window_chrome::demo::register(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(single_instance.build())
         .invoke_handler(move |invoke| {
@@ -568,8 +576,11 @@ fn main() {
             // the commands also need the running document to be the gateway's
             // (chat-voice §13.2, review M1). Tauri calls this on the GTK main
             // thread as the message arrives, where `media` tracks the commits.
+            //
+            // `window_chrome` is also open to the design sample of a debug
+            // build's demo (`window_chrome::demo`), judged the same way.
             #[cfg(target_os = "linux")]
-            if let Err(why) = media::command_allowed() {
+            if let Err(why) = media::command_allowed(invoke.message.command()) {
                 tracing::info!("command {} refused: {why}", invoke.message.command());
                 invoke.resolver.reject(format!("refused: {why}"));
                 return true;
@@ -619,6 +630,9 @@ fn main() {
             };
             app.manage(state.clone());
             app.manage(gateway);
+            // The demo's page may drive the window controls: a grant added
+            // only while the demo is on, never a file in capabilities/.
+            window_chrome::demo::grant(app.handle())?;
             // SIGTERM and Ctrl-C quit as Quit does, once the gateway is
             // managed (`gateway::on_signals`).
             gateway::on_signals(app.handle().clone());
@@ -901,7 +915,7 @@ fn main() {
                     // of them are serving something right now.
                     let busy = runtime.iter().filter(|v| v.in_flight > 0).count();
                     let hold_suffix = if snap.settings.hold.active {
-                        " · HOLD"
+                        " · on hold"
                     } else {
                         ""
                     };

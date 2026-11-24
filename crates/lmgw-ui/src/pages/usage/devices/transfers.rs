@@ -23,7 +23,7 @@ use crate::widgets::{use_toasts, Modal, ModalFooter};
 /// for).
 fn state_chip(t: &Transfer) -> (&'static str, String) {
     match &t.state {
-        TransferState::Uploading => ("chip live", "uploading".into()),
+        TransferState::Uploading => ("chip info", "uploading".into()),
         TransferState::Ready => ("chip info", format!("waiting for {}", t.to.name)),
         TransferState::Delivered => ("chip ok", "delivered".into()),
         TransferState::Declined => ("chip off", "declined".into()),
@@ -65,7 +65,7 @@ fn head_words(l: &TransferList) -> String {
 }
 
 #[component]
-pub(super) fn TransfersSection() -> impl IntoView {
+pub(in crate::pages::usage) fn TransfersSection() -> impl IntoView {
     let toasts = use_toasts();
     let live = use_live();
     let Now(now) = expect_context::<Now>();

@@ -13,7 +13,7 @@ use lmgw_api_types::voice_lab::{VoiceCloneCheck, VoiceModelFacts};
 
 use super::page::{enc, Lab};
 use crate::api;
-use crate::widgets::{ModelPicker, Select};
+use crate::widgets::{ActionRow, AudioPlayer, ComboRow, EntryRow, ModelPicker, StackRow};
 
 /// The check's own state.
 #[derive(Clone, Copy)]
@@ -183,62 +183,61 @@ pub(super) fn CloneCard(lab: Lab) -> impl IntoView {
     });
     let ready =
         move || !c.sample.get().is_empty() && !c.alias.get().trim().is_empty() && !c.running.get();
+    let note = move || {
+        c.facts
+            .get()
+            .and_then(|f| f.clone_note.map(|n| (f.clones, n)))
+    };
     view! {
-        <div class="card vl-clone" id="vl-clone">
-            <h3 class="lab-h3">"Cloning check"</h3>
-            <p class="dim mini-note">
+        <section class="pref-group vl-clone" id="vl-clone">
+            <div class="pref-head"><h2>"Cloning check"</h2></div>
+            <p class="pref-desc">
                 "Have a cloning model say a short line with a saved sample as its reference, the "
                 "way a realtime session would speak with it — to hear whether the sample clones well."
             </p>
-            <div class="field-grid" style="--field-min:180px">
-                <div class="field">
-                    <label>"Sample"</label>
-                    <Select value=c.sample options=samples placeholder="pick a saved sample"/>
-                </div>
-                <div class="field">
-                    <label>"Cloning model"</label>
+            <div class="boxed">
+                <ComboRow title="Sample" value=c.sample options=samples placeholder="pick a saved sample"/>
+                <ActionRow title="Cloning model">
                     <ModelPicker
                         value=c.alias
                         tasks=lmgw_api_types::realtime::SPEECH_TASKS
                         recent_key="voicelab.clone"
                     />
-                </div>
+                </ActionRow>
+                {move || {
+                    note().map(|(clones, n)| {
+                        view! {
+                            <StackRow>
+                                <span class="dim" class:vl-warn=!clones>{n}</span>
+                            </StackRow>
+                        }
+                    })
+                }}
+                <EntryRow title="Line" value=c.text placeholder="What the model says" wide=true/>
+                <StackRow class="vl-clone-run">
+                    <div class="row">
+                        <button class="btn suggested primary sm" disabled=move || !ready() on:click=move |_| speak(lab)>
+                            "Speak"
+                        </button>
+                        <Show when=move || c.running.get()>
+                            <span class="chip info">
+                                <i class="dot"></i>
+                                "speaking…"
+                            </span>
+                        </Show>
+                    </div>
+                    {move || c.audio.get().map(|u| view! { <AudioPlayer src=Some(u) autoplay=true/> })}
+                    {move || {
+                        let a = c.answered.get();
+                        (!a.is_empty()).then(|| view! { <div class="dim mini-note">{a}</div> })
+                    }}
+                    {move || {
+                        let e = c.error.get();
+                        (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
+                    }}
+                </StackRow>
             </div>
-            {move || {
-                c.facts.get().and_then(|f| f.clone_note.map(|n| (f.clones, n))).map(|(clones, n)| {
-                    view! { <div class="field-hint" class:vl-warn=!clones>{n}</div> }
-                })
-            }}
-            <div class="field" style="margin-top:10px">
-                <label>"Line"</label>
-                <input
-                    class="input"
-                    placeholder="what the model says"
-                    prop:value=move || c.text.get()
-                    on:input=move |ev| c.text.set(event_target_value(&ev))
-                />
-            </div>
-            <div class="row" style="margin-top:10px">
-                <button class="btn primary sm" disabled=move || !ready() on:click=move |_| speak(lab)>
-                    "Speak"
-                </button>
-                <Show when=move || c.running.get()>
-                    <span class="chip live">
-                        <i class="dot"></i>
-                        "speaking…"
-                    </span>
-                </Show>
-            </div>
-            {move || c.audio.get().map(|u| view! { <audio controls autoplay src=u></audio> })}
-            {move || {
-                let a = c.answered.get();
-                (!a.is_empty()).then(|| view! { <div class="dim mini-note">{a}</div> })
-            }}
-            {move || {
-                let e = c.error.get();
-                (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
-            }}
-        </div>
+        </section>
     }
 }
 

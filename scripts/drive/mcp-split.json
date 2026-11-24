@@ -1,0 +1,258 @@
+[
+ {
+  "js": "'MCP servers as a list beside the detail: the tool inventory with nothing selected (a group per source, folded, the filter), a click selects a server (its path) and shows its form and its tools, the arrows move the selection, a built-in toolset (its tools, no form), the list search (/ focuses it, a miss says so, Esc clears it), a tool switch (applies at once, put back), a dirty change on the server named notes-demo (the accent dot, the save toast, the guard asking, Ctrl+S saving, the value read back, then put back), the new-server form, and the narrow window. It SAVES and switches tools: run it on a dev copy with a stdio server named notes-demo (command python3, args scripts/mock-mcp.py), never on production. Run: scripts/ui-drive.py scripts/drive/mcp-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr> --podman-guard <prefix>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.mcp.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/mcp-servers"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow') && document.querySelector('.mcp-overview .tool-band')",
+  "timeout": 20,
+  "label": "the list has rows, the inventory its groups"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__row = n => [...document.querySelectorAll('.mlist .lrow')].find(r => r.querySelector('.lrow-name').textContent === n); window.__prow = t => [...document.querySelectorAll('.mdetail-scroll .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent === t); window.__group = t => [...document.querySelectorAll('.mdetail-scroll .pref-head h2')].some(h => h.textContent === t); 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.mcp-split:not(.narrow)') && __sel().length === 0 && [...document.querySelectorAll('.mlist .list-head')].map(h => h.firstChild.textContent).join('|') === 'Servers|Built in'",
+  "label": "wide: the servers and the built-in toolsets, nothing selected"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "shot": "mcp-overview"
+ },
+ {
+  "js": "(() => { const b = document.querySelector('.mcp-overview .tool-band .pref-fold'); window.__wasOpen = b.classList.contains('open'); b.click(); return 'fold' })()"
+ },
+ {
+  "until": "document.querySelector('.mcp-overview .tool-band .pref-fold').classList.contains('open') !== __wasOpen",
+  "timeout": 3,
+  "label": "a source's group folds from its heading"
+ },
+ {
+  "js": "document.querySelector('.mcp-overview .tool-band .pref-fold').click(); 'back'"
+ },
+ {
+  "js": "__row('notes-demo').click(); document.querySelector('.mlist').focus(); 'notes-demo'"
+ },
+ {
+  "until": "/^\\/mcp-servers\\/\\d+$/.test(location.pathname) && __sel()[0] === location.pathname && __group('Server') && __group('Process') && __group('Behaviour') && __group('Tools')",
+  "timeout": 5,
+  "label": "a click selects the server: its path, its groups and its tools"
+ },
+ {
+  "until": "document.querySelectorAll('.mdetail-scroll .tool-row').length >= 3",
+  "timeout": 20,
+  "label": "its tools are rows with their switches"
+ },
+ {
+  "shot": "mcp-server"
+ },
+ {
+  "js": "window.__notes = location.pathname; 'ok'"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname !== __notes && __sel()[0] === location.pathname",
+  "timeout": 5,
+  "label": "ArrowDown moves the selection"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('.mlist .lrow')].find(r => r.dataset.key.includes('/builtin/')); window.__builtin = b.dataset.key; b.click(); return 'builtin' })()"
+ },
+ {
+  "until": "location.pathname === __builtin && __group('Tools') && !__group('Server')",
+  "timeout": 5,
+  "label": "a built-in toolset shows its tools and no form"
+ },
+ {
+  "shot": "mcp-builtin"
+ },
+ {
+  "js": "history.pushState(null, '', __notes); dispatchEvent(new PopStateEvent('popstate')); 'deep link'"
+ },
+ {
+  "until": "location.pathname === __notes && __sel()[0] === __notes && document.querySelectorAll('.mdetail-scroll .tool-row').length >= 3",
+  "timeout": 10,
+  "label": "a deep link selects its server"
+ },
+ {
+  "js": "window.__sw = () => document.querySelector('.mdetail-scroll .tool-row .switch'); window.__on0 = __sw().classList.contains('on'); __sw().click(); 'switch'"
+ },
+ {
+  "until": "__sw() && __sw().classList.contains('on') !== __on0",
+  "timeout": 10,
+  "label": "a tool's switch applies at once"
+ },
+ {
+  "js": "__sw().click(); 'switch back'"
+ },
+ {
+  "until": "__sw() && __sw().classList.contains('on') === __on0",
+  "timeout": 10,
+  "label": "and back"
+ },
+ {
+  "js": "(() => { window.__i0 = __prow('Stop when idle').querySelector('input').value; const i = __prow('Stop when idle').querySelector('input'); i.value = '4321'; i.dispatchEvent(new Event('input', {bubbles: true})); i.dispatchEvent(new Event('change', {bubbles: true})); return __i0 })()"
+ },
+ {
+  "until": "__prow('Stop when idle').classList.contains('dirty') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "an edit marks the row changed and shows the save toast"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mlist .lrow')].find(r => r.dataset.key !== __notes).click(); 'other row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on this server'))",
+  "timeout": 5,
+  "label": "picking another row asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname === __notes && __prow('Stop when idle').classList.contains('dirty')",
+  "label": "Stay keeps the server and the change"
+ },
+ {
+  "click": ".mdetail-scroll"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && !__prow('Stop when idle').classList.contains('dirty')",
+  "timeout": 10,
+  "label": "Ctrl+S saves: no change left"
+ },
+ {
+  "js": "history.pushState(null, '', '/mcp-servers'); dispatchEvent(new PopStateEvent('popstate')); 'away'"
+ },
+ {
+  "until": "document.querySelector('.mcp-overview')",
+  "timeout": 5
+ },
+ {
+  "js": "history.pushState(null, '', __notes); dispatchEvent(new PopStateEvent('popstate')); 'back to it'"
+ },
+ {
+  "until": "__prow('Stop when idle') && __prow('Stop when idle').querySelector('input').value.replace(/\\D/g, '') === '4321'",
+  "timeout": 10,
+  "label": "the saved value is read back"
+ },
+ {
+  "js": "(() => { const i = __prow('Stop when idle').querySelector('input'); i.value = __i0; i.dispatchEvent(new Event('input', {bubbles: true})); i.dispatchEvent(new Event('change', {bubbles: true})); return 'restore' })()"
+ },
+ {
+  "until": "document.querySelector('.save-toast.show')",
+  "timeout": 5
+ },
+ {
+  "click": ".save-toast .btn.suggested"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && __prow('Stop when idle').querySelector('input').value.replace(/\\D/g, '') === __i0.replace(/\\D/g, '')",
+  "timeout": 10,
+  "label": "Save puts the value back"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "/ focuses the list's search"
+ },
+ {
+  "type": "zzz-no-such-server"
+ },
+ {
+  "until": "document.querySelector('.mlist-empty') && document.querySelector('.mlist-empty').textContent.includes('Nothing matches')",
+  "timeout": 5,
+  "label": "a search with no match says so"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelector('.msearch input').value === '' && document.querySelector('.mlist .lrow')",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "click": ".mlist-head .icon-btn[title=\"Add server\"]"
+ },
+ {
+  "until": "location.pathname === '/mcp-servers/new' && __prow('Name') && __group('Process')",
+  "timeout": 5,
+  "label": "+ opens the new-server form, stdio first"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show') && !__group('Tools')",
+  "label": "a blank form has nothing to save and no tools"
+ },
+ {
+  "shot": "mcp-new"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/mcp-servers"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow')",
+  "timeout": 15
+ },
+ {
+  "expect": "document.querySelector('.mcp-split.narrow') && getComputedStyle(document.querySelector('.mdetail-pane')).display === 'none'",
+  "label": "narrow: the list alone"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mlist .lrow')].find(r => r.querySelector('.lrow-name').textContent === 'notes-demo').click(); 'server'"
+ },
+ {
+  "until": "/^\\/mcp-servers\\/\\d+$/.test(location.pathname) && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[title=\"Back to the list\"]')",
+  "timeout": 5,
+  "label": "narrow: opening a server shows its detail alone, with a back button"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-scroll').scrollWidth <= document.querySelector('.mdetail-scroll').clientWidth",
+  "label": "narrow: the detail does not scroll sideways"
+ },
+ {
+  "shot": "mcp-narrow-detail"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the list\"]"
+ },
+ {
+  "until": "location.pathname === '/mcp-servers' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the list"
+ }
+]

@@ -89,7 +89,7 @@ pub use ladder::{RungTag, RUNG_HEADER};
 pub(crate) use machine_setup::gpu_setup_fallback;
 pub use open::{
     open, open_pinned, resolve, resolve_pinned, usable_fallback, AdmissionPolicy, FallbackReason,
-    GateHeaders, OpenFailed, Opened, RouteCheck, Routed,
+    GateHeaders, OpenFailed, Opened, RouteCheck, Routed, UpstreamIds,
 };
 pub(crate) use send::rebuild;
 pub use send::{send_gated, send_gated_marked, CountInput, Sent};

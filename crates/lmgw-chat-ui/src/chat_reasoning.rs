@@ -139,9 +139,9 @@ pub(super) fn ReasoningFields(
     });
     let think_opts = Signal::derive(|| {
         vec![
-            (String::new(), "model default".to_string()),
-            ("on".to_string(), "on".to_string()),
-            ("off".to_string(), "off".to_string()),
+            (String::new(), "Default".to_string()),
+            ("on".to_string(), "On".to_string()),
+            ("off".to_string(), "Off".to_string()),
         ]
     });
     let levels = Memo::new(move |_| {
@@ -150,8 +150,8 @@ pub(super) fn ReasoningFields(
     let effort_opts = Signal::derive(move || {
         let default = facts
             .with(|f| f.as_ref().and_then(|f| f.default.clone()))
-            .map(|d| format!("model default · {d}"))
-            .unwrap_or_else(|| "model default".to_string());
+            .map(|d| format!("Default · {d}"))
+            .unwrap_or_else(|| "Default".to_string());
         std::iter::once((String::new(), default))
             .chain(levels.get().into_iter().map(|l| (l.clone(), l)))
             .collect::<Vec<_>>()
@@ -159,8 +159,8 @@ pub(super) fn ReasoningFields(
     let budget_ph = move || {
         facts
             .with(|f| f.as_ref().and_then(|f| f.budget_tokens))
-            .map(|b| format!("model default · {b}"))
-            .unwrap_or_else(|| "model default".to_string())
+            .map(|b| format!("Default · {b}"))
+            .unwrap_or_else(|| "Default".to_string())
     };
     view! {
         <div class="field">
@@ -177,7 +177,7 @@ pub(super) fn ReasoningFields(
                             view! {
                                 <input
                                     class="input mono"
-                                    placeholder="model default"
+                                    placeholder="Default"
                                     prop:value=move || effort.get()
                                     on:input=move |ev| effort.set(event_target_value(&ev))
                                 />

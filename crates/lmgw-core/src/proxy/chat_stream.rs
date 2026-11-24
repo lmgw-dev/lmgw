@@ -110,6 +110,13 @@ pub(super) async fn stream_chat(
         // An error answer read to its end is a task the server is done with.
         lease.end(bytes.is_ok());
         let bytes = bytes.unwrap_or_default();
+        // An Anthropic upstream's error carries its request id to the client.
+        headers.set_request_id(super::chat::answer_request_id(
+            proto,
+            route.upstream.protocol,
+            &answer_headers,
+            Some(&bytes),
+        ));
         // Before the stream: the classified refusal answers as the unary
         // send's would (structured-output design §9).
         return Err(crate::gate::attribute(
@@ -124,8 +131,18 @@ pub(super) async fn stream_chat(
         ));
     }
 
+    // An Anthropic upstream's request id goes out with the stream's headers.
+    headers.set_request_id(super::chat::answer_request_id(
+        proto,
+        route.upstream.protocol,
+        resp.headers(),
+        None,
+    ));
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
-    let mut encoder = proto.new_stream_encoder(&ir.model_alias, include_usage);
+    // The route that answers: an Anthropic upstream's input counts open a
+    // Messages stream (`ingress::anthropic::start`).
+    let mut encoder =
+        proto.new_stream_encoder(&ir.model_alias, include_usage, route.upstream.protocol);
     let decoder = egress.decoder_for(&route.upstream);
     let state2 = state.clone();
     let ctx2 = ctx.clone();

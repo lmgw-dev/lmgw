@@ -64,7 +64,7 @@ Android and [Inkference](https://github.com/lmgw-dev/inkference) for Firefox
       <sub><b>Traffic</b> · every request, across both API dialects</sub>
     </td>
     <td align="center">
-      <a href="docs/screenshots/backends.png"><img src="docs/screenshots/thumbs/backends.png" width="400" alt="Engines page"></a><br>
+      <a href="docs/screenshots/engines.png"><img src="docs/screenshots/thumbs/engines.png" width="400" alt="Engines page"></a><br>
       <sub><b>Engines</b> · llama.cpp, audio.cpp and sd.cpp images built from git</sub>
     </td>
   </tr>
@@ -80,13 +80,14 @@ Android and [Inkference](https://github.com/lmgw-dev/inkference) for Firefox
   </tr>
 </table>
 
-<sub>The app window at 1920×1080, a 1080p screen at 125% scaling. Click a thumbnail for the full image.</sub>
+<sub>The app window, 1920×1080 at its default 125 % interface scale, with the frame and shadow it draws on Linux. Click a thumbnail for the full image.</sub>
 
 ## Features
 
 **Local models**
 - **One container per model.** Chat, embedding and rerank models run on llama.cpp or ik_llama.cpp, and decision models on llama.cpp from b11361 on. audio.cpp covers TTS, ASR and a dozen other audio tasks, and stable-diffusion.cpp generates and edits images.
 - **VRAM-aware scheduling.** Admission works from measured GPU memory (NVML, or amdgpu sysfs). A model that doesn't fit waits, or pushes out an idle one, and idle models hand their memory back. A row's footprint counts llama.cpp's compute buffers and lays the KV cache out the way llama.cpp does, and a plan that can't fit the card says so.
+- **Several graphics cards.** lmgw measures each card on its own and puts each model on one card: of the cards that hold it, the one it leaves least free on, so the large free blocks stay for large models. The model's container gets only that card. A model that doesn't fit pushes out idle models on that card only, and an idle model pushed out starts again on another card that has room for it. A chat model whose context you set and that no single card holds is split over the fewest cards that hold it together. The **GPU pin** in a model's editor keeps it on cards you choose. **Settings → GPU** shows each card's headroom and what the engine costs on it, and the GPU panel shows each card with the models on it. AMD cards and the Windows build's native engines can't be handed a single card yet: their models run on every card they see, as before. See [several graphics cards](#several-graphics-cards).
 - **From Hugging Face to a running model.** Download a GGUF together with its projector and draft model, and lmgw proposes llama.cpp settings from the file's metadata. **Find a model** takes a name as someone said it ("qwen 3.6"), a link or a shared model text, and picks the one file that fits your graphics card. The Models page shows the licence the file's header states.
 - **Engine builds and benchmarks.** Build engine images from any git ref with pull requests merged in. Benchmarks measure prefill, decode, VRAM and tokens per joule.
 
@@ -116,7 +117,7 @@ Android and [Inkference](https://github.com/lmgw-dev/inkference) for Firefox
 **Dashboard and extensions**
 - **Desktop app, remote-ready.** The tray menu covers the GPU hold, starting and stopping models, and updates, and the dashboard opens in a native window. Bind lmgw to your LAN and the same dashboard works remotely in any browser.
 - **Rust from gateway to dashboard.** The dashboard is about 88,000 lines of Rust (Leptos), compiled to WebAssembly and built with cargo and Trunk. There's no npm anywhere in the tree. JavaScript is limited to vendored libraries for chat rendering (highlight.js, KaTeX, Mermaid, DOMPurify) and about 700 lines of glue for the window title bar and code blocks.
-- **Chat, plus labs for audio and images.** Chat with any alias, with attachments, knowledge bases and MCP tools. Dictate into it, have replies read aloud, or talk with a conversation in voice mode, all on your own speech models (see [Voice in the Chat](#voice-in-the-chat)). The Audio lab and Image lab are playgrounds for the speech and image routes.
+- **Chat, plus labs for audio, images and documents.** Chat with any alias, with attachments, knowledge bases and MCP tools. Dictate into it, have replies read aloud, or talk with a conversation in voice mode, all on your own speech models (see [Voice in the Chat](#voice-in-the-chat)). The Audio lab and Image lab are playgrounds for the speech and image routes, the Documents lab for the document conversion.
 - **Lab store and the Decision lab.** The labs keep their runs on the server, in a store of their own that survives restarts until you delete it. The Decision lab runs `/v1/systemone` questions against a decision model: question sets, set runs with their metrics, and JSONL or CSV export. The Audio and Image labs save the files their runs made, one file as it is or several as a zip with a manifest. Batch agents can classify through a question set too.
 - **Self-administration over MCP.** The `lmgw__*` tools on `/mcp/admin` let an agent such as Claude Code inspect and configure the gateway. They stay off until you enable their key, and start out read-only.
 - **Agents.** JSON manifests define chat presets, batch pipelines whose results you review before anything gets written, and container agents that bring their own UI.
@@ -149,7 +150,7 @@ go to `$XDG_DATA_HOME/lmgw`, usually `~/.local/share/lmgw`, unless
 
 - **Linux or Windows, x86_64.** Linux is the main platform: developed and used daily on Fedora, and packaged as an RPM or an AppImage. Windows has a native build with its own installer (see **Install**). There is no macOS build yet.
 - **Podman** runs local models and stdio MCP servers on Linux, and the RPM depends on it. Cloud-only use needs no GPU. The Windows build has no Podman: it runs the engines as native processes (see **Install**).
-- **NVIDIA GPU** is the tested path. Model containers get the card through `--device nvidia.com/gpu=all --security-opt label=disable` (the default in **Settings → Runtimes**), so you need the driver plus NVIDIA's container toolkit (the `nvidia-container-toolkit-base` package, from [NVIDIA's repository](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)). lmgw writes the card's CDI description itself, without root, into its own runtime directory, writes it again after a driver or package update, and points the containers it gives the card to (models, benchmarks, the probes that read an engine's options, and MCP servers whose run arguments ask for it) at it, so there is no `nvidia-ctk cdi generate` to run for them. Containers you start yourself still read the system's description in `/etc/cdi` or `/var/run/cdi`, and so do lmgw's when the toolkit isn't installed or Podman has no `--cdi-spec-dir` option. lmgw checks at start whether this computer can run local models (the card, its driver, the toolkit, Podman, the model settings) and says in plain words what is missing. The dashboard shows the result on **Settings → GPU** (the "This computer" card), on the Overview and above the Chat's empty state, and the tray gains a "Graphics card needs attention…" item when something needs doing. Where the fix is a package, **Set it up** in the app's window installs NVIDIA's container toolkit (or switches the model settings) after a native confirmation and your password (a polkit prompt) through `lmgw-machine-helper`, a small root helper the RPM installs; **Show the commands** lists exactly what it would run. In a browser the card shows the same commands to type instead, since a remote page can't open a password prompt on your desktop. Through the API the check is the `machine_check` op and the `lmgw__machine_check` tool.
+- **NVIDIA GPU** is the tested path. Model containers get the card through `--device nvidia.com/gpu=all --security-opt label=disable` (the default in **Settings → Runtimes**; on a computer with several cards lmgw passes the cards it chose for the model instead, see [several graphics cards](#several-graphics-cards)), so you need the driver plus NVIDIA's container toolkit (the `nvidia-container-toolkit-base` package, from [NVIDIA's repository](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)). lmgw writes the card's CDI description itself, without root, into its own runtime directory, writes it again after a driver or package update, and points the containers it gives the card to (models, benchmarks, the probes that read an engine's options, and MCP servers whose run arguments ask for it) at it, so there is no `nvidia-ctk cdi generate` to run for them. Containers you start yourself still read the system's description in `/etc/cdi` or `/var/run/cdi`, and so do lmgw's when the toolkit isn't installed or Podman has no `--cdi-spec-dir` option. lmgw checks at start whether this computer can run local models (the card, its driver, the toolkit, Podman, the model settings) and says in plain words what is missing. The dashboard shows the result on **Settings → GPU** (the "This computer" card), on the Overview and above the Chat's empty state, and the tray gains a "Graphics card needs attention…" item when something needs doing. Where the fix is a package, **Set it up** in the app's window installs NVIDIA's container toolkit (or switches the model settings) after a native confirmation and your password (a polkit prompt) through `lmgw-machine-helper`, a small root helper the RPM installs; **Show the commands** lists exactly what it would run. In a browser the card shows the same commands to type instead, since a remote page can't open a password prompt on your desktop. Through the API the check is the `machine_check` op and the `lmgw__machine_check` tool.
 - **AMD** works on a Ryzen APU with Vulkan images and a few changed settings, as [docs/amd-arch.md](docs/amd-arch.md) describes. Self-built Vulkan and ROCm images are untested.
 
 ## Install
@@ -163,10 +164,26 @@ and install it:
 sudo dnf install ./lmgw-*.x86_64.rpm
 ```
 
+The RPM recommends `poppler-utils` (PDF text) and `tesseract`, which dnf
+installs by default; lmgw runs without them, and **Settings → Documents** says
+what each optional program adds ([docs/documents.md](docs/documents.md)).
+
 From then on the app checks for new releases in the background and offers to
 install them, unless you switch that off under **Settings → Tokens & updates**.
 Some releases also carry an AppImage. It's built on current Fedora and needs a
 glibc at least that recent. On anything older, build from source.
+
+On Arch Linux, take the `lmgw-*-x86_64.pkg.tar.zst` from the same release
+instead:
+
+```sh
+sudo pacman -Syu && sudo pacman -U ./lmgw-*-x86_64.pkg.tar.zst
+```
+
+The package is listed in the release's `latest.json` under `arch`, but the
+in-app updater installs RPMs only and does not install it yet: on Arch you
+install each release's package yourself.
+[docs/amd-arch.md](docs/amd-arch.md) covers the rest of the Arch setup.
 
 For a server without a desktop there is a Podman image instead, started by a
 rootless Quadlet unit, with sign-in accounts and native TLS. It ships as an
@@ -299,14 +316,16 @@ Chat thread) where they need more:
   OpenAI-compatible routes with a gateway key rather than the device link, and
   the dark mode works with no model at all.
 
-Kai and Kai mobile pair over the device link. Open **Pair a device…** on the Devices card
-(**Usage → Keys & budgets**) and choose the address the device should use (this
-computer, the LAN or WireGuard); if the device listener is off, pairing turns it
-on (it can also be switched under **Settings → Network & access → Devices**).
-The card shows a pairing link and its QR code. They carry lmgw's CA fingerprint and a one-time token that expires after
+Kai and Kai mobile pair over the device link. Open **Pair a device…** under
+**Usage → Keys & budgets** (in the list's add menu, or on the page shown while
+no key is selected) and choose the address the device should use (this computer, the LAN
+or WireGuard); if the device listener is off, pairing turns it on (it can also
+be switched under **Settings → Network & access → Devices**). lmgw then shows a
+pairing link and its QR code. They carry lmgw's CA fingerprint and a one-time token that expires after
 ten minutes by default; the device sends the public key of a key pair it made
 itself and gets a certificate back. Both sides then show a confirmation code,
-and the pairing is complete when you confirm it on the card. Apart from
+and the pairing is complete when you confirm it in lmgw (on the pairing card,
+or on the device's page in the list). Apart from
 enrolment, the device listener answers only a request that carries a certificate
 lmgw issued. It serves the inference routes (`/v1`, `/tokenize`, `/mcp`), the
 Chat routes and a device's own `/mcp/host` link, and nothing else: no
@@ -490,6 +509,110 @@ a fallback that answered is named on the message.
 No audio is stored. A spoken turn is kept as text, together with how it was
 spoken.
 
+### Several graphics cards
+
+On a computer with more than one card, lmgw keeps the books per card. What
+follows is for NVIDIA cards, which lmgw can hand to a container one by one.
+
+- **Where a model goes.** lmgw puts each model on one card: of the cards that
+  hold it now, the one it leaves least free on. Where none does, it stops
+  idle models on one card to make room, the fewest it can. Its container is
+  started with that card alone, by the card's UUID (`--device
+  nvidia.com/gpu=GPU-…` and `NVIDIA_VISIBLE_DEVICES`), in place of the
+  cards the run arguments pass. A container that already has exactly the
+  cards its run arguments pass keeps them as written.
+- **A model too large for one card.** A chat model whose context is set (the
+  context field, or `-c` in its arguments) and that no card holds is split
+  over the fewest cards that hold it together. lmgw tells llama-server the
+  layers each card gets (`--split-mode layer --tensor-split`) and charges
+  each card its part. An engine image whose `--help` doesn't list those
+  options can't be split: the model waits or is refused, and says why. A
+  chat model with no context set stays on one card, with the largest
+  context that card holds: set a context to spread it over several.
+  Embedding, rerank, decision, speech and image models always go on one
+  card; one larger than every card is refused.
+- **Making room.** A model that needs room pushes out idle models on the
+  card it goes on, never on another. An idle model pushed out starts again
+  on another card that has room for it now, keeps its place in the
+  unloading order, and says where it came from on the Models page. It is
+  not moved again before a request has used it.
+- **Choosing the card yourself.** The **GPU pin** in a model's editor lists
+  the cards; tick one or more to keep the model on them. A pinned model
+  whose cards are gone does not start on another card; its fallback
+  answers. Run arguments that name a card (`--device nvidia.com/gpu=1`,
+  `-e NVIDIA_VISIBLE_DEVICES=1`) count as a pin too. The line under the
+  command line says where the model would start now.
+- **A split of your own.** A chat model whose arguments set
+  `--tensor-split` keeps it where its GPU pin has as many cards as the
+  split has entries: lmgw starts it on those cards, the entries in the
+  order of the cards' PCI addresses, with its arguments as written, and
+  charges each card its share. Without such a pin lmgw places it as any
+  model and starts it without `--tensor-split`, and without `--split-mode`
+  and `--main-gpu` beside it. The line under the command line and the
+  start's warnings say so. An embedding, rerank or decision model's own
+  split is never kept: those run on one card.
+- **Fit marks.** **Find a model** and the Hugging Face file list measure a
+  file against the card with the most room for lmgw now, and name it
+  ("fits on card 2"). Beside that mark each file shows two badges, judged
+  at the context Get it would create (shown beside them):
+  **Min. cards**, the fewest cards whose total memory holds it ("2 of 4"),
+  and **Free VRAM**, whether the cards it would use have room now (a tick),
+  after lmgw unloads its idle models there (a "!", the models named), or not
+  (a cross, with what it needs against what is there: "needs 21 GiB, card 2
+  has 18"). A mixture-of-experts model that no card holds whole shows a
+  third, "with experts in RAM: 1 card". The figures per card are in the
+  card's **Per card** fold and in the file list's tooltip. One card hides
+  Min. cards; a GPU memory budget shows "budget" with a tick or a cross in
+  its place. An embedding, rerank or decision model that only a split would
+  hold says "fits only split" and that it runs on one card; so does a chat
+  model whose engine can't be told a split, with the reason. The finder still
+  recommends the best file one card holds.
+- **Get it asks.** Get it on a file that one card holds at its full context
+  sets it up as before. On a file that only a split (or its experts in RAM)
+  holds at its full context, lmgw doesn't choose: Get it lists the ways with
+  their numbers — split over cards 2 and 3 at the full context with the GiB
+  on each, one card at a shorter context with the tokens it gets, and the
+  experts in RAM where that applies — and downloads nothing until you pick
+  one. `lmgw__model_get` answers the same as `choices` and takes the pick as
+  `layout`.
+- **Waiting.** A request that waits for room says which card it waits for
+  and which model it unloads there, on the Traffic page's GPU panel and in
+  the Chat's image and speech calls. A refusal names the card that was
+  short. Another model that fits a different card starts meanwhile.
+- **Headroom: room for other programs.** On each card lmgw keeps a floor
+  free for other programs (the **Floor per card**, 1 GiB by default), but
+  no more than the most they used on that card in the last 7 days: a card
+  nobody else uses keeps nothing. On top it keeps the room they used
+  beyond what they hold now (they used 41 GiB, they hold 22 now: 19 GiB
+  more). A model still starting, or not measured yet, gets a margin on
+  top for what its estimate may miss (327 MiB for a llama.cpp model, as
+  much as its files for a voice model whose memory isn't learned yet). The
+  learned room and the margin are given up last: lmgw puts a model on
+  another card, unloads its own idle models, waits for them, or fits a
+  model that can run with less smaller first, and only then starts beside
+  the floor alone, with a warning that says what it went without. Whether a
+  model is too large counts the floor, never the room or the margin, so a
+  model that fits beside the floor always gets to start (a voice model
+  gets its first request and is measured); if its estimate runs low, that
+  comes out of the floor. **Settings → GPU** says per card what is kept
+  and why, and **Keep free for other programs** sets a card to **Always**
+  an amount (never given up: a model that needs it waits, goes elsewhere
+  or falls back) or **Nothing** (the card is lmgw's); where other programs
+  used more than now, it suggests an amount — the floor and that room
+  together, since Always replaces the floor. **Forget…** drops a card's
+  readings.
+- **The engine's cost.** **Settings → GPU** shows what the engine itself
+  takes on each card: learned once a model has run on that card alone,
+  640 MiB on an NVIDIA card until then.
+- **Not yet.** AMD cards, a GPU node in a row's run arguments
+  (`--device /dev/nvidia0`) and the Windows build's native engines can't be
+  handed a single card: their models run on every card they see, as one
+  group. A model is not fitted smaller over several
+  cards, an aux, speech or image model is not split, and an idle model is
+  not moved unless a request needs its room. Benchmarks still run on every
+  card the run arguments pass. The design record is
+  [the device ledger](docs/design/2026-11-13-device-ledger-design.md).
+
 ### Network and access defaults
 
 - The gateway listens on **`127.0.0.1:8787`**, loopback only. **Settings → Network & access** changes that after a restart.
@@ -506,6 +629,7 @@ spoken.
 | [docs/amd-arch.md](docs/amd-arch.md) | Running on Arch Linux with an AMD Ryzen APU |
 | [docs/server.md](docs/server.md) | Running lmgw headless on a server: the Podman image, its rootless Quadlet unit, TLS, accounts, updates and migrations |
 | [docs/accounts.md](docs/accounts.md) | Sign-in accounts on the desktop, and its TLS listener for sign-in from other machines |
+| [docs/documents.md](docs/documents.md) | What lmgw turns into text, the optional programs it uses (poppler, tesseract, …) and the Settings → Documents page |
 | [docs/design/](docs/design/) | Design records for each major feature |
 | [examples/agents/folder-chat](examples/agents/folder-chat/README.md) | A complete container agent that chats with a folder of documents |
 
@@ -523,6 +647,14 @@ bash ci/check.sh                      # rustfmt, clippy, the dashboard build and
 bash ci/check.sh --changed            # the fast tier: only what the diff against main touches
 ```
 
+To run the gate (or any long command) in the background, start it with
+`scripts/long-run.sh target/ci.log scripts/build-slot.sh bash ci/check.sh` and wait on it with
+`scripts/long-wait.sh target/ci.log`: each wait call blocks for up to nine and a half minutes and
+reports log growth and CPU use, so a running job is told apart from a stuck one.
+The check before landing is `scripts/long-run.sh target/land.log scripts/land-check.sh`: it runs
+the gate and the Windows compile check (`LMGW_WIN_HOST` set) at the same time and prints one
+verdict line for each and an overall exit status.
+
 `ci/check.sh` runs the suite under [cargo-nextest](https://nexte.st) when it is
 installed (`cargo install cargo-nextest --locked`): every test in a process of
 its own, known flakes retried and named in the summary (`.config/nextest.toml`
@@ -532,6 +664,10 @@ the touched crates' tests, the `tests/it` modules that `ci/it-map.toml` maps the
 diff to, and a smoke set; the dashboard build and the worklet check run only
 when their inputs changed. The narrowing needs nextest (without it, `--changed`
 runs the whole suite), and the full run stays the check before a merge.
+Under nextest a setup script (`scripts/nextest-test-env.sh`) lets lmgw-core's
+`tests/it` processes share one build of the admin API document per run and hash
+passwords with argon2's smallest parameters; `.config/nextest.toml` explains both
+and what they saved. Plain `cargo test` builds and hashes as the app does.
 
 ### Podman under SELinux
 
@@ -634,8 +770,8 @@ and an image start skips creating its LoRA and upscaler dirs there. To test thos
 point the copy's models dir at a folder inside its data dir. A row's own extra run
 args and an agent you re-enable in a copy still reach production's paths.
 
-Your real data dir belongs to the installed app (the RPM; on Arch, the release
-build `docs/amd-arch.md` describes). Do not run a work-in-progress build on it:
+Your real data dir belongs to the installed app (the RPM; on Arch, the release's
+package `docs/amd-arch.md` describes). Do not run a work-in-progress build on it:
 `cargo run --release` opens `~/.local/share/lmgw` and applies that tree's
 database migrations, which are one-way, so an older installed app refuses to
 start afterwards.

@@ -40,6 +40,7 @@ pub(crate) fn parse_usage(v: Option<&Value>) -> Usage {
                 // models a write costs the plain input rate, which is what a
                 // price row without `price_cache_write` falls back to.
                 cache_write_tokens: detail("prompt_tokens_details", "cache_write_tokens"),
+                cache_write_1h_tokens: None,
                 reasoning_tokens: detail("completion_tokens_details", "reasoning_tokens"),
             }
         }
@@ -130,6 +131,7 @@ pub fn parse_completion_with(body: &[u8], read: ReadTier) -> Result<Completion, 
                     .unwrap_or_default()
                     .to_string(),
                 args: crate::ir::parse_call_args(args_raw),
+                cache_control: None,
             });
         }
     }

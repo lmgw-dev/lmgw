@@ -5,7 +5,7 @@
 //! and "Say hello" or "Ready for Knowledge" (§6.3, D29).
 
 use leptos::prelude::*;
-use lmgw_api_types::model_find::{CardKind, FitMeasure, ModelCard};
+use lmgw_api_types::model_find::{CardKind, FitMeasure, GetLayout, ModelCard};
 use lmgw_api_types::model_get::{
     ModelGetArgs, ModelGetDetail, ModelGetDone, ModelGetStage, ModelGetStarted, ModelGetState,
     ModelGetStatus, ModelGetStatusArgs,
@@ -24,7 +24,10 @@ use track::{EndRead, FileLine, FileState, Known, Next};
 /// "Get it" (§6.1): the card's file with the measure it was shown by, the
 /// card's original naming the id (D84) when the file is from one of its
 /// uploads; a file chosen by hand from another repo is named by the server.
-pub(super) fn start(f: Finder, card: &ModelCard, s: &Shown) {
+/// `layout`: the way the person chose where Get it asked (device-ledger
+/// design WP12); the server answers with the choices when it is needed
+/// and not given, and the card asks then.
+pub(super) fn start(f: Finder, card: &ModelCard, s: &Shown, layout: Option<GetLayout>) {
     let args = ModelGetArgs {
         repo: s.upload.clone(),
         file: s.file.clone(),
@@ -32,8 +35,11 @@ pub(super) fn start(f: Finder, card: &ModelCard, s: &Shown) {
         measure: Some(s.fit.measure),
         model_id: Some(words::model_id_for(&card.origin))
             .filter(|m| !m.is_empty() && of_the_card(card, &s.upload)),
+        layout,
     };
-    f.get.set(Getting::Starting);
+    f.get.set(Getting::Starting {
+        reads_header: layout.is_none() && !s.exact,
+    });
     f.disk_ask.set(false);
     let gen = f.generation.get_value();
     f.scope.spawn(async move {
@@ -42,16 +48,18 @@ pub(super) fn start(f: Finder, card: &ModelCard, s: &Shown) {
             return;
         }
         match res {
+            // No single card holds it whole: the person chooses (WP12).
+            Ok(st) if !st.choices.is_empty() => f.get.set(Getting::Asks(st.choices)),
             // A row already serves the file (D87): it is the answer.
-            Ok(st) if st.job_id.is_none() => f.get.set(Getting::Done(ModelGetDone {
+            Ok(st) if st.job_id.is_none() => f.get.set(Getting::Done(Box::new(ModelGetDone {
                 model_id: st.model_id,
                 public_name: st.public_name,
                 target: st.target,
                 row_id: st.row_id.unwrap_or_default(),
                 created: false,
                 ..ModelGetDone::default()
-            })),
-            Ok(st) => f.get.set(Getting::Running(st)),
+            }))),
+            Ok(st) => f.get.set(Getting::Running(Box::new(st))),
             Err(e) => f.get.set(Getting::Failed(e.to_string())),
         }
     });
@@ -215,13 +223,14 @@ pub(super) fn GetProgress(f: Finder, started: ModelGetStarted, rate: Option<f64>
             match st.state {
                 ModelGetState::Running => {}
                 ModelGetState::Done => {
-                    f.get.set(Getting::Done(st.result.unwrap_or(ModelGetDone {
-                        model_id: st.model_id,
-                        public_name: st.public_name,
-                        target: st.target,
-                        row_id: st.row_id.unwrap_or_default(),
-                        ..ModelGetDone::default()
-                    })))
+                    f.get
+                        .set(Getting::Done(Box::new(st.result.unwrap_or(ModelGetDone {
+                            model_id: st.model_id,
+                            public_name: st.public_name,
+                            target: st.target,
+                            row_id: st.row_id.unwrap_or_default(),
+                            ..ModelGetDone::default()
+                        }))))
                 }
                 ModelGetState::Failed => {
                     f.get.set(Getting::Failed(st.error.unwrap_or_else(|| {
@@ -279,6 +288,9 @@ pub(super) fn GetProgress(f: Finder, started: ModelGetStarted, rate: Option<f64>
     let stage = move || {
         let d = detail.get();
         match d.as_ref().map(|d| d.stage) {
+            Some(ModelGetStage::WaitingForEngine) => {
+                "The files are here. Waiting for the engine…".to_string()
+            }
             Some(ModelGetStage::SettingUp) => "Setting it up…".to_string(),
             Some(ModelGetStage::Ready) => "Ready.".to_string(),
             Some(ModelGetStage::Paused) => {

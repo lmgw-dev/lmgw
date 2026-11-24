@@ -425,7 +425,7 @@ fn RecipeCard(
                                 view! { <span class="chip ok"><span class="dot"></span>"on disk"</span> }
                                     .into_any()
                             } else if c.downloading {
-                                view! { <span class="chip live"><span class="dot"></span>"downloading"</span> }
+                                view! { <span class="chip info"><span class="dot"></span>"downloading"</span> }
                                     .into_any()
                             } else if c.done {
                                 view! { <span class="chip ok"><span class="dot"></span>"done"</span> }

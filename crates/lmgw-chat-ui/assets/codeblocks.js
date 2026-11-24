@@ -32,21 +32,31 @@ const ICON_CHECK =
 const ICON_EYE =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
 
+// The <pre>'s box (div.code-wrap), made around it if it has none yet. A
+// decoration wraps the node it decorates or writes inside it, and never adds
+// a node beside it: the Chat writes a reply's blocks in place by position
+// (chat/morph.rs), and a block of its own among them would make it rewrite
+// them all.
+function codeWrap(pre) {
+  const up = pre.parentElement;
+  if (up?.classList.contains("code-wrap")) return up;
+  const wrap = document.createElement("div");
+  wrap.className = "code-wrap";
+  pre.replaceWith(wrap);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
 function addCodeTools(code, lang) {
   const pre = code.parentElement;
   if (!pre) return;
   // Wrap <pre> so the toolbar pins to the block, not the scrollable inner
   // content (an absolutely-positioned child of an overflow:auto <pre> would
-  // scroll away horizontally). innerHTML is rebuilt each frame, so re-wrap.
-  let wrap = pre.parentElement;
-  if (!wrap || !wrap.classList.contains("code-wrap")) {
-    wrap = document.createElement("div");
-    wrap.className = "code-wrap";
-    pre.replaceWith(wrap);
-    wrap.appendChild(pre);
-  } else if (wrap.querySelector(":scope > .code-tools")) {
-    return;
-  }
+  // scroll away horizontally). A block whose markdown changed is written
+  // afresh (chat/morph.rs), so re-wrap.
+  const wrapped = pre.parentElement?.classList.contains("code-wrap");
+  const wrap = codeWrap(pre);
+  if (wrapped && wrap.querySelector(":scope > .code-tools")) return;
   const raw = code.textContent || "";
   const bar = document.createElement("div");
   bar.className = "code-tools";
@@ -86,9 +96,9 @@ function addCodeTools(code, lang) {
 }
 
 // Highlight every code block under `root` and, once the message has settled,
-// attach its toolbar. The markdown is re-parsed into fresh innerHTML on every
-// update, so blocks are plain text again here — re-highlighting is clean (no
-// double-wrapping).
+// attach its toolbar. A block whose markdown changed is written afresh, plain
+// text again here, so re-highlighting it is clean (no double-wrapping); one
+// that did not change is left as it stood (chat/morph.rs), highlighted.
 window.lmgwDecorateCode = function (root, settled) {
   if (!root) return;
   for (const code of root.querySelectorAll("pre > code")) {
@@ -97,7 +107,11 @@ window.lmgwDecorateCode = function (root, settled) {
     // Labeled+known → highlight live (cheap, single grammar). Unlabeled →
     // auto-detect, but only once settled (it tries every grammar, too costly
     // per frame). Labeled-unknown → leave plain (avoids a console warning).
-    if (lang) {
+    // A block the Chat left as it stood (its markdown did not change since
+    // the last pass, chat/morph.rs) is highlighted already.
+    if (code.dataset.highlighted) {
+      // nothing to do
+    } else if (lang) {
       if (hljs.getLanguage(lang)) {
         try {
           hljs.highlightElement(code);
@@ -109,7 +123,8 @@ window.lmgwDecorateCode = function (root, settled) {
       } catch (_) {}
     }
     // Toolbars only on settled code — buttons on a half-written block are
-    // pointless, and innerHTML is rebuilt each frame so they'd churn anyway.
+    // pointless, and a block still being written is rebuilt each frame, so
+    // they'd churn anyway.
     if (settled) addCodeTools(code, lang);
   }
   decorateLinks(root);
@@ -182,8 +197,9 @@ function withKatex(fn) {
 }
 
 // pulldown-cmark emits <span class="math math-inline|math-display">TeX</span>.
-// The markdown is re-parsed into fresh innerHTML on every update, so each pass
-// starts from the TeX source again; rendering is idempotent by construction.
+// A block whose markdown changed is written afresh (chat/morph.rs), its spans
+// the TeX source again; one that did not keeps its rendered math and its
+// data-math-done mark. Rendering is idempotent by construction.
 function renderMath(root) {
   const spans = root.querySelectorAll(".math-inline, .math-display");
   if (!spans.length) return;
@@ -563,33 +579,34 @@ function diagramWrap(view, codeWrap, src) {
 
 function renderDiagrams(root) {
   for (const code of root.querySelectorAll("pre > code.language-mermaid")) {
-    const pre = code.parentElement;
-    const codeWrap = pre.parentElement?.classList.contains("code-wrap")
-      ? pre.parentElement
-      : pre;
-    if (codeWrap.dataset.mermaid) continue;
-    codeWrap.dataset.mermaid = "1";
+    // The block's box (made here if its toolbar has not): the diagram's
+    // card wraps it, and a failed diagram's error goes inside it.
+    const box = codeWrap(code.parentElement);
+    if (box.dataset.mermaid) continue;
+    box.dataset.mermaid = "1";
     const src = code.textContent || "";
     mermaidQueue = mermaidQueue.then(async () => {
       try {
         const svg = await mermaidSvg(src);
         // The message may have been re-rendered while mermaid worked.
-        if (!codeWrap.isConnected) return;
+        if (!box.isConnected) return;
         const view = document.createElement("div");
         view.className = "mermaid-view";
         view.appendChild(document.importNode(svg, true));
-        const wrap = diagramWrap(view, codeWrap, src);
-        codeWrap.replaceWith(wrap);
-        wrap.appendChild(codeWrap);
+        const wrap = diagramWrap(view, box, src);
+        box.replaceWith(wrap);
+        wrap.appendChild(box);
       } catch (e) {
-        if (!codeWrap.isConnected) return;
+        if (!box.isConnected) return;
         const err = document.createElement("div");
         err.className = "mermaid-error";
         err.textContent =
           e instanceof DiagramRefused
             ? e.message.charAt(0).toUpperCase() + e.message.slice(1)
             : "Diagram error: " + (e?.message || e);
-        codeWrap.after(err);
+        // Inside the block's box, never beside it (`codeWrap`): it goes
+        // with the block when the block is written afresh.
+        box.appendChild(err);
       }
     });
   }

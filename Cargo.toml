@@ -2,15 +2,15 @@
 resolver = "2"
 # First-party example agents (examples/agents/*) are ordinary members, so
 # `cargo test --workspace` and `cargo fmt --all` cover them like the gateway.
-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-doc-reader", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/lmgw-ui", "crates/lmgw-chat-ui", "crates/lmgw-ui-kit", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 # lmgw-ui and the Chat it mounts (lmgw-chat-ui) are wasm32-only (built by Trunk);
 # keep them out of plain `cargo build`.
 # lmgw-client builds for both: natively here, for wasm32 inside the dashboard
 # (and on its own in ci/check.sh).
-default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-machine", "crates/lmgw-machine-helper", "crates/lmgw-doc-reader", "crates/lmgw-private", "crates/lmgw-update", "crates/lmgw-server", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 

@@ -17,67 +17,116 @@
 .media-live-text .dl-bar { max-width: 360px; margin: 2px 0 4px; }
 
 /* chat */
-/* The thread list on the left and the thread's settings on the right are
-   split panes; the conversation between them is a column: head, transcript
-   (the one scroller), stats, composer — the composer always the last row. */
+/* The modern design (docs/design/ui-rebuild/plan.md "Chat"): the thread list
+   is a pane in the sidebar's tone with its own header bar (the split's head:
+   title, count, New chat, the list's menu, fold), the conversation is the
+   view's tone with a header bar of its own (the thread's title, its model as
+   the subtitle, its marks and actions, the window's buttons), and the
+   thread's settings are a panel under that head. Tones part the panes, not
+   borders. The conversation is a column: head, transcript (the one
+   scroller), stats, strips, composer — the composer always the last row.
+   Every colour is a kit token, so a host's own palette restyles it. */
 /* --chat-side is the conversation's side gutter (10 px in the narrow
    layout): a host's surface laid in the Chat's column (the dashboard's
-   machine-check banner) keeps to it. */
-.chat-shell { height: 100%; min-height: 0; --chat-side: 22px; }
-.thread-tools { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column;
-  gap: 6px; padding: 8px; background: var(--bg0); }
-/* New chat and Admin chat fit the panel's floor beside its scrollbar; a
-   larger font wraps Admin chat under New chat rather than widen the list. */
-.thread-tools .row { gap: 6px; flex-wrap: wrap; }
-.thread-tools .row .btn:first-child { flex: 1; }
-.thread-tools > .btn { width: 100%; }
-.thread-tools > .btn.active { background: var(--accent-bg); color: var(--accent);
-  border-color: var(--accent); }
-.thread-filter { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.thread-q { flex: 1 1 auto; width: auto; min-width: 0; }
-.thread-list { display: flex; flex-direction: column; padding: 0 6px 10px; }
-.thread-group { display: flex; align-items: center; gap: 6px; padding: 10px 6px 4px;
-  font: 600 10.5px var(--sans); letter-spacing: .09em; text-transform: uppercase;
-  color: var(--text-3); }
-.thread-group .count { margin-left: 0; letter-spacing: 0; text-transform: none; }
+   machine-check banner) keeps to it. --chat-col is the reading column's
+   width, the transcript's, the composer's and the strips'. */
+.chat-shell { height: 100%; min-height: 0; --chat-side: 22px; --chat-col: 760px;
+  background: var(--bg1); }
+/* the thread list: the sidebar's tone, its head a header bar */
+.chat-shell > .dock.left > .dock-side, .chat-shell > .dock.left > .dock-rail {
+  background: var(--bg0); }
+.chat-shell > .dock.left > .dock-side > .dock-head { height: var(--head-h);
+  padding: 0 4px 0 14px; gap: 4px; }
+.chat-shell > .dock.left > .dock-side > .dock-head .dock-title {
+  font: 600 14.5px var(--sans); color: var(--text); }
+.chat-shell > .dock.left > .dock-side > .dock-head .dock-actions .icon-btn {
+  width: 28px; height: 28px; }
+.chat-shell > .dock.left > .dock-side > .dock-head .dock-fold { width: 26px; }
+/* The list's count is in its view switch (Active 23 · Archived 4) and on its
+   folded rail; the head keeps the room for the title and the buttons. */
+.chat-shell > .dock.left > .dock-side > .dock-head > .count { display: none; }
+/* The list's column: the search and the view stay, the rows scroll under
+   them, the date headings sticking under the search; the panel's body
+   itself does not scroll. */
+.chat-shell > .dock.left > .dock-side > .dock-body { overflow: hidden; display: flex;
+  flex-direction: column; }
+.thread-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.thread-tools { flex: none; display: flex; flex-direction: column; gap: 8px;
+  padding: 2px 10px 8px; }
+.thread-search { display: flex; align-items: center; gap: 8px; height: 32px; min-width: 0;
+  padding: 0 6px 0 10px; border-radius: var(--r-item); background: var(--field);
+  color: var(--text-2); cursor: text; }
+.thread-search:focus-within { outline: 2px solid var(--focus); outline-offset: -1px; }
+.thread-q { flex: 1 1 auto; min-width: 0; height: 100%; padding: 0; border: 0;
+  background: none; outline: none; color: var(--text); font: 400 13.5px var(--sans); }
+.thread-q::placeholder { color: var(--text-3); }
+.thread-q::-webkit-search-cancel-button { display: none; }
+.thread-q-clear { flex: none; width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 50%; display: grid; place-items: center; background: none;
+  color: var(--text-2); cursor: pointer; }
+.thread-q-clear:hover { background: var(--hover); color: var(--text); }
+.thread-q-clear svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
+.thread-view { display: flex; }
+.thread-view .seg-btn { flex: 1 1 0; justify-content: center; min-width: 0; }
+.thread-view .seg-btn .count { margin-left: 6px; }
+.thread-list { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  display: flex; flex-direction: column; padding: 0 8px 12px; outline: none; }
+.thread-group { position: sticky; top: 0; z-index: 1; display: flex; align-items: center;
+  gap: 6px; padding: 12px 10px 5px; background: var(--bg0);
+  font: 600 12px var(--sans); color: var(--text-3); }
+.thread-group .count { margin-left: 0; padding: 0; background: none; letter-spacing: 0;
+  text-transform: none; font-weight: 400; color: var(--text-3); }
+/* A row is the kit's two-line list row (ListRow): the title, the facts under
+   it, the menu at the end; the open one in the selection's tone, the
+   accent's tint while the list has the focus. */
 .thread-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 6px;
-  align-items: center; padding: 4px 6px 5px 10px; border-radius: 8px; cursor: pointer;
-  color: var(--text-2); font-size: 13px; outline: none; }
-.thread-row:hover, .thread-row:focus-visible { background: var(--surface); color: var(--text); }
-.thread-row.open { background: var(--accent-bg); color: var(--accent); }
-.thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  row-gap: 1px; align-items: center; padding: 7px 4px 8px 10px;
+  border-radius: var(--r-item); cursor: pointer; color: var(--text); font-size: 13.5px;
+  outline: none; }
+.thread-row:hover { background: var(--hover); }
+.thread-row.open { background: var(--select); }
+.thread-list:focus-within .thread-row.open { background: var(--accent-soft); }
+.thread-row:focus-visible, .thread-folder:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: -2px; }
+.thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500; }
 /* Wraps rather than clips: at the panel's floor the trailing spans (agent,
    folder, purge countdown) would otherwise vanish with their titles. The
    model keeps its ellipsis and a span that is wider than the line alone
    ellipsizes too. */
-.thread-meta { grid-column: 1; display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0;
-  font: 400 11px var(--mono); color: var(--text-3); white-space: nowrap; }
+.thread-meta { grid-column: 1; display: flex; flex-wrap: wrap; gap: 0 8px; min-width: 0;
+  font: 400 12px var(--sans); color: var(--text-2); white-space: nowrap; }
 .thread-meta > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.thread-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread-model { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font: 400 11.5px var(--mono); line-height: 16px; }
 .thread-kind { color: var(--text-2); }
 /* An ongoing folder's current thread (client-apps §3.6): an accent bar on
    its row and on its folder's header, beside the words "current" and
    "ongoing", so the colour is never the only cue (chat-plane §9.10). */
 .thread-current { color: var(--accent); font-weight: 600; }
-.thread-row.ongoing-current, .thread-folder.ongoing { box-shadow: inset 2px 0 0 var(--accent); }
+.thread-row.ongoing-current, .thread-folder.ongoing { position: relative; }
+.thread-row.ongoing-current::before, .thread-folder.ongoing::before { content: ""; position: absolute;
+  left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 1px; background: var(--accent); }
 .folder-ongoing { flex: none; font-size: 11px; font-weight: 400; color: var(--accent); }
 .thread-row > .thread-row-menu { grid-column: 2; grid-row: 1 / span 2; }
-.thread-row-menu .row-menu-btn { padding: 0 5px; font-size: 11px; color: var(--text-3); }
-.thread-row-menu .row-menu-btn:hover { color: var(--text); }
-.pin-mark { margin-right: 3px; font-size: 11px; color: var(--text-3); }
-.pin-mark svg { width: 10px; height: 10px; stroke: currentColor; fill: none;
+.thread-row-menu .row-menu-btn { width: 26px; height: 26px; padding: 0; justify-content: center;
+  font-size: 12px; color: var(--text-3); border-radius: 7px; }
+.thread-row-menu .row-menu-btn:hover { color: var(--text); background: var(--hover); }
+.pin-mark { margin-right: 4px; font-size: 11px; color: var(--text-3); }
+.pin-mark svg { width: 11px; height: 11px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
 .thread-purge { color: var(--text-3); }
 .thread-folder-name { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Folders (chat-complete §5): a header line, its threads indented under it. */
-.thread-folder { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 6px;
-  margin-top: 4px; border-radius: 8px; cursor: pointer; outline: none; font-size: 13px;
-  font-weight: 600; color: var(--text); }
-.thread-folder:hover, .thread-folder:focus-visible { background: var(--surface); }
+.thread-folder { display: flex; align-items: center; gap: 6px; padding: 6px 4px 6px 8px;
+  margin-top: 4px; border-radius: var(--r-item); cursor: pointer; outline: none;
+  font-size: 13.5px; font-weight: 600; color: var(--text); }
+.thread-folder:hover { background: var(--hover); }
 .thread-folder .count { margin-left: 0; }
 .thread-folder .thread-row-menu { margin-left: auto; }
 .folder-chev { flex: none; width: 12px; font-size: 10px; color: var(--text-3);
-  transition: transform .12s; }
+  transition: transform .12s; display: inline-flex; }
+.folder-chev svg { width: 12px; height: 12px; }
 .folder-chev.collapsed { transform: rotate(-90deg); }
 .folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A folder a device's delete hid from devices (review F-7): it gives way
@@ -86,36 +135,83 @@
   font-size: 11px; font-weight: 400; color: var(--text-3); white-space: nowrap; }
 .folder-rename { flex: 1; min-width: 0; }
 .thread-rename { width: 100%; min-width: 0; }
+.thread-rename, .folder-rename { height: 24px; margin-block: -4px; padding: 0 6px; font: inherit; }
 .thread-row.nested { margin-left: 14px; }
 .thread-folder.drop-over, .thread-dropzone.drop-over { background: var(--accent-bg);
   outline: 1px dashed var(--accent); }
 /* Only there while a thread is dragged; sticky, so it appears without moving
    anything above it. */
 .thread-dropzone { position: sticky; bottom: 6px; margin-top: 8px; padding: 10px 8px;
-  border: 1px dashed var(--border); border-radius: 8px; background: var(--bg0);
+  border: 1px dashed var(--border-strong); border-radius: var(--r-item); background: var(--bg0);
   color: var(--text-2); font-size: 12px; text-align: center; }
 .move-list { display: flex; flex-direction: column; gap: 4px; }
 .move-list .btn { justify-content: flex-start; }
 .folder-settings { padding: 0; }
 .modal-foot .folder-apply { margin-right: auto; font-size: var(--fs-sm); }
-.chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.chat-head { flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 10px 20px; border-bottom: 1px solid var(--border); min-width: 0; }
-/* The pills (mcp, knowledge, reasoning, profile) are one line each and never
-   shrink; the model picker gives way first and ellipsizes, down to a floor
-   that still reads. Should even that not fit, the row wraps as whole items
-   instead of overflowing. */
-.chat-head { flex-wrap: wrap; row-gap: 6px; }
-.chat-head > :not(.model-picker) { flex: none; white-space: nowrap; }
-.chat-head .model-picker { flex: 0 1 auto; min-width: 7rem; max-width: 100%; }
-.chat-head .model-picker :is(.select, .select-btn) { max-width: 100%; }
-.chat-settings { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 0; }
+
+/* the conversation: the view's tone */
+/* (the empty state's box is not `.chat-main`: a host reads that class as a conversation being open) */
+.chat-main, .chat-empty-main { display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--bg1); }
+/* the thread's settings panel under the head, and the conversation beside it */
+.chat-main > .dock { flex: 1 1 auto; height: auto; min-height: 0; }
+.chat-main > .dock.right > :is(.dock-side, .dock-rail) { background: var(--pane); }
+.chat-main > .dock.right > .dock-side > .dock-head { padding: 0 4px 0 16px; }
+.chat-body { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* The header bar: 48 px, the title with the model under it, the marks, the
+   actions and the window's buttons at the end. A head too narrow for one
+   line wraps its marks, the title and the buttons keeping the first. */
+.chat-head { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px;
+  min-height: var(--head-h); padding: 0 8px 0 16px; min-width: 0; position: relative;
+  z-index: 3; background: var(--bg1); box-shadow: 0 1px 0 var(--divider); }
+.chat-head > * { flex: none; white-space: nowrap; }
+.chat-head:has(> .chat-wstart > .wctl) { padding-left: 6px; }
+.chat-wstart:empty { display: none; }
+/* While the list is open beside the conversation, its head is the leftmost
+   and holds the start buttons; a list laid over the conversation (a look, a
+   drawer) leaves them here. */
+.chat-shell > .dock.left:not(.peek) > .dock-side ~ .dock-main .chat-wstart { display: none; }
+.chat-title { flex: 0 1 auto; min-width: 7rem; display: grid; gap: 1px; padding: 4px 0;
+  line-height: 1.2; }
+.chat-title h1 { margin: 0; min-width: 0; font-size: 15px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The model is the subtitle: the picker as a quiet line under the title,
+   the alias, where it is served from and the arrow (libadwaita's subtitle
+   with a dropdown). It gives way first, ellipsized. */
+.chat-title .model-picker { display: block; min-width: 0; max-width: 100%; }
+.chat-title .mp-btn { display: inline-flex; width: auto; max-width: 100%; height: 20px;
+  padding: 0 4px 0 0; gap: 4px; border: 0; border-radius: 5px; background: none;
+  color: var(--text-2); font: 400 12px var(--sans); justify-content: flex-start; }
+.chat-title .mp-btn:hover:not(:disabled) { background: none; color: var(--text); }
+.chat-title .mp-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.chat-title .mp-val { font: 400 12px var(--mono); color: inherit; gap: 5px; }
+.chat-title .mp-dot { width: 7px; height: 7px; border-radius: 50%; }
+.chat-title .mp-src { font: 400 12px var(--sans); color: var(--text-3); }
+.chat-title .select-arrow { width: 12px; height: 12px; color: inherit; }
+.chat-head > .type-badge { font: 500 11.5px var(--sans); padding: 2px 9px;
+  border-radius: 999px; background: var(--ctl); color: var(--text-2); border: 0; }
+.chat-head > .type-badge.mcp-badge { display: inline-flex; align-items: center; gap: 4px; }
+.type-badge svg.i { width: 12px; height: 12px; }
+.chat-head-end { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.chat-head-end .export-menu .icon-btn { color: var(--text); }
+.chat-head .wctl.end { margin-left: 8px; padding-right: 2px; }
+.chat-settings .input.mono::placeholder { font-family: var(--sans); }
+.chat-settings { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px 0; }
 .chat-settings .field + .field { margin-top: 0; }
 .chat-settings-save { position: sticky; bottom: 0; display: flex; justify-content: flex-end;
-  align-items: center; gap: 8px; padding: 8px 0 10px; background: var(--bg0); border-top: 1px solid var(--border); }
+  align-items: center; gap: 8px; padding: 8px 0 12px; background: var(--pane);
+  box-shadow: 0 -1px 0 var(--divider); }
 
+/* No conversation open: a status page (libadwaita's), the glyph, the
+   sentence and New chat. */
+.chat-empty-main > .chat-empty { flex: 1 1 auto; min-height: 0; }
 .chat-empty { flex: 1; display: grid; place-items: center; }
-.chat-empty .empty { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.chat-empty .empty { display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--text-2); }
+svg.i.chat-empty-glyph { width: 56px; height: 56px; color: var(--text-3); stroke-width: 1.4;
+  margin-bottom: 6px; }
+.chat-empty-title { font-size: 20px; font-weight: 600; color: var(--text); }
+.chat-empty-sub { font-size: 14px; color: var(--text-2); margin-bottom: 8px; }
 /* The host's machine check above the empty state (machine-check design
    D173): the empty state becomes a column that scrolls under it, the one
    scroller there; the host's card fills the Chat's own box. */
@@ -132,8 +228,9 @@
    design D176): its sentence, what the start said, and under the newest
    such card the host's check. */
 .chat-gpu-setup { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
-  padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--amber);
-  border-radius: 8px; background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
+  padding: 12px 14px 12px 17px; border-radius: var(--r-box); background: var(--surface);
+  box-shadow: inset 3px 0 0 var(--amber), 0 0 0 1px var(--card-line), var(--card-shadow);
+  min-width: 0; overflow-wrap: anywhere; }
 .chat-gpu-setup-head { display: flex; align-items: flex-start; gap: 10px; color: var(--text);
   font-weight: 500; line-height: 1.5; }
 .chat-gpu-setup-mark { flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%;
@@ -142,61 +239,88 @@
 .chat-gpu-setup-said { font-size: var(--fs-sm); color: var(--text-2); padding-left: 30px; }
 .chat-gpu-setup-said > summary { cursor: pointer; list-style: none; display: inline-block; }
 .chat-gpu-setup-said > summary::-webkit-details-marker { display: none; }
-.chat-gpu-setup-said > summary::before { content: "\25B8  "; color: var(--text-3); font-size: 10px; }
-.chat-gpu-setup-said[open] > summary::before { content: "\25BE  "; }
 .chat-gpu-setup-said > div { margin-top: 4px; font: 12px/1.5 var(--mono); color: var(--text-2);
   white-space: pre-wrap; }
-.chat-gpu-setup-fix { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border);
+.chat-gpu-setup-fix { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--divider);
   font-size: 13.5px; }
-/* The transcript reads in a 110ch column centred in the pane; the question
-   sits at the column's right edge, not the window's. Code and tables start on
+/* The transcript reads in a column of --chat-col centred in the pane; the
+   question sits at the column's right edge, not the window's. Code and tables start on
    the column's left edge and may run on to the pane's right edge before they
    scroll sideways (`(100cqi - 100%) / 2` is the gutter beside the column).
    The stats row and the composer keep to the same column. */
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px;
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 22px var(--chat-side) 24px;
   container: transcript / inline-size; }
 .chat-main.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px;
   background: var(--accent-bg); }
 .chat-col, .stats-row, .composer-wrap, .chip-row, .archive-strip { width: 100%;
   margin-inline: auto; font-size: 14px; }
-.chat-col { max-width: 110ch; display: flex; flex-direction: column; gap: 16px; }
-/* their own 22px sides around the same 110ch */
-.stats-row, .composer-wrap, .chip-row, .archive-strip { max-width: calc(110ch + 44px); }
-.msg-user { align-self: flex-end; max-width: 75%; display: flex;
-  flex-direction: column; gap: 6px; background: var(--surface);
-  border: 1px solid var(--border); border-radius: 16px 16px 4px 16px;
-  padding: 10px 14px; font-size: 14px; }
-.msg-user-text { white-space: pre-wrap; }
-.msg-assistant { min-width: 0; font-size: 14px; line-height: 1.55; }
+.chat-col { max-width: var(--chat-col); display: flex; flex-direction: column; gap: 14px; }
+/* their own sides around the same column */
+.stats-row, .composer-wrap, .chip-row { max-width: calc(var(--chat-col) + 2 * var(--chat-side)); }
+/* A classic scrollbar takes 10px off the transcript's width: the strips under it
+   are 10px narrower and sit 5px left, so they centre on the same width as the column. */
+html.tauri .chat-scroll { overflow-y: scroll; }
+html.tauri :is(.chat-body, .composer-area) > :is(.stats-row, .composer-wrap, .chip-row) {
+  width: calc(100% - 10px); position: relative; left: -5px; }
+html.tauri :is(.chat-body, .composer-area) > .archive-strip {
+  width: calc(100% - 2 * var(--chat-side) - 10px); position: relative; left: -5px; }
+/* The user's turn: a soft bubble in a tone of its own (no border), the
+   assistant's: flat on the view. */
+.msg-user { align-self: flex-end; max-width: 80%; display: flex;
+  flex-direction: column; gap: 6px; background: var(--ctl); color: var(--text);
+  border-radius: 18px 18px 6px 18px; padding: 9px 14px; font-size: 14px; line-height: 1.5; }
+.msg-user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-assistant { min-width: 0; font-size: 14px; line-height: 1.6; }
 .chat-col .md > :is(pre, .code-wrap) { width: max-content; min-width: 100%;
   max-width: calc(100% + (100cqi - 100%) / 2); }
 .chat-col .md > table { display: block; overflow-x: auto; width: max-content;
   max-width: calc(100% + (100cqi - 100%) / 2); }
-.md :is(h1,h2,h3) { font-size: 15px; margin: 12px 0 6px; }
-.md p { margin: 6px 0; }
-.md pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
-  background: var(--bg0); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; overflow-x: auto; }
-.md code { font-family: var(--mono); font-size: 12.5px;
-  background: var(--surface-hi); border-radius: 4px; padding: 1px 4px; }
-.md pre code { background: none; padding: 0; }
+.md h1 { font-size: 19px; margin: 18px 0 8px; line-height: 1.3; }
+.md h2 { font-size: 17px; margin: 16px 0 6px; line-height: 1.3; }
+.md :is(h3, h4, h5, h6) { font-size: 15px; margin: 14px 0 6px; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 8px 0; }
+.md :is(ul, ol) { margin: 8px 0; padding-left: 24px; }
+.md li + li { margin-top: 3px; }
+.md blockquote { margin: 10px 0; padding: 2px 0 2px 14px; color: var(--text-2);
+  box-shadow: inset 3px 0 0 var(--ctl-hover); }
+.md hr { border: 0; border-top: 1px solid var(--divider); margin: 16px 0; }
+.md a { color: var(--accent); text-decoration: underline; }
+/* A code block is a well with a quiet header band: its language at the
+   start, Preview and Copy at the end (assets/codeblocks.js adds them once the
+   message settles). The band is the block's own padding, drawn from the
+   first token on, so nothing moves when the tools arrive; it stays put
+   while the code scrolls sideways under it. */
+.md pre { position: relative; margin: 10px 0; padding: 10px 14px 12px;
+  font: 400 12.5px/1.55 var(--mono); border-radius: 10px; overflow-x: auto;
+  background: var(--well); box-shadow: 0 0 0 1px var(--card-line); }
+/* The band is the chat column's alone: other pages render markdown too and
+   have no tools to put in it. */
+.chat-col .md pre { padding-top: 42px;
+  background: linear-gradient(var(--hover), var(--hover)) top / 100% 32px no-repeat,
+    var(--well); }
+.md code { font-family: var(--mono); font-size: .9em;
+  background: var(--ctl); border-radius: 5px; padding: 1px 5px; }
+.md pre code { background: none; padding: 0; font-size: inherit; }
 
 /* Per-code-block toolbar (language chip · Preview · Copy), injected by
    assets/codeblocks.js into the rendered markdown. Anchored to a .code-wrap
    around <pre> so it stays put when the block is scrolled horizontally. */
-.md .code-wrap { position: relative; }
-.md .code-tools { position: absolute; top: 7px; right: 7px; display: flex;
-  gap: 5px; opacity: 0; transition: opacity .12s; }
-.md .code-wrap:hover .code-tools, .md .code-tools:focus-within { opacity: 1; }
-.md .code-tools .lang { align-self: center; margin-right: 2px; font-size: 10px;
-  letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
-.md .code-tools button { display: inline-flex; align-items: center; gap: 4px;
-  font: 500 11px var(--sans); background: var(--surface); color: var(--text-2);
-  border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px;
-  cursor: pointer; }
-.md .code-tools button:hover { color: var(--text); border-color: var(--accent); }
-.md .code-tools button.ok { color: var(--ok); border-color: var(--ok); }
-.md .code-tools svg { width: 12px; height: 12px; display: block; }
+.md .code-wrap { position: relative; margin: 10px 0; }
+.md .code-wrap > pre { margin: 0; }
+.md .code-tools { position: absolute; top: 0; left: 0; right: 0; height: 32px;
+  display: flex; align-items: center; gap: 2px; padding: 0 5px 0 14px; }
+.md .code-tools .lang { margin-right: auto; font: 500 11.5px var(--mono);
+  color: var(--text-3); }
+.md .code-tools > button:first-child { margin-left: auto; }
+.md .code-tools button { display: inline-flex; align-items: center; gap: 5px; height: 24px;
+  padding: 0 8px; border: 0; border-radius: 6px; background: none;
+  font: 500 12px var(--sans); color: var(--text-2); cursor: pointer; }
+.md .code-tools button:hover { color: var(--text); background: var(--hover); }
+.md .code-tools button:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.md .code-tools button.ok { color: var(--ok); }
+.md .code-tools svg { width: 13px; height: 13px; display: block; }
 
 /* Math (KaTeX, assets/vendor/katex). Display math scrolls inside the message
    column; it never widens the page. */
@@ -207,17 +331,21 @@
 
 /* Mermaid diagrams (assets/codeblocks.js): the SVG on a .code-wrap-like card,
    the source kept behind the toolbar's Code toggle. */
-.md .mermaid-wrap { position: relative; }
+.md .mermaid-wrap { position: relative; margin: 10px 0; }
+.md .mermaid-wrap .code-wrap { margin: 0; }
 .chat-col .md > .mermaid-wrap { max-width: 100%; }
-.md .mermaid-view { background: var(--bg0); border: 1px solid var(--border);
-  border-radius: 10px; padding: 12px; overflow-x: auto; text-align: center; }
+.md .mermaid-view { padding: 42px 12px 12px; border-radius: 10px; overflow-x: auto;
+  text-align: center;
+  background: linear-gradient(var(--hover), var(--hover)) top / 100% 32px no-repeat,
+    var(--well);
+  box-shadow: 0 0 0 1px var(--card-line); }
 .md .mermaid-view svg { max-width: 100%; height: auto; }
 .md .mermaid-wrap .mermaid-src { display: none; }
 .md .mermaid-wrap.show-code .mermaid-src { display: block; }
 .md .mermaid-wrap.show-code .mermaid-view { display: none; }
 .md .mermaid-wrap .mermaid-src .code-tools { display: none; }
 .md .mermaid-wrap:hover > .code-tools, .md .mermaid-wrap > .code-tools:focus-within { opacity: 1; }
-.md .mermaid-error { margin: -4px 0 8px; padding: 6px 10px; font-size: 12px;
+.md .mermaid-error { margin: 6px 0 0; padding: 6px 10px; font-size: 12px;
   color: var(--err); background: var(--err-bg); border-radius: 8px;
   white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -242,18 +370,38 @@
 .md .hljs-deletion { color: var(--err); }
 .md .hljs-emphasis { font-style: italic; }
 .md .hljs-strong { font-weight: 600; }
-.md table { border-collapse: collapse; margin: 8px 0; }
-.md th, .md td { border: 1px solid var(--border); padding: 4px 10px;
-  font-size: 13px; }
-.reasoning { margin-bottom: 6px; }
-.reasoning summary { cursor: pointer; font-size: 12px; }
-.reasoning-body { font-size: 12.5px; color: var(--text-2); white-space: pre-wrap;
-  border-left: 2px solid var(--border-strong); padding-left: 10px; margin: 6px 0; }
-.tool-card { border: 1px solid var(--border); border-radius: 10px;
-  padding: 6px 10px; margin: 6px 0; background: var(--surface); }
-.tool-card.err { border-color: var(--err); }
-.tool-card summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }
-.tool-io { margin-top: 6px; }
+.md table { border-collapse: separate; border-spacing: 0; margin: 10px 0;
+  border-radius: 10px; box-shadow: 0 0 0 1px var(--card-line); }
+.md th, .md td { padding: 6px 12px; font-size: 13px; text-align: left;
+  border-bottom: 1px solid var(--divider); }
+.md tr:last-child > td { border-bottom: 0; }
+.md th { font-weight: 600; background: var(--hover); }
+/* Reasoning, tool calls, a task's result: cards in the transcript (the
+   kit's boxed tone), folded to one line with a chevron. */
+.reasoning, .tool-card { margin: 0 0 10px; border-radius: var(--r-box);
+  background: var(--surface); box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); }
+:is(.reasoning, .tool-card) > summary { list-style: none; display: flex; align-items: center;
+  flex-wrap: wrap; gap: 2px 6px; min-height: 36px; padding: 6px 12px; cursor: pointer;
+  border-radius: var(--r-box); font-size: 13px; color: var(--text-2); }
+:is(.reasoning, .tool-card) > summary::-webkit-details-marker { display: none; }
+:is(.reasoning, .tool-card) > summary::before { content: ""; flex: none; width: 14px; height: 14px;
+  background: currentColor; opacity: .7; transition: transform .12s;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat; }
+:is(.reasoning, .tool-card)[open] > summary::before { transform: rotate(90deg); }
+:is(.reasoning, .tool-card) > summary:hover { color: var(--text); }
+:is(.reasoning, .tool-card) > summary:focus-visible { outline: 2px solid var(--focus);
+  outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.reasoning, .tool-card) > summary::before { transition: none; } }
+.reasoning-body { margin: 0; padding: 2px 14px 12px 32px; font-size: 13px; line-height: 1.55;
+  color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-card.err { box-shadow: 0 0 0 1px color-mix(in srgb, var(--err) 55%, transparent); }
+.tool-card summary .mono-sm { color: var(--text); }
+.tool-io { padding: 0 12px 12px 32px; }
+.tool-io pre.preset { margin: 2px 0 6px; padding: 8px 10px; border-radius: 8px;
+  background: var(--well); font: 400 12px/1.5 var(--mono); white-space: pre-wrap;
+  overflow-wrap: anywhere; }
 /* The Chat's image and audio tools (chat_media; chat-media-tools design §8).
    A picture and its live preview share one frame, so the picture lands where
    its preview was: in the picture's aspect ratio (--ar, width over height,
@@ -265,8 +413,8 @@
    so nothing here fades). */
 .media-frame { position: relative; aspect-ratio: var(--ar, 1);
   width: min(100%, 448px, calc(50vh * var(--ar, 1)), var(--nw, 448px));
-  display: grid; place-items: center; overflow: hidden; border-radius: 8px;
-  border: 1px solid var(--border); background: var(--surface-hi); }
+  display: grid; place-items: center; overflow: hidden; border: 0; border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--card-line); background: var(--surface); }
 .media-frame img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .media-pic { padding: 0; font: inherit; color: inherit; cursor: zoom-in; }
 .media-pic:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -277,7 +425,7 @@
 .media-step { font-size: 12px; }
 .media-live-actions { margin-top: 4px; }
 .media-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
-  padding: 6px 10px; border: 1px solid var(--amber); border-radius: 8px;
+  padding: 6px 10px; border: 1px solid var(--amber); border-radius: var(--r-item);
   background: var(--amber-bg); font-size: 12.5px; max-width: 448px; }
 .media-confirm-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .media-spinner { width: 22px; height: 22px; border-radius: 50%;
@@ -302,7 +450,7 @@
 .media-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   min-width: 0; }
 .media-thumb { flex: none; width: 56px; height: 56px; padding: 0; overflow: hidden;
-  border-radius: 6px; border: 2px solid transparent; background: var(--surface-hi);
+  border-radius: 8px; border: 2px solid transparent; background: var(--surface);
   cursor: pointer; }
 .media-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .media-thumb[aria-selected="true"] { border-color: var(--accent); }
@@ -318,8 +466,8 @@
   max-width: 448px; }
 .media-actions-gap { flex: 1 1 0; min-width: 0; }
 .media-form { display: flex; flex-direction: column; gap: 6px; max-width: 448px;
-  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--surface); font-size: 12.5px; }
+  padding: 10px 12px; border-radius: var(--r-box); background: var(--surface);
+  box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); font-size: 12.5px; }
 .media-form .field { display: flex; flex-direction: column; gap: 3px; margin: 0; }
 .media-form .field > span { color: var(--text-2); font-size: 12px; }
 .media-form .input.ta { min-height: 0; resize: vertical; }
@@ -332,11 +480,12 @@
 .media-player { width: min(100%, 420px); height: 36px; }
 
 .stats-row { flex: none; display: flex; align-items: center; gap: 12px;
-  padding: 6px 22px; border-top: 1px solid var(--border); min-height: 30px; }
+  padding: 4px var(--chat-side) 0; min-height: 26px; }
+.stats-row .mono-sm { font-size: 11.5px; }
 .stats-row.live .mono-sm { color: var(--amber); }
 .stats-row .fallback-badge { flex: none; white-space: nowrap; margin-left: 0; }
-.ctx-bar { width: 120px; height: 5px; border-radius: 999px;
-  background: var(--surface-hi); overflow: hidden; display: inline-block; }
+.ctx-bar { width: 120px; height: 5px; border-radius: 999px; margin-left: auto;
+  background: var(--ctl); overflow: hidden; display: inline-block; }
 .ctx-bar i { display: block; height: 100%; background: var(--accent);
   border-radius: 999px; }
 /* The composer is one bubble, as chat apps draw it: the draft's chips, the
@@ -345,11 +494,12 @@
    beside the text box read as clutter (the owner's ruling, 2026-10-20). The text always
    has the bubble's full width, so no width needs a layout of its own; where
    even the toolbar is too wide, its right group wraps under its left. */
-.composer-wrap { flex: none; padding: 8px 22px 16px; }
-.composer { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 6px;
-  background: var(--surface); border: 1px solid var(--border-strong);
-  border-radius: 16px; }
-.composer:focus-within { border-color: var(--accent); }
+/* The composer floats at the column's foot: a rounded field in the field's
+   tone, no border, the focus ring when it is being written in. */
+.composer-wrap { flex: none; padding: 6px var(--chat-side) 16px; }
+.composer { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 6px 10px;
+  background: var(--field); border-radius: 20px; }
+.composer:focus-within { box-shadow: 0 0 0 2px var(--focus); }
 /* The chips sit inside the bubble: none of the page column's centring. */
 .composer .chip-row { width: auto; max-width: none; margin: 0; padding: 0 2px; }
 /* The text box is the bubble's: no border, fill or grip of its own, and the
@@ -387,19 +537,21 @@
 .composer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .composer-tools, .composer-actions { flex: none; display: flex; align-items: center;
   gap: 2px; }
-.composer-actions { margin-left: auto; gap: 6px; }
-/* Every icon button in the bar is one ghost square. */
-.composer-attach { flex: none; height: 32px; width: 32px; padding: 0; border-radius: 8px;
-  justify-content: center; font-size: 16px; }
+.composer-actions { margin-left: auto; gap: 4px; }
+/* Every icon button in the bar is one flat square, the header bar's. */
+.composer-attach { flex: none; height: 32px; width: 32px; padding: 0;
+  border-radius: var(--r-item); justify-content: center; font-size: 16px; color: var(--text-2); }
+.composer-attach:hover:not(:disabled) { color: var(--text); }
 .composer-attach svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.composer-attach svg.i { stroke-width: 1.75; }
 .composer .answer-btn { height: 32px; }
 /* Send is the round accent button; Stop is the same circle in the danger
    colour, with a filled square. */
 .composer-send { width: 32px; height: 32px; padding: 0; border-radius: 50%;
   justify-content: center; }
 .composer-send svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
-  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .composer-send.danger svg { fill: currentColor; stroke: none; }
 /* For screen readers only (a live region, a label). */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -409,20 +561,26 @@
    hover or focus-within, and always on a narrow transcript, where there is no
    hover to wait for. The row keeps its height hidden, so nothing jumps. */
 .msg-item { min-width: 0; }
-.msg-item-user { align-self: flex-end; max-width: 75%; display: flex;
+.msg-item-user { align-self: flex-end; max-width: 80%; display: flex;
   flex-direction: column; align-items: flex-end; }
 .msg-item-user > .msg-user { max-width: 100%; }
-.msg-actions { display: flex; gap: 2px; margin-top: 4px; opacity: 0;
-  transition: opacity .12s; }
-.msg-item:hover .msg-actions, .msg-item:focus-within .msg-actions { opacity: 1; }
-@container transcript (width < 640px) { .msg-actions { opacity: 1; } }
+.msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 4px; }
+.msg-actions > :not(.msg-meta) { opacity: 0; transition: opacity .12s; }
+.msg-item:hover .msg-actions > *, .msg-item:focus-within .msg-actions > * { opacity: 1; }
+@container transcript (width < 640px) { .msg-actions > * { opacity: 1; } }
+/* The reply's tokens and its model: always shown, at the row's right end,
+   under the buttons when the pane is too narrow for both. */
+.msg-actions .msg-meta { margin-left: auto; padding-left: 8px; font-size: 11.5px;
+  color: var(--text-3); overflow-wrap: anywhere; }
 .msg-actions .msg-act, .msg-actions .confirm .msg-act { display: inline-flex;
-  align-items: center; justify-content: center; width: 26px; height: 24px; padding: 0;
-  border: 0; border-radius: 6px; background: none; color: var(--text-3); cursor: pointer; }
-.msg-actions .msg-act:hover:not(:disabled) { color: var(--text); background: var(--surface-hi); }
+  align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--r-item); background: none; color: var(--text-2);
+  cursor: pointer; }
+.msg-actions .msg-act:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+.msg-actions .msg-act:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
 .msg-actions .msg-act:disabled { opacity: .4; cursor: default; }
 .msg-actions .msg-act svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
-  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .msg-actions .confirm { display: inline-flex; align-items: center; gap: 4px; }
 .msg-editor { display: flex; flex-direction: column; gap: 6px; min-width: min(60ch, 100%); }
 .msg-edit-ta { width: 100%; min-height: 6em; resize: vertical; font: inherit; }
@@ -431,17 +589,21 @@
 
 /* Temporary chats (§7): the banner above the composer, and the ✕ on a row
    of the sidebar's "Temporary" group. */
-.temp-strip { flex: none; display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; padding: 6px 22px; margin-top: 4px; width: 100%; max-width: calc(110ch + 44px);
-  margin-inline: auto; color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
+/* The strips above the composer (temporary, archived, a new chat that
+   waits, the jobs) are rounded notes in the column, in the card's tone. */
+.temp-strip, .archive-strip { flex: none; display: flex; align-items: center;
+  justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; padding: 6px 8px 6px 14px;
+  margin: 6px auto 0; width: calc(100% - 2 * var(--chat-side)); max-width: var(--chat-col);
+  min-height: 40px; border-radius: var(--r-box); color: var(--text-2); font-size: 13px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); }
 .temp-strip > span:first-child { flex: 1; }
 /* Export (§6): the head's menu sits at the far end; the sidebar's ⋯ ends the
    filter's line and never shrinks. */
-.chat-head .export-menu { margin-left: auto; }
+
 /* "Back to <folder>" (chat-plane §9.10): an ongoing folder's current thread
    from another one. The name gives way first. */
 .chat-head > .chat-back { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 4px;
-  min-width: 0; max-width: 16rem; color: var(--accent); }
+  min-width: 0; max-width: 16rem; color: var(--accent); border-radius: 999px; }
 .chat-back svg { flex: none; width: 14px; height: 14px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .chat-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -453,18 +615,17 @@
 .thread-x { border: 0; background: none; color: var(--text-3); cursor: pointer;
   padding: 0 5px; font-size: 11px; }
 .thread-x:hover { color: var(--text); }
+.thread-x svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
 
 /* Archived-thread strip, above the composer: when it was filed away, when
    the purge sweep takes it, and a way back. */
-.archive-strip { flex: none; display: flex; align-items: center;
-  justify-content: space-between; gap: 10px; padding: 6px 22px; margin-top: 4px;
-  color: var(--text-2); font-size: 12.5px; background: var(--surface-hi); }
+
 
 /* Attachment chips: the composer's own drafts (uploading/uploaded/failed),
    and the ones a sent message carries above its text. Both reuse the
    `.chip`/`.chip-x` look. */
 .chip-row { flex: none; display: flex; flex-wrap: wrap; gap: 6px;
-  padding: 6px 22px 0; }
+  padding: 6px var(--chat-side) 0; }
 /* Inside a message bubble rather than the page column: shrink to content,
    none of the composer's page-width centring. */
 .msg-user .msg-attach-row { width: auto; max-width: 100%; margin: 0; padding: 0; }
@@ -473,10 +634,12 @@
    rather than being clipped (the rule against silent truncation)
    — the chip grows to fit it instead of the wrapped lines overflowing a
    height that never grew. */
-.attach-chip { height: auto; min-height: 26px; padding: 3px 4px; cursor: default;
-  background: var(--surface-hi); color: var(--text); max-width: 220px; }
+.attach-chip { height: auto; min-height: 28px; padding: 3px 6px 3px 4px; cursor: default;
+  border-radius: var(--r-item); background: var(--surface); color: var(--text);
+  box-shadow: 0 0 0 1px var(--card-line); max-width: 220px; letter-spacing: 0; }
 .attach-chip[role="button"] { cursor: pointer; }
-.attach-chip[role="button"]:hover { background: var(--surface); }
+.attach-chip[role="button"]:hover { background: var(--surface-hi); }
+.msg-user .attach-chip { background: var(--surface); }
 .attach-chip.err { background: var(--err-bg); color: var(--err); }
 .attach-chip.warn { background: var(--amber-bg); color: var(--amber); }
 /* The name still ellipsizes (the full name is one hover away in its
@@ -485,7 +648,7 @@
 .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   max-width: 120px; }
 .chip-err-text { white-space: normal; overflow-wrap: anywhere; }
-.chip-thumb { width: 18px; height: 18px; border-radius: 4px; object-fit: cover;
+.chip-thumb { width: 20px; height: 20px; border-radius: 5px; object-fit: cover;
   flex: none; }
 .chip-warn-mark { color: var(--amber); }
 .chip-dot-pending { width: 8px; height: 8px; border-radius: 50%; flex: none;
@@ -511,22 +674,22 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
   box-shadow: 0 0 0 1px var(--amber); border-radius: 2px; }
 
 /* chat search: the sidebar's Messages section and the flash on a revealed hit */
-.msg-hits { border-top: 1px solid var(--border); margin-top: 8px; }
-.msg-hits-arch { display: flex; align-items: center; gap: 4px; padding: 0 6px 4px; font-size: 11.5px; }
+.msg-hits { border-top: 1px solid var(--divider); margin-top: 8px; }
+.msg-hits-arch { display: flex; align-items: center; gap: 4px; padding: 0 6px 4px 10px; font-size: 11.5px; }
 .msg-hit-list { display: flex; flex-direction: column; gap: 8px; padding: 2px 0; }
 .msg-hit-thread { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.msg-hit-title { all: unset; cursor: pointer; padding: 2px 6px; font-weight: 500; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; }
-.msg-hit-meta { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; padding: 0 6px;
+.msg-hit-title { all: unset; cursor: pointer; padding: 2px 6px 2px 10px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 6px; }
+.msg-hit-meta { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; padding: 0 6px 0 10px;
   font-size: 11px; }
 .msg-hit-meta:empty { display: none; }
 .msg-hit { all: unset; cursor: pointer; display: grid; grid-template-columns: 44px minmax(0, 1fr);
-  gap: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px; color: var(--text-2);
+  gap: 6px; padding: 3px 6px 3px 10px; border-radius: 6px; font-size: 12px; color: var(--text-2);
   line-height: 1.4; }
-.msg-hit-who { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; padding-top: 1px; }
+.msg-hit-who { font-size: 11px; padding-top: 1px; color: var(--text-3); }
 .msg-hit-text { overflow-wrap: anywhere; }
 .msg-hit-title:hover, .msg-hit:hover, .msg-hit-title:focus-visible, .msg-hit:focus-visible {
-  background: var(--surface); color: var(--text); }
+  background: var(--hover); color: var(--text); }
 .msg-hit-text mark { background: var(--amber-bg); color: var(--text); border-radius: 2px; padding: 0 1px; }
 .msg-hit-more { padding: 0 6px; font-size: 11px; }
 .msg-item.msg-flash { animation: msg-flash 1.5s ease-out; }
@@ -562,8 +725,9 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
   flex-direction: column; gap: 4px; }
 .kb-ex { all: unset; box-sizing: border-box; cursor: pointer; display: grid; width: 100%;
   grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 8px;
-  border: 1px solid var(--border); border-radius: 8px; align-items: baseline; }
-.kb-ex:hover, .kb-ex:focus-visible { background: var(--surface); border-color: var(--border-strong); }
+  border-radius: var(--r-item); background: var(--surface);
+  box-shadow: 0 0 0 1px var(--card-line); align-items: baseline; }
+.kb-ex:hover, .kb-ex:focus-visible { background: var(--surface-hi); }
 .kb-ex-n { font: 600 11px var(--mono); color: var(--accent); text-align: center; }
 .kb-ex-file { font-weight: 500; overflow-wrap: anywhere; }
 .kb-ex-head { grid-column: 2 / 4; font-size: 11.5px; overflow-wrap: anywhere; }
@@ -603,27 +767,33 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 .msg-unsaved-note { color: var(--amber); }
 /* A reply a fallback that cannot see answered: what it got in the images' place. */
 .msg-images-note { color: var(--amber); }
+/* The attached MCP labels that offered a turn no tools (an unreachable
+   server, an offline device): a block of their own above the reply's text,
+   kept with the reply. */
+.msg-notices { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.msg-notices > .msg-notice { margin: 0; max-width: none; font-size: 13px; line-height: 1.45;
+  overflow-wrap: anywhere; }
 
 /* A gated tool call (client-apps design §6): the card that waits for a
    decision joins the bar with Approve and Decline under it; a call that did
    not run says why in a line under its card. */
-.tool-card.await { margin-bottom: 0; border-color: var(--accent);
+.tool-card.await { margin-bottom: 0; box-shadow: 0 0 0 1px var(--accent);
   border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .tool-state { font-family: var(--mono); font-size: 11.5px; }
 .tool-state.await, .tool-state.sending { color: var(--accent); }
 .tool-state.declined, .tool-state.moved, .tool-state.held { color: var(--text-3); }
 .tool-state.notrun { color: var(--amber); }
 .tool-ask, .tool-batch { display: flex; align-items: center; justify-content: space-between;
-  flex-wrap: wrap; gap: 6px 12px; padding: 6px 10px; margin: 0 0 6px;
-  border: 1px solid var(--accent); background: var(--surface);
-  border-top: 0; border-radius: 0 0 10px 10px; font-size: 12.5px; }
+  flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px 8px 14px; margin: 1px 0 10px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--accent);
+  border-radius: 0 0 var(--r-box) var(--r-box); font-size: 13px; }
 .tool-ask-text { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); }
 .tool-ask-btns { display: inline-flex; gap: 6px; }
 .tool-ask .btn.on:not(.primary), .tool-batch .btn.on:not(.primary) {
   background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
-.tool-batch { border-top: 1px solid var(--accent); border-radius: 10px; }
-.tool-note { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--text-3); }
-.tool-said { margin: -2px 0 6px; padding: 0 10px; font-size: 12px; color: var(--err); }
+.tool-batch { border-radius: var(--r-box); }
+.tool-note { margin: -4px 0 10px; padding: 0 12px; font-size: 12px; color: var(--text-3); }
+.tool-said { margin: -4px 0 10px; padding: 0 12px; font-size: 12px; color: var(--err); }
 
 /* MCP Tasks in the Chat (MCP Tasks design §6). A late result is a card of
    its own in the transcript, its status in its colour: completed green,
@@ -633,10 +803,12 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 .job-card .job-head { color: var(--text-2); }
 .job-card .type-badge { margin-left: 0; }
 .job-card .job-when { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
-.job-card.completed { border-left: 3px solid var(--ok); }
-.job-card.failed { border-color: var(--err); border-left-width: 3px; }
-.job-card.abandoned { border-color: var(--amber); border-left-width: 3px; }
-.job-card.cancelled { border-left: 3px solid var(--text-3); }
+.job-card.completed { box-shadow: inset 3px 0 0 var(--ok), 0 0 0 1px var(--card-line); }
+.job-card.failed { box-shadow: inset 3px 0 0 var(--err),
+  0 0 0 1px color-mix(in srgb, var(--err) 55%, transparent); }
+.job-card.abandoned { box-shadow: inset 3px 0 0 var(--amber),
+  0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); }
+.job-card.cancelled { box-shadow: inset 3px 0 0 var(--text-3), 0 0 0 1px var(--card-line); }
 .tool-state.completed { color: var(--ok); }
 .tool-state.failed { color: var(--err); }
 .tool-state.abandoned { color: var(--amber); }
@@ -647,20 +819,20 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 /* The open thread's jobs, above the composer, in the composer's column. Many
    jobs (there is no cap) scroll inside the strip rather than squeezing the
    transcript away; the head counts them all. */
-.job-strip { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
-  padding: 0 22px; display: flex; flex-direction: column; gap: 4px; max-height: 35vh;
+.job-strip { flex: none; width: 100%; max-width: calc(var(--chat-col) + 2 * var(--chat-side));
+  margin: 6px auto 0; padding: 0 var(--chat-side); display: flex; flex-direction: column; gap: 4px; max-height: 35vh;
   overflow-y: auto; font-size: 12.5px; }
 .job-strip-head { display: flex; align-items: baseline; justify-content: space-between;
   flex-wrap: wrap; gap: 2px 12px; color: var(--text-2); }
 .job-strip-head .job-count { font-weight: 500; }
 .job-strip-head .job-fresh { font-size: 11.5px; }
 .job-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
-  padding: 5px 10px; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface); }
-/* A running job is not a focused field: the neutral border, a 3px left accent as the
+  padding: 6px 10px; border-radius: var(--r-item); background: var(--surface);
+  box-shadow: 0 0 0 1px var(--card-line); }
+/* A running job is not a focused field: the neutral line, a 3px left accent as the
    result cards have, the blue dot and status word say it is live. */
-.job-row.working { border-left: 3px solid var(--accent); }
-.job-row.input_required { border-left: 3px solid var(--amber); }
+.job-row.working { box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px var(--card-line); }
+.job-row.input_required { box-shadow: inset 3px 0 0 var(--amber), 0 0 0 1px var(--card-line); }
 .job-row .type-badge { margin-left: 0; }
 .job-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
 .job-dot.live { background: var(--accent); animation: blink 1.4s ease-in-out infinite; }
@@ -670,10 +842,10 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 .job-wait { color: var(--amber); overflow-wrap: anywhere; }
 .job-cancel { margin-left: auto; }
 /* A refused Answer: the gateway's reason, until dismissed or the thread changes. */
-.job-said { flex: none; width: 100%; max-width: calc(110ch + 44px); margin: 6px auto 0;
-  padding: 0 22px; display: flex; align-items: baseline; justify-content: space-between;
+.job-said { flex: none; width: 100%; max-width: calc(var(--chat-col) + 2 * var(--chat-side));
+  margin: 6px auto 0; padding: 0 var(--chat-side); display: flex; align-items: baseline; justify-content: space-between;
   gap: 10px; font-size: 12.5px; color: var(--amber); }
-.answer-btn { flex: none; border-color: var(--accent); color: var(--accent); }
+.answer-btn { flex: none; background: var(--accent-bg); color: var(--accent); }
 .answer-btn:hover:not(:disabled) { background: var(--accent-bg); }
 
 /* ---------- the narrow layout (chat/narrow.rs) ----------
@@ -683,23 +855,29 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
    the whole column with tighter sides. It works from 280 px up; a Firefox
    sidebar opens at 338. */
 .chat-drawer-btn { flex: none; display: inline-flex; align-items: center; justify-content: center;
-  gap: 4px; height: 30px; min-width: 30px; padding: 0 6px; border-radius: 8px; }
+  gap: 4px; height: 32px; min-width: 32px; padding: 0 6px; border-radius: var(--r-item); }
 .chat-drawer-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .chat-drawer-btn .count { margin: 0; }
-.chat-drawer-btn[aria-expanded="true"] { background: var(--accent-bg); color: var(--accent); }
+.chat-drawer-btn[aria-expanded="true"] { background: var(--select); }
 .chat-shell.narrow { --chat-side: 10px; }
-.chat-shell.narrow .chat-head { padding: 8px 10px; gap: 6px; }
-/* The first line is the list's button, New chat, the model and the settings'
-   button; the way back, then the badges and Export wrap under them. Narrow,
-   the way back is its icon and the folder's name. */
-.chat-shell.narrow .chat-head > * { order: 2; }
-.chat-shell.narrow .chat-head > :is(.chat-drawer-btn, .model-picker) { order: 0; }
-.chat-shell.narrow .chat-head > .chat-back { order: 1; max-width: 10rem; }
+.chat-shell.narrow .chat-head { padding: 0 6px; gap: 2px 4px; }
+/* The first line is the list's button, New chat, the title with the model
+   under it, then Export and the settings' button; the way back and the
+   marks wrap under them. Narrow, the way back is its icon and the folder's
+   name. */
+.chat-shell.narrow .chat-head > :not(.chat-wstart, .chat-drawer-btn, .chat-title, .chat-head-end, .wctl) {
+  order: 3; }
+.chat-shell.narrow .chat-head > .chat-back { max-width: 10rem; }
 .chat-shell.narrow .chat-back-to { display: none; }
-.chat-shell.narrow .chat-head .model-picker { flex: 1 1 8rem; min-width: 0; }
-.chat-shell.narrow .chat-scroll { padding: 12px 10px; --mc-stick-gap: 12px; }
-.chat-shell.narrow :is(.stats-row, .composer-wrap, .chip-row, .archive-strip, .temp-strip,
+.chat-shell.narrow .chat-title { flex: 1 1 6rem; min-width: 0; }
+.chat-shell.narrow .chat-head:has(> :not(.chat-wstart, .chat-drawer-btn, .chat-title, .chat-head-end, .wctl)) {
+  padding-bottom: 6px; }
+/* the line break before them: the first line is the controls' alone */
+.chat-shell.narrow .chat-head:has(> :not(.chat-wstart, .chat-drawer-btn, .chat-title, .chat-head-end, .wctl))::after {
+  content: ""; order: 2; flex-basis: 100%; height: 0; }
+.chat-shell.narrow .chat-scroll { padding: 14px 10px; --mc-stick-gap: 12px; }
+.chat-shell.narrow :is(.stats-row, .composer-wrap, .chip-row,
   .job-strip, .job-said) { padding-left: 10px; padding-right: 10px; }
 .chat-shell.narrow .composer-wrap { padding-bottom: 10px; }
 .chat-shell.narrow .stats-row { flex-wrap: wrap; row-gap: 2px; }

@@ -55,6 +55,9 @@ pub struct ChatReply {
     /// What a fallback that cannot see was sent instead of the images
     /// ([`ChatMessageRow::images_note`]).
     pub images_note: Option<String>,
+    /// The turn's notices ([`ChatMessageRow::notices`]). A continue and a
+    /// resumed turn add theirs to the row's ([`super::merged_notices`]).
+    pub notices: Vec<lmgw_api_types::chat_frames::LabelNotice>,
     /// A spoken reply's voice ([`ChatMessageRow::voice`]). A continue never
     /// writes it: the continued row keeps its own, less the unheard rest
     /// ([`continue_chat_reply`]).
@@ -97,8 +100,9 @@ pub async fn append_chat_reply_by(
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
-            model, answered_by, voice, images_note, pending_approvals, reasoning_seals)
-         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            model, answered_by, voice, images_note, pending_approvals, reasoning_seals,
+            notices)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )
     .bind(thread_id)
     .bind(&r.content)
@@ -116,6 +120,7 @@ pub async fn append_chat_reply_by(
             .map(super::PendingApprovals::to_json),
     )
     .bind(super::chat_seals::to_column(&r.reasoning_seals))
+    .bind(super::chat_notices::to_column(&r.notices))
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -150,25 +155,26 @@ pub async fn continue_chat_reply(
     by: feed::By<'_>,
 ) -> DbResult<ContinueSave> {
     let mut tx = super::begin_write(pool).await?;
-    let now: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT content, voice FROM chat_messages
+    let now: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT content, voice, notices FROM chat_messages
          WHERE id = ?1 AND thread_id = ?2 AND role = 'assistant'",
     )
     .bind(id)
     .bind(thread_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((now, voice)) = now else {
+    let Some((now, voice, had)) = now else {
         return Ok(ContinueSave::Gone);
     };
     if now.trim_end() != prefix {
         return Ok(ContinueSave::Changed);
     }
     let voice = MessageVoice::from_stored(voice).map(MessageVoice::continued);
+    let notices = super::merged_notices(&super::chat_notices::from_column(had), &r.notices);
     sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
            completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, voice=?10,
-           images_note=?11, reasoning_seals=?12
+           images_note=?11, reasoning_seals=?12, notices=?13
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -183,6 +189,7 @@ pub async fn continue_chat_reply(
     .bind(super::chat_voice::message_voice_json(voice.as_ref()))
     .bind(&r.images_note)
     .bind(super::chat_seals::to_column(&r.reasoning_seals))
+    .bind(super::chat_notices::to_column(&notices))
     .execute(&mut *tx)
     .await?;
     super::chat_tool_files::bind_tool_files(&mut tx, thread_id, id, &r.tool_files).await?;

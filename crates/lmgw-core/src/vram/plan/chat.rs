@@ -56,6 +56,7 @@ use crate::vram::compute::qsa;
 
 use super::{cpu_only, cpu_only_args, Footprint, GgufFiles, PlanCache};
 
+pub(crate) mod by_layer;
 pub(crate) mod fit;
 pub(crate) mod offload;
 pub(crate) mod shape;
@@ -67,6 +68,10 @@ pub(crate) struct ChatFiles {
     pub files: GgufFiles,
     /// The draft model's header, when the row names a draft model.
     pub draft: Option<Result<ModelSummary, String>>,
+    /// The row loads a projector (one of the companions is not the draft
+    /// model): a split charges its compute buffer on the first card
+    /// (`by_layer`).
+    pub projector: bool,
 }
 
 impl ChatFiles {
@@ -80,6 +85,7 @@ impl ChatFiles {
     ) -> Self {
         let root = PathBuf::from(models_dir);
         Self {
+            projector: companions.iter().any(|c| Some(c.as_str()) != draft),
             files: GgufFiles::read(models_dir, gguf_path, companions),
             draft: draft.map(|d| {
                 gguf::summarize(&root.join(d.trim_start_matches('/'))).map_err(|e| e.to_string())
@@ -242,6 +248,18 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
         ));
     }
     let placed = offload::place(s, &overrides, true, "its");
+    // The main model's weights on the card, without its companions: what a
+    // split puts in its repeating layers and its output layer (`by_layer`).
+    let main_on = match &placed {
+        Some(p) => files
+            .files
+            .main_bytes
+            .saturating_sub(host)
+            .saturating_add(p.onto_card)
+            .saturating_sub(p.off_card),
+        None if shape.tensors_to_device && s.host_input_bytes > 0 => files.files.main_bytes,
+        None => files.files.main_bytes.saturating_sub(host),
+    };
     let mut weights = match &placed {
         Some(p) => {
             notes.extend(p.notes.iter().cloned());
@@ -343,6 +361,33 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
             "its",
             &mut notes,
         ));
+    // The main context's cache by layer, for a split (`by_layer`): what of
+    // it the layers from `i` on keep, less what those from `i + 1` keep.
+    // Of it, the layers' recurrent state.
+    let rs_from = |i: u64| -> u64 {
+        if shape.fit.kv_on_host {
+            return 0;
+        }
+        let Ok(l) = Layout::of_from(s, i) else {
+            return 0;
+        };
+        let states = shape.slots.saturating_mul(1 + shape.rollback);
+        match (l.recurrent_layers, gguf::recurrent_state_bytes(s)) {
+            (0, _) | (_, None) => 0,
+            (n, Some(per)) => per.saturating_mul(n).saturating_mul(states),
+        }
+    };
+    let kv_from = |i: u64| -> u64 {
+        if shape.fit.kv_on_host {
+            return 0;
+        }
+        let Ok(l) = Layout::of_from(s, i) else {
+            return 0;
+        };
+        cache_bytes(&l, &main, bk, bv)
+            .saturating_add(qsa::cache_bytes(s, &l, &main, bk))
+            .saturating_add(rs_from(i))
+    };
     if shape.fit.kv_on_host {
         if first_gpu.is_none() {
             notes.push(
@@ -376,6 +421,13 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
         placed.largest_main,
         &mut notes,
     );
+    // The main context's alone, before a second context adds its own.
+    let (kv_main, compute_main) = (kv, compute);
+    // Of it, the copy above: on a split the first card's alone (`by_layer`).
+    let main_copy = match offloads {
+        true => placed.largest_main,
+        false => 0,
+    };
     let (dk, dv) = (
         shape.draft_cache_k.as_deref(),
         shape.draft_cache_v.as_deref(),
@@ -498,7 +550,40 @@ fn sized(files: &ChatFiles, gguf_path: &str, shape: &Shape) -> Footprint {
         },
     }
     let note = (!notes.is_empty()).then(|| notes.join(". "));
-    Footprint::new(weights, kv, Some(ctx), note).with_compute(compute)
+    let mut fp = Footprint::new(weights, kv, Some(ctx), note).with_compute(compute);
+    fp.by_layer = by_layer::ByLayer::of(by_layer::Parts {
+        s,
+        first_gpu: first_gpu.unwrap_or(0),
+        overrides: &overrides,
+        main_on,
+        weights,
+        kv_main,
+        kv,
+        compute_main,
+        compute,
+        kv_from: &kv_from,
+        rs_from: &rs_from,
+        second: &shape.second,
+        copy: main_copy,
+        // llama.cpp's condition for a pipeline, as far as the row decides
+        // it (`by_layer`'s module doc: `src/llama-context.cpp` at
+        // ggml-org/llama.cpp 97069ff6, lines 584–590).
+        pipeline: first_gpu.is_none()
+            && !shape.fit.kv_on_host
+            && shape.overrides.is_empty()
+            && shape.moe_cache_mib == 0,
+        projector: files.projector,
+    })
+    .map(std::sync::Arc::new);
+    fp
+}
+
+/// Chat row `m` sets its context (the field, `-c`, or a unified pool per
+/// slot): what it runs with is its whole, which lmgw may split over several
+/// cards (device-ledger design §5.2, WP6). A row that sets none is kept on
+/// one card (ruling 15).
+pub(crate) fn sets_context(m: &LocalModel) -> bool {
+    Shape::of(&m.params, &m.args).fit.ctx_set
 }
 
 /// The first layer `fit`'s `--n-gpu-layers` puts on the card when that

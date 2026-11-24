@@ -57,7 +57,7 @@ fn opt<T: ToString>(v: Option<T>) -> String {
 }
 
 /// The header record of `own` after the run's columns.
-fn header(own: &[&str]) -> String {
+pub(super) fn header(own: &[&str]) -> String {
     let all: Vec<&str> = RUN_COLUMNS.iter().chain(own).copied().collect();
     csv_line(&all)
 }
@@ -71,7 +71,7 @@ pub fn audio_header() -> String {
 }
 
 /// The run's own columns.
-fn run_fields(g: &LabGroupView, r: &LabRunView) -> Vec<String> {
+pub(super) fn run_fields(g: &LabGroupView, r: &LabRunView) -> Vec<String> {
     vec![
         g.id.to_string(),
         opt(r.id),
@@ -89,7 +89,7 @@ fn run_fields(g: &LabGroupView, r: &LabRunView) -> Vec<String> {
 }
 
 /// The files a run made: their count, their size and their ids.
-fn file_fields(r: &LabRunView) -> [String; 3] {
+pub(super) fn file_fields(r: &LabRunView) -> [String; 3] {
     let ids: Vec<String> = r.artifacts.iter().map(|a| a.id.to_string()).collect();
     [
         r.artifacts.len().to_string(),

@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use super::preauth::{PreAuth, Slot};
 use crate::devices::tls::ClientAuth;
-use crate::server::conn::TrackedStream;
+use crate::server::conn::{Cuttable, TrackedStream};
 use crate::server::{canonical, Conn, DevicePeer, ServedAt, Via};
 use crate::state::SharedState;
 
@@ -243,6 +243,7 @@ impl Serving {
             slot.release();
             tls.get_ref().0.handle()
         });
+        let io = Cuttable::new(tls);
         let conn = Conn {
             via: Via::Devices,
             peer,
@@ -251,11 +252,12 @@ impl Serving {
             local,
             device,
             socket,
+            cut: Some(io.cut()),
         };
         // Not authenticated: the whole connection is bounded (§4.3).
         let lapses = (!authenticated).then_some(lapses);
         let header = Duration::from_secs(u64::from(d.header_timeout_s));
-        self.serve(TokioIo::new(tls), conn, authenticated, header, lapses)
+        self.serve(TokioIo::new(io), conn, authenticated, header, lapses)
             .await;
     }
 

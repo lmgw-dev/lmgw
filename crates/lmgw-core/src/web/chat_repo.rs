@@ -293,6 +293,11 @@ impl ChatRepo {
         store::count_archived_chat_threads(&s.db, caller.reach(&s.snapshot())).await
     }
 
+    /// How many of the stored threads `caller` may see are active.
+    pub(super) async fn active_count(s: &AppState, caller: &Caller) -> DbResult<i64> {
+        store::count_active_chat_threads(&s.db, caller.reach(&s.snapshot())).await
+    }
+
     /// Pin or unpin (pinning an archived thread restores it). Stored threads
     /// only: a temporary one has nothing to pin until it is kept.
     pub(super) async fn set_pinned(

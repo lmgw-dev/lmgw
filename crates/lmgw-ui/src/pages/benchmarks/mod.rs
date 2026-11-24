@@ -2,13 +2,16 @@
 //! local chat row, an image and a rung — what the owner reads to choose
 //! between rows, quants, builds and settings.
 //!
-//! One route, `/benchmarks`, and three views the query string picks:
+//! One route, `/benchmarks/:run?`: the runs as a list ([`runs`]) beside
+//! the detail on the shared split view, newest first, the running one on
+//! top. The detail shows
 //!
-//! * bare — the runs table ([`runs`]), newest first, the running one on top;
-//! * `?run=<id>` — one run whole ([`detail`], [`identity`], [`probes`], the
-//!   charts), with its comparison against the previous comparable run;
+//! * `/benchmarks/<id>` — one run whole ([`detail`], [`identity`],
+//!   [`probes`], the charts), with its comparison against the previous
+//!   comparable run (the old `?run=<id>` link lands there);
 //! * `?compare=<id>,<id>,…` — runs overlaid ([`compare`]), judged against the
-//!   first one with the ops' own rule (`lmgw_api_types::bench_compare`).
+//!   first one with the ops' own rule (`lmgw_api_types::bench_compare`);
+//! * neither — the status page: what a run measures, the threshold, New.
 //!
 //! `?new=1` (with `&model=<id>` and `&image=<ref>` from the Models and
 //! Backends entry points) opens the New benchmark modal ([`new_run`]) over
@@ -28,12 +31,13 @@ use lmgw_api_types::bench_ops::{BenchArgs, BenchRunsResponse, BenchStatus, DEFAU
 use crate::bench_api::{self as api, LiveBench};
 use crate::scope::{Latest, Scope};
 use crate::url_state::use_query_signal;
-use crate::widgets::{use_toasts, Toasts};
+use crate::widgets::{use_toasts, Dot, Toasts};
 
 mod charts;
 mod compare;
 mod delta;
 mod detail;
+mod frame;
 mod identity;
 mod new_run;
 mod notes;
@@ -75,6 +79,8 @@ pub struct Bn {
     /// The run whose notes the notes modal edits, with them.
     pub notes: RwSignal<Option<(i64, String)>>,
     nav: Callback<String>,
+    /// A navigation that replaces the history entry (`true`) or adds one.
+    nav_replace: Callback<(String, bool)>,
 }
 
 impl Bn {
@@ -106,6 +112,12 @@ impl Bn {
     /// A link inside the app (history entry, no reload).
     pub fn go(self, href: String) {
         self.nav.run(href);
+    }
+
+    /// A link that replaces the history entry (a key move, an old link)
+    /// when `replace`.
+    pub fn nav_with(self, href: String, replace: bool) {
+        self.nav_replace.run((href, replace));
     }
 
     /// Open the New benchmark modal, prefilled with `seed` when there is one.
@@ -169,7 +181,7 @@ pub fn parse_ids(s: &str) -> Vec<i64> {
 }
 
 pub fn run_href(id: i64) -> String {
-    format!("/benchmarks?run={id}")
+    format!("/benchmarks/{id}")
 }
 
 pub fn compare_href(ids: &[i64]) -> String {
@@ -362,16 +374,16 @@ pub fn build_words(
     }
 }
 
-/// The status chip of a run: `(class, words, tooltip)`. A done run that
-/// did not finish every phase is partial; a throttled one says so, because
-/// its numbers are throttled numbers.
+/// The state of a run, for its list dot and its hero chip alike: `(dot, words,
+/// tooltip)`. A done run that did not finish every phase is partial; a
+/// throttled one says so, because its numbers are throttled numbers.
 pub fn status_look(
     status: BenchStatus,
     complete: bool,
     throttled: bool,
     reason: Option<&str>,
     error: Option<&str>,
-) -> (&'static str, String, String) {
+) -> (Dot, String, String) {
     let why = |t: &str| {
         let mut s = t.to_string();
         if let Some(e) = error.filter(|e| !e.is_empty()) {
@@ -383,26 +395,26 @@ pub fn status_look(
         s
     };
     match status {
-        BenchStatus::Running => ("chip live", "running".into(), why("running now")),
+        BenchStatus::Running => (Dot::Busy, "running".into(), why("running now")),
         BenchStatus::Done if !complete => (
-            "chip warn",
+            Dot::Warn,
             "partial".into(),
             why("finished, but not every selected phase completed"),
         ),
         BenchStatus::Done if throttled => (
-            "chip warn",
+            Dot::Warn,
             "done, throttled".into(),
             why("every selected phase completed"),
         ),
         BenchStatus::Done => (
-            "chip ok",
+            Dot::Stopped,
             "done".into(),
             why("every selected phase completed"),
         ),
-        BenchStatus::Failed => ("chip err", "failed".into(), why("a phase failed")),
-        BenchStatus::Canceled => ("chip off", "canceled".into(), why("canceled by the owner")),
+        BenchStatus::Failed => (Dot::Error, "failed".into(), why("a phase failed")),
+        BenchStatus::Canceled => (Dot::Off, "canceled".into(), why("canceled by the owner")),
         BenchStatus::Aborted => (
-            "chip warn",
+            Dot::Warn,
             match reason {
                 Some("hold") => "aborted: hold".into(),
                 Some("shutdown") => "aborted: quit".into(),
@@ -415,7 +427,7 @@ pub fn status_look(
             }),
         ),
         BenchStatus::Interrupted => (
-            "chip warn",
+            Dot::Warn,
             "interrupted".into(),
             why("lmgw went away mid-run; found still running at the next start"),
         ),
@@ -428,13 +440,27 @@ pub fn status_look(
 
 #[derive(Clone, PartialEq)]
 enum View {
-    Runs,
+    Status,
     Run(i64),
     Compare(Vec<i64>),
 }
 
+const CONF: crate::widgets::nav_split::SplitConf = crate::widgets::nav_split::SplitConf {
+    // Dense: the run's sections, notes and threshold are the older
+    // controls, which take their height from the page's density.
+    class: "bench-split density-dense",
+    width_key: "benchmarks.list.width",
+    list_width: (280, 30, 400),
+    detail_min: 480,
+    narrow_below: 800.0,
+    handle_label: "Resize the list",
+};
+
 #[component]
 pub fn Benchmarks() -> impl IntoView {
+    use crate::widgets::nav_split::{provide_save_key, NavSplit, SplitState};
+    use leptos_router::hooks::{use_location, use_params_map};
+
     let feed = crate::live::use_live();
     let live = Memo::new(move |_| {
         feed.jobs
@@ -444,6 +470,8 @@ pub fn Benchmarks() -> impl IntoView {
     let threshold =
         Memo::new(move |_| parse_threshold(&threshold_text.get()).unwrap_or(DEFAULT_THRESHOLD_PCT));
     let navigate = use_navigate();
+    let params = use_params_map();
+    let location = use_location();
     let bn = Bn {
         toasts: use_toasts(),
         scope: Scope::new(),
@@ -461,7 +489,20 @@ pub fn Benchmarks() -> impl IntoView {
         q_image: use_query_signal("image"),
         seed: RwSignal::new(None),
         notes: RwSignal::new(None),
-        nav: Callback::new(move |href: String| navigate(&href, Default::default())),
+        nav: Callback::new({
+            let navigate = navigate.clone();
+            move |href: String| navigate(&href, Default::default())
+        }),
+        nav_replace: Callback::new(move |(href, replace): (String, bool)| {
+            navigate(
+                &href,
+                leptos_router::NavigateOptions {
+                    replace,
+                    scroll: false,
+                    ..Default::default()
+                },
+            )
+        }),
     };
     provide_context(bn);
     bn.load_runs();
@@ -477,23 +518,79 @@ pub fn Benchmarks() -> impl IntoView {
         now
     });
 
+    // The old link: `?run=<id>` opens the run at its path, the rest of the
+    // query (a `new=1`) kept.
+    Effect::new(move |_| {
+        let id = bn.q_run.get();
+        if let Ok(id) = id.trim().parse::<i64>() {
+            let rest = crate::widgets::list_pane::query_without(
+                &location.search.get_untracked(),
+                &["run"],
+            );
+            bn.nav_with(format!("{}{rest}", run_href(id)), true);
+        }
+    });
+
+    let sel = Memo::new(move |_| {
+        params
+            .with(|p| p.get("run"))
+            .and_then(|s| s.trim().parse::<i64>().ok())
+    });
     let view = Memo::new(move |_| {
-        if let Ok(id) = bn.q_run.get().trim().parse::<i64>() {
+        if let Some(id) = sel.get() {
             return View::Run(id);
         }
         let ids = parse_ids(&bn.q_compare.get());
         if !ids.is_empty() {
             return View::Compare(ids);
         }
-        View::Runs
+        View::Status
     });
+    let has_sel = Memo::new(move |_| view.with(|v| *v != View::Status));
+
+    let split = SplitState::new(CONF);
+    let narrow = split.narrow;
+    let save_key = provide_save_key();
+    let open_row = Callback::new(move |(id, replace): (i64, bool)| {
+        if sel.get_untracked() != Some(id) {
+            // The list's search goes along; a comparison or the dialog's
+            // prefill does not.
+            let q = crate::widgets::list_pane::query_without(
+                &location.search.get_untracked(),
+                &["run", "compare", "new", "model", "image"],
+            );
+            bn.nav_with(format!("{}{q}", run_href(id)), replace);
+        }
+    });
+    let list = runs::RunsList::new(bn, sel, narrow, open_row);
+    let back = Callback::new(move |()| {
+        let q = crate::widgets::list_pane::query_without(
+            &location.search.get_untracked(),
+            &["run", "compare", "new", "model", "image"],
+        );
+        bn.go(format!("/benchmarks{q}"));
+        request_animation_frame(move || list.nav.focus_list());
+    });
+    provide_context(frame::BnPane { narrow, back });
 
     view! {
-        {move || match view.get() {
-            View::Runs => view! { <runs::RunsView/> }.into_any(),
-            View::Run(id) => view! { <detail::DetailView id=id/> }.into_any(),
-            View::Compare(ids) => view! { <compare::CompareView ids=ids/> }.into_any(),
-        }}
+        <NavSplit
+            split=split
+            has_sel=has_sel
+            save_key=save_key
+            search=list.nav.search
+            search_off=Signal::derive(move || narrow.get() && has_sel.get())
+            list=ViewFn::from(move || view! { <runs::RunsPane list=list narrow=narrow/> })
+            detail=ViewFn::from(move || {
+                view! {
+                    {move || match view.get() {
+                        View::Status => view! { <runs::StatusPage/> }.into_any(),
+                        View::Run(id) => view! { <detail::DetailView id=id/> }.into_any(),
+                        View::Compare(ids) => view! { <compare::CompareView ids=ids/> }.into_any(),
+                    }}
+                }
+            })
+        />
         // The page's own modals, under the page's density: a `<dialog>` in
         // the top layer still inherits its custom properties from here.
         <div class="density-dense bn-modals">
@@ -544,7 +641,7 @@ pub fn GpuBenchRow(open: RwSignal<bool>) -> impl IntoView {
                     view! {
                         <div class="gpu-k">"Benchmark"</div>
                         <div class="gpu-row bn-gpu-row">
-                            <span class="chip live">
+                            <span class="chip info">
                                 <span class="dot"></span>
                                 {format!("run {} · {}", b.run_id, b.model_id)}
                             </span>
@@ -637,9 +734,9 @@ mod tests {
     #[test]
     fn a_done_run_that_missed_a_phase_is_partial() {
         let (c, w, _) = status_look(BenchStatus::Done, false, false, None, None);
-        assert_eq!((c, w.as_str()), ("chip warn", "partial"));
+        assert_eq!((c, w.as_str()), (Dot::Warn, "partial"));
         let (c, w, t) = status_look(BenchStatus::Done, true, true, None, None);
-        assert_eq!((c, w.as_str()), ("chip warn", "done, throttled"));
+        assert_eq!((c, w.as_str()), (Dot::Warn, "done, throttled"));
         assert!(t.contains("throttled numbers"));
         let (_, w, _) = status_look(BenchStatus::Aborted, false, false, Some("hold"), None);
         assert_eq!(w, "aborted: hold");

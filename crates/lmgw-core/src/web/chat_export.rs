@@ -813,6 +813,11 @@ fn markdown(b: &Bundle) -> String {
         if let Some(note) = &m.images_note {
             o.push_str(&format!("*{}*\n\n", one_line(note)));
         }
+        // The attached labels that offered the turn no tools, as the page
+        // says them beside the reply.
+        for n in &m.notices {
+            o.push_str(&format!("*⚠ {}*\n\n", md_escape(&one_line(&n.message))));
+        }
         // Where a message was written, as its client said and the model
         // read it (chat-plane design §9.10).
         if let Some(origin) = &m.origin {

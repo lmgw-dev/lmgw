@@ -41,6 +41,7 @@ pub const IDENTITY: &[&str] = &[
     "target",
     "action",
     "enabled",
+    "card",
 ];
 
 /// Every name the API document flags as a secret, anywhere in it.

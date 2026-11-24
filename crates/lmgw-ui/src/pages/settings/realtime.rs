@@ -13,8 +13,9 @@ use std::collections::BTreeSet;
 use leptos::prelude::*;
 use serde_json::{json, Map, Value};
 
+use super::prow::SetField as Field;
 use super::{anchor, f, labels, Ctl, Def, Page};
-use crate::widgets::{Field, FormState, Kind};
+use crate::widgets::{FormState, Kind};
 
 /// The default voice and the TTS model's voice list.
 mod voice;
@@ -28,13 +29,10 @@ pub(super) use budget::BudgetPanel;
 mod style;
 pub(super) use style::{SpeechStyleField, TagHintField};
 
-const ENGINES: &[(&str, &str)] = &[
-    ("smart_turn", "Smart Turn"),
-    ("server_vad", "silence windows only (server_vad)"),
-];
+const ENGINES: &[(&str, &str)] = &[("smart_turn", "Smart Turn"), ("server_vad", "Silence only")];
 const CHECKS: &[(&str, &str)] = &[
-    ("words", "words — transcribe the interruption"),
-    ("duration", "voiced time only"),
+    ("words", "Words — transcribe the interruption"),
+    ("duration", "Voiced time only"),
 ];
 
 /// The Smart Turn table's columns: the key in a row, its header, its unit.
@@ -110,7 +108,7 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .ph("calm, warm, unhurried")
     .hint(
-        "what the voice is told while a session sends none (session.lmgw.speech_instructions), \
+        "What the voice is told while a session sends none, \
          and the Chat's while Settings → Chat names none; empty = its own neutral delivery",
     )
     .terms("speech instructions style tone voice design description expressive emotion"),
@@ -211,7 +209,7 @@ pub(super) const REALTIME: &[Def] = &[
         "realtime",
         "rt-smart",
         "realtime.semantic_vad_engine",
-        "semantic_vad runs on",
+        "Smart Turn runs on",
         Ctl::Choice(ENGINES),
     )
     .terms("semantic_vad smart turn escape hatch"),
@@ -822,7 +820,7 @@ pub(super) fn explain(group: &str) -> Option<(&'static str, String, AnyView)> {
                 "A score at or above the threshold ends the turn at once; one between the floor "
                 "and the threshold ends it at the floor window; below the floor the turn waits "
                 "for more speech, or for the maximum wait. A pause that could not be scored ends "
-                "at its row's no-score window, which is also what the server_vad engine runs on. "
+                "at its row's no-score window, which is also what Silence only runs on. "
                 "The defaults were measured on real recordings, not taken from OpenAI's waits."
             }
             .into_any(),

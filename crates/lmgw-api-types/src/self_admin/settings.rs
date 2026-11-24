@@ -138,10 +138,15 @@ pub struct SettingsRead {
 pub struct VramRead {
     /// Fall back when VRAM outside lmgw's control is short.
     pub fallback_on_external: bool,
-    /// How the headroom is set: `auto` (learned) or `fixed`.
+    /// How the headroom is set: `auto` (a floor and the learned room, per
+    /// card) or `fixed`.
     pub headroom_mode: crate::HeadroomMode,
-    /// The fixed headroom in MiB (`fixed` mode, and `auto` until learned).
+    /// The headroom's floor in MiB, kept free for other programs on each
+    /// graphics card (`auto`: no more than the most they held there; `fixed`:
+    /// as written).
     pub headroom_mb: u64,
+    /// The cards with an amount of their own, by id (`keep_free`).
+    pub keep_free: std::collections::BTreeMap<crate::DeviceId, crate::KeepFree>,
     /// What the headroom is now and where it comes from.
     pub headroom: crate::HeadroomNow,
 }
@@ -245,7 +250,8 @@ mod tests {
         let vram = serde_json::to_value(VramRead::default()).unwrap();
         assert_eq!(vram["fallback_on_external"], json!(false));
         assert_eq!(vram["headroom_mode"], json!("auto"));
-        assert_eq!(vram.as_object().unwrap().len(), 4, "{vram}");
+        assert_eq!(vram.as_object().unwrap().len(), 5, "{vram}");
+        assert_eq!(vram["keep_free"], json!({}), "every card automatic");
         assert!(vram["headroom"]["sentence"].is_string(), "{vram}");
     }
 

@@ -242,7 +242,10 @@ async fn a_stage_crowded_out_by_its_own_group_gives_up_its_wait() {
 /// go, and the gate free within a few polls.
 #[tokio::test]
 async fn a_three_stage_group_crowded_out_after_two_are_up_lets_everything_go() {
-    let (g, gw) = world(10 * GIB, 5).await;
+    // 11 GiB: the three stages and their start margins (in every mode since
+    // the device ledger's WP13: 327 MiB for each llama.cpp stage, at least
+    // 0.78 GiB for the TTS) fit the card beside nothing else.
+    let (g, gw) = world(11 * GIB, 5).await;
     g.model("other", 2 * GIB).await;
     g.model("ears", 3 * GIB).await;
     g.model("talk", 6 * GIB).await;

@@ -281,6 +281,40 @@ pub fn xlsx(sheets: &[(&str, &[&[&str]])]) -> Vec<u8> {
 /// the page blank (what a scan looks like to `pdftotext`). Text is Latin-1
 /// through the standard Helvetica; parentheses and backslashes are escaped.
 pub fn pdf(pages: &[Option<&str>]) -> Vec<u8> {
+    let placed: Vec<Vec<(f32, f32, f32, &str)>> = pages
+        .iter()
+        .map(|p| p.map(|t| vec![(20.0, 86.0, 14.0, t)]).unwrap_or_default())
+        .collect();
+    pdf_placed(300.0, 200.0, &placed)
+}
+
+/// A valid PDF of `width` × `height` points with one page per entry, each
+/// line drawn at `(x, y from the top, font size, text)` in Helvetica; an
+/// empty page is blank.
+pub fn pdf_placed(width: f32, height: f32, pages: &[Vec<(f32, f32, f32, &str)>]) -> Vec<u8> {
+    pdf_pages(width, height, 0, pages)
+}
+
+/// A one-page PDF of `width` × `height` points turned by `/Rotate`
+/// `rotate` (0, 90, 180 or 270), each line given as it is displayed:
+/// `(x, y from the top, font size, text)` on the turned page, written so it
+/// reads left to right there.
+#[cfg(unix)]
+pub fn pdf_turned(
+    width: f32,
+    height: f32,
+    rotate: u32,
+    lines: &[(f32, f32, f32, &str)],
+) -> Vec<u8> {
+    pdf_pages(width, height, rotate, &[lines.to_vec()])
+}
+
+fn pdf_pages(
+    width: f32,
+    height: f32,
+    rotate: u32,
+    pages: &[Vec<(f32, f32, f32, &str)>],
+) -> Vec<u8> {
     let n = pages.len();
     // Objects: 1 catalog, 2 pages, 3 font, then per page a page and a stream.
     let mut objs: Vec<String> = vec![
@@ -294,21 +328,37 @@ pub fn pdf(pages: &[Option<&str>]) -> Vec<u8> {
         ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
     ];
-    for (i, text) in pages.iter().enumerate() {
+    for (i, lines) in pages.iter().enumerate() {
         objs.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents {} 0 R \
-             /Resources << /Font << /F1 3 0 R >> >> >>",
-            5 + 2 * i
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents {} 0 R \
+             /Resources << /Font << /F1 3 0 R >> >>{} >>",
+            5 + 2 * i,
+            if rotate == 0 {
+                String::new()
+            } else {
+                format!(" /Rotate {rotate}")
+            }
         ));
-        let content = match text {
-            Some(t) => format!(
-                "BT /F1 14 Tf 20 100 Td ({}) Tj ET",
-                t.replace('\\', "\\\\")
+        let content = lines
+            .iter()
+            .map(|(x, y, size, t)| {
+                let t = t
+                    .replace('\\', "\\\\")
                     .replace('(', "\\(")
-                    .replace(')', "\\)")
-            ),
-            None => String::new(),
-        };
+                    .replace(')', "\\)");
+                // The baseline as displayed, then in the page's own space,
+                // with the text turned against the page.
+                let (bx, by) = (*x, y + size);
+                let place = match rotate {
+                    90 => format!("0 1 -1 0 {by} {bx} Tm"),
+                    180 => format!("-1 0 0 -1 {} {by} Tm", width - bx),
+                    270 => format!("0 -1 1 0 {} {} Tm", width - by, height - bx),
+                    _ => format!("{x} {} Td", height - y - size),
+                };
+                format!("BT /F1 {size} Tf {place} ({t}) Tj ET")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         objs.push(format!(
             "<< /Length {} >>\nstream\n{content}\nendstream",
             content.len()
@@ -334,3 +384,58 @@ pub fn pdf(pages: &[Option<&str>]) -> Vec<u8> {
     );
     out
 }
+
+/// A one-page PDF of 300 × 200 pt whose content is one path of `pieces`
+/// lines, compressed: poppler holds a path's pieces until it is drawn,
+/// about 400 bytes each, even for its text (measured 2026-11-20). Its
+/// tests run poppler, on Unix.
+#[cfg(unix)]
+pub fn pdf_one_path(pieces: usize) -> Vec<u8> {
+    use std::io::Write;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    for _ in 0..pieces {
+        z.write_all(b"0 0 m 1 1 l\n").unwrap();
+    }
+    z.write_all(b"S\n").unwrap();
+    let content = z.finish().unwrap();
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    let mut obj = |out: &mut Vec<u8>, body: &[u8]| {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", offsets.len()).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    };
+    obj(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
+    obj(&mut out, b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>");
+    obj(
+        &mut out,
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R >>",
+    );
+    let mut stream = format!(
+        "<< /Length {} /Filter /FlateDecode >>\nstream\n",
+        content.len()
+    )
+    .into_bytes();
+    stream.extend_from_slice(&content);
+    stream.extend_from_slice(b"\nendstream");
+    obj(&mut out, &stream);
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+    );
+    for o in &offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            offsets.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+#[cfg(unix)]
+pub mod jpx;

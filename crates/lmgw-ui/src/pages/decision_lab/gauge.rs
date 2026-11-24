@@ -217,7 +217,7 @@ pub(super) fn GaugeCard(lab: Lab) -> impl IntoView {
         }
     };
     view! {
-        <div class="card dl-gauge">
+        <section class="pref-group lab-card dl-gauge">
             <div class="dl-card-head">
                 <h3 class="lab-h3">"Tokens"</h3>
                 <span class="spacer"></span>
@@ -226,41 +226,43 @@ pub(super) fn GaugeCard(lab: Lab) -> impl IntoView {
                         .then(|| count_btn("Count again"))
                 }}
             </div>
-            {move || match lab.gauge.get() {
-                Gauge::Idle => {
-                    view! { <p class="mini-note dim">"Write a state and a question to count them."</p> }
-                        .into_any()
-                }
-                Gauge::Counting => view! { <p class="mini-note dim">"counting…"</p> }.into_any(),
-                Gauge::NotLoaded(m) => {
-                    view! {
-                        <div class="dl-not-counted">
-                            <span class="mini-note">{format!("not counted: {m} is not loaded")}</span>
-                            {count_btn("Count")}
-                        </div>
+            <div class="boxed lab-box">
+                {move || match lab.gauge.get() {
+                    Gauge::Idle => {
+                        view! { <p class="mini-note dim">"Write a state and a question to count them."</p> }
+                            .into_any()
                     }
-                        .into_any()
-                }
-                Gauge::Failed(e) => {
-                    view! { <p class="mini-note dl-bad-line">{format!("not counted: {e}")}</p> }
-                        .into_any()
-                }
-                Gauge::Counted(c) => counted_view(lab, c).into_any(),
-            }}
-            {move || {
-                let m = lab.alias.get();
-                lab.measured
-                    .get()
-                    .filter(|(asked, _)| *asked == m)
-                    .map(|(_, t)| {
+                    Gauge::Counting => view! { <p class="mini-note dim">"counting…"</p> }.into_any(),
+                    Gauge::NotLoaded(m) => {
                         view! {
-                            <p class="mini-note dim" title="input_tokens of the last answer on this model; types that do not share the state count it once per question">
-                                {format!("measured on the last answer: {} input tokens", grouped(t))}
-                            </p>
+                            <div class="dl-not-counted">
+                                <span class="mini-note">{format!("not counted: {m} is not loaded")}</span>
+                                {count_btn("Count")}
+                            </div>
                         }
-                    })
-            }}
-        </div>
+                            .into_any()
+                    }
+                    Gauge::Failed(e) => {
+                        view! { <p class="mini-note dl-bad-line">{format!("not counted: {e}")}</p> }
+                            .into_any()
+                    }
+                    Gauge::Counted(c) => counted_view(lab, c).into_any(),
+                }}
+                {move || {
+                    let m = lab.alias.get();
+                    lab.measured
+                        .get()
+                        .filter(|(asked, _)| *asked == m)
+                        .map(|(_, t)| {
+                            view! {
+                                <p class="mini-note dim" title="input_tokens of the last answer on this model; types that do not share the state count it once per question">
+                                    {format!("measured on the last answer: {} input tokens", grouped(t))}
+                                </p>
+                            }
+                        })
+                }}
+            </div>
+        </section>
     }
 }
 

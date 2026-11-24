@@ -1,14 +1,20 @@
-//! One agent (agent-catalog design §6.2): Run, Runs, App, Definition — each a
-//! path of its own (`/agents/<id>`, `/agents/<id>/runs`, …), so a tab is
-//! bookmarkable and Back goes to the tab before.
+//! One agent (agent-catalog design §6.2), the detail beside the catalog's
+//! list: Run, Runs, App, Definition — each a path of its own
+//! (`/agents/<id>`, `/agents/<id>/runs`, …) and a tab in the detail's header
+//! bar, so a tab is bookmarkable and Back goes to the tab before. The header
+//! carries the run kind's buttons ([`run_actions`]: Open in Chat, Start run,
+//! List only and Dry run, Stop while a run is in flight) and the agent's menu
+//! ([`menu`]: Enable, the exports, Duplicate, its token, Reset, Delete).
 //!
-//! **Run** is the config form (§2.6) beside the run column: whatever the run
-//! kind offers, in view while the form scrolls. For `chat` that is "Open in
-//! Chat", which is one op: the thread is seeded server-side from the manifest
-//! — model, system prompt, tools, temperature — and the page navigates to it.
-//! For `batch` it is the two Start buttons. Once a run is on screen the tab is
-//! its **review**: the progress line, the table with attention first, and
-//! Apply behind a confirmation (§6.2), with the config folded to a panel.
+//! **Run** is the agent as a preferences page: the hero ([`hero`]), what
+//! stands in the way of a run, the run kind's group, the config form (§2.6)
+//! as boxed rows with the save toast and Ctrl+S, the runtime and package,
+//! the agent's switch and Delete, two columns over 1000 px. "Open in Chat" is
+//! one op: the thread is seeded server-side from the manifest — model,
+//! system prompt, tools, temperature — and the page navigates to it. Once a
+//! run is on screen the tab is its **review**: the progress line, the table
+//! with attention first, and Apply behind a confirmation (§6.2), with the
+//! config folded to a panel.
 //!
 //! **Runs** is what this agent has done: its threads for a `chat` agent, its
 //! `agent_run` jobs for a `batch` one, any of which reopens its review table.
@@ -19,8 +25,8 @@
 //! checkboxes someone has been ticking for a minute. [`RunState`] is the whole
 //! surface as one `Copy` bundle, owned by [`AgentDetailPage`] and handed down.
 //!
-//! **Definition** is the manifest in a textarea with Validate, Save, Export,
-//! Duplicate, Reset and Delete. The manifest travels as **text**, never as a
+//! **Definition** is the manifest in a textarea with Validate, its save toast
+//! and Ctrl+S (Export, Duplicate, Reset and Delete are the header menu's). The manifest travels as **text**, never as a
 //! parsed object: `serde_json::Map` is a `BTreeMap`, so a round trip through a
 //! JSON value alphabetizes the config schema's properties and silently re-sorts
 //! the form the author laid out (§2.6). `agent_set` accepts an object and says
@@ -49,6 +55,15 @@ use page::*;
 
 mod run_tab;
 use run_tab::*;
+
+mod run_actions;
+use run_actions::*;
+
+mod hero;
+use hero::*;
+
+mod menu;
+use menu::*;
 
 mod runtime;
 use runtime::*;

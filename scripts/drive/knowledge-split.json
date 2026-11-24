@@ -1,0 +1,352 @@
+[
+ {
+  "js": "'Knowledge as a list beside the selected base: SETUP as scripts/drive/knowledge.json (mock-openai with EMBED_DIMS=64, a dev instance, scripts/knowledge-setup.sh for fake-embed); this drive deletes every knowledge base of that instance first and makes three. It drives the status page, a click selecting (its path), ↑ ↓ Home End, the search (/ focuses it, Esc clears it, a second Esc goes back to the list), a deep link to a tab, an edit on Settings (the accent dot, the save toast, the guard asking when another row is picked, Stay, Ctrl+S saving, the value read back after a reload, then put back), and the narrow window (one pane, the back button). It SAVES: a dev instance only. Run: scripts/ui-drive.py scripts/drive/knowledge-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr> --podman-guard <prefix>'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/knowledge/bases');for(const k of r.bases)await j('/api/knowledge/bases/'+k.id+'/delete',{});for(const n of ['demo-alpha','demo-beta','demo-gamma'])await j('/api/knowledge/bases',{name:n,description:'drive base '+n,embed_alias:'fake-embed',rerank_alias:'',vision_alias:'',chunk_tokens:256,chunk_overlap:32,mcp_visible:true});const b=await j('/api/knowledge/bases');window.__ids=b.bases.map(k=>k.id);return JSON.stringify(b.bases.map(k=>k.name))})()"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.knowledge.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/knowledge"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-list .lrow').length===3",
+  "timeout": 15,
+  "label": "the list has the three bases"
+ },
+ {
+  "js": "window.__sel=()=>[...document.querySelectorAll('.kb-list .lrow.sel')].map(r=>r.dataset.key);window.__keys=()=>[...document.querySelectorAll('.kb-list .lrow')].map(r=>r.dataset.key);window.__desc=()=>[...document.querySelectorAll('.mdetail-scroll .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Description'));'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.kb-split:not(.narrow)')&&document.querySelector('.kb-status')&&__sel().length===0",
+  "label": "wide: nothing selected shows the status page beside the list"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth<=document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "shot": "knowledge-split-status"
+ },
+ {
+  "click": ".kb-list .lrow",
+  "nth": 0
+ },
+ {
+  "until": "/^\\/knowledge\\/\\d+$/.test(location.pathname)&&document.querySelector('.detail-hero h1')",
+  "timeout": 10,
+  "label": "a click selects the row: its path and its hero"
+ },
+ {
+  "expect": "__sel().length===1&&__sel()[0]===__keys()[0]&&document.querySelector('.detail-hero h1').textContent===document.querySelector('.kb-list .lrow.sel .lrow-name').textContent",
+  "label": "the row is highlighted and the hero names it"
+ },
+ {
+  "expect": "document.querySelectorAll('.mdetail-head .sub-nav .seg-btn').length===3&&document.querySelector('.mdetail-head .sub-nav [aria-current=page]').textContent.startsWith('Files')",
+  "label": "the header bar carries the three tabs, Files current"
+ },
+ {
+  "expect": "document.querySelector('.kb-hero .chips').textContent.includes('Empty')&&/per.input/i.test(document.querySelector('.kb-hero .chips').textContent)",
+  "label": "the hero says its state and the pin's input limit"
+ },
+ {
+  "shot": "knowledge-split-files"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "__sel()[0]===__keys()[1]&&location.pathname==='/'+__keys()[1].replace('kb-','knowledge/')",
+  "timeout": 5,
+  "label": "↓ selects the next base"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "until": "__sel()[0]===__keys()[2]",
+  "timeout": 5,
+  "label": "End selects the last"
+ },
+ {
+  "key": "Home"
+ },
+ {
+  "until": "__sel()[0]===__keys()[0]",
+  "timeout": 5,
+  "label": "Home selects the first"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "expect": "document.activeElement===document.querySelector('.kb-split .msearch input')",
+  "label": "/ focuses the search"
+ },
+ {
+  "type": "gamma"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-list .lrow').length===1&&location.search.includes('q=gamma')",
+  "timeout": 5,
+  "label": "the search filters the list (?q=)"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-list .lrow').length===3",
+  "timeout": 5,
+  "label": "Esc clears it"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": "document.activeElement===document.querySelector('.kb-list')",
+  "label": "a second Esc goes back to the list"
+ },
+ {
+  "js": "sessionStorage.setItem('wp9.k2',__keys()[1].replace('kb-','')); sessionStorage.getItem('wp9.k2')"
+ },
+ {
+  "js": "location.assign('/knowledge/'+sessionStorage.getItem('wp9.k2')+'/settings'); 'reload'"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "until": "document.querySelector('.kb-list .lrow')",
+  "timeout": 15
+ },
+ {
+  "js": "window.__sel=()=>[...document.querySelectorAll('.kb-list .lrow.sel')].map(r=>r.dataset.key);window.__keys=()=>[...document.querySelectorAll('.kb-list .lrow')].map(r=>r.dataset.key);window.__desc=()=>[...document.querySelectorAll('.mdetail-scroll .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Description'));window.__k2=sessionStorage.getItem('wp9.k2');window.__d0=sessionStorage.getItem('wp9.d0');'helpers'"
+ },
+ {
+  "until": "document.querySelector('.mdetail-head .sub-nav [aria-current=page]')&&document.querySelector('.mdetail-head .sub-nav [aria-current=page]').textContent==='Settings'&&__desc()",
+  "timeout": 10,
+  "label": "a deep link opens the base's Settings tab"
+ },
+ {
+  "expect": "__sel().length===1&&__sel()[0]==='kb-'+location.pathname.split('/')[2]",
+  "label": "the deep link's row is selected"
+ },
+ {
+  "js": "window.__d0=__desc().querySelector('input').value; sessionStorage.setItem('wp9.d0',__d0); window.__there=location.pathname; __d0"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show')&&!document.querySelector('.mdetail-scroll .prow.dirty')",
+  "label": "a loaded base has no changes"
+ },
+ {
+  "js": "const i=__desc().querySelector('input');i.value=__d0+' (edited)';i.dispatchEvent(new Event('input',{bubbles:true}));'typed'"
+ },
+ {
+  "until": "__desc().classList.contains('dirty')&&document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "an edit marks its row and shows the save toast"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent==='1 unsaved change'",
+  "label": "the toast counts it"
+ },
+ {
+  "shot": "knowledge-split-settings-dirty"
+ },
+ {
+  "js": "[...document.querySelectorAll('.kb-list .lrow')].find(r=>!r.classList.contains('sel')).click();'other row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d=>d.innerText.includes('Unsaved changes on this knowledge base'))",
+  "timeout": 5,
+  "label": "picking another base asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname===__there&&__desc().classList.contains('dirty')",
+  "label": "Stay keeps the base and the change"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show')&&!__desc().classList.contains('dirty')",
+  "timeout": 10,
+  "label": "Ctrl+S saves: no change left"
+ },
+ {
+  "until": "fetch('/api/knowledge/bases/'+location.pathname.split('/')[2]).then(r=>r.json()).then(j=>j.base.description===__d0+' (edited)')",
+  "timeout": 10,
+  "label": "the server has the new description"
+ },
+ {
+  "js": "location.assign('/knowledge/'+sessionStorage.getItem('wp9.k2')+'/settings'); 'reload'"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "until": "document.querySelector('.kb-list .lrow')",
+  "timeout": 15
+ },
+ {
+  "js": "window.__sel=()=>[...document.querySelectorAll('.kb-list .lrow.sel')].map(r=>r.dataset.key);window.__keys=()=>[...document.querySelectorAll('.kb-list .lrow')].map(r=>r.dataset.key);window.__desc=()=>[...document.querySelectorAll('.mdetail-scroll .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Description'));window.__k2=sessionStorage.getItem('wp9.k2');window.__d0=sessionStorage.getItem('wp9.d0');'helpers'"
+ },
+ {
+  "until": "__desc()&&__desc().querySelector('input').value===__d0+' (edited)'",
+  "timeout": 10,
+  "label": "after a reload the saved value is read back"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show')",
+  "label": "Ctrl+S with nothing changed saves nothing"
+ },
+ {
+  "js": "const i=__desc().querySelector('input');i.value=__d0;i.dispatchEvent(new Event('input',{bubbles:true}));'restore'"
+ },
+ {
+  "click": ".save-toast .btn.suggested"
+ },
+ {
+  "until": "fetch('/api/knowledge/bases/'+location.pathname.split('/')[2]).then(r=>r.json()).then(j=>j.base.description===__d0)",
+  "timeout": 10,
+  "label": "put back the same way"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show')",
+  "timeout": 5
+ },
+ {
+  "expect": "(()=>{const r=document.querySelector('.kb-list .lrow.sel');const t=r.getAttribute('title')||'';const l=t.split('\\n');return l.length===3&&l[0]===r.querySelector('.lrow-name').textContent&&l[1].startsWith(r.querySelector('.lrow-state').textContent.trim())&&l[2]===r.querySelector('.lrow-meta').textContent})()",
+  "label": "a row's tooltip says its name, state and facts in full"
+ },
+ {
+  "js": "{window.__there=location.pathname;const i=__desc().querySelector('input');i.value=__d0+' (unsaved)';i.dispatchEvent(new Event('input',{bubbles:true}));}'typed'"
+ },
+ {
+  "until": "__desc().classList.contains('dirty')&&document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "an unsaved change on this base"
+ },
+ {
+  "click": ".mlist-head .actions .icon-btn[title='New knowledge base']"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": "dialog[open] .prow-entry",
+  "nth": 0
+ },
+ {
+  "type": "demo-delta"
+ },
+ {
+  "click": "dialog[open] .model-picker button.select-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "type": "fake-embed"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.suggested"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d=>d.innerText.includes('Unsaved changes on this knowledge base'))",
+  "timeout": 30,
+  "label": "creating another base while this one's Settings are unsaved asks first"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-list .lrow').length===4",
+  "timeout": 10,
+  "label": "the new base is in the list"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname===__there&&__desc().classList.contains('dirty')&&__desc().querySelector('input').value===__d0+' (unsaved)'",
+  "label": "Stay keeps the base and its unsaved change"
+ },
+ {
+  "click": ".save-toast .btn:not(.suggested)"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show')&&__desc().querySelector('input').value===__d0",
+  "timeout": 5,
+  "label": "Discard puts the field back"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "until": "document.querySelector('.kb-split.narrow')",
+  "timeout": 5,
+  "label": "narrow: one pane at a time"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.kb-split .mlist-pane')).display==='none'&&document.querySelector('.mdetail-head button[title=\"Back to the list\"]')",
+  "label": "narrow: the detail shows with a back button"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth<=document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "shot": "knowledge-split-narrow"
+ },
+ {
+  "click": ".mdetail-head button[title=\"Back to the list\"]"
+ },
+ {
+  "until": "location.pathname==='/knowledge'&&getComputedStyle(document.querySelector('.kb-split .mlist-pane')).display!=='none'",
+  "timeout": 5,
+  "label": "back shows the list"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();const r=await (await fetch('/api/knowledge/bases')).json();for(const k of r.bases)if(k.name.startsWith('demo-'))await j('/api/knowledge/bases/'+k.id+'/delete',{});return 'cleaned'})()"
+ }
+]

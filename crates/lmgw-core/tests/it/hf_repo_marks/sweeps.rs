@@ -140,9 +140,17 @@ pub(super) async fn sweep(
             for e in &exact {
                 let r = row(&listed, &e.file);
                 let a = r.fit.clone().unwrap();
+                // A file estimated from another's header can't know its own
+                // marks it by its size (a split set that doesn't load, D54):
+                // it says whether it fits as that size says.
+                let by_size = |m: FitMark| match (m, r.estimated_from.is_some()) {
+                    (FitMark::FitsBySize, true) => FitMark::Fits,
+                    (FitMark::DoesNotFitBySize, true) => FitMark::DoesNotFit,
+                    (m, _) => m,
+                };
                 assert_eq!(
                     (a.whole_card.mark, a.beside.mark),
-                    (e.fit.whole_card.mark, e.fit.beside.mark),
+                    (by_size(e.fit.whole_card.mark), by_size(e.fit.beside.mark)),
                     "{} at {at}: {a:?} against {:?}",
                     e.file,
                     e.fit

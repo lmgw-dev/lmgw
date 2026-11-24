@@ -29,7 +29,8 @@ use lmgw_core::quickdoc::InProcessEmbedder;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry, HOST_PID_FORMAT};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewAuxModel, NewLocalModel};
-use lmgw_core::vram::{GpuMemory, GpuProbe, ProcessMemory};
+use lmgw_core::vram::nvml::DeviceProcesses;
+use lmgw_core::vram::{GpuMemory, GpuProbe};
 use quickdoc_core::embed::{EmbedIdentity, Embedder};
 use quickdoc_core::store::{self as qstore, NewCorpus};
 use serde_json::{json, Value};
@@ -37,10 +38,17 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use crate::common;
+use crate::support::fake_machine::{card_id, Machine};
 use common::{serve, Gw};
 
 mod containers;
+mod fit_again_card;
 mod fixture;
+mod placing;
+mod placing_moves;
+mod placing_own_splits;
+mod placing_pins;
+mod placing_splits;
 mod podman;
 mod world;
 
@@ -58,6 +66,8 @@ mod audio_voices;
 mod background_starts;
 mod blind_fallback;
 mod blind_fallback_chat;
+mod card_charges;
+mod cards_view;
 mod chat_tool_reroute;
 mod dead_container;
 mod degradation;
@@ -72,6 +82,7 @@ mod engine_download_waits;
 #[cfg(unix)]
 mod engine_prefetch;
 mod engine_with_model_download;
+mod fake_machine;
 mod fallback_chain;
 mod gate_follows_running_container;
 mod gpu_hold;
@@ -86,6 +97,7 @@ mod gpu_setup_rows;
 // As gpu_setup, whose world it uses.
 #[cfg(unix)]
 mod gpu_setup_stamp;
+mod headroom_cards;
 mod image_partial_bounds;
 mod image_partial_fit;
 mod image_pipeline_peak;
@@ -99,6 +111,7 @@ mod live_frame;
 mod llama_fit;
 mod llama_fit_headroom;
 mod llama_fit_review;
+mod margin_last;
 mod open_ended_upstream;
 mod outside_vram_decision;
 mod outside_vram_fallback;

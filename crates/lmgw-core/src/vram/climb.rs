@@ -207,8 +207,9 @@ async fn climb_with(
 
     if vs.enabled {
         let l = state.vram.ledger(state, &snap).await;
-        if let Some(cap) = &l.capacity {
-            plan.fits_the_card(&target, cap.total)?;
+        if let Some((total, holder, cards)) = state.vram.climb_total(&snap, &l, &target) {
+            let structural = plan.structural_on(&state.vram, &snap, &target, &cards);
+            plan.fits_the_card(&target, total, holder, structural)?;
         }
     }
     // After the card-size check, so a rung no card could hold stays the
@@ -298,7 +299,7 @@ async fn climb_with(
             alias: hold.alias.clone(),
             model: target.model_id.clone(),
             class: target.class,
-            needs: plan.needs,
+            needs: super::CardCharge::over(state.vram.seen_now(&snap, &target), plan.needs),
             since: started,
             stage: format!(
                 "climbing to rung {}: draining the running rung",
@@ -361,12 +362,21 @@ async fn climb_with(
     };
     let plan = own;
     if snap.settings.vram.enabled {
-        if let Some(cap) = &state.vram.ledger(state, &snap).await.capacity {
-            plan.fits_the_card(&target, cap.total)?;
-            joiner = joiner.filter(|j| j.bytes.saturating_add(j.structural) <= cap.total);
+        let l = state.vram.ledger(state, &snap).await;
+        if let Some((total, holder, cards)) = state.vram.climb_total(&snap, &l, &target) {
+            let structural = plan.structural_on(&state.vram, &snap, &target, &cards);
+            plan.fits_the_card(&target, total, holder, structural)?;
+            joiner = joiner.filter(|j| {
+                j.bytes
+                    .saturating_add(j.structural_on(&state.vram, &snap, &target, &cards))
+                    <= total
+            });
         }
     }
-    state.vram.set_needs(queued.id, plan.needs);
+    state.vram.set_needs(
+        queued.id,
+        super::CardCharge::over(state.vram.seen_now(&snap, &target), plan.needs),
+    );
 
     // 4. Admission as a replacement, and the claim. A guest's: tried, never
     // waited for, never evicting, its own rung only (§9).
@@ -475,6 +485,17 @@ async fn climb_with(
 }
 
 /// The trigger's 502 when a climb's rung would not start (§12 entry 22).
+/// The cards the running rung of `target` is charged on, as ledger `l`
+/// reads them (device-ledger design §5.6): where a climb's new rung goes.
+/// Empty — the pooled capacity — where it is charged on none.
+pub(super) fn rung_cards(l: &Ledger, target: &Target) -> Vec<super::nvml::DeviceId> {
+    l.residents
+        .iter()
+        .find(|r| r.container == target.class && r.model == target.model_id)
+        .map(|r| r.charge.cards())
+        .unwrap_or_default()
+}
+
 fn climb_failed(target: &Target, plan: &Plan, why: String) -> GatewayError {
     GatewayError::Upstream {
         status: 502,
@@ -538,19 +559,29 @@ struct Plan {
     slot: u64,
     /// The rung's footprint, sized like any row ([`VramScheduler::footprint_at`]).
     bytes: u64,
-    /// `bytes` plus the start's headroom: what admission waits for while
-    /// lmgw has anything on the card a wait could free.
+    /// `bytes` plus the start's headroom on the running rung's cards, each
+    /// card's by its own rules (`VramScheduler::rules_over`, owner,
+    /// 2026-11-18): what admission waits for while lmgw has anything on the
+    /// card a wait could free.
     needs: u64,
-    /// `bytes` plus its margin alone (`VramScheduler::start_margin`): what
-    /// it starts with once nothing of lmgw's is left, and what §4.7's
-    /// verdict asks of the card — the learned growth only decides waiting
-    /// (per-model containers §4, "Learned growth decides waiting").
+    /// `bytes` plus those cards' floors and its margin: what it keeps once
+    /// the learned room is given up, for the warning.
+    kept: u64,
+    /// `bytes` plus those cards' floors alone: what it starts with once
+    /// nothing of lmgw's is left, and what §4.7's verdict asks of the card —
+    /// the learned room and its margin only decide waiting and are given up
+    /// last (per-model containers §4, "Learned growth decides waiting";
+    /// device-ledger design WP13).
     real: u64,
-    /// What it needs beside it on an otherwise empty card
-    /// (`VramScheduler::card_headroom`): whether it fits the card at all
-    /// is judged against this, never against the learned growth.
+    /// What it needs beside it on those cards otherwise empty: whether it
+    /// fits the card at all is judged against this
+    /// ([`Self::structural_on`] for another card), never against the
+    /// learned room.
     structural: u64,
     gguf: String,
+    /// The rung's footprint, for what it keeps free on another card
+    /// (device-ledger design §5.6); `None` where lmgw has no figure.
+    fp: Option<super::Footprint>,
 }
 
 impl Plan {
@@ -607,24 +638,22 @@ impl Plan {
             .footprint_at(snap, target.class, &target.model_id, charge.as_ref())
             .await;
         let bytes = fp.as_ref().map_or(0, |f| f.total_bytes);
-        let headroom = match &fp {
-            Some(f) => state
-                .vram
-                .start_headroom(snap, target.class, &target.model_id, f),
-            None => state.vram.headroom(snap).bytes,
+        // Read on the cards the new rung goes on — the running rung's
+        // (device-ledger design §5.6) — card by card as admission reads
+        // them, never summed over every card (owner, 2026-11-18); the
+        // pooled sums where no device read names a card.
+        let on = match snap.settings.vram.enabled {
+            true => rung_cards(&Box::pin(state.vram.ledger(state, snap)).await, target),
+            false => Vec::new(),
         };
-        let structural = match &fp {
-            Some(f) => state
-                .vram
-                .card_headroom(snap, target.class, &target.model_id, f),
-            None => headroom,
-        };
-        let margin = match &fp {
-            Some(f) => state
-                .vram
-                .start_margin(snap, target.class, &target.model_id, f),
-            None => headroom,
-        };
+        let rules = fp
+            .as_ref()
+            .map(|f| state.vram.rules_over(snap, target, f, &on));
+        let pooled = state.vram.headroom(snap).bytes;
+        let headroom = rules.map_or(pooled, |r| r.headroom);
+        let structural = rules.map_or(headroom, |r| r.structural);
+        let margin = rules.map_or(headroom, |r| r.margin);
+        let floor = rules.map_or(headroom, |r| r.floor);
         Some(Self {
             pos,
             slot,
@@ -635,9 +664,28 @@ impl Plan {
             runtime,
             bytes,
             needs: bytes.saturating_add(headroom),
-            real: bytes.saturating_add(margin),
+            kept: bytes.saturating_add(margin),
+            real: bytes.saturating_add(floor),
             structural,
+            fp,
         })
+    }
+
+    /// What the rung needs beside it on `cards` with nothing else of lmgw's
+    /// there (§5.8), by those cards' own rules as admission reads them
+    /// (`VramScheduler::rules_over`); the plan's figure where lmgw has no
+    /// footprint.
+    fn structural_on(
+        &self,
+        vram: &super::VramScheduler,
+        snap: &Snapshot,
+        target: &Target,
+        cards: &[super::nvml::DeviceId],
+    ) -> u64 {
+        match &self.fp {
+            Some(f) => vram.rules_over(snap, target, f, cards).structural,
+            None => self.structural,
+        }
     }
 
     /// `k/n (<gguf>)`, 1-based — how every message names the rung.
@@ -657,12 +705,21 @@ impl Plan {
 
     /// A rung that cannot fit on an empty card is refused before anything is
     /// marked (`vram_too_large`): no eviction and no wait can make it fit.
-    fn fits_the_card(&self, target: &Target, capacity: u64) -> Result<(), GatewayError> {
-        if self.bytes.saturating_add(self.structural) > capacity {
+    ///
+    /// `structural`: what it needs beside it on the cards `capacity` is of,
+    /// by their own rules ([`Self::structural_on`]).
+    fn fits_the_card(
+        &self,
+        target: &Target,
+        capacity: u64,
+        holder: String,
+        structural: u64,
+    ) -> Result<(), GatewayError> {
+        if self.bytes.saturating_add(structural) > capacity {
             return Err(GatewayError::VramTooLarge {
                 model: self.label(target),
-                need: GatewayError::vram_need(self.bytes, self.structural),
-                capacity: fmt_bytes(capacity),
+                need: GatewayError::vram_need(self.bytes, structural),
+                holds: GatewayError::vram_holds(&holder, capacity),
                 hint: String::new(),
             });
         }
@@ -855,6 +912,125 @@ fn start_climb(
         })
 }
 
+/// [`start_climb`] for the holder's own rung on cards other than its
+/// running rung's (device-ledger design §5.6): `cards`, which lmgw hands
+/// the new container.
+fn start_climb_on(
+    state: &SharedState,
+    snap: &Snapshot,
+    ticket: ClimbTicket,
+    chosen: &Plan,
+    cards: super::CardCharge,
+) -> AdmittedClimb {
+    let spec = StartSpec::of(&lifecycle_spec(state, snap, &chosen.runtime));
+    ticket
+        .start_on(spec, cards)
+        .map_or(AdmittedClimb::Gone, |run| AdmittedClimb::Started {
+            run,
+            joiner: false,
+        })
+}
+
+impl VramScheduler {
+    /// The largest card a climb's new rung of `target` may go on, as ledger
+    /// `l` reads them (device-ledger design §5.6, §5.8): its running rung's
+    /// cards, and — where lmgw can hand it another card on a machine of
+    /// several — each of its candidates. `None` without a capacity.
+    ///
+    /// Beside it, what holds it with its verb, for the refusal
+    /// (device-ledger design §10): "the GPU holds" on one card and under a
+    /// declared budget, else the card by name and index.
+    ///
+    /// Last, the cards that total is of: what the rung's own rules are read
+    /// on ([`Plan::structural_on`]).
+    fn climb_total(
+        &self,
+        snap: &Snapshot,
+        l: &Ledger,
+        target: &Target,
+    ) -> Option<(u64, String, Vec<super::nvml::DeviceId>)> {
+        let running = rung_cards(l, target);
+        let own = l.capacity_on(&running, None)?.total;
+        let named = |cards: &[super::nvml::DeviceId], largest: bool| match cards {
+            [one] if largest => format!(
+                "{}, the largest card it may go on, holds",
+                super::place::card_label(&l.devices, one)
+            ),
+            [one] => format!("{} holds", super::place::card_label(&l.devices, one)),
+            more => format!("the {} cards it runs on hold", more.len()),
+        };
+        if l.devices.len() < 2 || l.budget > 0 {
+            return Some((own, "the GPU holds".into(), running));
+        }
+        let cand = self.candidates(snap, target, &l.devices);
+        if !cand.hand_out {
+            return Some((own, named(&running, false), running));
+        }
+        let largest = cand
+            .cards
+            .iter()
+            .filter_map(|c| Some((c, l.capacity_on(std::slice::from_ref(c), None)?.total)))
+            .max_by_key(|(_, t)| *t);
+        Some(match largest {
+            Some((c, t)) if t > own => (t, named(std::slice::from_ref(c), true), vec![c.clone()]),
+            _ => {
+                let words = named(&running, cand.cards.len() > 1);
+                (own, words, running)
+            }
+        })
+    }
+
+    /// Another card that holds `plan`'s rung of `target` now, where its
+    /// running rung's cards `on` do not (device-ledger design §5.6, §5.2
+    /// step 1): of its candidates lmgw can hand it, the card it leaves
+    /// least free on beside its footprint, the engine's cost there and what
+    /// it keeps free there — the headroom while something of lmgw's is on
+    /// that card, else the floor and its margin (WP13: its margin is given
+    /// up only on its own cards, last). `None` on a machine of one card,
+    /// under a declared budget, and where no other card holds it now.
+    fn climb_elsewhere(
+        &self,
+        snap: &Snapshot,
+        target: &Target,
+        l: &Ledger,
+        on: &[super::nvml::DeviceId],
+        plan: &Plan,
+    ) -> Option<super::CardCharge> {
+        if l.devices.len() < 2 || l.budget > 0 || on.is_empty() {
+            return None;
+        }
+        let fp = plan.fp.as_ref()?;
+        let cand = self.candidates(snap, target, &l.devices);
+        // A row's own split kept on its pin stays on its pin's cards
+        // (§7.2).
+        if !cand.hand_out || cand.own_kept().is_some() {
+            return None;
+        }
+        let heads = self.cards_headroom(snap);
+        let (card, engine) = l
+            .devices
+            .iter()
+            .filter(|d| cand.cards.contains(&d.id) && !on.contains(&d.id))
+            .filter_map(|d| {
+                let one = std::slice::from_ref(&d.id);
+                let cap = l.capacity_on(one, None)?;
+                // Its margin kept on another card: given up only on its own
+                // cards, once nothing else fits (WP13).
+                let r = self.rules_on(snap, target, fp, &heads, &d.id);
+                let keep = match super::place::others_hold_on(l, target, one) {
+                    true => r.headroom,
+                    false => r.margin,
+                };
+                let engine = self.engine_on(target.class, &d.id);
+                let needs = plan.bytes.saturating_add(engine).saturating_add(keep);
+                (cap.free >= needs).then(|| (cap.free - needs, d.index, d.id.clone(), engine))
+            })
+            .min_by_key(|(left, index, _, _)| (*left, *index))
+            .map(|(_, _, id, engine)| (id, engine))?;
+        Some(super::CardCharge::over(vec![card], plan.bytes.saturating_add(engine)).handed())
+    }
+}
+
 /// What [`VramScheduler::admit_climb`] settled on.
 enum AdmittedClimb {
     /// Fits: the start is claimed and running — at the joiner's raised rung
@@ -961,7 +1137,11 @@ impl VramScheduler {
                 return Ok(AdmittedClimb::Held);
             }
             let l = self.ledger(state, snap).await;
-            let Some(cap) = l.capacity.as_ref() else {
+            // The new rung goes where the running one is (device-ledger
+            // design §5.6): its cards' room, the running rung's charge
+            // counted as freed.
+            let on = rung_cards(&l, target);
+            let Some(cap) = l.capacity_on(&on, None) else {
                 // Telemetry vanished mid-wait: unarbitrated, like `decide`.
                 return Ok(match joiner {
                     Some(j) => start_climb(state, snap, ticket, j, true),
@@ -977,8 +1157,31 @@ impl VramScheduler {
                 self.set_stage(waiter_id, "starting the new rung");
                 return Ok(start_climb(state, snap, ticket, plan, false));
             }
+            // Not on its own cards now: on another card that holds it now
+            // (device-ledger design §5.6, §5.2 step 1), before anything is
+            // evicted or waited for on its own.
+            if let Some(moved) = self.climb_elsewhere(snap, target, &l, &on, plan) {
+                tracing::info!(
+                    "climbing chat model '{}' to rung {}: it does not fit its card now, and \
+                     goes on {}",
+                    target.model_id,
+                    plan.rung_text(),
+                    super::place::in_words(
+                        &moved
+                            .cards()
+                            .iter()
+                            .map(|c| super::place::card_label(&l.devices, c))
+                            .collect::<Vec<_>>()
+                    )
+                );
+                self.set_stage(waiter_id, "starting the new rung on another card");
+                return Ok(start_climb_on(state, snap, ticket, plan, moved));
+            }
             if budget.is_some_and(|d| started.elapsed() >= d) {
-                return Err(expired(describe_holders(&l)));
+                return Err(expired(describe_holders(
+                    &l,
+                    &super::stall::wait_cards(&l, &on),
+                )));
             }
             // An owner's climb waiting for room drains every resident model
             // for them, like `decide`'s wait (candidate-aliases §4.5, §12
@@ -994,21 +1197,26 @@ impl VramScheduler {
                 fmt_bytes(running)
             ));
             if self
-                .evict_one(state, target, &l, background::Victims::Any, None)
+                .evict_one(state, target, &l, background::Victims::Any, None, &on)
                 .await
             {
                 continue;
             }
             // Nothing of lmgw's is left to evict or wait for: the learned
-            // growth is no reason to wait any longer, and a rung that fits
-            // beside what other programs hold now with its margin starts,
-            // warned (per-model containers §4, "Learned growth decides
-            // waiting").
-            if !super::queue::others_hold(&l, target) && free >= plan.real {
+            // growth and its margin are no reason to wait any longer, and a
+            // rung that fits beside what other programs hold now with the
+            // floor starts, warned (per-model containers §4, "Learned growth
+            // decides waiting"; device-ledger design WP13: both given up
+            // last).
+            if !super::place::others_hold_on(&l, target, &on) && free >= plan.real {
                 if let Some(note) = self.growth_let_go(
                     target,
                     plan.bytes,
-                    (plan.needs - plan.bytes, plan.real - plan.bytes),
+                    (
+                        plan.needs - plan.bytes,
+                        plan.kept - plan.bytes,
+                        plan.real - plan.bytes,
+                    ),
                     free,
                 ) {
                     tracing::warn!(
@@ -1059,7 +1267,12 @@ impl VramScheduler {
                     Gated::External(_) => return Ok(AdmittedClimb::External),
                     // Out of time back in the queue: it was still waiting
                     // for the busy models it yielded over (§12 entry 74).
-                    Gated::Expired => return Err(expired(describe_holders(&l))),
+                    Gated::Expired => {
+                        return Err(expired(describe_holders(
+                            &l,
+                            &super::stall::wait_cards(&l, &on),
+                        )))
+                    }
                 };
                 ticket.set_at_gate(false);
             }
@@ -1091,7 +1304,7 @@ impl VramScheduler {
         needs: u64,
         running: u64,
     ) -> Option<String> {
-        let total = l.capacity.as_ref()?.total;
+        let total = l.capacity_on(&rung_cards(l, target), None)?.total;
         let others: Vec<(Class, String)> = state
             .runtime()
             .list()
@@ -1120,7 +1333,7 @@ impl VramScheduler {
                     .iter()
                     .find(|r| r.container == class && r.model == model)
                     .map_or(0, |r| r.estimated_bytes);
-                climbs.push((model, bytes, w.needs));
+                climbs.push((model, bytes, w.needs.total()));
             }
         }
         let held: u64 = climbs.iter().map(|(_, bytes, _)| bytes).sum();

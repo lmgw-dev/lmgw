@@ -1,0 +1,83 @@
+[
+ {
+  "js": "'A toast that stays (a failed download, an error) never covers the Chat composer: the toast stack stands above it (--toast-bottom, the composer height), the toast host passes clicks through outside its pills, and a real click on the message field lands in it. Checked wide and narrow (the drawer layout). Read-only apart from typing into the box (never sent). Run: scripts/ui-drive.py scripts/drive/chat-toast.json --block-writes --token-file <dir>.token --base http://<addr>.'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/chat/api/threads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model_alias:'fake-echo',kind:'chat'})});const t=await r.json();return 'thread '+t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "(() => { window.__fail = n => { for (let i = 0; i < n; i++) window.dispatchEvent(new CustomEvent('lmgw-download-failed', { detail: { error: 'the drive keeps this toast up ' + i } })); return n; }; window.__geo = () => { const c = document.querySelector('.composer').getBoundingClientRect(); const ts = [...document.querySelectorAll('.toast-host .toast')].map(t => t.getBoundingClientRect()); const h = document.querySelector('.toast-host'); return { n: ts.length, hit: ts.some(t => t.left < c.right && t.right > c.left && t.top < c.bottom && t.bottom > c.top), bottom: Math.max(0, ...ts.map(t => t.bottom)), ctop: c.top, hostPe: getComputedStyle(h).pointerEvents, reserve: document.documentElement.style.getPropertyValue('--toast-bottom') }; }; return 'helpers'; })()"
+ },
+ {
+  "js": "__fail(3)"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "JSON.stringify(__geo())",
+  "label": "three toasts up: their geometry against the composer"
+ },
+ {
+  "expect": "(() => { const g = __geo(); return g.n === 3 && !g.hit && g.bottom <= g.ctop && g.hostPe === 'none' && /px$/.test(g.reserve); })()",
+  "label": "wide: three persistent toasts stand above the composer, the host passes clicks through, the composer's reserve is published"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "typed under toasts"
+ },
+ {
+  "expect": "document.querySelector('textarea.composer-input').value === 'typed under toasts' && document.activeElement === document.querySelector('textarea.composer-input')",
+  "label": "wide: a real click on the message field focused it and the typing landed there"
+ },
+ {
+  "shot": "toast-wide"
+ },
+ {
+  "size": "700x800"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "js": "JSON.stringify(__geo())",
+  "label": "narrow: geometry"
+ },
+ {
+  "expect": "(() => { const g = __geo(); return g.n === 3 && !g.hit && g.bottom <= g.ctop; })()",
+  "label": "narrow (drawer layout): the toasts still stand above the composer"
+ },
+ {
+  "js": "(() => { const t = document.querySelector('textarea.composer-input'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return 'cleared'; })()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "narrow too"
+ },
+ {
+  "expect": "document.querySelector('textarea.composer-input').value === 'narrow too'",
+  "label": "narrow: the click on the message field lands in it"
+ },
+ {
+  "shot": "toast-narrow"
+ },
+ {
+  "js": "(() => { const t = document.querySelector('textarea.composer-input'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); return 'composer cleared'; })()"
+ }
+]

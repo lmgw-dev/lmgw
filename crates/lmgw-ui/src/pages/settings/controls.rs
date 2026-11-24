@@ -1,17 +1,18 @@
 //! Settings — the controls that act at once: GPU hold, apply, check now, theme and scale.
 
+use super::prow::SetField;
 use super::*;
 
 // ---------------------------------------------------------------------------
 // Controls that apply at once
 // ---------------------------------------------------------------------------
 
-/// The manual GPU hold (gpu-hold design §3.1, §6): a state line and one
-/// button. `active` is never part of the draft — only `ops::hold_set` may
-/// flip it, since engaging it stops containers (§5) — the same op the
-/// titlebar pill and the tray call.
+/// The manual GPU hold (gpu-hold design §3.1, §6): its state as the row's
+/// subtitle and one button. `active` is never part of the draft — only
+/// `ops::hold_set` may flip it, since engaging it stops containers (§5) —
+/// the same op the titlebar pill and the tray call.
 #[component]
-pub(super) fn HoldSwitch(page: Page) -> impl IntoView {
+pub(super) fn HoldRow(page: Page, id: String, hidden: Signal<bool>) -> impl IntoView {
     let toasts = use_toasts();
     let live = use_live();
     // Seeded from the settings snapshot, then the live bus wins — a toggle
@@ -25,36 +26,42 @@ pub(super) fn HoldSwitch(page: Page) -> impl IntoView {
     let busy = RwSignal::new(false);
     let toggle = move |_| crate::model_ops::hold_set(toasts, busy, !active.get_untracked());
     view! {
-        <span class="set-line-label">"GPU hold"</span>
-        <span class="chip" class:warn=move || active.get() class:off=move || !active.get()>
-            <span class="dot"></span>
-            {move || {
+        <SetField
+            label="GPU hold"
+            unit="applies now"
+            hint=Signal::derive(move || {
                 if active.get() {
-                    "engaged — local models are paused"
+                    "Engaged: local models are paused".to_string()
                 } else {
-                    "off — local models start on demand"
+                    "Off: local models start on demand".to_string()
                 }
-            }}
-        </span>
-        <button
-            class="btn sm"
-            disabled=move || busy.get()
-            title=move || {
-                if active.get() {
-                    "Let local models start again"
-                } else {
-                    "Stop every local model and refuse or reroute local requests until released"
-                }
-            }
-            on:click=toggle
+            })
+            inline=true
+            class="set-hold"
+            id=id
+            hidden=hidden
         >
-            {move || match (busy.get(), active.get()) {
-                (true, _) => "Working…",
-                (false, true) => "Release hold",
-                (false, false) => "Engage hold",
-            }}
-        </button>
-        <span class="applies-now">"applies now"</span>
+            <span class="dot" class:warn=move || active.get()></span>
+            <button
+                class="btn"
+                class:destructive=move || !active.get()
+                disabled=move || busy.get()
+                title=move || {
+                    if active.get() {
+                        "Let local models start again"
+                    } else {
+                        "Stop every local model and refuse or reroute local requests until released"
+                    }
+                }
+                on:click=toggle
+            >
+                {move || match (busy.get(), active.get()) {
+                    (true, _) => "Working…",
+                    (false, true) => "Release hold",
+                    (false, false) => "Engage hold",
+                }}
+            </button>
+        </SetField>
     }
 }
 
@@ -94,7 +101,7 @@ pub(super) fn ClassApplyButton(
     };
     view! {
         <button
-            class="btn sm"
+            class="btn"
             disabled=move || busy() || unsaved.get()
             title=move || {
                 if unsaved.get() {
@@ -105,7 +112,7 @@ pub(super) fn ClassApplyButton(
             }
             on:click=run
         >
-            {move || if busy() { "Applying…" } else { "Apply to running containers" }}
+            {move || if busy() { "Applying…" } else { "Apply" }}
         </button>
     }
 }
@@ -129,58 +136,21 @@ pub(super) fn CheckNowButton() -> impl IntoView {
         });
     };
     view! {
-        <button class="btn sm" disabled=move || checking.get() on:click=check>
-            {move || if checking.get() { "Checking…" } else { "Check for app update now" }}
+        <button class="btn" disabled=move || checking.get() on:click=check>
+            {move || if checking.get() { "Checking…" } else { "Check now" }}
         </button>
     }
 }
 
-/// Theme: this window's own, stored where index.html reads it before paint.
-/// In the Windows app window, whose shell marks the system's mode on the page
-/// (`data-system-theme`, src-tauri's desktop_palette/win.rs), "system" is
-/// offered too and is the default: the page follows Windows' dark or light.
+/// Theme: this window's own (crate::theme, which the main menu sets too).
 #[component]
 pub(super) fn ThemeField(id: String, hidden: Signal<bool>) -> impl IntoView {
-    let system = || {
-        document()
-            .document_element()
-            .and_then(|el| el.get_attribute("data-system-theme"))
-    };
-    let follows = system().is_some();
-    let theme = RwSignal::new(
-        window()
-            .local_storage()
-            .ok()
-            .flatten()
-            .and_then(|s| s.get_item("lmgw-theme").ok().flatten())
-            .filter(|t| follows || t != "system")
-            .unwrap_or_else(|| if follows { "system" } else { "dark" }.into()),
-    );
-    Effect::new(move |_| {
-        let t = theme.get();
-        let shown = match t.as_str() {
-            "system" => system().unwrap_or_else(|| "dark".into()),
-            _ => t.clone(),
-        };
-        let _ = document()
-            .document_element()
-            .map(|el| el.set_attribute("data-theme", &shown));
-        if let Ok(Some(storage)) = window().local_storage() {
-            let _ = storage.set_item("lmgw-theme", &t);
-        }
-    });
-    let opts = Signal::derive(move || {
-        let system = follows.then_some(("system", "system"));
-        system
-            .into_iter()
-            .chain([("dark", "dark"), ("light", "light")])
-            .map(|(v, l)| (v.to_string(), l.to_string()))
-            .collect::<Vec<_>>()
-    });
+    let theme = crate::theme::use_theme();
+    let opts = Signal::derive(move || theme.options());
     view! {
-        <Field label="Theme" unit="applies now" id=id hidden=hidden>
-            <Select value=theme options=opts/>
-        </Field>
+        <SetField label="Theme" unit="applies now" inline=true class="combo" id=id hidden=hidden>
+            <Select value=theme.choice options=opts/>
+        </SetField>
     }
 }
 
@@ -214,12 +184,16 @@ pub(super) fn ScaleField(id: String, hidden: Signal<bool>) -> impl IntoView {
             .collect::<Vec<_>>()
     });
     view! {
-        <Field label="Interface scale" unit="applies now" id=id hidden=hidden>
-            {if in_shell {
-                view! { <Select value=sel options=opts/> }.into_any()
-            } else {
-                view! { <div class="dim set-static">"browser zoom · Ctrl +/-"</div> }.into_any()
-            }}
-        </Field>
+        <SetField
+            label="Interface scale"
+            unit="applies now"
+            hint=if in_shell { "" } else { "In a browser tab, the browser's zoom: Ctrl + and Ctrl -" }
+            inline=true
+            class="combo"
+            id=id
+            hidden=hidden
+        >
+            {in_shell.then(|| view! { <Select value=sel options=opts/> })}
+        </SetField>
     }
 }

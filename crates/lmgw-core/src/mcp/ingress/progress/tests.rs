@@ -17,6 +17,8 @@ fn progress_only_rises_over_stages_steps_and_passes() {
         phase: MediaPhase::Unloading,
         model: "chat/qwen".into(),
         room: None,
+        on: None,
+        moves: false,
     };
     let a = c.next(&stage).unwrap();
     assert_eq!((a.0, a.2.as_str()), (0.5, "unloading chat/qwen"));
@@ -25,6 +27,8 @@ fn progress_only_rises_over_stages_steps_and_passes() {
             phase: MediaPhase::Loading,
             model: "image/z".into(),
             room: None,
+            on: None,
+            moves: false,
         })
         .unwrap();
     assert_eq!(b.0, 0.75);

@@ -114,19 +114,19 @@ pub(super) const TLS: &[Def] = &[
 /// What the panel says of the listener: its line and the line's tone.
 pub(super) fn state_line(s: &TlsStatus) -> (String, &'static str) {
     match s.state {
-        TlsListenerState::Off => ("off: no certificate, key and address are set".into(), "off"),
+        TlsListenerState::Off => ("Off: no certificate, key and address are set".into(), "off"),
         TlsListenerState::Serving => (
             format!(
-                "serving on {} (TLS 1.2 and 1.3)",
+                "Serving on {} (TLS 1.2 and 1.3)",
                 s.listening.as_deref().unwrap_or("?")
             ),
             "ok",
         ),
         TlsListenerState::NotServing if s.error.is_some() => {
-            ("not serving: it did not start".into(), "warn")
+            ("Not serving: it did not start".into(), "warn")
         }
         TlsListenerState::NotServing => (
-            "not serving yet: configured since the server started".into(),
+            "Not serving yet: configured since the server started".into(),
             "warn",
         ),
     }
@@ -307,7 +307,7 @@ mod tests {
         };
         assert_eq!(
             state_line(&serving),
-            ("serving on 0.0.0.0:8443 (TLS 1.2 and 1.3)".into(), "ok")
+            ("Serving on 0.0.0.0:8443 (TLS 1.2 and 1.3)".into(), "ok")
         );
         let failed = TlsStatus {
             state: TlsListenerState::NotServing,

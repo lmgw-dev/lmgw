@@ -166,7 +166,7 @@ pub fn holders(probe: &dyn GpuProbe) -> String {
         Ok(l) => l,
         Err(e) => return format!("  (the driver lists no processes: {e})"),
     };
-    if listed.is_empty() {
+    if listed.iter().all(|d| d.processes.is_empty()) {
         return "  (the driver lists no process holding memory)".into();
     }
     let containers = container_pids();
@@ -182,11 +182,13 @@ pub fn holders(probe: &dyn GpuProbe) -> String {
         .collect();
     let mut rows: Vec<(Option<u64>, String)> = listed
         .iter()
-        .map(|p| {
+        .enumerate()
+        .flat_map(|(card, d)| d.processes.iter().map(move |p| (card, p)))
+        .map(|(card, p)| {
             let comm = command(p.pid);
             let who = match owner.get(&p.pid) {
-                Some(c) => format!("container {c} ({comm}, pid {})", p.pid),
-                None => format!("{comm} (pid {})", p.pid),
+                Some(c) => format!("container {c} ({comm}, pid {}) on card {card}", p.pid),
+                None => format!("{comm} (pid {}) on card {card}", p.pid),
             };
             (p.bytes, who)
         })

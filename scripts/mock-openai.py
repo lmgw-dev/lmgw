@@ -42,6 +42,9 @@ Environment:
   MODE=down          500 everything, to exercise the failure banner
   DELAY=<s>          delay before a non-streaming answer (default 0)
   STREAM_DELAY=<s>   delay between streamed chunks (default 0.05 → ~20 tok/s)
+  PREFILL_DELAY=<s>  delay before a streamed answer's first chunk, after its headers
+                     (default 0): a model still reading its prompt, for the Chat's
+                     prefill state (scripts/drive/chat-stream-return.json)
   STREAM_TOKENS=<n>  chunks in a streamed answer (default 80)
   STREAM_CODE=0      drop the fenced code block from the answer (default: keep)
   EMBED_DIMS=<n>     `/embeddings` answers deterministic hashed bag-of-words vectors
@@ -104,6 +107,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODE = os.environ.get("MODE", "normal")
 DELAY = float(os.environ.get("DELAY", "0"))
 STREAM_DELAY = float(os.environ.get("STREAM_DELAY", "0.05"))
+PREFILL_DELAY = float(os.environ.get("PREFILL_DELAY", "0"))
 STREAM_TOKENS = int(os.environ.get("STREAM_TOKENS", "80"))
 STREAM_CODE = os.environ.get("STREAM_CODE", "1") != "0"
 ECHO = os.environ.get("ECHO", "0") == "1"
@@ -583,6 +587,9 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         try:
+            if PREFILL_DELAY:
+                self.wfile.flush()
+                time.sleep(PREFILL_DELAY)
             self._sse(frame({"role": "assistant", "content": ""}))
             for piece in pieces:
                 if STREAM_DELAY:

@@ -42,13 +42,17 @@ use lmgw_api_types::ImageCapabilities;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::lab_frame::{Check, Fname, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
+use super::lab_frame::{Check, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
 use super::lab_history::{ExportMenu, HistoryList, LabHistory};
-use super::lab_presets::PresetsCard;
+use super::lab_presets::PresetsMenu;
+use super::lab_rows::{FilePick, PromptField};
 use crate::catalog::CatalogEntry;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
-use crate::widgets::{Explain, ModelPicker, Select};
+use crate::widgets::{
+    ActionRow, ComboRow, EntryRow, Explain, Ico, Icon, InfoRow, ModelPicker, PrefGroup, Select,
+    StackRow,
+};
 
 /// A kept generation's or edit's card.
 mod card;
@@ -676,15 +680,16 @@ pub fn ImageLab() -> impl IntoView {
 
     view! {
         <LabFrame
+            title="Image lab"
+            glyph=Ico::Image
+            empty="Every image you render lands here, newest first, and stays on the server until you delete it: one from its card, or all with Clear."
             persist="image-lab.pipeline"
             side_label="Pipeline"
             side_badge=Signal::derive(String::new)
             side=move || view! { <SidePanel lab=lab/> }
+            model=move || view! { <ModelPicker value=lab.alias entries=entries status=lab.list/> }
             head=move || {
                 view! {
-                    <span class="lab-label">"Model"</span>
-                    <ModelPicker value=lab.alias entries=entries status=lab.list/>
-                    <span class="lab-label">"Route"</span>
                     <TaskMenu
                         value=Signal::derive(move || {
                             if lab.editing.get() { "edit" } else { "generate" }.to_string()
@@ -703,7 +708,10 @@ pub fn ImageLab() -> impl IntoView {
                                 modes.map(|s| view! { <span class="type-badge">{s}</span> })
                             })
                     }}
-                    <span class="spacer"></span>
+                }
+            }
+            actions=move || {
+                view! {
                     {move || {
                         // A start waiting for its download (machine-check
                         // design §5): no container yet, so that is its state.
@@ -717,8 +725,8 @@ pub fn ImageLab() -> impl IntoView {
                         }
                         let (cls, label) = match lab.state().as_deref() {
                             Some("ready") => ("chip ok", "container ready"),
-                            Some("starting") => ("chip live", "starting…"),
-                            Some("stopping") => ("chip live", "stopping…"),
+                            Some("starting") => ("chip info", "starting…"),
+                            Some("stopping") => ("chip info", "stopping…"),
                             Some(_) => ("chip off", "stopped"),
                             // A cloud alias has no container of ours.
                             None if lab.model().map(|m| m.local) == Some(false) => {
@@ -737,25 +745,26 @@ pub fn ImageLab() -> impl IntoView {
                         }
                         .into_any()
                     }}
-                    <button
-                        class="btn ghost"
-                        title="Reload the model list and the probed capabilities"
-                        on:click=move |_| load_models()
-                    >
-                        "Reload"
-                    </button>
-                }
-            }
-            form=move || {
-                view! {
-                    <Notices lab=lab on_retry=load_models/>
-                    <PresetsCard
+                    <PresetsMenu
                         lab=LabKind::Image
                         kind=LabPresetKind::ImagePrompt
                         title="Prompt presets"
                         current=preset_now
                         on_load=preset_load
                     />
+                    <button
+                        class="icon-btn lab-reload"
+                        title="Reload the model list and the probed capabilities"
+                        aria-label="Reload"
+                        on:click=move |_| load_models()
+                    >
+                        <Icon ico=Ico::Refresh/>
+                    </button>
+                }
+            }
+            form=move || {
+                view! {
+                    <Notices lab=lab on_retry=load_models/>
                     {move || {
                         if lab.editing.get() {
                             view! { <EditPanel lab=lab/> }.into_any()
@@ -763,7 +772,7 @@ pub fn ImageLab() -> impl IntoView {
                             view! { <GeneratePanel lab=lab/> }.into_any()
                         }
                     }}
-                    <details class="card req-card wrap" open>
+                    <details class="req-card wrap" open>
                         <summary>
                             "Request — "
                             <span class="mono-sm">{move || lab.endpoint()}</span>
@@ -781,10 +790,10 @@ pub fn ImageLab() -> impl IntoView {
                                 view! {
                                     <div class="card result-card">
                                         <div class="run-head">
-                                            <span class="run-model mono-sm">{model}</span>
+                                            <span class="run-model mono-sm" title=model.clone()>{model.clone()}</span>
                                             <span class="mono-sm dim">{endpoint}</span>
                                             <span class="spacer"></span>
-                                            <span class="chip live">
+                                            <span class="chip info" data-state="running">
                                                 <i class="dot"></i>
                                                 "rendering…"
                                             </span>
@@ -828,7 +837,7 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
             ListStatus::Failed(e) => {
                 view! {
                     <div class="notice err">
-                        {format!("⚠ The image model list did not load: {e}")}
+                        {format!("The image model list did not load: {e}")}
                         " "
                         <button class="btn ghost sm" on:click=move |_| on_retry()>
                             "Retry"
@@ -860,7 +869,7 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
                             "Local models are paused. A request either answers from this row's "
                             "fallback alias or refuses with "
                             <span class="mono-sm">"gpu_hold"</span>
-                            " — release the hold from the HOLD pill at the foot of the sidebar to render here."
+                            " — release the hold from the On hold pill at the foot of the sidebar to render here."
                         </div>
                     }
                 })
@@ -888,33 +897,23 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
 fn PromptCard(lab: Lab) -> impl IntoView {
     let f = lab.form;
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Prompt"</h3>
-            <textarea
-                class="input ta"
-                placeholder="What to draw…"
-                prop:value=move || f.prompt.get()
-                on:input=move |ev| f.prompt.set(event_target_value(&ev))
-            ></textarea>
-            <div class="field" style="margin-top:10px">
-                <label>
-                    "Negative prompt " <Fname name="negative_prompt"/>
-                </label>
-                <input
-                    class="input"
-                    placeholder="what to keep out of it"
-                    prop:value=move || f.negative_prompt.get()
-                    on:input=move |ev| f.negative_prompt.set(event_target_value(&ev))
-                />
-            </div>
-            <Explain summary="Everything below the prompt travels inside it." persist="image-lab.explain.extra">
-                "The OpenAI route reads only "
-                <span class="mono-sm">"prompt, n, size, output_format, output_compression"</span>
-                ", and sd.cpp's own "
-                <span class="mono-sm">"<sd_cpp_extra_args>"</span>
-                " block carries the rest. It is appended only when a field is set — see the request panel."
-            </Explain>
-        </div>
+        <PromptField title="Prompt" value=f.prompt placeholder="What to draw…"/>
+        <PrefGroup>
+            <EntryRow
+                title="Negative prompt"
+                wire="negative_prompt"
+                value=f.negative_prompt
+                placeholder="What to keep out of it"
+                wide=true
+            />
+        </PrefGroup>
+        <Explain summary="Everything below the prompt travels inside it." persist="image-lab.explain.extra">
+            "The OpenAI route reads only "
+            <span class="mono-sm">"prompt, n, size, output_format, output_compression"</span>
+            ", and sd.cpp's own "
+            <span class="mono-sm">"<sd_cpp_extra_args>"</span>
+            " block carries the rest. It is appended only when a field is set — see the request panel."
+        </Explain>
     }
 }
 
@@ -939,106 +938,40 @@ fn SizeCard(lab: Lab) -> impl IntoView {
             .chain(probed.into_iter().map(|v| (v.clone(), v)))
             .collect::<Vec<_>>()
     });
+    let desc = move || {
+        match limits() {
+        Some(l) if l.max_width.is_some() => format!(
+            "This pipeline accepts {}–{} × {}–{} px and up to {} image(s) per request — its own numbers, read from its capabilities.",
+            l.min_width.unwrap_or_default(),
+            l.max_width.unwrap_or_default(),
+            l.min_height.unwrap_or_default(),
+            l.max_height.unwrap_or_default(),
+            l.max_batch_count
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into()),
+        ),
+        _ => "Empty means the server's own default. No bounds are known until this model has run once and reported its capabilities — an out-of-range value comes back as the server's own refusal.".to_string(),
+    }
+    };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Size and output"</h3>
-            <div class="field-grid">
-                <div class="field">
-                    <label>
-                        "Width " <Fname name="size"/>
-                    </label>
-                    <input
-                        class="input"
-                        type="number"
-                        placeholder="server default"
-                        min=move || limits().and_then(|l| l.min_width).map(|v| v.to_string())
-                        max=move || limits().and_then(|l| l.max_width).map(|v| v.to_string())
-                        prop:value=move || f.width.get()
-                        on:input=move |ev| f.width.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Height " <Fname name="size"/>
-                    </label>
-                    <input
-                        class="input"
-                        type="number"
-                        placeholder="server default"
-                        min=move || limits().and_then(|l| l.min_height).map(|v| v.to_string())
-                        max=move || limits().and_then(|l| l.max_height).map(|v| v.to_string())
-                        prop:value=move || f.height.get()
-                        on:input=move |ev| f.height.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Images " <Fname name="n"/>
-                    </label>
-                    <input
-                        class="input"
-                        type="number"
-                        placeholder="server default"
-                        min="1"
-                        max=move || limits().and_then(|l| l.max_batch_count).map(|v| v.to_string())
-                        prop:value=move || f.n.get()
-                        on:input=move |ev| f.n.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Format " <Fname name="output_format"/>
-                    </label>
-                    <Select
-                        value=f.output_format
-                        options=format_opts
-                        placeholder="(server default)"
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Compression " <Fname name="output_compression"/>
-                    </label>
-                    <input
-                        class="input"
-                        type="number"
-                        placeholder="server default"
-                        prop:value=move || f.output_compression.get()
-                        on:input=move |ev| f.output_compression.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
-            {move || {
-                match limits() {
-                    Some(l) if l.max_width.is_some() => {
-                        view! {
-                            <p class="dim mini-note">
-                                {format!(
-                                    "This pipeline accepts {}–{} × {}–{} px and up to {} image(s) per request — its own numbers, read from its capabilities.",
-                                    l.min_width.unwrap_or_default(),
-                                    l.max_width.unwrap_or_default(),
-                                    l.min_height.unwrap_or_default(),
-                                    l.max_height.unwrap_or_default(),
-                                    l
-                                        .max_batch_count
-                                        .map(|v| v.to_string())
-                                        .unwrap_or_else(|| "?".into()),
-                                )}
-                            </p>
-                        }
-                            .into_any()
-                    }
-                    _ => {
-                        view! {
-                            <p class="dim mini-note">
-                                "Empty means the server's own default. No bounds are known until this model has run once and reported its capabilities — an out-of-range value comes back as the server's own refusal."
-                            </p>
-                        }
-                            .into_any()
-                    }
-                }
-            }}
-        </div>
+        <PrefGroup title="Size and output" desc=desc>
+            <EntryRow title="Width" wire="size" value=f.width placeholder="server default"/>
+            <EntryRow title="Height" wire="size" value=f.height placeholder="server default"/>
+            <EntryRow title="Images" wire="n" value=f.n placeholder="server default"/>
+            <ComboRow
+                title="Format"
+                wire="output_format"
+                value=f.output_format
+                options=format_opts
+                placeholder="(server default)"
+            />
+            <EntryRow
+                title="Compression"
+                wire="output_compression"
+                value=f.output_compression
+                placeholder="server default"
+            />
+        </PrefGroup>
     }
 }
 
@@ -1049,114 +982,89 @@ fn SamplingCard(lab: Lab) -> impl IntoView {
     let schedulers = move || lab.caps().map(|c| c.schedulers).unwrap_or_default();
     let sampler_opts = Signal::derive(move || with_default(samplers()));
     let scheduler_opts = Signal::derive(move || with_default(schedulers()));
+    let no_lists = Memo::new(move |_| samplers().is_empty());
+    let no_scheds = Memo::new(move |_| schedulers().is_empty());
+    let desc = move || {
+        if no_lists.get() {
+            "Start the model to load its sampler list — the names come from the running container's own capabilities, and a typed one is passed through as written."
+        } else {
+            ""
+        }
+    };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Sampling"</h3>
-            <div class="field-grid">
-                <div class="field">
-                    <label>
-                        "Steps " <Fname name="sample_params.sample_steps"/>
-                    </label>
-                    <input
-                        class="input"
-                        type="number"
-                        placeholder="server default"
-                        prop:value=move || f.steps.get()
-                        on:input=move |ev| f.steps.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "CFG scale " <Fname name="sample_params.guidance.txt_cfg"/>
-                    </label>
-                    <input
-                        class="input"
-                        placeholder="server default"
-                        prop:value=move || f.cfg_scale.get()
-                        on:input=move |ev| f.cfg_scale.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Seed " <Fname name="seed"/>
-                    </label>
-                    <div class="seed-row">
-                        <input
-                            class="input"
-                            placeholder="server default"
-                            prop:value=move || f.seed.get()
-                            on:input=move |ev| f.seed.set(event_target_value(&ev))
+        <PrefGroup title="Sampling" desc=desc>
+            <EntryRow
+                title="Steps"
+                wire="sample_params.sample_steps"
+                value=f.steps
+                placeholder="server default"
+            />
+            <EntryRow
+                title="CFG scale"
+                wire="sample_params.guidance.txt_cfg"
+                value=f.cfg_scale
+                placeholder="server default"
+            />
+            <EntryRow title="Seed" wire="seed" value=f.seed placeholder="server default">
+                <button
+                    class="btn flat sm"
+                    title="Pick a random seed to reuse; -1 means a new random seed on every run"
+                    on:click=move |_| f.seed.set(random_seed().to_string())
+                >
+                    "Random"
+                </button>
+            </EntryRow>
+            {move || {
+                if no_lists.get() {
+                    view! {
+                        <EntryRow
+                            title="Sampler"
+                            wire="sample_params.sample_method"
+                            value=f.sampler
+                            placeholder="euler"
+                            mono=true
                         />
-                        <button
-                            class="btn ghost sm"
-                            title="Pick a random seed to reuse; -1 means a new random seed on every run"
-                            on:click=move |_| f.seed.set(random_seed().to_string())
-                        >
-                            "Random"
-                        </button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label>
-                        "Sampler " <Fname name="sample_params.sample_method"/>
-                    </label>
-                    {move || {
-                        if samplers().is_empty() {
-                            view! {
-                                <input
-                                    class="input mono"
-                                    placeholder="euler"
-                                    prop:value=move || f.sampler.get()
-                                    on:input=move |ev| f.sampler.set(event_target_value(&ev))
-                                />
-                            }
-                                .into_any()
-                        } else {
-                            view! {
-                                <Select
-                                    value=f.sampler
-                                    options=sampler_opts
-                                    placeholder="(server default)"
-                                />
-                            }
-                                .into_any()
-                        }
-                    }}
-                </div>
-                <div class="field">
-                    <label>
-                        "Scheduler " <Fname name="sample_params.scheduler"/>
-                    </label>
-                    {move || {
-                        if schedulers().is_empty() {
-                            view! {
-                                <input
-                                    class="input mono"
-                                    placeholder="discrete"
-                                    prop:value=move || f.scheduler.get()
-                                    on:input=move |ev| f.scheduler.set(event_target_value(&ev))
-                                />
-                            }
-                                .into_any()
-                        } else {
-                            view! {
-                                <Select
-                                    value=f.scheduler
-                                    options=scheduler_opts
-                                    placeholder="(server default)"
-                                />
-                            }
-                                .into_any()
-                        }
-                    }}
-                </div>
-            </div>
-            <Show when=move || samplers().is_empty()>
-                <p class="dim mini-note">
-                    "Start the model to load its sampler list — the names come from the running container's own capabilities, and a typed one is passed through as written."
-                </p>
-            </Show>
-        </div>
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <ComboRow
+                            title="Sampler"
+                            wire="sample_params.sample_method"
+                            value=f.sampler
+                            options=sampler_opts
+                            placeholder="(server default)"
+                        />
+                    }
+                        .into_any()
+                }
+            }}
+            {move || {
+                if no_scheds.get() {
+                    view! {
+                        <EntryRow
+                            title="Scheduler"
+                            wire="sample_params.scheduler"
+                            value=f.scheduler
+                            placeholder="discrete"
+                            mono=true
+                        />
+                    }
+                        .into_any()
+                } else {
+                    view! {
+                        <ComboRow
+                            title="Scheduler"
+                            wire="sample_params.scheduler"
+                            value=f.scheduler
+                            options=scheduler_opts
+                            placeholder="(server default)"
+                        />
+                    }
+                        .into_any()
+                }
+            }}
+        </PrefGroup>
     }
 }
 
@@ -1181,9 +1089,32 @@ fn LoraCard(lab: Lab) -> impl IntoView {
         f.loras
             .update(|v| v.push((id, String::new(), String::new())));
     };
+    let desc = move || {
+        let n = known().len();
+        if n > 0 {
+            format!("{n} found under --lora-model-dir.")
+        } else {
+            String::new()
+        }
+    };
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"LoRA"</h3>
+        <PrefGroup
+            title="LoRA"
+            desc=desc
+            suffix=move || {
+                view! {
+                    <button class="btn flat sm lora-add" title="Add a LoRA to the request" on:click=add>
+                        <Icon ico=Ico::Plus/>
+                        "Add LoRA"
+                    </button>
+                }
+            }
+        >
+            <Show when=move || f.loras.with(Vec::is_empty)>
+                <StackRow class="lora-none">
+                    <span class="dim">"None: the request sends no LoRA."</span>
+                </StackRow>
+            </Show>
             <For each=move || f.loras.get() key=|(id, _, _)| *id let:row>
                 {
                     let (id, path, mult) = row;
@@ -1204,76 +1135,65 @@ fn LoraCard(lab: Lab) -> impl IntoView {
                         }
                     });
                     view! {
-                        <div class="lora-row">
-                            <input
-                                class="input mono"
-                                placeholder="lora name or path under --lora-model-dir"
-                                prop:value=path
-                                on:input=move |ev| {
-                                    let v = event_target_value(&ev);
-                                    f.loras
-                                        .update(|rows| {
-                                            if let Some(r) = rows.iter_mut().find(|r| r.0 == id) {
-                                                r.1 = v.clone();
-                                            }
-                                        });
-                                }
-                            />
-                            // Always a cell, so the row's four columns line
-                            // up whether or not this model has LoRAs on disk.
-                            <div class="lora-pick">
-                                <Show when=move || !known().is_empty()>
-                                    <Select value=pick options=known_opts placeholder="on disk"/>
-                                </Show>
+                        <StackRow class="lora-prow">
+                            <div class="lora-row">
+                                <input
+                                    class="input mono"
+                                    aria-label="LoRA name or path"
+                                    placeholder="lora name or path under --lora-model-dir"
+                                    prop:value=path
+                                    on:input=move |ev| {
+                                        let v = event_target_value(&ev);
+                                        f.loras
+                                            .update(|rows| {
+                                                if let Some(r) = rows.iter_mut().find(|r| r.0 == id) {
+                                                    r.1 = v.clone();
+                                                }
+                                            });
+                                    }
+                                />
+                                // Always a cell, so the row's four columns line
+                                // up whether or not this model has LoRAs on disk.
+                                <div class="lora-pick">
+                                    <Show when=move || !known().is_empty()>
+                                        <Select value=pick options=known_opts placeholder="on disk"/>
+                                    </Show>
+                                </div>
+                                <input
+                                    class="input"
+                                    aria-label="Multiplier"
+                                    placeholder="multiplier"
+                                    prop:value=mult
+                                    on:input=move |ev| {
+                                        let v = event_target_value(&ev);
+                                        f.loras
+                                            .update(|rows| {
+                                                if let Some(r) = rows.iter_mut().find(|r| r.0 == id) {
+                                                    r.2 = v.clone();
+                                                }
+                                            });
+                                    }
+                                />
+                                <button
+                                    class="icon-btn sm del"
+                                    title="Remove this LoRA"
+                                    aria-label="Remove this LoRA"
+                                    on:click=move |_| f.loras.update(|rows| rows.retain(|r| r.0 != id))
+                                >
+                                    <Icon ico=Ico::Close/>
+                                </button>
                             </div>
-                            <input
-                                class="input"
-                                placeholder="multiplier"
-                                prop:value=mult
-                                on:input=move |ev| {
-                                    let v = event_target_value(&ev);
-                                    f.loras
-                                        .update(|rows| {
-                                            if let Some(r) = rows.iter_mut().find(|r| r.0 == id) {
-                                                r.2 = v.clone();
-                                            }
-                                        });
-                                }
-                            />
-                            <button
-                                class="btn ghost del"
-                                title="Remove this LoRA"
-                                on:click=move |_| f.loras.update(|rows| rows.retain(|r| r.0 != id))
-                            >
-                                "✕"
-                            </button>
-                        </div>
+                        </StackRow>
                     }
                 }
             </For>
-            <div class="row" style="margin-top:8px">
-                <button class="btn ghost" on:click=add>
-                    "Add LoRA"
-                </button>
-                {move || {
-                    let n = known().len();
-                    (n > 0)
-                        .then(|| {
-                            view! {
-                                <span class="dim mono-sm">
-                                    {format!("{n} found under --lora-model-dir")}
-                                </span>
-                            }
-                        })
-                }}
-            </div>
-            <Explain summary="A LoRA is a field of the request, never a prompt tag." persist="image-lab.explain.lora">
-                "It is the structured " <span class="mono-sm">"lora"</span>
-                " field inside the extension block — "
-                <span class="mono-sm">"<lora:name:1.0>"</span>
-                " prompt tags are refused by every sd.cpp family."
-            </Explain>
-        </div>
+        </PrefGroup>
+        <Explain summary="A LoRA is a field of the request, never a prompt tag." persist="image-lab.explain.lora">
+            "It is the structured " <span class="mono-sm">"lora"</span>
+            " field inside the extension block — "
+            <span class="mono-sm">"<lora:name:1.0>"</span>
+            " prompt tags are refused by every sd.cpp family."
+        </Explain>
     }
 }
 
@@ -1290,63 +1210,49 @@ fn GeneratePanel(lab: Lab) -> impl IntoView {
 #[component]
 fn EditPanel(lab: Lab) -> impl IntoView {
     let f = lab.form;
+    let image_sub = move || {
+        let n = f.image_name.get();
+        if n.is_empty() {
+            "No file chosen".to_string()
+        } else {
+            n
+        }
+    };
+    let mask_sub = move || {
+        let n = f.mask_name.get();
+        if n.is_empty() {
+            "Optional: none chosen".to_string()
+        } else {
+            n
+        }
+    };
+    let pick_image = Callback::new(move |ev: web_sys::Event| {
+        let el: web_sys::HtmlInputElement = event_target(&ev);
+        let file = el.files().and_then(|l| l.get(0));
+        f.image_name
+            .set(file.as_ref().map(|x| x.name()).unwrap_or_default());
+        f.image_ref.set(None);
+        f.image_file.set_value(file);
+    });
+    let pick_mask = Callback::new(move |ev: web_sys::Event| {
+        let el: web_sys::HtmlInputElement = event_target(&ev);
+        let file = el.files().and_then(|l| l.get(0));
+        f.mask_name
+            .set(file.as_ref().map(|x| x.name()).unwrap_or_default());
+        f.mask_ref.set(None);
+        f.mask_file.set_value(file);
+    });
     view! {
-        <div class="card">
-            <h3 class="lab-h3">"Reference image"</h3>
-            <div class="field-grid">
-                <div class="field">
-                    <label>
-                        "Image " <Fname name="image"/>
-                    </label>
-                    <input
-                        class="input file"
-                        type="file"
-                        accept="image/*"
-                        on:change=move |ev| {
-                            let el: web_sys::HtmlInputElement = event_target(&ev);
-                            let file = el.files().and_then(|l| l.get(0));
-                            f.image_name.set(file.as_ref().map(|x| x.name()).unwrap_or_default());
-                            f.image_ref.set(None);
-                            f.image_file.set_value(file);
-                        }
-                    />
-                </div>
-                <div class="field">
-                    <label>
-                        "Mask (optional) " <Fname name="mask"/>
-                    </label>
-                    <input
-                        class="input file"
-                        type="file"
-                        accept="image/*"
-                        on:change=move |ev| {
-                            let el: web_sys::HtmlInputElement = event_target(&ev);
-                            let file = el.files().and_then(|l| l.get(0));
-                            f.mask_name.set(file.as_ref().map(|x| x.name()).unwrap_or_default());
-                            f.mask_ref.set(None);
-                            f.mask_file.set_value(file);
-                        }
-                    />
-                </div>
-            </div>
-            {move || {
-                let name = f.image_name.get();
-                (!name.is_empty())
-                    .then(|| {
-                        view! {
-                            <p class="dim mono-sm">
-                                {format!(
-                                    "{name}{}",
-                                    if f.mask_name.get().is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(" · mask {}", f.mask_name.get())
-                                    },
-                                )}
-                            </p>
-                        }
-                    })
-            }}
+        <PrefGroup
+            title="Reference image"
+            desc="The upload is relayed as multipart through /v1/images/edits — the same path an OpenAI images client takes. The prompt, size and batch below are the edit's."
+        >
+            <ActionRow title="Image" wire="image" sub=image_sub>
+                <FilePick accept="image/*" title="Pick the picture to edit" on_file=pick_image/>
+            </ActionRow>
+            <ActionRow title="Mask" wire="mask" sub=mask_sub>
+                <FilePick accept="image/*" title="Pick a mask: white is redrawn" on_file=pick_mask/>
+            </ActionRow>
             {move || {
                 let kept: Vec<String> = [f.image_ref.get(), f.mask_ref.get()]
                     .into_iter()
@@ -1356,11 +1262,13 @@ fn EditPanel(lab: Lab) -> impl IntoView {
                 (!kept.is_empty())
                     .then(|| {
                         view! {
-                            <p class="mini-note il-kept">
-                                {format!("kept: {} — sent from the lab store, no upload. ", kept.join(" · "))}
+                            <ActionRow
+                                title="Kept pictures"
+                                sub=format!("{} — sent from the lab store, no upload", kept.join(" · "))
+                            >
                                 <button
                                     type="button"
-                                    class="btn ghost sm"
+                                    class="btn flat sm il-kept"
                                     title="Forget the kept pictures; pick files instead"
                                     on:click=move |_| {
                                         f.image_ref.set(None);
@@ -1371,16 +1279,11 @@ fn EditPanel(lab: Lab) -> impl IntoView {
                                 >
                                     "Clear"
                                 </button>
-                            </p>
+                            </ActionRow>
                         }
                     })
             }}
-            <p class="dim mini-note">
-                "The upload is relayed as multipart through "
-                <span class="mono-sm">"/v1/images/edits"</span>
-                " — the same path an OpenAI images client takes. The prompt, size and batch below are the edit's."
-            </p>
-        </div>
+        </PrefGroup>
         <PromptCard lab=lab/>
         <SizeCard lab=lab/>
         <SamplingCard lab=lab/>
@@ -1401,10 +1304,11 @@ fn SidePanel(lab: Lab) -> impl IntoView {
                 };
                 let caps = lab.caps();
                 view! {
-                    <p class="dim mini-note">
-                        "Routes: "
-                        <span class="mono-sm">{m.endpoints.join(", ")}</span>
-                    </p>
+                    <PrefGroup title="Routes">
+                        <StackRow>
+                            <span class="mono-sm lab-routes">{m.endpoints.join(", ")}</span>
+                        </StackRow>
+                    </PrefGroup>
                     // Folded: these are the same notes `/v1/models` publishes
                     // for this id — five paragraphs of contract, worth reading
                     // once and not worth burying the numbers below them.
@@ -1438,50 +1342,30 @@ fn SidePanel(lab: Lab) -> impl IntoView {
                                 .into_any()
                         }
                         Some(c) => {
+                            let refs = match (c.features.ref_images, m.edit) {
+                                (true, false) => "yes — not the gate",
+                                (true, true) => "yes",
+                                _ => "no",
+                            };
                             view! {
-                                <div class="caps">
-                                    <div class="caps-row">
-                                        <span class="k">"modes"</span>
-                                        <span class="v mono-sm">{c.supported_modes.join(", ")}</span>
-                                    </div>
-                                    <div class="caps-row">
-                                        <span class="k">"samplers"</span>
-                                        <span class="v mono-sm">{c.samplers.len()}</span>
-                                    </div>
-                                    <div class="caps-row">
-                                        <span class="k">"schedulers"</span>
-                                        <span class="v mono-sm">{c.schedulers.len()}</span>
-                                    </div>
-                                    <div class="caps-row">
-                                        <span class="k">"formats"</span>
-                                        <span class="v mono-sm">{c.output_formats.join(", ")}</span>
-                                    </div>
-                                    <div class="caps-row">
-                                        <span class="k">"loras"</span>
-                                        <span class="v mono-sm">{c.loras.len()}</span>
-                                    </div>
-                                    <div class="caps-row">
-                                        <span class="k">"upscalers"</span>
-                                        <span class="v mono-sm">{c.upscalers.len()}</span>
-                                    </div>
+                                <PrefGroup title="What it reports">
+                                    <StackRow title="Modes"><span class="mono" style="overflow-wrap:anywhere">{c.supported_modes.join(", ")}</span></StackRow>
+                                    <InfoRow title="Samplers" value=c.samplers.len().to_string() mono=true/>
+                                    <InfoRow title="Schedulers" value=c.schedulers.len().to_string() mono=true/>
+                                    <StackRow title="Formats"><span class="mono" style="overflow-wrap:anywhere">{c.output_formats.join(", ")}</span></StackRow>
+                                    <InfoRow title="LoRAs" value=c.loras.len().to_string() mono=true/>
+                                    <InfoRow title="Upscalers" value=c.upscalers.len().to_string() mono=true/>
                                     // What the pipeline *claims*, which is not
                                     // the edit gate: Z-Image-Turbo answers yes
                                     // here and then dies on a reference image
                                     // (§12.8), so the row's column decides.
                                     <div
-                                        class="caps-row"
+                                        class="caps-claim"
                                         title="The pipeline's own claim. The row's `edit` column is what decides whether /v1/images/edits is served — a pipeline that cannot take a reference image does not refuse one, it crashes."
                                     >
-                                        <span class="k">"reports ref images"</span>
-                                        <span class="v mono-sm">
-                                            {match (c.features.ref_images, m.edit) {
-                                                (true, false) => "yes — not the gate",
-                                                (true, true) => "yes",
-                                                _ => "no",
-                                            }}
-                                        </span>
+                                        <InfoRow title="Reports reference images" value=refs mono=true/>
                                     </div>
-                                </div>
+                                </PrefGroup>
                             }
                                 .into_any()
                         }

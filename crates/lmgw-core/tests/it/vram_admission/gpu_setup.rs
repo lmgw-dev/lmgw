@@ -350,8 +350,8 @@ async fn a_missing_toolkit_is_the_reason_only_for_rows_given_the_nvidia_card() {
 
     not_ready(
         ask(&gw, "m1", false).await,
-        "'m1' could not start on the graphics card of the computer lmgw runs on. One piece is \
-         missing so models can use the graphics card.",
+        "'m1' could not start on the graphics card of the computer lmgw runs on. The NVIDIA \
+         Container Toolkit is missing: models can't use the graphics card without it.",
         &["Open lmgw there to see what to do."],
     )
     .await;

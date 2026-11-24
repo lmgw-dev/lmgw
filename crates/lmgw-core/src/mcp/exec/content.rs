@@ -27,8 +27,8 @@ pub(crate) fn of_blocks(blocks: &[ToolResultBlock]) -> Vec<Value> {
     blocks
         .iter()
         .map(|b| match b {
-            ToolResultBlock::Text { text } => json!({"type": "text", "text": text}),
-            ToolResultBlock::Image { mime, data } => {
+            ToolResultBlock::Text { text, .. } => json!({"type": "text", "text": text}),
+            ToolResultBlock::Image { mime, data, .. } => {
                 json!({"type": "image", "data": data, "mimeType": mime})
             }
             ToolResultBlock::Audio { mime, data } => {
@@ -69,6 +69,7 @@ mod tests {
             ToolResultBlock::Image {
                 mime: "image/png".into(),
                 data: "AAAA".into(),
+                cache_control: None,
             },
             ToolResultBlock::Resource {
                 uri: "file://p__/a".into(),

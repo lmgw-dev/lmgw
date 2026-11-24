@@ -52,6 +52,7 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
                 // Chat Completions' own default where the client said
                 // none: not strict (ToolDef::strict).
                 strict: Some(f.get("strict").and_then(Value::as_bool).unwrap_or(false)),
+                anthropic_fields: Default::default(),
             });
         }
     }
@@ -133,6 +134,7 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     })
 }
 
@@ -325,6 +327,7 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
             name: m.get("name").and_then(Value::as_str).map(String::from),
             content: ToolResultBlock::one(text),
             is_error: false,
+            cache_control: None,
         });
         return Ok(Message { role, content });
     }
@@ -412,12 +415,15 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
                         .unwrap_or_default()
                         .to_string(),
                     args,
+                    cache_control: None,
                 });
             }
         }
     }
 
-    Ok(Message { role, content })
+    // A system message's text parts are one text, joined as they were
+    // before the system role's own rule (`Message::joined_text`).
+    Ok(Message { role, content }.with_system_text_joined())
 }
 
 /// A tool message's text: the string, or its text parts joined by newlines.
@@ -480,6 +486,7 @@ pub(crate) fn parse_image_url(url: &str) -> ContentPart {
                 source: ImageSource::Base64 {
                     data: data.to_string(),
                 },
+                cache_control: None,
             };
         }
     }
@@ -490,6 +497,7 @@ pub(crate) fn parse_image_url(url: &str) -> ContentPart {
     ContentPart::Image {
         mime,
         source: ImageSource::Url { url: url.into() },
+        cache_control: None,
     }
 }
 
@@ -533,7 +541,7 @@ fn tool_calls_json(content: &[ContentPart]) -> Vec<Value> {
     content
         .iter()
         .filter_map(|p| match p {
-            ContentPart::ToolUse { id, name, args } => Some(json!({
+            ContentPart::ToolUse { id, name, args, .. } => Some(json!({
                 "id": id,
                 "type": "function",
                 "function": {

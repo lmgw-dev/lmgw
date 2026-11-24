@@ -21,7 +21,9 @@ use super::logic::{self, Need, Where};
 use super::qr_card::QrSession;
 use super::scope_editor::{AliasScopeEditor, ScopeState, ToolScopeEditor};
 use super::*;
-use crate::widgets::{use_toasts, Modal, ModalFooter, Select};
+use crate::widgets::{
+    use_toasts, ComboRow, EntryRow, Modal, ModalFooter, PrefGroup, Select, TextRow,
+};
 
 #[component]
 pub(super) fn PairDevice(
@@ -300,7 +302,7 @@ pub(super) fn PairDevice(
                 if res.is_ok() {
                     toasts.warn(
                         "the device was paired, but this page was left before its link could be \
-                         shown — give it a new token on the Devices card",
+                         shown — give it a New token… on its page in the list",
                     );
                 }
                 return;
@@ -323,17 +325,17 @@ pub(super) fn PairDevice(
     };
     let period_opts = Signal::derive(|| {
         vec![
-            ("day".to_string(), "per day".to_string()),
-            ("month".into(), "per month".into()),
-            ("total".into(), "total".into()),
+            ("day".to_string(), "Per day".to_string()),
+            ("month".into(), "Per month".into()),
+            ("total".into(), "Total".into()),
         ]
     });
     // Off first, then read only: the first choice above off.
     let admin_opts = Signal::derive(|| {
         vec![
-            ("off".to_string(), "off".to_string()),
-            ("read_only".into(), "read only".into()),
-            ("full".into(), "full".into()),
+            ("off".to_string(), "Off".to_string()),
+            ("read_only".into(), "Read only".into()),
+            ("full".into(), "Full".into()),
         ]
     });
     let where_opts = Signal::derive(|| {
@@ -361,101 +363,92 @@ pub(super) fn PairDevice(
                     when=move || reviewing.get()
                     fallback=move || {
                         view! {
-                            <div class="row">
-                                <span class="lbl">"name"</span>
-                                <input
-                                    class="input"
+                            <PrefGroup title="Device">
+                                <EntryRow
+                                    title="Name"
+                                    aria_label="Device name"
                                     placeholder="desktop, phone, …"
-                                    aria-label="Device name"
-                                    prop:value=move || name.get()
-                                    on:input=move |ev| name.set(event_target_value(&ev))
+                                    value=name
                                 />
-                            </div>
-                            <div class="row" style="margin-top:10px">
-                                <span class="lbl">"where"</span>
-                                <Select value=where_ options=where_opts/>
-                                <span class="dim mini-note">
-                                    {move || match w.get() {
-                                        Where::Computer => "a client app on this computer: reachable from this computer only",
-                                        Where::Lan => "another device on your network",
-                                        Where::Wireguard => "another device over a WireGuard tunnel",
-                                    }}
-                                </span>
-                            </div>
-                            <div class="row" style="margin-top:10px;align-items:flex-start">
-                                <span class="lbl">"URLs"</span>
-                                <textarea
-                                    class="input mono pair-urls"
-                                    rows=move || (urls_text.get().lines().count() + 1).clamp(2, 12)
-                                    spellcheck="false"
-                                    aria-label="The URLs the device dials, one a line, in order"
+                                <ComboRow
+                                    title="Where"
+                                    sub=move || match w.get() {
+                                        Where::Computer => "A client app on this computer: reachable from this computer only",
+                                        Where::Lan => "Another device on your network",
+                                        Where::Wireguard => "Another device over a WireGuard tunnel",
+                                    }
+                                    value=where_
+                                    options=where_opts
+                                />
+                                <TextRow
+                                    mono=true
+                                    title="URLs"
+                                    sub="The URLs the device dials, one a line, in order"
                                     placeholder="https://192.0.2.1:8788"
-                                    prop:value=move || urls_text.get()
-                                    on:input=move |ev| urls_text.set(event_target_value(&ev))
-                                ></textarea>
-                            </div>
-                            <div class="mini-note dim">
-                                "One URL a line, in the order the device tries them. lmgw proposed these; add a name or an address the network rewrites, and it goes into the server certificates."
-                            </div>
-                            <Show when=move || none_found.get()>
-                                <div class="mini-note notice warn">
-                                    "lmgw found no address of that kind on this machine: type the URL the device dials."
-                                </div>
-                            </Show>
-                            <Show when=move || !notes.get().is_empty() && !w.get().local_only()>
-                                <div class="mini-note dim pair-url-notes">
-                                    <For each=move || notes.get() key=|n| n.0.clone() let:n>
-                                        <div>
-                                            <span class="mono-sm">{n.0.clone()}</span>
-                                            {format!(" — {}", n.1)}
-                                        </div>
-                                    </For>
-                                </div>
-                            </Show>
-                            <AliasScopeEditor state=scope disabled=Signal::derive(|| false)/>
-                            <ToolScopeEditor state=scope inventory=inv_state disabled=Signal::derive(|| false)/>
-                            <DeviceToolsEditor
-                                state=device_tools
-                                hosted=hosted
-                                own=Signal::derive(|| None::<i64>)
-                                disabled=Signal::derive(|| false)
-                                scope=Signal::derive(move || (scope.tool_mode.get(), scope.tool_patterns()))
-                            />
-                            <div class="row" style="margin-top:10px">
-                                <span class="lbl">"budget"</span>
-                                <input
-                                    class="input mono"
-                                    style="max-width:110px"
+                                    value=urls_text
+                                    rows=Signal::derive(move || {
+                                        (urls_text.with(|t| t.lines().count()) as u32 + 1).clamp(2, 12)
+                                    })
+                                    after=ViewFn::from(move || {
+                                        view! {
+                                            <div class="mini-note dim">
+                                                "lmgw proposed these; add a name or an address the network rewrites, and it goes into the server certificates."
+                                            </div>
+                                            <Show when=move || none_found.get()>
+                                                <div class="mini-note notice warn">
+                                                    "lmgw found no address of that kind on this machine: type the URL the device dials."
+                                                </div>
+                                            </Show>
+                                            <Show when=move || {
+                                                !notes.get().is_empty() && !w.get().local_only()
+                                            }>
+                                                <div class="mini-note dim pair-url-notes">
+                                                    <For each=move || notes.get() key=|n| n.0.clone() let:n>
+                                                        <div>
+                                                            <span class="mono-sm">{n.0.clone()}</span>
+                                                            {format!(" — {}", n.1)}
+                                                        </div>
+                                                    </For>
+                                                </div>
+                                            </Show>
+                                        }
+                                    })
+                                />
+                            </PrefGroup>
+                            // The scope editors are preference rows of their own.
+                            <PrefGroup title="What it may reach">
+                                <AliasScopeEditor state=scope disabled=Signal::derive(|| false)/>
+                                <ToolScopeEditor state=scope inventory=inv_state disabled=Signal::derive(|| false)/>
+                                <DeviceToolsEditor
+                                    state=device_tools
+                                    hosted=hosted
+                                    own=Signal::derive(|| None::<i64>)
+                                    disabled=Signal::derive(|| false)
+                                    scope=Signal::derive(move || (scope.tool_mode.get(), scope.tool_patterns()))
+                                />
+                                <EntryRow
+                                    title="Budget"
+                                    sub="Set a budget where a cloud alias is in reach: a device key that leaks spends until something stops it."
                                     placeholder="none"
-                                    prop:value=move || budget.get()
-                                    on:input=move |ev| budget.set(event_target_value(&ev))
+                                    mono=true
+                                    value=budget
+                                >
+                                    <Select value=period options=period_opts/>
+                                </EntryRow>
+                                <EntryRow
+                                    title="Hosts tools as"
+                                    sub="The prefix its own MCP tools are named under (label__…)"
+                                    placeholder="Optional label"
+                                    mono=true
+                                    value=label
                                 />
-                                <Select value=period options=period_opts/>
-                            </div>
-                            <div class="mini-note dim">
-                                "Set a budget where a cloud alias is in reach: a device key that leaks spends until something stops it."
-                            </div>
-                            <div class="row" style="margin-top:10px">
-                                <span class="lbl">"hosts tools as"</span>
-                                <input
-                                    class="input mono"
-                                    style="max-width:180px"
-                                    placeholder="optional label"
-                                    aria-label="Hosting label"
-                                    prop:value=move || label.get()
-                                    on:input=move |ev| label.set(event_target_value(&ev))
+                                <ComboRow
+                                    title="Admin tools"
+                                    sub="Off by default; the review says what a level allows"
+                                    value=admin_tools
+                                    options=admin_opts
                                 />
-                                <span class="dim mini-note">
-                                    "the prefix its own MCP tools are named under (label__…)"
-                                </span>
-                            </div>
-                            <div class="row" style="margin-top:10px">
-                                <span class="lbl">"admin tools"</span>
-                                <Select value=admin_tools options=admin_opts/>
-                                <span class="dim mini-note">
-                                    "off by default; the review says what a level allows"
-                                </span>
-                            </div>
+                            </PrefGroup>
                         }
                     }
                 >

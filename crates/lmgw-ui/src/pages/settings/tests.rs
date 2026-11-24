@@ -580,3 +580,15 @@ fn the_tls_rows_are_the_settings_the_image_pins() {
         assert_eq!((d.cat, d.group), ("network", "tls"), "{key}");
     }
 }
+
+#[test]
+fn a_hint_reads_as_a_sentence() {
+    use super::prow::sentence;
+    assert_eq!(
+        sentence("per-model overrides win"),
+        "Per-model overrides win"
+    );
+    assert_eq!(sentence("0 = unlimited"), "0 = unlimited");
+    assert_eq!(sentence("Already one"), "Already one");
+    assert_eq!(sentence(""), "");
+}

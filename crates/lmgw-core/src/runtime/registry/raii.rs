@@ -73,7 +73,11 @@ impl StartClaim {
                         e.in_flight += 1;
                         e.claims += 1;
                     }
-                    e.last_used = Instant::now();
+                    // A moved model keeps its age until a request has
+                    // used it (device-ledger design §6.2).
+                    if !e.moved {
+                        e.last_used = Instant::now();
+                    }
                     e.warnings = warnings.clone();
                     e.capabilities = capabilities.clone();
                     self.reg

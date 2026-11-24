@@ -45,6 +45,11 @@ pub(super) const CATS: &[(&str, &str, &str)] = &[
         "the system prompt new conversations start with, how attachments are read, the knowledge budget, the voice, the change feed client apps follow",
     ),
     (
+        "documents",
+        "Documents",
+        "what files lmgw can turn into text on this computer, and what one install would add",
+    ),
+    (
         "realtime",
         labels::REALTIME,
         "spoken conversations on /v1/realtime and WebRTC calls: the voice cascade and its GPU memory, turns, barge-in, output, the UDP listener",
@@ -80,6 +85,7 @@ pub(super) const CAT_SLUGS: &[&str] = &[
     "runtimes",
     "backends",
     "chat",
+    "documents",
     "realtime",
     "agents",
     "docs",
@@ -139,11 +145,12 @@ const fn class_group(
 pub(super) const GROUPS: &[Group] = &[
     g("network", "listen", labels::GATEWAY),
     g("network", "tls", labels::TLS),
-    g("network", "accounts", labels::ACCOUNTS),
+    g("network", "accounts", labels::ACCOUNTS).wide(),
     g("network", "access", "Access"),
     g("network", "devices", labels::DEVICES),
     g("retention", "logs", "Request log"),
     g("retention", "jobs", "Job history"),
+    g("retention", "conversions", "Document conversions"),
     g("retention", "chat", "Chat threads"),
     g("retention", "rollups", "Usage rollups"),
     g("retention", "responses", "Responses storage"),
@@ -179,18 +186,26 @@ pub(super) const GROUPS: &[Group] = &[
     ),
     g("backends", "forge", labels::FORGE_TOKENS),
     g("backends", "builds", labels::BUILDS),
-    g("chat", "prompt", "Default system prompt"),
+    g("chat", "prompt", "Default system prompt").wide(),
     g("chat", "attachments", "Attachments"),
     g("chat", "knowledge", "Knowledge bases"),
     g("chat", "chat-voice", labels::CHAT_VOICE),
     g("chat", "chat-media", "Picture and sound tools"),
     g("chat", "feed", "Change feed"),
+    g("documents", "doc-convert", "What you can convert").wide(),
+    g("documents", "doc-found", "Found on this computer").wide(),
+    g("documents", "doc-missing", "Not installed").wide(),
+    g("documents", "doc-web", "Web addresses").wide(),
+    g("documents", "doc-models", "Layout model").wide(),
+    g("documents", "doc-model", "Model help").wide(),
+    g("documents", "doc-callers", "Who calls the docling route").wide(),
+    g("documents", "doc-bounds", "How much conversions may hold").wide(),
     g("realtime", "rt-cascade", labels::VOICE_CASCADE),
-    g("realtime", "rt-budget", "GPU memory of the cascade"),
+    g("realtime", "rt-budget", "GPU memory of the cascade").wide(),
     g("realtime", "rt-prompt", "Voice instructions"),
     g("realtime", "rt-names", "Client names"),
     g("realtime", "rt-vad", "Turn detection"),
-    g("realtime", "rt-smart", "Smart Turn (semantic_vad)"),
+    g("realtime", "rt-smart", "Smart Turn"),
     g("realtime", "rt-barge", "Barge-in"),
     g("realtime", "rt-output", "Output"),
     g("realtime", "rt-limits", "Connection"),
@@ -252,9 +267,11 @@ pub(super) enum Ctl {
     /// A sentence the server works out, read from this `SettingsFull`
     /// pointer (`/headroom_now/sentence`): never part of the draft.
     Said(&'static str),
-    /// Forget auto headroom's learned growth (`headroom_forget`), behind a
-    /// confirmation: never part of the draft.
-    HeadroomForget,
+    /// Each card's headroom (`headroom::HeadroomCards`): its sentence, its
+    /// amount — the draft's `vram.keep_free`, one `Raw` value holding every
+    /// card's — and forgetting its readings (`headroom_forget`), which acts
+    /// at once behind a confirmation.
+    HeadroomCards,
     /// A default prompt: prose in a tall box, and a Reset that puts the
     /// built-in text back — the server's `…_builtin` at this `SettingsFull`
     /// pointer.
@@ -332,6 +349,10 @@ pub(super) enum Ctl {
     /// This lmgw's version, data dir, deployment and stop budget — read,
     /// never part of the draft ([`about::AboutPanel`]).
     About,
+    /// One of Settings → Documents' panels: what can be converted, the
+    /// tools found, the ones missing — read, never part of the draft
+    /// ([`documents::DocPanel`]).
+    Documents(documents::DocPart),
 }
 
 impl Ctl {
@@ -354,7 +375,7 @@ impl Ctl {
             | Ctl::MediaModel(_)
             | Ctl::MediaVoice
             | Ctl::Model(..) => Kind::Text,
-            Ctl::ForgeTokens => Kind::Raw,
+            Ctl::ForgeTokens | Ctl::HeadroomCards => Kind::Raw,
             Ctl::Int(_) | Ctl::IntRange(..) => Kind::Int,
             Ctl::Float(..) => Kind::Float,
             Ctl::Vad(col) => realtime::vad_kind(col),
@@ -371,13 +392,13 @@ impl Ctl {
             | Ctl::Link(_)
             | Ctl::Budget
             | Ctl::Said(_)
-            | Ctl::HeadroomForget
             | Ctl::DeviceListener
             | Ctl::WebRtc
             | Ctl::TlsStatus
             | Ctl::Accounts
             | Ctl::AuditLog
-            | Ctl::About => return None,
+            | Ctl::About
+            | Ctl::Documents(_) => return None,
         })
     }
 }
@@ -391,6 +412,9 @@ pub(super) struct Def {
     pub(super) group: &'static str,
     pub(super) ctl: Ctl,
     pub(super) unit: &'static str,
+    /// The key of a field whose draft value is the unit (the budget's is
+    /// the currency); empty when the unit is fixed.
+    pub(super) unit_from: &'static str,
     pub(super) hint: &'static str,
     pub(super) ph: &'static str,
     pub(super) size: Size,
@@ -414,6 +438,7 @@ pub(super) const fn f(
         group,
         ctl,
         unit: "",
+        unit_from: "",
         hint: "",
         ph: "",
         size: Size::M,
@@ -425,6 +450,10 @@ pub(super) const fn f(
 impl Def {
     pub(super) const fn unit(mut self, unit: &'static str) -> Self {
         self.unit = unit;
+        self
+    }
+    pub(super) const fn unit_from(mut self, key: &'static str) -> Self {
+        self.unit_from = key;
         self
     }
     pub(super) const fn hint(mut self, hint: &'static str) -> Self {
@@ -454,31 +483,31 @@ impl Def {
 }
 
 pub(super) const PERIODS: &[(&str, &str)] = &[
-    ("day", "per day"),
-    ("month", "per month"),
-    ("total", "total"),
+    ("day", "Per day"),
+    ("month", "Per month"),
+    ("total", "Total"),
 ];
 pub(super) const SELF_ADMIN: &[(&str, &str)] =
-    &[("off", "off"), ("read_only", "read only"), ("full", "full")];
+    &[("off", "Off"), ("read_only", "Read only"), ("full", "Full")];
 pub(super) const PDF_MODES: &[(&str, &str)] = &[
-    ("text", "text"),
-    ("images", "page images"),
-    ("ask", "ask each time"),
+    ("text", "Text"),
+    ("images", "Page images"),
+    ("ask", "Ask each time"),
 ];
 pub(super) const CATALOG_REVISIONS: &[(&str, &str)] = &[
-    ("pinned", "the commit the spec pins"),
-    ("latest", "latest (main)"),
+    ("pinned", "The commit the spec pins"),
+    ("latest", "Latest (main)"),
 ];
 pub(super) const HEADROOM_MODES: &[(&str, &str)] = &[
-    ("auto", "learned from this computer"),
-    ("fixed", "the fixed amount below"),
+    ("auto", "A floor and learned room per card"),
+    ("fixed", "The floor below on every card"),
 ];
 pub(super) const BACKENDS: &[(&str, &str)] = &[
-    ("cuda", "cuda"),
-    ("cpu", "cpu"),
-    ("vulkan", "vulkan"),
-    ("metal", "metal"),
-    ("hip", "hip"),
+    ("cuda", "CUDA"),
+    ("cpu", "CPU"),
+    ("vulkan", "Vulkan"),
+    ("metal", "Metal"),
+    ("hip", "HIP"),
 ];
 
 /// The three classes shaped like llama-server's (chat, aux, image): the same
@@ -561,3 +590,13 @@ pub(super) const AUX_DECISION: [Def; 1] = [f(
 .hint("decision models; empty = bare ids")
 .terms("systemone decide")];
 pub(super) const IMAGE: [Def; 6] = class_fields!("image", "image", ImageClass::Image);
+
+#[cfg(test)]
+mod backend_names {
+    #[test]
+    fn the_backend_choices_use_the_shared_names() {
+        for (key, label) in super::BACKENDS {
+            assert_eq!(crate::labels::backend_label(key), *label);
+        }
+    }
+}

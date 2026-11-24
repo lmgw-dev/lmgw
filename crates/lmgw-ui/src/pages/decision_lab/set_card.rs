@@ -91,15 +91,24 @@ pub(super) fn SetCard(lab: Lab) -> impl IntoView {
     });
 
     view! {
-        <div class="card dl-setcard">
+        <section class="pref-group lab-card dl-setcard">
             <div class="dl-card-head">
                 <h3 class="lab-h3">"Question set"</h3>
-                <span class="dl-setname" title="The set the questions came from">
+                <span
+                    class="dl-setname"
+                    class:none=move || lab.sets.loaded.with(Option::is_none)
+                    title=move || {
+                        lab.sets
+                            .loaded
+                            .with(|l| l.as_ref().map(|p| format!("The set the questions came from: {}", p.name)))
+                            .unwrap_or_else(|| "The set the questions came from".into())
+                    }
+                >
                     {move || {
                         lab.sets
                             .loaded
                             .with(|l| l.as_ref().map(|p| p.name.clone()))
-                            .unwrap_or_else(|| "none loaded".into())
+                            .unwrap_or_else(|| "No set loaded".into())
                     }}
                 </span>
                 <span class="mini-note dim dl-setedit">
@@ -110,108 +119,111 @@ pub(super) fn SetCard(lab: Lab) -> impl IntoView {
                     <RowMenu
                         items=load_items
                         title="Load a saved set: its questions replace the form's, its model becomes the head model"
-                        label=Signal::derive(|| "Load ▾".to_string())
+                        label=Signal::derive(|| "Load".to_string())
+                        chevron=true
                     />
                 </Show>
             </div>
-            <div class="dl-setbtns">
-                <button
-                    type="button"
-                    class="btn ghost sm"
-                    title="Keep the form's questions and the head model under a name"
-                    on:click=move |_| {
-                        err.set(None);
-                        naming.update(|v| *v = !*v);
-                    }
-                >
-                    "Save as set…"
-                </button>
-                <button
-                    type="button"
-                    class="btn ghost sm"
-                    disabled=move || !edit.get().is_some_and(Edits::any)
-                    title=move || match lab.sets.loaded.get() {
-                        None => "Load or save a set first".to_string(),
-                        Some(p) => format!(
-                            "Overwrite the set '{}' with the form's questions and the head model; a changed question keeps its threshold's value, not its measurement",
-                            p.name
-                        ),
-                    }
-                    on:click=move |_| sets::update_loaded(lab)
-                >
-                    "Update set"
-                </button>
-                <span class="spacer"></span>
-                <button
-                    type="button"
-                    class="btn sm"
-                    disabled=move || blocked.get().is_some()
-                    title=move || match blocked.get() {
-                        Some(why) => format!("Not yet: {why}"),
-                        None => "Ask these questions of every row of a CSV or JSONL file, as a job".into(),
-                    }
-                    on:click=move |_| open_new_run(lab)
-                >
-                    "New set run…"
-                </button>
-            </div>
-            <Show when=move || naming.get()>
-                <div class="dl-setname-row">
-                    <input
-                        class="input"
-                        placeholder="set name"
-                        node_ref=input
-                        prop:value=move || name.get()
-                        on:input=move |ev| name.set(event_target_value(&ev))
-                        on:keydown=move |ev: web_sys::KeyboardEvent| {
-                            match ev.key().as_str() {
-                                "Enter" => save(),
-                                "Escape" => naming.set(false),
-                                _ => {}
-                            }
+            <div class="boxed lab-box">
+                <div class="dl-setbtns">
+                    <button
+                        type="button"
+                        class="btn ghost sm"
+                        title="Keep the form's questions and the head model under a name"
+                        on:click=move |_| {
+                            err.set(None);
+                            naming.update(|v| *v = !*v);
                         }
-                    />
-                    <button type="button" class="btn primary sm" on:click=move |_| save()>
-                        "Save"
+                    >
+                        "Save as set…"
                     </button>
-                    <button type="button" class="btn ghost sm" on:click=move |_| naming.set(false)>
-                        "Cancel"
+                    <button
+                        type="button"
+                        class="btn ghost sm"
+                        disabled=move || !edit.get().is_some_and(Edits::any)
+                        title=move || match lab.sets.loaded.get() {
+                            None => "Load or save a set first".to_string(),
+                            Some(p) => format!(
+                                "Overwrite the set '{}' with the form's questions and the head model; a changed question keeps its threshold's value, not its measurement",
+                                p.name
+                            ),
+                        }
+                        on:click=move |_| sets::update_loaded(lab)
+                    >
+                        "Update set"
+                    </button>
+                    <span class="spacer"></span>
+                    <button
+                        type="button"
+                        class="btn sm"
+                        disabled=move || blocked.get().is_some()
+                        title=move || match blocked.get() {
+                            Some(why) => format!("Not yet: {why}"),
+                            None => "Ask these questions of every row of a CSV or JSONL file, as a job".into(),
+                        }
+                        on:click=move |_| open_new_run(lab)
+                    >
+                        "New set run…"
                     </button>
                 </div>
-            </Show>
-            {move || err.get().map(|e| view! { <p class="mini-note bad">{e}</p> })}
-            {move || {
-                lab.sets
-                    .conflict
-                    .get()
-                    .map(|msg| {
-                        view! {
-                            <div class="notice warn dl-set-conflict">
-                                <b>"Not updated: the set changed since it was loaded."</b>
-                                " "
-                                {msg}
-                                <div class="row">
-                                    <button
-                                        type="button"
-                                        class="btn sm"
-                                        title="Read the set as it is now; its questions replace the form's"
-                                        on:click=move |_| sets::reload_loaded(lab)
-                                    >
-                                        "Reload the set"
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="btn ghost sm"
-                                        on:click=move |_| lab.sets.conflict.set(None)
-                                    >
-                                        "Dismiss"
-                                    </button>
+                <Show when=move || naming.get()>
+                    <div class="dl-setname-row">
+                        <input
+                            class="input"
+                            placeholder="set name"
+                            node_ref=input
+                            prop:value=move || name.get()
+                            on:input=move |ev| name.set(event_target_value(&ev))
+                            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                match ev.key().as_str() {
+                                    "Enter" => save(),
+                                    "Escape" => naming.set(false),
+                                    _ => {}
+                                }
+                            }
+                        />
+                        <button type="button" class="btn primary sm" on:click=move |_| save()>
+                            "Save"
+                        </button>
+                        <button type="button" class="btn ghost sm" on:click=move |_| naming.set(false)>
+                            "Cancel"
+                        </button>
+                    </div>
+                </Show>
+                {move || err.get().map(|e| view! { <p class="mini-note bad">{e}</p> })}
+                {move || {
+                    lab.sets
+                        .conflict
+                        .get()
+                        .map(|msg| {
+                            view! {
+                                <div class="notice warn dl-set-conflict">
+                                    <b>"Not updated: the set changed since it was loaded."</b>
+                                    " "
+                                    {msg}
+                                    <div class="row">
+                                        <button
+                                            type="button"
+                                            class="btn sm"
+                                            title="Read the set as it is now; its questions replace the form's"
+                                            on:click=move |_| sets::reload_loaded(lab)
+                                        >
+                                            "Reload the set"
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn ghost sm"
+                                            on:click=move |_| lab.sets.conflict.set(None)
+                                        >
+                                            "Dismiss"
+                                        </button>
+                                    </div>
                                 </div>
-                            </div>
-                        }
-                    })
-            }}
-        </div>
+                            }
+                        })
+                }}
+            </div>
+        </section>
     }
 }
 

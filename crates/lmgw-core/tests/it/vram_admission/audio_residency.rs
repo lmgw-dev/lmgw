@@ -216,13 +216,16 @@ async fn a_warm_audio_model_keeps_its_load_free_until_its_first_request() {
 
     let v = vram_status(&f.gateway).await;
     assert_eq!(v["devices"][0]["used_bytes"], CONTEXT, "only the context");
+    // The load still to come, and its margin until its residency is
+    // learned: as much as its estimate, in every mode (device-ledger
+    // design WP13).
     assert_eq!(
         v["free_bytes"],
-        10 * GIB - CONTEXT - 2 * GIB,
-        "the load still to come is off the free figure: {v}"
+        10 * GIB - CONTEXT - 2 * GIB - 2 * GIB,
+        "the load still to come and its margin are off the free figure: {v}"
     );
     let r = audio_resident(&v);
-    assert_eq!(r["pending_bytes"], 2 * GIB);
+    assert_eq!(r["pending_bytes"], 2 * GIB + 2 * GIB);
     assert_eq!(r["estimated_bytes"], 2 * GIB, "unlearned: the on-disk size");
     let n = note(&r);
     assert!(
@@ -414,7 +417,8 @@ async fn without_per_process_figures_nothing_is_learned_and_the_load_still_count
     start_idle(&f, "tts").await;
     assert_eq!(
         audio_resident(&vram_status(&f.gateway).await)["pending_bytes"],
-        2 * GIB
+        2 * GIB + 2 * GIB,
+        "the load and its margin"
     );
 
     let before = f.state.vram.residency_readings();

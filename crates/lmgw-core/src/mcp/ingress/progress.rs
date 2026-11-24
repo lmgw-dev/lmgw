@@ -256,11 +256,28 @@ fn message(p: &MediaProgress) -> String {
                 },
             }
         }
-        MediaProgress::Stage { phase, model, room } => match (phase.as_str(), room) {
-            ("unloading", _) => format!("unloading {model}"),
+        MediaProgress::Stage {
+            phase,
+            model,
+            room,
+            on,
+            moves,
+        } => match (phase.as_str(), room) {
+            ("unloading", _) => format!(
+                "unloading {model}{}{}",
+                on.as_ref()
+                    .map(|o| format!(" from {o}"))
+                    .unwrap_or_default(),
+                if *moves {
+                    ", which starts again on another card"
+                } else {
+                    ""
+                }
+            ),
             ("loading", _) => format!("loading {model}"),
             ("waiting_for_room", Some((needs, free))) => format!(
-                "{model}: waiting for room (needs {}, {} free)",
+                "{model}: waiting for room{} (needs {}, {} free)",
+                on.as_ref().map(|o| format!(" on {o}")).unwrap_or_default(),
                 crate::hf::fmt_bytes(*needs),
                 crate::hf::fmt_bytes(*free)
             ),

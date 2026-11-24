@@ -5,6 +5,7 @@
 
 use lmgw_api_types::audio_lab::AudioSettings;
 use lmgw_api_types::decision_lab::QuestionSet;
+use lmgw_api_types::documents_lab::DocumentsLabSettings;
 use lmgw_api_types::image_lab::ImageGenForm;
 use lmgw_api_types::lab_store::{LabKind, LabPresetBody, LabPresetKind, LabPresetView};
 
@@ -16,6 +17,7 @@ pub fn body_text(body: &LabPresetBody) -> Result<String, String> {
         LabPresetBody::QuestionSet(s) => serde_json::to_string(s),
         LabPresetBody::ImagePrompt(f) => serde_json::to_string(f),
         LabPresetBody::AudioSettings(a) => serde_json::to_string(a),
+        LabPresetBody::DocumentOptions(d) => serde_json::to_string(d),
     }
     .map_err(|e| e.to_string())
 }
@@ -32,6 +34,9 @@ pub fn body_of(kind: &str, text: &str) -> Result<LabPresetBody, String> {
         Some(LabPresetKind::AudioSettings) => serde_json::from_str::<AudioSettings>(text)
             .map(|a| LabPresetBody::AudioSettings(Box::new(a)))
             .map_err(|e| format!("the stored audio settings do not read: {e}")),
+        Some(LabPresetKind::DocumentOptions) => serde_json::from_str::<DocumentsLabSettings>(text)
+            .map(|d| LabPresetBody::DocumentOptions(Box::new(d)))
+            .map_err(|e| format!("the stored document options do not read: {e}")),
         None => Err(format!("'{kind}' is no preset kind this build knows")),
     }
 }

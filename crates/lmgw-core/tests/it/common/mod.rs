@@ -176,9 +176,10 @@ pub async fn serve_on(listener: tokio::net::TcpListener, app: axum::Router) {
 }
 
 /// Guards the handful of suites that mutate a process-wide environment
-/// variable (`HF_ENDPOINT`, `LMGW_AUDIO_CATALOG_ENDPOINT`, `LMGW_UPDATE_ENDPOINT`)
-/// to point the code under test at a mock server. Each used to be its own test binary, so
-/// owning the process for the duration of the mutation was safe; folded into
+/// variable (`HF_ENDPOINT`, `LMGW_AUDIO_CATALOG_ENDPOINT`, `LMGW_UPDATE_ENDPOINT`,
+/// the proxy variables) to point the code under test at a mock server. Each
+/// used to be its own test binary, so owning the process for the duration of
+/// the mutation was safe; folded into
 /// one `tests/it` binary, two of them running at once would stomp on each
 /// other's endpoint — and a suite that expects the *unset* default (a live
 /// suite hitting the real hub) could just as easily start mid-mutation.
@@ -192,10 +193,20 @@ pub async fn serve_on(listener: tokio::net::TcpListener, app: axum::Router) {
 static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The variables [`process_env_lock`] guards and restores.
-const GUARDED_ENV: [&str; 3] = [
+const GUARDED_ENV: [&str; 11] = [
     "HF_ENDPOINT",
     "LMGW_AUDIO_CATALOG_ENDPOINT",
     "LMGW_UPDATE_ENDPOINT",
+    // The proxy variables reqwest's system proxy reads (`docling_web`'s
+    // proxy case sets them).
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
 ];
 
 pub struct EnvGuard {

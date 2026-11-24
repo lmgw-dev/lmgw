@@ -220,6 +220,16 @@ pub struct AppState {
     /// (a test state's reads a blank one until the test states one,
     /// [`crate::machine::MachineChecks::set_machine`]).
     pub machine: crate::machine::MachineChecks,
+    /// The optional document tools found on this computer
+    /// (document-conversion design §4.3, §4.4): the in-memory snapshot of
+    /// their probes, looked up on this process's `PATH` (a test state's on
+    /// an empty one, so it finds nothing until the test sets a path,
+    /// [`crate::extract::convert::tools::DocTools::set_search_path`]).
+    pub doc_tools: crate::extract::convert::tools::DocTools,
+    /// The async conversion jobs running in this process (document-conversion
+    /// design §7.3): how to cancel each and its change counter; their state
+    /// is in the store.
+    pub convert_jobs: crate::extract::convert::jobs::Jobs,
     /// How a container agent reaches `podman` (container-runtime §6.1).
     ///
     /// A second, streaming seam beside [`Self::runtime`]'s buffered one,
@@ -696,8 +706,11 @@ impl AppState {
         probe: Arc<dyn crate::vram::GpuProbe>,
         machine: Arc<dyn lmgw_machine::Facts>,
     ) -> anyhow::Result<SharedState> {
+        crate::alloc_tune::tune();
         // Every path under the data dir may become a container mount.
         let data_dir = absolute_dir(data_dir);
+        // No confined document tool's rules may hold it (`confine::reach`).
+        crate::extract::convert::confine::protect(&data_dir);
         // A new data dir also gets its models dirs (`fresh_install`).
         let db = fresh_install::open_db(&data_dir, dev, start.deployment).await?;
         // The container's pinned and seeded settings, before the snapshot is
@@ -770,6 +783,9 @@ impl AppState {
         // And the benchmark runs (benchmark design §3.3): `interrupted`, with
         // the phases they finished kept. Their containers are collected by
         // `lifecycle::boot`, before it reconciles.
+        // And the async conversion jobs (document-conversion design §7.3):
+        // `interrupted`, their finished files' results kept.
+        crate::extract::convert::jobs::sweep::boot(&db, &data_dir).await;
         match store::interrupt_running_bench_runs(&db).await {
             Ok(0) => {}
             Ok(n) => tracing::info!("marked {n} benchmark run(s) interrupted by the last shutdown"),
@@ -847,6 +863,15 @@ impl AppState {
         );
         #[cfg(not(windows))]
         let registry = runtime::registry::Registry::new(runner, http.clone());
+        // The tool pool's size by hand, as stored (document-conversion
+        // design §7.7); every publish applies it again (`publish_over`).
+        crate::extract::convert::pool::configure(snapshot.settings.documents.tool_slots);
+        // Whether one caller's shares apply (who may call the conversions).
+        crate::extract::convert::callers::configure(&snapshot);
+        crate::extract::convert::layout_model::configure(
+            snapshot.settings.documents.onnx_layout,
+            &snapshot.settings.aux_router.models_dir,
+        );
         let app = Arc::new(Self {
             db,
             corpus,
@@ -885,6 +910,8 @@ impl AppState {
             runtime: ArcSwap::from_pointee(registry),
             cdi: ArcSwap::from_pointee(cdi),
             machine: checks,
+            doc_tools: crate::extract::convert::tools::DocTools::system(),
+            convert_jobs: Default::default(),
             agent_spawner: std::sync::Mutex::new(Arc::new(crate::agents::container::TokioSpawner)),
             turn_score_hook: std::sync::Mutex::new(None),
             started_at: Instant::now(),
@@ -1133,9 +1160,16 @@ impl AppState {
             // that has one). This is the degraded path, which is also what a
             // GPU-less host runs. A test that wants a GPU installs its own with
             // `state.vram.set_probe(...)`.
-            vram: VramScheduler::with_probe(Arc::new(crate::vram::nvml::NoTelemetry(
-                "test state: no GPU probe installed".into(),
-            ))),
+            vram: {
+                let v = VramScheduler::with_probe(Arc::new(crate::vram::nvml::NoTelemetry(
+                    "test state: no GPU probe installed".into(),
+                )));
+                // The engine's own cost on a card is charged nothing until a
+                // test states it (device-ledger design §4.2): every test
+                // written before it was charged expects none.
+                v.set_engine_default(0);
+                v
+            },
             kv_pools: Default::default(),
             // Deliberately never the real podman, for the same reason the probe
             // above is never the real NVML: a test must not start containers on
@@ -1163,6 +1197,15 @@ impl AppState {
             // A blank machine, for the same reason: a test's check reads
             // nothing of the computer it runs on unless it states one.
             machine: crate::machine::MachineChecks::blank(),
+            // An empty search path, for the same reason: a test reads no
+            // tool of the computer it runs on unless it points at fakes.
+            // lmgw's own reader is found beside the test binary (cargo
+            // builds it): it starts every document tool, as it does in the
+            // installed lmgw (`run/start.rs`).
+            doc_tools: crate::extract::convert::tools::DocTools::on_path_with_own(
+                Default::default(),
+            ),
+            convert_jobs: Default::default(),
             // Never the real podman, for the same reason the registry above is
             // not: a test must not start containers on the machine it runs on.
             // A test that wants the runner installs its own with
@@ -1663,6 +1706,17 @@ impl AppState {
         });
         let published = published.expect("rcu runs its closure at least once");
         let replaced = replaced.expect("rcu runs its closure at least once");
+        // "Parallel tool runs" (document-conversion design §7.7), whichever
+        // path saved it: the next conversion step is handed out by it.
+        crate::extract::convert::pool::configure(published.settings.documents.tool_slots);
+        // Whether one caller's shares apply: a key added or switched off,
+        // or "Require API key", counts from the next request.
+        crate::extract::convert::callers::configure(&published);
+        // "Use the layout model", and the folder its file is in.
+        crate::extract::convert::layout_model::configure(
+            published.settings.documents.onnx_layout,
+            &published.settings.aux_router.models_dir,
+        );
         // The Chat feed's `hold` event and its live buffer (client-apps
         // design §2.2): every published snapshot, whichever path saved it.
         self.chat_feed.published(|| self.snapshot());

@@ -433,6 +433,7 @@ impl TempChats {
             model: r.model.clone(),
             answered_by: r.answered_by.clone(),
             images_note: r.images_note.clone(),
+            notices: r.notices.clone(),
             voice: r.voice.clone(),
             pending_approvals: r.pending_approvals.clone(),
             created_at: now(),
@@ -471,6 +472,7 @@ impl TempChats {
             row.model = r.model.clone();
             row.answered_by = r.answered_by.clone();
             row.images_note = r.images_note.clone();
+            row.notices = crate::store::merged_notices(&row.notices, &r.notices);
             row.voice = row.voice.take().map(MessageVoice::continued);
             t.touch();
             ContinueSave::Saved

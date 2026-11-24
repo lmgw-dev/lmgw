@@ -91,7 +91,7 @@ impl ToolResultRenderer for LlamaToolResults<'_> {
         let mut dropped = Vec::new();
         for block in content {
             match block {
-                ToolResultBlock::Image { mime, data } => match self.image(mime, data) {
+                ToolResultBlock::Image { mime, data, .. } => match self.image(mime, data) {
                     Ok(format) => {
                         parts.push(Part::Image(format!("data:{};base64,{data}", format.mime())))
                     }

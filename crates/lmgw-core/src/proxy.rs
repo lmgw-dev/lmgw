@@ -37,7 +37,8 @@ pub use transcribe::{
     answered_line, transcribe, transcribe_as, transcribe_voice_clip, ClipTranscript,
 };
 pub(crate) use transcribe::{
-    transcribe_dictation, transcribe_for, transcribe_turn, warm as transcribe_warm, ASR_REQUIRED,
+    transcribe_dictation, transcribe_document, transcribe_for, transcribe_turn,
+    warm as transcribe_warm, ASR_REQUIRED,
 };
 mod image;
 // The image tools' in-process call (chat-media-tools design §4.1).

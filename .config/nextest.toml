@@ -13,8 +13,38 @@
 # pid) uncontended without touching them, so `cargo test` keeps working
 # as before.
 
+# Setup scripts are still experimental in nextest (0.9.146); NEXTEST_RUN_ID,
+# which the API document's cache (below) is stamped with, came in 0.9.116.
+nextest-version = { required = "0.9.116" }
+experimental = ["setup-scripts"]
+
 [store]
 dir = "target/nextest"
+
+# --- The admin API document, built once per run instead of once per test.
+# Building it (`openapi::admin_doc()`) takes 3.4-3.8 s, and with a process per
+# test every test that reads it built it again: a typed answer's round trip
+# (`common::round_trips`, ~390 calls), the audit log's redaction list (every
+# audited write), the API document's own tests. Measured 2026-11-20: ~600-750
+# tests, about a third of the suite's summed test time. The setup script names
+# a file (LMGW_OPENAPI_DOC_CACHE); in a debug build the first test that needs
+# the document builds and writes it, stamped with this run's id and the test
+# binary, and the rest read it (crates/lmgw-core/src/openapi/doc_cache.rs).
+# `openapi_doc_cache::the_cached_document_is_the_one_this_build_makes` builds
+# it for real and holds the file to it. The same script sets
+# LMGW_TEST_ARGON2_FAST: password hashes with argon2's smallest parameters
+# (accounts/password.rs; its unit tests keep RFC 9106's). Without the script
+# (plain `cargo test`, Windows) every test builds the document and hashes as
+# before.
+# Measured 2026-11-20 on a 16-core desktop CPU (32 threads), nextest 0.9.146, 16 test
+# threads, whole workspace, back to back: suite wall 460.7 s -> 269.8 s, summed
+# junit test time 7317 s -> 4263 s, tests over 5 s 586 -> 100 (load 2.8 before
+# the first run; 14 at the start of the second, the first's tail, so the second
+# is the pessimistic one). Reproduce: build, then run, in a worktree of main
+# and one of this change: `scripts/build-slot.sh cargo nextest run --workspace
+# --no-run`, `scripts/build-slot.sh cargo nextest run --workspace`.
+[scripts.setup.test-env]
+command = { command-line = "scripts/nextest-test-env.sh", relative-to = "workspace-root" }
 
 [profile.default]
 # Every failure, not just the first: the summary should be the whole story.
@@ -54,3 +84,8 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'package(lmgw-core) & binary(it) & (test(/^realtime_/) | test(/^vram_admission::(gate_follows_running_container|outside_vram_fallback|request_gate|ladder_|in_flight_claim|admission)::/) | test(/^modelinfo_real_files::/) | test(/^openapi_live::/))'
 priority = 50
+
+[[profile.default.scripts]]
+platform = { host = "cfg(unix)" }
+filter = 'package(lmgw-core) & binary(it)'
+setup = 'test-env'

@@ -1,10 +1,12 @@
 //! The Chat component: the page's state, its actions, and its view (the
-//! thread list and the settings drawer beside the conversation).
+//! thread list beside the conversation, whose header bar spans it and the
+//! settings panel under the head).
 
 use super::drawer::ThreadSettings;
 use super::list::{purge_text, thread_items, today_local, ThreadList};
 use super::msg_view::{MsgView, StatsRow};
 use super::*;
+use lmgw_ui_kit::widgets::{Ico, Icon};
 
 #[component]
 pub fn Chat() -> impl IntoView {
@@ -28,7 +30,9 @@ pub fn Chat() -> impl IntoView {
     // words.
     let thread_tasks: chat_tasks::Tasks = RwSignal::new(None);
     let answer_said = RwSignal::new(None::<String>);
-    let next_key = StoredValue::new(0u64);
+    // Keys of a range of the page's own: a bubble kept from a page that went
+    // (`chat_inflight`) is shown beside this page's.
+    let next_key = StoredValue::new(crate::chat_inflight::key_base());
     let catalog = lmgw_ui_kit::catalog::use_model_catalog();
     let model_sel = RwSignal::new(String::new());
     let composer = RwSignal::new(String::new());
@@ -48,6 +52,8 @@ pub fn Chat() -> impl IntoView {
     let making = Memo::new(move |_| rescue.with(Rescue::making));
     let composer_ta: NodeRef<leptos::html::Textarea> = NodeRef::new();
     let composer_box: NodeRef<leptos::html::Div> = NodeRef::new();
+    let composer_wrap: NodeRef<leptos::html::Div> = NodeRef::new();
+    follow_toast_bottom(composer_wrap);
     let kb_pick = KbPick::new(draft_kbs, composer, composer_ta);
     composer::follow(composer, composer_ta, composer_box);
     let scroll_pane: NodeRef<leptos::html::Div> = NodeRef::new();
@@ -56,16 +62,22 @@ pub fn Chat() -> impl IntoView {
     // Dictation, read-aloud and their status line (chat-voice WP7).
     let page_voice =
         chat_voice::provide_page_voice(current, composer, composer_ta, host.voice.is_some());
-    // The thread whose reply is streaming, not just "something is": the
-    // owner may open another thread meanwhile, and that one's Stop must not
-    // abort this stream, nor its stats row show this stream's numbers.
-    let streaming = RwSignal::new(None::<i64>);
-    // The streaming reply's own message, to put back under its thread when
-    // the owner returns to it before the server has stored it.
-    let live = StoredValue::new(None::<(i64, Msg)>);
-    // The last reply's numbers, tagged with its thread.
-    let stats = RwSignal::new(None::<(i64, Stats)>);
-    let aborter = StoredValue::new(None::<web_sys::AbortController>);
+    // The thread whose reply is streaming, its bubble, its numbers and its
+    // Stop: the app's, not the page's, so a page opened again while the
+    // reply still streams shows it streaming (`chat_inflight`).
+    let crate::chat_inflight::InFlight {
+        streaming,
+        live,
+        stats,
+        aborter,
+    } = crate::chat_inflight::use_in_flight();
+    // A page that goes with a reply streaming keeps its bubble there; a copy
+    // kept so whose turn ended goes once no page shows it.
+    on_cleanup(crate::chat_inflight::keep_live);
+    Effect::new(move |_| {
+        let keys: Vec<u64> = msgs.with(|v| v.iter().map(|m| m.key).collect());
+        crate::chat_inflight::sweep(|k| keys.contains(&k));
+    });
     // The list's read: `None` while the first is out, the error of the last
     // one that failed. A failed read is not "no conversations" (code:A3).
     let threads_state = RwSignal::new(None::<Result<(), String>>);
@@ -78,6 +90,7 @@ pub fn Chat() -> impl IntoView {
     let focus = RwSignal::new(None::<i64>);
     install_reveal(focus, msgs);
     let archived_count = RwSignal::new(0i64);
+    let active_count = RwSignal::new(0i64);
     // The gateway's in-memory temporary chats (chat-complete §7), listed in
     // their own group above the dated ones; and Keep's write in flight.
     let temp_threads = RwSignal::new(Vec::<ChatThread>::new());
@@ -138,6 +151,7 @@ pub fn Chat() -> impl IntoView {
         temporary: temp_threads,
         folders: folder_list,
         archived_count,
+        active_count,
         state: threads_state,
         view_archived,
         latest: Latest::new(),
@@ -174,6 +188,7 @@ pub fn Chat() -> impl IntoView {
                     m.model.set(r.model);
                     m.answered_by.set(r.answered_by);
                     m.images_note.set(r.images_note);
+                    m.notices.set(r.notices);
                     m.task.set(r.task);
                     m.created_at
                         .set(Some(r.created_at).filter(|a| !a.is_empty()));
@@ -234,10 +249,11 @@ pub fn Chat() -> impl IntoView {
         load_msgs(d.messages);
         // Back on the thread whose reply is streaming: the server stores the
         // reply when it is done, so until then the live message is the only
-        // copy of it.
+        // copy of it (a continue's or a resumed turn's: in its stored row's
+        // place, `put_live`).
         if keep == Some(id) {
             if let Some((_, m)) = live.get_value().filter(|(t, _)| *t == id) {
-                msgs.update(|v| v.push(m));
+                msgs.update(|v| crate::chat_inflight::put_live(v, m));
             }
         }
         // Reseed the composer's chips from this thread's own drafts —
@@ -781,6 +797,7 @@ pub fn Chat() -> impl IntoView {
         resume: Callback::new(move |()| actions.resume()),
         delete: Callback::new(move |key| actions.delete(key)),
         decide: Callback::new(move |v| actions.decide(v)),
+        thread_model: model_sel.into(),
     };
 
     // Leaving the Chat page discards the open temporary chat too.
@@ -1221,6 +1238,23 @@ pub fn Chat() -> impl IntoView {
         })
     });
 
+    // The heads' shared parts (`head`), and the host's window buttons.
+    let head_env = super::head::HeadEnv {
+        narrow,
+        threads_drawer,
+        settings_drawer,
+        badge,
+        new_label,
+        on_new,
+        place,
+    };
+    let window = host.window.clone();
+    let list_start = window.as_ref().map(|w| w.start.clone());
+    let (window_empty, window_open) = (window.clone(), window);
+    let back_name = Signal::derive(move || back.get().map(|b| b.name));
+    let on_back = Callback::new(move |()| go_back(()));
+    let held_now = Signal::derive(move || held.with(Option::is_some));
+
     view! {
         <div class="chat-shell" class:narrow=move || narrow.get() node_ref=shell>
             <SplitPane
@@ -1229,6 +1263,17 @@ pub fn Chat() -> impl IntoView {
                 label="Conversations"
                 badge=badge
                 drawer=threads_drawer
+                window_header=true
+                head_start=list_start.unwrap_or_else(|| ViewFn::from(|| ()))
+                head_actions=ViewFn::from(move || {
+                    view! {
+                        <super::list_head::ListActions
+                            new_label=new_label
+                            on_new=on_new
+                            folders=folders
+                        />
+                    }
+                })
                 side_view=move || {
                     view! {
                         <ThreadList
@@ -1241,15 +1286,19 @@ pub fn Chat() -> impl IntoView {
                             query=query
                             current=current_id
                             on_open=on_open
-                            on_new=on_new
-                            new_label=new_label
                             on_delete=on_delete
                             on_pin=on_pin
                             on_archive=on_archive
                             renaming=renaming
                             on_rename=on_rename
                             view_archived=view_archived
-                            archived_count=archived_count
+                            view_counts=Signal::derive(move || {
+                                // The gateway counts both views; temporary
+                                // chats are active ones.
+                                let active = usize::try_from(active_count.get()).unwrap_or(0);
+                                let archived = usize::try_from(archived_count.get()).unwrap_or(0);
+                                (active + temp_threads.with(Vec::len), archived)
+                            })
                             folders=folders
                             on_pick=on_pick
                         />
@@ -1260,31 +1309,81 @@ pub fn Chat() -> impl IntoView {
                     when=move || current_id.get().is_some() || rescue.with(Rescue::holds_page)
                     fallback=move || {
                         view! {
-                            <div class="chat-empty density-airy">
-                                <crate::chat_machine::EmptySlot/>
-                                <div class="empty">
-                                    "Pick a conversation or start a new one."
-                                    <button class="btn primary" on:click=move |_| on_new.run("chat")>
-                                        "New chat"
-                                    </button>
-                                    <Show when=move || narrow.get()>
-                                        <narrow::DrawerButton
-                                            drawer=threads_drawer
-                                            other=settings_drawer
-                                            label="Conversations"
-                                            icon=narrow::ICON_LIST
-                                            badge=badge
-                                            class="chat-empty-list"
-                                        />
-                                    </Show>
+                            <div class="chat-empty-main density-airy">
+                                <super::head::EmptyHead env=head_env window=window_empty.clone()/>
+                                <div class="chat-empty">
+                                    <crate::chat_machine::EmptySlot/>
+                                    <div class="empty">
+                                        <Icon ico=Ico::Chat class="chat-empty-glyph"/>
+                                        <span class="chat-empty-title">"No conversation open"</span>
+                                        <span class="chat-empty-sub">"Pick a conversation or start a new one."</span>
+                                        <button class="btn primary" on:click=move |_| on_new.run("chat")>
+                                            "New chat"
+                                        </button>
+                                        <Show when=move || narrow.get()>
+                                            <narrow::DrawerButton
+                                                drawer=threads_drawer
+                                                other=settings_drawer
+                                                label="Conversations"
+                                                icon=narrow::ICON_LIST
+                                                badge=badge
+                                                class="chat-empty-list"
+                                            />
+                                        </Show>
+                                    </div>
                                 </div>
                             </div>
                         }
                     }
                 >
-                    // Collapsed by default: the settings take the transcript's
-                    // width, never its height, so the composer stays the last
-                    // row whatever the panel holds.
+                    // The head spans the conversation and its settings
+                    // panel: it is the rightmost header, with the window's
+                    // end buttons. Under it the settings take the
+                    // transcript's width, never its height, so the composer
+                    // stays the last row whatever the panel holds.
+                    <div
+                        class="chat-main density-airy"
+                        class:drag-over=move || drag_over.get()
+                        on:dragover=move |ev| {
+                            // Only claim the drop when it is files: text
+                            // (a selection, a link) must fall through to
+                            // the browser's normal drop-into-a-field
+                            // handling instead of being swallowed.
+                            if ev.data_transfer().is_some_and(|dt| drag_has_files(&dt)) {
+                                ev.prevent_default();
+                                drag_over.set(true);
+                            }
+                        }
+                        on:dragleave=move |ev| {
+                            ev.prevent_default();
+                            drag_over.set(false);
+                        }
+                        on:drop=move |ev| {
+                            let Some(dt) = ev.data_transfer() else { return };
+                            if !drag_has_files(&dt) {
+                                return;
+                            }
+                            ev.prevent_default();
+                            drag_over.set(false);
+                            if let Some(files) = dt.files() {
+                                upload_files(files);
+                            }
+                        }
+                    >
+                        <super::head::ChatHead
+                            env=head_env
+                            window=window_open.clone()
+                            current=current
+                            current_id=current_id
+                            model_sel=model_sel
+                            picker_held=picker_held
+                            held=held_now
+                            is_admin=is_admin
+                            mcp_names=mcp_names
+                            back=back_name
+                            on_back=on_back
+                        />
+                        <crate::chat_machine::BannerSlot/>
                     <SplitPane
                         side=Side::Right
                         persist="chat.settings"
@@ -1320,144 +1419,7 @@ pub fn Chat() -> impl IntoView {
                             }
                         }
                     >
-                        <div
-                            class="chat-main density-airy"
-                            class:drag-over=move || drag_over.get()
-                            on:dragover=move |ev| {
-                                // Only claim the drop when it is files: text
-                                // (a selection, a link) must fall through to
-                                // the browser's normal drop-into-a-field
-                                // handling instead of being swallowed.
-                                if ev.data_transfer().is_some_and(|dt| drag_has_files(&dt)) {
-                                    ev.prevent_default();
-                                    drag_over.set(true);
-                                }
-                            }
-                            on:dragleave=move |ev| {
-                                ev.prevent_default();
-                                drag_over.set(false);
-                            }
-                            on:drop=move |ev| {
-                                let Some(dt) = ev.data_transfer() else { return };
-                                if !drag_has_files(&dt) {
-                                    return;
-                                }
-                                ev.prevent_default();
-                                drag_over.set(false);
-                                if let Some(files) = dt.files() {
-                                    upload_files(files);
-                                }
-                            }
-                        >
-                            <div class="chat-head">
-                                <Show when=move || narrow.get()>
-                                    <narrow::DrawerButton
-                                        drawer=threads_drawer
-                                        other=settings_drawer
-                                        label="Conversations"
-                                        icon=narrow::ICON_LIST
-                                        badge=badge
-                                    />
-                                    <narrow::NewChatButton
-                                        label=new_label
-                                        on_new=Callback::new(move |()| on_new.run("chat"))
-                                    />
-                                </Show>
-                                <ModelPicker
-                                    value=model_sel
-                                    tasks=&["chat"]
-                                    recent_key="chat"
-                                    disabled=picker_held
-                                    empty_hint=move || {
-                                        // The dashboard's pages, where the host has them.
-                                        let (models, providers) = (place.href("/models"), place.href("/upstreams"));
-                                        let both = models.is_some() && providers.is_some();
-                                        view! {
-                                            {models.map(|h| view! { <a href=h>"Add a model"</a> })}
-                                            {both.then_some(" · ")}
-                                            {providers.map(|h| view! { <a href=h>"Add a cloud provider"</a> })}
-                                        }
-                                    }
-                                />
-                                <Show when=move || held.with(Option::is_some)>
-                                    <span class="type-badge held-badge" title=chat_sync::HELD>
-                                        "folder's model"
-                                    </span>
-                                </Show>
-                                <Show when=move || is_admin.get()>
-                                    <span class="type-badge" title="self-admin tools attached">
-                                        "admin"
-                                    </span>
-                                </Show>
-                                {move || {
-                                    current
-                                        .with(|c| c.as_ref().and_then(reasoning_badge))
-                                        .map(|b| {
-                                            view! {
-                                                <span
-                                                    class="type-badge"
-                                                    title="This thread's reasoning overrides — Thread settings → Reasoning"
-                                                >
-                                                    {b}
-                                                </span>
-                                            }
-                                        })
-                                }}
-                                {move || {
-                                    let names = mcp_names.get();
-                                    (!names.is_empty())
-                                        .then(|| {
-                                            view! {
-                                                <span
-                                                    class="type-badge"
-                                                    title=format!(
-                                                        "MCP servers attached: {}",
-                                                        names.join(", "),
-                                                    )
-                                                >
-                                                    {format!("{} mcp", names.len())}
-                                                </span>
-                                            }
-                                        })
-                                }}
-                                {move || {
-                                    current
-                                        .with(|c| c.as_ref().and_then(kb_badge))
-                                        .map(|b| {
-                                            view! {
-                                                <span
-                                                    class="type-badge"
-                                                    title="Knowledge bases on this thread — Thread settings → Knowledge"
-                                                >
-                                                    {b}
-                                                </span>
-                                            }
-                                        })
-                                }}
-                                <crate::chat_profiles::ProfileBadge current=current/>
-                                <crate::chat_live::FeedStopped/>
-                                {move || {
-                                    back.get()
-                                        .map(|b| {
-                                            view! {
-                                                <narrow::BackButton name=b.name on_back=go_back/>
-                                            }
-                                        })
-                                }}
-                                <Show when=move || current_id.get().is_some()>
-                                    <crate::chat_export::ExportMenu thread=current_id/>
-                                </Show>
-                                <Show when=move || narrow.get()>
-                                    <narrow::DrawerButton
-                                        drawer=settings_drawer
-                                        other=threads_drawer
-                                        label="Thread settings"
-                                        icon=narrow::ICON_SETTINGS
-                                        class="chat-settings-btn"
-                                    />
-                                </Show>
-                            </div>
-                            <crate::chat_machine::BannerSlot/>
+                        <div class="chat-body">
                             <div class="chat-scroll" id="chat-scroll" node_ref=scroll_pane>
                                 <div class="chat-col" node_ref=scroll_col>
                                     <For each=move || msgs.get() key=|m| m.key let:m>
@@ -1533,7 +1495,7 @@ pub fn Chat() -> impl IntoView {
                             <BlockerNote blockers=attach_blockers/>
                             <HintNote hints=attach_hints/>
                             <chat_voice::VoiceStatusLine pv=page_voice/>
-                            <div class="composer-wrap">
+                            <div class="composer-wrap" node_ref=composer_wrap>
                             // One bubble holds what the message is made of:
                             // its chips, the text, and a toolbar row under it,
                             // so the text always has the bubble's full width.
@@ -1613,12 +1575,9 @@ pub fn Chat() -> impl IntoView {
                                         }
                                     }
                                 >
-                                    // Monochrome line icon, like every other
-                                    // icon in the app — the paperclip emoji
-                                    // rendered in colour otherwise (review nit).
-                                    <svg viewBox="0 0 16 16">
-                                        <path d="M14.29 7.37l-6.13 6.13a4 4 0 0 1-5.66-5.66l6.13-6.13a2.67 2.67 0 0 1 3.77 3.77l-6.13 6.13a1.33 1.33 0 0 1-1.89-1.89l5.65-5.65"/>
-                                    </svg>
+                                    // The kit's symbolic paperclip, like every
+                                    // other icon in the app.
+                                    <Icon ico=Ico::Attach/>
                                 </button>
                                 <KbButton pick=kb_pick/>
                                 </div>
@@ -1654,9 +1613,7 @@ pub fn Chat() -> impl IntoView {
                                                 title=move || send_disabled_reason.get()
                                                 on:click=move |_| send(())
                                             >
-                                                <svg viewBox="0 0 16 16" aria-hidden="true">
-                                                    <path d="M8 13V3.5 M3.75 7.5L8 3.25l4.25 4.25"/>
-                                                </svg>
+                                                <Icon ico=Ico::Send/>
                                             </button>
                                         }
                                             .into_any()
@@ -1672,6 +1629,7 @@ pub fn Chat() -> impl IntoView {
                             </Show>
                         </div>
                     </SplitPane>
+                    </div>
                 </Show>
             </SplitPane>
 
@@ -1724,4 +1682,37 @@ pub fn Chat() -> impl IntoView {
             </Modal>
         </div>
     }
+}
+
+/// Keeps the notification toasts above the composer: the page's bottom
+/// reserve (the composer's height, hidden or not) is published as the
+/// `--toast-bottom` custom property the kit's toast stack stands on, so a
+/// toast that stays up never covers the message field. The property is
+/// removed with the page.
+fn follow_toast_bottom(wrap: NodeRef<leptos::html::Div>) {
+    let size = lmgw_ui_kit::element_size::use_element_size(wrap);
+    let root = || {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    };
+    Effect::new(move |_| {
+        // The wrap's content box excludes its padding: add the 6 px above
+        // and 16 px below it, then a gap.
+        let h = size.get().1;
+        if let Some(root) = root() {
+            let style = root.style();
+            if h > 0.0 {
+                let _ = style.set_property("--toast-bottom", &format!("{}px", h + 22.0 + 8.0));
+            } else {
+                let _ = style.remove_property("--toast-bottom");
+            }
+        }
+    });
+    on_cleanup(move || {
+        if let Some(root) = root() {
+            let _ = root.style().remove_property("--toast-bottom");
+        }
+    });
 }

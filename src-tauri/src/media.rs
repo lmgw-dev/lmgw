@@ -228,17 +228,20 @@ thread_local! {
     static WINDOW_DOCUMENT: RefCell<Option<WindowDocument>> = const { RefCell::new(None) };
 }
 
-/// Whether a command may run for the window's document: the same
+/// Whether `command` may run for the window's document: the same
 /// [`document_at_gateway`] question the microphone gets. Tauri's own check
 /// (`capabilities/remote-ui.json`) reads only the active URI, which during a
-/// navigation is the provisional one.
+/// navigation is the provisional one. The one other document is the design
+/// sample of a debug build's demo, which may call `window_chrome` and
+/// nothing else, judged the same way: committed and active URI both its own
+/// ([`crate::window_chrome::demo::document_is_demo`]).
 ///
 /// Call it from the invoke handler, which Tauri runs on the GTK main thread
 /// as each message arrives (wry's script-message and IPC-scheme handlers both
 /// run there): `load-changed` runs on the same thread, so nothing commits
 /// between the message and this answer. Called anywhere else there is no
 /// window document to ask, and the answer is no.
-pub(crate) fn command_allowed() -> Result<(), String> {
+pub(crate) fn command_allowed(command: &str) -> Result<(), String> {
     WINDOW_DOCUMENT.with(|doc| {
         let doc = doc.borrow();
         let Some(doc) = doc.as_ref() else {
@@ -250,8 +253,21 @@ pub(crate) fn command_allowed() -> Result<(), String> {
         let active = view.uri();
         let running = doc.running.borrow();
         let serving = doc.serving.origin();
-        document_at_gateway(running.as_deref(), active.as_deref(), serving.as_ref())
-            .map_err(str::to_string)
+        let at_gateway =
+            document_at_gateway(running.as_deref(), active.as_deref(), serving.as_ref());
+        match at_gateway {
+            Err(_)
+                if command == "window_chrome"
+                    && crate::window_chrome::demo::document_is_demo(
+                        crate::window_chrome::demo::wanted(),
+                        running.as_deref(),
+                        active.as_deref(),
+                    ) =>
+            {
+                Ok(())
+            }
+            other => other.map_err(str::to_string),
+        }
     })
 }
 

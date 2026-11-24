@@ -122,6 +122,11 @@ pub(super) async fn principal_mw(
     let bearer = crate::agents::token::presented(req.headers()).is_some();
     let subprotocol_key =
         crate::realtime::subprotocol_key(req.uri().path(), req.headers()).filter(|_| !bearer);
+    // docling-serve's status WebSocket (document-conversion design §7.4.1):
+    // its clients send their key as `?api_key=`, for that path only, for the
+    // same reason. The trace records the path, never the query.
+    let docling_key = super::docling::ws_query_key(req.uri()).filter(|_| !bearer);
+    let subprotocol_key = subprotocol_key.or(docling_key.as_deref());
     // The scheme it came in with (headless server design §4.3, §4.5): the
     // listener's, or a trusted proxy's word for the client's. Which cookie
     // counts, and which `Origin` is this gateway's.
@@ -401,7 +406,11 @@ fn gate(
         // A call's hangup ends work and starts none (realtime calls design
         // C3): no slot and no count, so a key at its concurrency limit can
         // still hang up. Its expiry alone, as on `Chat`.
-        if crate::realtime::is_hangup(&path) {
+        // The same for a look at a conversion job, its result or its cancel:
+        // the job holds the slot of the request that made it.
+        if crate::realtime::is_hangup(&path)
+            || crate::extract::convert::jobs::reads::is_job_read(req.method().as_str(), &path)
+        {
             if let Err(at) = crate::policy::check_expiry(key, chrono::Utc::now()) {
                 let refusal = Refusal::key_expired(key, &at);
                 return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;

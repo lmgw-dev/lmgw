@@ -110,6 +110,7 @@ fn image_block(url: &str) -> Option<ToolResultBlock> {
     Some(ToolResultBlock::Image {
         mime: image_mime(mime, data)?.to_string(),
         data: data.to_string(),
+        cache_control: None,
     })
 }
 

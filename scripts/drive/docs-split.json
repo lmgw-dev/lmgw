@@ -1,0 +1,294 @@
+[
+ {
+  "js": "'Docs in the modern design on faked data (no ingest, no model, no GPU): run with --init-script scripts/drive/docs-fake.js. It drives the corpora split (status page, a click selecting its path, ↓, the badge filter ?show=, the corpus page and its Run eval, the Re-embed dialog, the corpus browser), the playground (search first, the ranked chunks and the trace), the Corpora tab leading back to the corpus, the request queue toggle, the eval tables and the narrow window (one pane, the back row). The fake swallows every write. Run: scripts/ui-drive.py scripts/drive/docs-split.json --dsf 1.25 --init-script scripts/drive/docs-fake.js --token-file <dir>.token --base http://<addr> --podman-guard <prefix>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.docs.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/docs?fake-docs=1"
+ },
+ {
+  "until": "document.querySelectorAll('.docs-list .lrow').length===3",
+  "timeout": 15,
+  "label": "the corpora list has the three faked corpora"
+ },
+ {
+  "js": "window.__sel=()=>[...document.querySelectorAll('.docs-list .lrow.sel')].map(r=>r.dataset.key);window.__row=t=>[...document.querySelectorAll('.mdetail-scroll .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.trim()===t);'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.docs-split:not(.narrow)')&&document.querySelector('.docs-status')&&__sel().length===0",
+  "label": "wide: nothing selected shows the status page"
+ },
+ {
+  "expect": "document.querySelector('.page.docs .page-head .sub').textContent.includes('in memory')&&document.querySelectorAll('.page.docs .page-head .actions .icon-btn').length===3",
+  "label": "the header bar has the reranker and the memory size, and three icon buttons"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth<=document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "shot": "docs-split-status"
+ },
+ {
+  "click": ".docs-list .lrow",
+  "nth": 0
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/1'&&document.querySelector('.detail-hero h1')&&document.querySelector('.detail-hero h1').textContent==='router-demo@0.8'",
+  "timeout": 10,
+  "label": "a click selects the corpus: its path and its hero"
+ },
+ {
+  "expect": "document.querySelector('.page.docs .sub-nav [aria-current=page]').textContent.startsWith('Corpora')",
+  "label": "the Corpora tab stays current on a selected corpus"
+ },
+ {
+  "shot": "docs-split-corpus"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/2'&&document.querySelector('.detail-hero .chips').textContent.includes('Re-embed required')",
+  "timeout": 5,
+  "label": "↓ selects the next corpus; its hero says re-embed required"
+ },
+ {
+  "expect": "document.querySelectorAll('.docs-detail .kb-hero-notes .notice').length>=2",
+  "label": "its warnings and missing vectors are said"
+ },
+ {
+  "click": ".docs-filter"
+ },
+ {
+  "until": "document.querySelector('.menu-pop .menu-item')",
+  "timeout": 3
+ },
+ {
+  "js": "[...document.querySelectorAll('.menu-pop .menu-item')].find(b=>b.textContent.includes('Empty')).click();'empty'"
+ },
+ {
+  "until": "location.search.includes('show=empty')&&document.querySelectorAll('.docs-list .lrow').length===1",
+  "timeout": 5,
+  "label": "the filter shows the empty corpus only (?show=empty)"
+ },
+ {
+  "click": ".docs-filter"
+ },
+ {
+  "until": "document.querySelector('.menu-pop .menu-item')",
+  "timeout": 3
+ },
+ {
+  "js": "[...document.querySelectorAll('.menu-pop .menu-item')].find(b=>b.textContent.includes('All corpora')).click();'all'"
+ },
+ {
+  "until": "document.querySelectorAll('.docs-list .lrow').length===3",
+  "timeout": 5
+ },
+ {
+  "click": ".docs-list .lrow",
+  "nth": 0
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/1'&&__row('Run eval')",
+  "timeout": 5
+ },
+ {
+  "js": "__row('Run eval').querySelector('button').click();'run'"
+ },
+ {
+  "until": "window.__docsFakePosts.includes('/api/docs/eval')",
+  "timeout": 5,
+  "label": "Run eval starts the eval job"
+ },
+ {
+  "js": "__row('Re-embed…').querySelector('button').click();'reembed'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d=>d.textContent.includes('Re-pin and re-embed'))",
+  "timeout": 5,
+  "label": "Re-embed opens its dialog"
+ },
+ {
+  "shot": "docs-reembed"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__row('Browse documents and chunks').click();'browse'"
+ },
+ {
+  "until": "document.querySelector('dialog[open] .cb-doc')&&document.querySelector('dialog[open] .cb-chunk')",
+  "timeout": 5,
+  "label": "Browse opens the documents beside their chunks"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__row('Search it in the playground').click();'playground'"
+ },
+ {
+  "until": "location.pathname==='/docs/playground'&&document.querySelector('.kb-query input')",
+  "timeout": 5,
+  "label": "the playground opens for the corpus"
+ },
+ {
+  "click": ".kb-query input"
+ },
+ {
+  "type": "middleware layer"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelectorAll('.pg-hit').length===2&&document.querySelector('.trace-card').textContent.includes('FTS query')",
+  "timeout": 5,
+  "label": "a search shows the ranked chunks and the trace"
+ },
+ {
+  "expect": "document.querySelector('.fill-pane.playground').scrollWidth<=document.querySelector('.fill-pane.playground').clientWidth",
+  "label": "the playground does not scroll sideways (the stages scroll in their box)"
+ },
+ {
+  "click": ".pg-params-toggle"
+ },
+ {
+  "until": "document.querySelectorAll('.pg-param-groups .prow').length>=12",
+  "timeout": 3,
+  "label": "the stage parameters unfold into rows"
+ },
+ {
+  "shot": "docs-playground"
+ },
+ {
+  "click": ".pg-params-toggle"
+ },
+ {
+  "expect": "document.querySelector('.page.docs .sub-nav a').getAttribute('href').startsWith('/docs/corpora/1')",
+  "label": "the Corpora tab leads back to the corpus shown last"
+ },
+ {
+  "js": "[...document.querySelectorAll('.page.docs .sub-nav a')].find(a=>a.textContent.startsWith('Corpora')).click();'corpora tab'"
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/1'&&document.querySelectorAll('.docs-list .lrow').length===3",
+  "timeout": 5
+ },
+ {
+  "click": ".docs-list .lrow",
+  "nth": 1
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/2'&&document.querySelector('.detail-hero h1')&&document.querySelector('.detail-hero h1').textContent==='parser-demo@2.1'",
+  "timeout": 5
+ },
+ {
+  "js": "[...document.querySelectorAll('.page.docs .sub-nav a')].find(a=>a.textContent.startsWith('Playground')).click();'playground tab'"
+ },
+ {
+  "until": "location.pathname==='/docs/playground'&&document.querySelector('.fill-pane.playground')&&document.querySelector('.fill-pane.playground').innerText.includes('parser-demo@2.1')",
+  "timeout": 5,
+  "label": "the playground tab acts on the corpus selected in the list"
+ },
+ {
+  "js": "[...document.querySelectorAll('.page.docs .sub-nav a')].find(a=>a.textContent.startsWith('Corpora')).click();'corpora tab'"
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/2'&&document.querySelectorAll('.docs-list .lrow').length===3",
+  "timeout": 5
+ },
+ {
+  "click": ".docs-list .lrow",
+  "nth": 0
+ },
+ {
+  "until": "location.pathname==='/docs/corpora/1'&&document.querySelector('.detail-hero h1')&&document.querySelector('.detail-hero h1').textContent==='router-demo@0.8'",
+  "timeout": 5
+ },
+ {
+  "expect": "(()=>{const r=document.querySelector('.docs-list .lrow.sel');const l=(r.getAttribute('title')||'').split('\\n');return l.length===3&&l[0]==='router-demo@0.8'&&l[2]===r.querySelector('.lrow-meta').textContent})()",
+  "label": "a row's tooltip says its name, state and facts in full"
+ },
+ {
+  "go": "/docs/requests"
+ },
+ {
+  "until": "document.querySelectorAll('.docs-request').length===2",
+  "timeout": 5,
+  "label": "Requests shows the two pending"
+ },
+ {
+  "js": "[...document.querySelectorAll('.docs-strip .seg-btn')].find(b=>b.textContent.startsWith('All')).click();'all'"
+ },
+ {
+  "until": "document.querySelectorAll('.docs-request').length===3&&location.search.includes('status=all')",
+  "timeout": 5,
+  "label": "All shows the dismissed one too"
+ },
+ {
+  "shot": "docs-requests"
+ },
+ {
+  "js": "history.pushState(null,'','/docs/eval');dispatchEvent(new PopStateEvent('popstate'));'eval'"
+ },
+ {
+  "until": "document.querySelectorAll('.eval-table tbody tr').length===2",
+  "timeout": 5,
+  "label": "Eval shows the corpus's golden queries"
+ },
+ {
+  "shot": "docs-eval"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "js": "history.pushState(null,'','/docs/corpora/1');dispatchEvent(new PopStateEvent('popstate'));'corpus'"
+ },
+ {
+  "until": "document.querySelector('.docs-split.narrow')&&document.querySelector('.docs-back')",
+  "timeout": 5,
+  "label": "narrow: the corpus alone with a back row"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.docs-split .mlist-pane')).display==='none'",
+  "label": "narrow: the list is hidden"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth<=document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "shot": "docs-narrow"
+ },
+ {
+  "click": ".docs-back .btn"
+ },
+ {
+  "until": "location.pathname==='/docs'&&getComputedStyle(document.querySelector('.docs-split .mlist-pane')).display!=='none'",
+  "timeout": 5,
+  "label": "back shows the list"
+ },
+ {
+  "expect": "!window.__docsFakeAnswered.refused",
+  "label": "the drive wrote nothing"
+ },
+ {
+  "js": "sessionStorage.removeItem('lmgw.fake.docs');'off'"
+ }
+]

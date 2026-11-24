@@ -41,24 +41,24 @@ pub struct VramSettings {
     /// Master switch. When off, requests are forwarded exactly as they were
     /// before this existed and the ledger is reporting only.
     pub enabled: bool,
-    /// How the headroom is set: `auto` (the default) learns it from this
-    /// machine (`vram::headroom`), `fixed` uses `headroom_mb` as written.
-    /// Auto uses `headroom_mb` too until it has learned enough.
+    /// How the headroom is set: `auto` (the default) from what other
+    /// programs did on each card (`vram::headroom`), `fixed` uses
+    /// `headroom_mb` as written.
     pub headroom_mode: lmgw_api_types::HeadroomMode,
-    /// Memory kept free above the GGUF-derived estimate, in MiB.
+    /// Memory kept free for other programs beside lmgw's models, in MiB, on
+    /// each graphics card (device-ledger design §9.1, WP13).
     ///
-    /// The estimate is weights + KV cache + compute buffers, read from the
-    /// file and the section's own flags (`vram::plan`). What it does **not**
-    /// describe — the CUDA context, allocator fragmentation, a projector's
-    /// own compute buffer — has no metadata to derive it from, so it lives
-    /// here as one visible number instead of being smuggled into the
-    /// estimate as a fudge factor. Raise it if loads still OOM; the status
-    /// surface shows both figures side by side.
-    ///
-    /// In `auto` mode this is the value until lmgw has learned enough; then
-    /// the headroom is the learned growth of other programs' use plus a
-    /// margin per model still starting or not measured (`vram::headroom`).
+    /// In `auto` mode it is the floor: always kept free, but no more than
+    /// the most other programs ever held on that card (a card nobody else
+    /// uses keeps nothing), with the learned room on top. In `fixed` mode it
+    /// is kept as written. lmgw's own estimates while a model starts have a
+    /// margin of their own on top, in every mode (`vram::headroom`).
     pub headroom_mb: u64,
+    /// What is kept free for other programs on a card, by the card's id,
+    /// where the owner declared it (Settings → GPU, WP13): `always` an
+    /// amount, never given up, or `nothing`. A card not listed is
+    /// `automatic`: as `headroom_mode` says.
+    pub keep_free: std::collections::BTreeMap<lmgw_api_types::DeviceId, lmgw_api_types::KeepFree>,
     /// GPU memory lmgw may plan against, in MiB. `0` = the device's real
     /// total, read from the driver (NVML on NVIDIA, amdgpu's sysfs counters on
     /// AMD — `vram::detect_probe`).
@@ -113,6 +113,7 @@ impl Default for VramSettings {
             enabled: true,
             headroom_mode: lmgw_api_types::HeadroomMode::Auto,
             headroom_mb: 1024,
+            keep_free: Default::default(),
             budget_mb: 0,
             queue_timeout_seconds: 300,
             load_timeout_seconds: 600,

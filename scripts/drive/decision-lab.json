@@ -6,9 +6,9 @@
   "js": "(async()=>{const r=await fetch('/labs/api/decision/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return r.status})()"
  },
  {"nav": "/decision-lab"},
- {"until": "document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {
-  "expect": "document.querySelector('.lab-head .model-picker').textContent.includes('laya') && [...document.querySelectorAll('.lab-head .dl-fact')].map(e=>e.textContent).join('|').startsWith('laya|non-causal|ctx 8192|ubatch 8192 (row)')",
+  "expect": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('laya') && [...document.querySelectorAll('.lab-shell > .page-head .dl-fact')].map(e=>e.textContent).join('|').startsWith('laya|non-causal|ctx 8192|ubatch 8192 (row)')",
   "label": "the head starts on decide/laya (a CPU row, never a cold GPU row) and reads its facts"
  },
  {
@@ -33,7 +33,7 @@
  },
  {"click": ".action-bar .btn.primary"},
  {
-  "until": "document.querySelectorAll('.dl-group').length===1 && !document.querySelector('.dl-group .chip.live') && document.querySelector('.dl-group .dl-run')",
+  "until": "document.querySelectorAll('.dl-group').length===1 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelector('.dl-group .dl-run')",
   "timeout": 300
  },
  {
@@ -58,7 +58,7 @@
  },
  {"click": ".action-bar .btn.primary"},
  {
-  "until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix tbody tr').length===3 && ![...document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix td')].some(t=>t.textContent==='…')",
+  "until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix tbody tr').length===3 && ![...document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix td')].some(t=>t.textContent==='…')",
   "timeout": 300
  },
  {
@@ -84,7 +84,7 @@
  },
  {"click": ".action-bar .btn.primary"},
  {
-  "until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')",
+  "until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')",
   "timeout": 300
  },
  {
@@ -101,7 +101,7 @@
   "expect": "!document.querySelector('.dl-override') && document.querySelector('.action-note').textContent.startsWith('Ask 3: 1 model × 3 variants')",
   "label": "Drop override gives the form, and its perturbations, back"
  },
- {"click": ".lh-export .btn"},
+ {"click": ".lh-export .icon-btn"},
  {"wait": 0.3},
  {
   "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='All as JSONL|All as CSV'",
@@ -151,7 +151,7 @@
  },
  {"js": "(async()=>{const url='data:image/x-receipt;name=r.png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';const body={form:{state_mode:'text',state:'Receipt attached: was order A-1001 paid twice?',images:[{source:'data_url',name:'r.png',url}],questions:[{id:'paid_twice',instructions:'Was it paid twice?',kind:{type:'noul',yes:'',no:''}}]},models:['decide/laya'],variants:[]};const r=await fetch('/decision-lab/api/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const g=await r.json();return r.status+' group '+g.id+' '+JSON.stringify(g.artifacts.map(a=>[a.id,a.data_url_head,a.size]))})()"},
  {"nav": "/decision-lab"},
- {"until": "document.querySelectorAll('.dl-group').length===1 && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "document.querySelectorAll('.dl-group').length===1 && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"click": ".dl-group .row-menu-btn"},
  {"wait": 0.3},
  {"click": ".menu-pop .menu-item", "nth": 0},
@@ -162,7 +162,7 @@
  {"until": "document.querySelector('.dl-override')", "timeout": 10},
  {"expect": "/\"lab-artifact:\\d+\"/.test(document.querySelector('.dl-override').value) && !document.querySelector('.dl-override').value.includes('base64') && document.querySelector('.dl-override-banner').textContent.includes('kept image')", "label": "Edit as JSON keeps the kept image as its ref, and the banner says what that is"},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
+ {"until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
  {"expect": "(async()=>{const gs=(await (await fetch('/labs/api/decision/groups')).json()).groups;const [g2,g1]=gs;const a1=g1.artifacts[0],a2=g2.artifacts[0];if(g2.artifacts.length!==1)return false;const r=g2.runs[0];window.__g2=g2;const bytes=new Uint8Array(await (await fetch(a2.href)).arrayBuffer());const b64=btoa(String.fromCharCode(...bytes));return a2 && a2.id!==a1.id && a2.sha256===a1.sha256 && a2.data_url_head==='data:image/x-receipt;name=r.png;base64' && g2.override.includes('\"lab-artifact:'+a2.id+'\"') && r.request.includes('\"lab-artifact:'+a2.id+'\"') && (a2.data_url_head+','+b64)==='data:image/x-receipt;name=r.png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='})()", "label": "the re-ask names its own row of the same file and head: <head>,<payload> is the URL as first typed"},
  {"shot": "reask-kept-image"},
  {"click": ".dl-override-banner .btn"},
@@ -179,7 +179,7 @@
  {"js": "window.__groupsBefore=0; fetch('/labs/api/decision/usage').then(r=>r.json()).then(u=>window.__groupsBefore=u.groups); 'ok'"},
  {"wait": 0.3},
  {"dblclick": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run') && !document.querySelector('.action-bar .btn.danger')", "timeout": 120},
+ {"until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run') && !document.querySelector('.action-bar .btn.danger')", "timeout": 120},
  {"expect": "(async()=>{const u=await (await fetch('/labs/api/decision/usage')).json();const g=(await (await fetch('/labs/api/decision/groups')).json()).groups[0];return u.groups===window.__groupsBefore+1 && g.runs.length===g.plan.length && !document.querySelectorAll('.dl-group')[0].querySelector('.chip.warn')})()", "label": "a double-clicked Ask asks once and is not stopped by its second click"},
  {"expect": "document.querySelectorAll('.dl-group')[1].querySelector('details.lab-details').open", "label": "another group's cells landing leave an open Raw open"},
  {"click": ".lh-filter .select-btn"},
@@ -188,23 +188,23 @@
  {"until": "document.querySelectorAll('.dl-group').length===0 && document.querySelector('.lh-filter').textContent.includes('kev-4b')", "timeout": 10},
  {"shot": "filter-kev"},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.dl-group').length===4 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
+ {"until": "document.querySelectorAll('.dl-group').length===4 && !document.querySelector('.dl-group .chip[data-state=running]') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
  {"expect": "document.querySelector('.lh-filter').textContent.includes('all models') && [...document.querySelectorAll('.toast')].some(t=>t.textContent.includes('model filter cleared'))", "label": "an Ask the filter would hide clears it, says so, and its card is in view"},
- {"click": ".lab-head .mp-btn"},
+ {"click": ".lab-shell > .page-head .mp-btn"},
  {"wait": 0.3},
  {"type": "kev"},
  {"wait": 0.3},
  {"key": "Enter"},
  {"wait": 0.2},
- {"expect": "document.querySelector('.lab-head .model-picker').textContent.includes('kev-4b') && document.querySelector('.dl-gauge').textContent.includes('decide/kev-4b is not loaded') && !document.querySelector('.dl-gauge .dl-bar') && !document.querySelector('.dl-qtokens')", "label": "a switch to another head model clears the bars and the per-question counts at once"},
+ {"expect": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('kev-4b') && document.querySelector('.dl-gauge').textContent.includes('decide/kev-4b is not loaded') && !document.querySelector('.dl-gauge .dl-bar') && !document.querySelector('.dl-qtokens')", "label": "a switch to another head model clears the bars and the per-question counts at once"},
  {"shot": "kev-head"},
  {"expect": "(()=>{const n=document.querySelector('.action-note');return n.textContent.endsWith('the first ask starts decide/kev-4b') && n.scrollWidth<=n.clientWidth})()", "label": "the action bar's line is whole"},
- {"click": ".lab-head .mp-btn"},
+ {"click": ".lab-shell > .page-head .mp-btn"},
  {"wait": 0.3},
  {"type": "laya"},
  {"wait": 0.3},
  {"key": "Enter"},
- {"until": "document.querySelector('.lab-head .model-picker').textContent.includes('laya') && document.querySelector('.dl-gauge .dl-bar')", "timeout": 20},
+ {"until": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('laya') && document.querySelector('.dl-gauge .dl-bar')", "timeout": 20},
  {"expect": "(()=>{const h=document.querySelector('.results-head');const hr=h.getBoundingClientRect();const n=document.querySelector('.results-note');const inside=[...h.querySelectorAll('.results-tools > *, .results-note, .count')].every(e=>{const r=e.getBoundingClientRect();return r.right<=hr.right+0.5 && r.left>=hr.left-0.5});return h.scrollWidth<=h.clientWidth && n.scrollWidth<=n.clientWidth && inside})()", "label": "the results head at this size: nothing cut, nothing outside"},
  {"size": "1024x700"},
  {"wait": 0.5},
@@ -212,7 +212,7 @@
  {"wait": 0.3},
  {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('laya')).click(), 'filter laya'"},
  {"until": "document.querySelector('.lh-filter').textContent.includes('laya') && document.querySelectorAll('.dl-group').length===4", "timeout": 10},
- {"expect": "(()=>{const h=document.querySelector('.results-head');const hr=h.getBoundingClientRect();const n=document.querySelector('.results-note');const inside=[...h.querySelectorAll('.results-tools > *, .results-note, .count')].every(e=>{const r=e.getBoundingClientRect();return r.right<=hr.right+0.5 && r.left>=hr.left-0.5});return h.scrollWidth<=h.clientWidth && n.scrollWidth<=n.clientWidth && inside && /\\d+ runs · [\\d.]+ kB/.test(n.textContent)})()", "label": "at 1024 with a filter set: the head wraps, the count and the size whole, nothing outside"},
+ {"expect": "(()=>{const h=document.querySelector('.results-head');const hr=h.getBoundingClientRect();const n=document.querySelector('.results-note');const inside=[...h.querySelectorAll('.results-tools > *, .results-note, .count')].every(e=>{const r=e.getBoundingClientRect();return r.right<=hr.right+0.5 && r.left>=hr.left-0.5});return h.scrollWidth<=h.clientWidth && n.scrollWidth<=n.clientWidth && inside && /\\d+ runs? · (\\d+ files? · )?[\\d.]+ (B|KiB|MiB|GiB)/.test(n.textContent)})()", "label": "at 1024 with a filter set: the head wraps, the count and the size whole, nothing outside"},
  {"shot": "head-1024"},
  {"js": "(async()=>{const r=await fetch('/labs/api/decision/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return r.status})()"}
 ]

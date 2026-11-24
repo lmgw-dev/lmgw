@@ -495,27 +495,27 @@ pub fn portability(agent: &Agent, redact_dev_url: bool) -> (bool, Vec<String>) {
     if let Some(image) = agent.manifest.image() {
         if container::is_local_image(image) {
             notes.push(format!(
-                "the image '{image}' is local to the machine that built it; the receiver must \
-                 build or retag it"
+                "The image '{image}' is local to the machine that built it; the receiver must \
+                 build or retag it."
             ));
         }
     }
     if let Some(url) = super::service::dev_url_of(agent) {
         notes.push(if redact_dev_url {
-            "this agent's app is currently served from a dev server on the exporting machine. A \
+            "This agent's app is currently served from a dev server on the exporting machine. A \
              dev_url is a row setting and is never exported — neither the override nor its \
-             address — so the receiver gets the image path only"
+             address — so the receiver gets the image path only."
                 .to_string()
         } else {
             format!(
-                "this agent's app is currently served from the dev server at {url}. A dev_url is \
-                 a row setting and is never exported, so the receiver gets the image path only"
+                "This agent's app is currently served from the dev server at {url}. A dev_url is \
+                 a row setting and is never exported, so the receiver gets the image path only."
             )
         });
     }
     if agent.manifest.kind() == "container" && agent.manifest.image().is_none() {
         notes.push(
-            "this manifest names no run.image, so the receiver has nothing to run it with"
+            "This manifest names no run.image, so the receiver has nothing to run it with."
                 .to_string(),
         );
     }

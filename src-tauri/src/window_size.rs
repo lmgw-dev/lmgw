@@ -157,11 +157,15 @@ impl Tracker {
         let maximized = w.is_maximized().unwrap_or(false);
         let size = (!maximized)
             .then(|| {
-                Some(
-                    w.inner_size()
-                        .ok()?
-                        .to_logical::<f64>(w.scale_factor().ok()?),
-                )
+                // The shell's own frame: the content, not the surface with
+                // its shadow (`window_chrome::content_size`).
+                crate::window_chrome::content_size().or_else(|| {
+                    Some(
+                        w.inner_size()
+                            .ok()?
+                            .to_logical::<f64>(w.scale_factor().ok()?),
+                    )
+                })
             })
             .flatten();
         let mut s = self.lock();

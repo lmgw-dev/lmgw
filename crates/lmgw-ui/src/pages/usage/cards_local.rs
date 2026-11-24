@@ -22,7 +22,7 @@ pub(super) fn LocalCard(local: Src<UsageLocalResponse>) -> impl IntoView {
     let tv = RwSignal::new(false);
     view! {
         <div class="card chart-card u-local">
-            <ChartHead title="Local vs cloud" note="tokens in this window" tv=tv/>
+            <ChartHead title="Local vs cloud" note="Tokens in this window" tv=tv/>
             <CardErr err=local.err/>
             <div class="chart-box" node_ref=node class:stale=move || local.stale()>
                 {move || {
@@ -33,7 +33,7 @@ pub(super) fn LocalCard(local: Src<UsageLocalResponse>) -> impl IntoView {
                     }
                     let tot = (l.local_tokens + l.cloud_tokens) as f64;
                     if tot <= 0.0 {
-                        return view! { <div class="chart-empty">"No tokens in this window."</div> }
+                        return view! { <div class="card-empty-line">"No tokens in this window"</div> }
                             .into_any();
                     }
                     let share = l.local_tokens as f64 / tot;
@@ -171,7 +171,7 @@ pub(super) fn PerfCard(
     let tv = RwSignal::new(false);
     view! {
         <div class="card chart-card u-perf">
-            <ChartHead title="Local decode throughput" note="tok/s per model per bucket, from the stored llama.cpp timings · Σtokens / Σms, never a mean of rates" tv=tv/>
+            <ChartHead title="Local decode throughput" note="Tokens/s per model" explain="Per bucket, from llama.cpp's own timings: all tokens over all time, never an average of rates." tv=tv/>
             <CardErr err=by_alias.err/>
             <div class="chart-box" node_ref=node class:stale=move || by_alias.stale()>
                 {move || {
@@ -190,8 +190,11 @@ pub(super) fn PerfCard(
                         .collect();
                     if n == 0 || locals.is_empty() {
                         return view! {
-                            <div class="chart-empty">
-                                "No local decode timings in this window — either nothing ran locally, or it ran before timings were stored."
+                            <div
+                                class="card-empty-line"
+                                title="Either nothing ran locally, or it ran before timings were stored."
+                            >
+                                "No local decode timings in this window"
                             </div>
                         }
                             .into_any();
@@ -361,7 +364,8 @@ pub(super) fn HeatCard(heat: Src<UsageHeatResponse>, tips: Tips) -> impl IntoVie
         <div class="card chart-card u-heat">
             <ChartHead
                 title="When"
-                note="requests summed over the window · weekday × hour, local time — a cell is every such hour added up, not a rate"
+                note="Requests by weekday and hour"
+                explain="Requests summed over the window, in local time. A cell is every such hour added up, not a rate."
                 tv=tv
             />
             <CardErr err=heat.err/>

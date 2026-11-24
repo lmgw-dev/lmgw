@@ -11,7 +11,7 @@
 //! `--fit` finds it ([`fit_to_card`]). Each decision fits it again on its
 //! own reading of the card (`VramScheduler::fit_in`), the same figures its
 //! admission check compares, so a target fitted on a card that holds only
-//! other programs' memory is admitted. The learned growth never shrinks it:
+//! other programs' memory is admitted. The learned room never shrinks it:
 //! it only makes the start wait for, or evict, lmgw's own models, and once
 //! none are left the start goes ahead without it, warned (`headroom`). The
 //! target is what the card can give it at all now, so it goes ahead, a
@@ -20,11 +20,14 @@
 //! **Less than the target** ([`decide`]) lasts for the container's life, so
 //! only where it is the only way the model runs now: nothing of lmgw's to
 //! wait for and no fallback that would answer. Then a lower context first,
-//! layers off the card after. It waits, as any model does, while not even
-//! its least placement fits what is free; it is refused, with numbers, only
-//! where its least does not fit the card beside what other programs hold at
-//! rest and its margin (`VramScheduler::card_headroom`) — never because of
-//! the learned growth or of what other programs hold now. A fallback
+//! layers off the card after, each beside its margin; where not even its
+//! least fits beside the margin, its target goes ahead beside the floor
+//! alone, its margin given up last (`partial::decide`, WP13). It waits, as
+//! any model does, while not even its least placement fits what is free;
+//! it is refused, with numbers, only where its least does not fit the card
+//! beside what other programs hold at rest and the floor
+//! (`VramScheduler::card_headroom`) — never because of the learned room,
+//! its margin or what other programs hold now. A fallback
 //! answers in its place only where its least does not fit beside what other
 //! programs hold now (`partial::least`, §4.7's verdict).
 //!
@@ -41,10 +44,12 @@
 //! off the card ([`super::PARTIAL_FIT`]) are logged and kept on the entry
 //! with both figures, what is free and the flags it runs with.
 //!
-//! **Not yet.** Several cards: llama.cpp splits layers by each card's free
-//! memory while the ledger pools them, so a row whose engine sees more than
-//! one card is charged as written; the target is the entry's for its life,
-//! as an image grant is.
+//! **Several cards.** lmgw places a model on one card (device-ledger
+//! design §5) and fits it to that card, with a count of one (D14); a row
+//! placed on several cards as a group (§5.7: an engine lmgw cannot hand a
+//! card) is charged as written, since llama.cpp splits it by each card's
+//! free memory. The target is the entry's for its life, as an image grant
+//! is.
 
 use crate::hf::fmt_bytes;
 use crate::runtime::registry::{LlamaPlacement, PartialGrant};
@@ -74,7 +79,7 @@ pub struct Card {
     pub margin: u64,
     /// What it needs beside it on an otherwise empty card
     /// (`VramScheduler::card_headroom`): whether it can run at all is
-    /// judged against this, never against the learned growth.
+    /// judged against this, never against the learned room nor its margin.
     pub structural: u64,
 }
 
@@ -341,8 +346,8 @@ pub(super) fn why_not(fp: &Footprint, room: Room) -> Option<String> {
         },
         Some(n) => format!(
             "llama.cpp's --fit could run it with less on the card, but its engine would see {n} \
-             cards and VRAM admission pools them, so fitting it on several cards is not done yet \
-             and it needs all of it free"
+             cards that lmgw cannot hand it one of, so it is placed on them together, and \
+             fitting it there is not done: it needs all of it free"
         ),
         None => "llama.cpp's --fit could run it with less on the card, but how many cards its \
                  engine would see is not known (no device reading), so it needs all of it free"

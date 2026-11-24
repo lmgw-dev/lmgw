@@ -38,7 +38,7 @@ const STEPS: [i32; 13] = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250,
 /// 125%: the window is read from further away than a browser tab, beside
 /// apps in the desktop's own sizes. index.html's first-paint script carries
 /// the same number.
-const DEFAULT: i32 = 125;
+pub const DEFAULT: i32 = 125;
 
 pub fn steps() -> &'static [i32] {
     &STEPS
@@ -64,7 +64,7 @@ impl UiScale {
 
     /// One rung up (`dir > 0`) or down. Reads as "the next rung past where we
     /// are", so a hand-edited in-between value still steps somewhere sane.
-    fn nudge(&self, dir: i32) {
+    pub fn nudge(&self, dir: i32) {
         let cur = self.pct.get_untracked();
         let next = if dir > 0 {
             STEPS.iter().copied().find(|s| *s > cur)

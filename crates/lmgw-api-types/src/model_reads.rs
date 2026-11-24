@@ -110,6 +110,19 @@ impl ModelLicence {
     }
 }
 
+/// A looped model's loop core (`<arch>.loop.*`): the stored layers
+/// `start..end` run `count` times per token, each pass with a KV cache of
+/// its own, so the cache holds `cache_layers` layers' worth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LayerLoop {
+    pub start: u64,
+    pub end: u64,
+    pub count: u64,
+    /// The stored layers plus every pass after the first over the core.
+    pub cache_layers: u64,
+}
+
 /// `GET /api/model-inspect` — what a GGUF file is, from its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -140,7 +153,12 @@ pub struct ModelInspect {
     pub quant: Option<String>,
     /// The model's trained context, in tokens.
     pub context_length: Option<u64>,
+    /// Layers stored in the file.
     pub block_count: Option<u64>,
+    /// A looped model's loop core; null for a model that runs each stored
+    /// layer once.
+    pub layer_loop: Option<LayerLoop>,
+    /// Query heads; the largest layer's when the header gives one per layer.
     pub head_count: Option<u64>,
     pub head_count_kv: Option<u64>,
     /// Per-layer KV heads, on models whose layers differ.

@@ -1,29 +1,38 @@
 //! Traffic — the unified request log: live tail on the SSE bus, filters,
-//! cursor pagination, expandable per-row detail (log rows carry every stored
-//! field, so no extra fetch). Two routes: `/traffic` (Requests) and
-//! `/traffic/conversations`.
+//! cursor pagination, and the opened row's every stored field (log rows carry
+//! them all, so no extra fetch). Two routes: `/traffic/:log?` (Requests) and
+//! `/traffic/conversations/:chain?`.
 //!
-//! Requests is a fill page: the filters and the table head stay put, the rows
-//! are the one scroller. The live tail keeps the newest page of whatever the
-//! filters select — a live row is matched against the same filters the server
-//! applied, so a filtered view grows only with rows that belong in it.
+//! Requests is a list beside the opened row on the shared split view
+//! (`widgets::nav_split`): the list is the log, newest first under sticky day
+//! headings, the filters in the URL's query, the opened row the path
+//! (`/traffic/4711?alias=…`), so a filter change keeps it open and a link to
+//! a row selects it. The live tail keeps the newest page of whatever the
+//! filters select — a live row is matched against the same filters the
+//! server applied, so a filtered view grows only with rows that belong in it.
 
 use std::time::Duration;
 
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeysResponse, LogsResponse, RequestRow, UsageTopResponse, VramStatus};
+use leptos_router::hooks::{use_location, use_navigate, use_params_map};
+use lmgw_api_types::{LogsResponse, RequestRow, UsageTopResponse, VramStatus};
 
-use crate::fmt::{count_of, fmt_bytes, grouped, hue_for, log_time};
-
-// A row's measured quantities and its priced parts (billable units §8.4).
-mod row_cost;
+use crate::fmt::{count_of, grouped};
 use crate::live::use_live;
 use crate::url_state::use_query_signal;
-use crate::widgets::{
-    filter_words, matches_word, FilterBar, NavTab, PageFrame, PageMode, Popover, Select, SubNav,
-};
+use crate::widgets::nav_split::{provide_save_key, NavSplit, SplitConf, SplitState};
+use crate::widgets::{filter_words, matches_word, Popover};
+
+// The opened row: its fields as boxed groups.
+mod detail;
+// The GPU plane: the header's button, its panel.
+mod gpu;
+// The list pane: the header, the filters, the rows.
+mod list;
+// A row's measured quantities and its priced parts (billable units §8.4).
+mod row_cost;
 
 /// The page sizes on offer. The size is also how many rows the live tail
 /// keeps (PLAN §7.5), so it is said next to the tail, not buried in a menu.
@@ -38,20 +47,30 @@ fn truthy(v: &str) -> bool {
     matches!(v, "1" | "true" | "yes" | "on")
 }
 
-/// The Traffic tabs, each its own route.
+/// Requests and Conversations, each its own route: the toggle under the
+/// list's header bar. Each side comes back with the query it was left with.
 #[component]
-pub(super) fn TrafficTabs(#[prop(into)] conversations: Signal<Option<i64>>) -> impl IntoView {
-    let tabs = Signal::derive(move || {
-        let mut c = NavTab::new("Conversations", "/traffic/conversations");
-        if let Some(n) = conversations.get() {
-            c = c.count(grouped(n.max(0) as u64));
-        }
-        vec![NavTab::new("Requests", "/traffic").exact(), c]
-    });
-    view! { <SubNav tabs=tabs/> }
+pub(super) fn TrafficSwitch(
+    /// Conversations is the one shown.
+    conversations: bool,
+    #[prop(into)] count: Signal<Option<i64>>,
+) -> impl IntoView {
+    let requests = crate::url_state::with_last_query("/traffic");
+    let convs = crate::url_state::with_last_query("/traffic/conversations");
+    view! {
+        <nav class="seg sub-nav mlist-switch" aria-label="Traffic">
+            <a href=requests class="seg-btn" aria-current=(!conversations).then_some("page")>
+                "Requests"
+            </a>
+            <a href=convs class="seg-btn" aria-current=conversations.then_some("page")>
+                "Conversations"
+                {move || count.get().map(|n| view! { <span class="count">{grouped(n.max(0) as u64)}</span> })}
+            </a>
+        </nav>
+    }
 }
 
-/// The stored conversations' count, for the tab.
+/// The stored conversations' count, for the switch.
 pub(super) fn conversations_count() -> Signal<Option<i64>> {
     let index =
         LocalResource::new(|| crate::api::get::<lmgw_api_types::ResponsesIndex>("/api/responses"));
@@ -61,7 +80,7 @@ pub(super) fn conversations_count() -> Signal<Option<i64>> {
 /// Every filter the log is asked with, one canonical query string: it is both
 /// what `/api/logs` receives and how two states are compared.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Filters {
+pub(super) struct Filters {
     /// Exact — what a Usage chart links with.
     alias: String,
     /// A part of the alias, case-insensitive — what the box types.
@@ -72,6 +91,17 @@ struct Filters {
     key_id: String,
     error_kind: String,
     errors_only: bool,
+}
+
+/// What the server is asked to find for a typed alias part: a request that
+/// named no model is stored with the alias `?` and shown as "No model", so
+/// searching those words looks for it.
+fn alias_needle(q: &str) -> &str {
+    if q.trim().eq_ignore_ascii_case("no model") {
+        "?"
+    } else {
+        q
+    }
 }
 
 impl Filters {
@@ -85,7 +115,7 @@ impl Filters {
             }
         };
         put("alias", &self.alias);
-        put("alias_q", &self.alias_q);
+        put("alias_q", alias_needle(&self.alias_q));
         put("upstream", &self.upstream);
         put("upstream_q", &self.upstream_q);
         put("class", &self.class);
@@ -109,7 +139,7 @@ impl Filters {
         let up = r.upstream_name.as_deref().unwrap_or("");
         let exact = |want: &str, have: &str| want.trim().is_empty() || want.trim() == have;
         exact(&self.alias, &r.requested_alias)
-            && has(&r.requested_alias, &self.alias_q)
+            && has(&r.requested_alias, alias_needle(&self.alias_q))
             && (self.upstream.trim().is_empty() || self.upstream.trim() == up)
             && (self.upstream_q.trim().is_empty() || (!up.is_empty() && has(up, &self.upstream_q)))
             && exact(&self.class, &r.class)
@@ -155,35 +185,139 @@ fn debounced(param: RwSignal<String>) -> RwSignal<String> {
     text
 }
 
-/// Requests (`/traffic`).
+/// Below this pane width the view is one pane at a time, as Models'.
+const NARROW_BELOW: f64 = 800.0;
+
+const CONF: SplitConf = SplitConf {
+    class: "traffic-split",
+    width_key: "traffic.list.width",
+    list_width: (300, 38, 480),
+    detail_min: 400,
+    narrow_below: NARROW_BELOW,
+    handle_label: "Resize the list",
+};
+
+/// The log's state, which the list, the status page and the detail share.
+#[derive(Clone, Copy)]
+pub(super) struct Log {
+    pub rows: RwSignal<Vec<RequestRow>>,
+    pub loading: RwSignal<bool>,
+    pub error: RwSignal<Option<String>>,
+    /// The last page came back full: there may be older rows.
+    pub more: RwSignal<bool>,
+    /// Live rows are counted, not prepended (Pause, or older rows shown).
+    pub halted: Memo<bool>,
+    pub paused: RwSignal<bool>,
+    pub page: Memo<usize>,
+    pub size_pref: RwSignal<String>,
+    pub status: Signal<String>,
+    pub load_older: Callback<()>,
+    pub resume: Callback<()>,
+    pub vram: Memo<Option<VramStatus>>,
+    pub f: FilterSignals,
+}
+
+/// The filters' URL parameters, and the boxes typed into a beat before them.
+#[derive(Clone, Copy)]
+pub(super) struct FilterSignals {
+    pub alias: RwSignal<String>,
+    pub alias_q: RwSignal<String>,
+    pub upstream: RwSignal<String>,
+    pub upstream_q: RwSignal<String>,
+    pub class: RwSignal<String>,
+    pub key_id: RwSignal<String>,
+    pub error_kind: RwSignal<String>,
+    pub errors_only_raw: RwSignal<String>,
+    pub errors_only: Signal<bool>,
+    pub alias_text: RwSignal<String>,
+    pub upstream_text: RwSignal<String>,
+}
+
+impl FilterSignals {
+    fn new() -> Self {
+        let alias_q = use_query_signal("alias_q");
+        let upstream_q = use_query_signal("upstream_q");
+        let errors_only_raw = use_query_signal("errors_only");
+        Self {
+            alias: use_query_signal("alias"),
+            alias_q,
+            upstream: use_query_signal("upstream"),
+            upstream_q,
+            class: use_query_signal("class"),
+            key_id: use_query_signal("key_id"),
+            error_kind: use_query_signal("error_kind"),
+            errors_only_raw,
+            errors_only: Signal::derive(move || truthy(&errors_only_raw.get())),
+            alias_text: debounced(alias_q),
+            upstream_text: debounced(upstream_q),
+        }
+    }
+
+    pub fn current(self) -> Filters {
+        Filters {
+            alias: self.alias.get(),
+            alias_q: self.alias_q.get(),
+            upstream: self.upstream.get(),
+            upstream_q: self.upstream_q.get(),
+            class: self.class.get(),
+            key_id: self.key_id.get(),
+            error_kind: self.error_kind.get(),
+            errors_only: self.errors_only.get(),
+        }
+    }
+
+    /// The filters the popover holds are set (the search and the link's
+    /// chips say their own).
+    pub fn own_active(self) -> bool {
+        !self.upstream_q.with(String::is_empty)
+            || !self.upstream_text.with(|t| t.trim().is_empty())
+            || !self.class.with(String::is_empty)
+            || !self.key_id.with(String::is_empty)
+            || self.errors_only.get()
+    }
+
+    pub fn clear(self) {
+        for s in [
+            self.alias,
+            self.alias_q,
+            self.upstream,
+            self.upstream_q,
+            self.upstream_text,
+            self.class,
+            self.key_id,
+            self.error_kind,
+            self.errors_only_raw,
+        ] {
+            s.set(String::new());
+        }
+    }
+}
+
+/// Where a row opens: its path, with the list's filters.
+pub(super) fn row_href(id: i64, search: &str) -> String {
+    format!(
+        "/traffic/{id}{}",
+        crate::widgets::list_pane::query_without(search, &[])
+    )
+}
+
+/// Requests (`/traffic/:log?`).
 #[component]
 pub fn Traffic() -> impl IntoView {
     let live = use_live();
+    let params = use_params_map();
+    let location = use_location();
+    let sel = Memo::new(move |_| {
+        params
+            .with(|p| p.get("log"))
+            .and_then(|s| s.trim().parse::<i64>().ok())
+    });
+    let has_sel = Memo::new(move |_| sel.with(Option::is_some));
 
     // Filters live in the URL, so a chart on Usage has somewhere to link to
     // and a filtered view is something the owner can bookmark or paste.
-    let alias = use_query_signal("alias");
-    let alias_q = use_query_signal("alias_q");
-    let upstream = use_query_signal("upstream");
-    let upstream_q = use_query_signal("upstream_q");
-    let class = use_query_signal("class");
-    let key_id = use_query_signal("key_id");
-    let error_kind = use_query_signal("error_kind");
-    let errors_only_raw = use_query_signal("errors_only");
-    let alias_text = debounced(alias_q);
-    let upstream_text = debounced(upstream_q);
-    let errors_only = Signal::derive(move || truthy(&errors_only_raw.get()));
-
-    let current = Memo::new(move |_| Filters {
-        alias: alias.get(),
-        alias_q: alias_q.get(),
-        upstream: upstream.get(),
-        upstream_q: upstream_q.get(),
-        class: class.get(),
-        key_id: key_id.get(),
-        error_kind: error_kind.get(),
-        errors_only: errors_only.get(),
-    });
+    let f = FilterSignals::new();
+    let current = Memo::new(move |_| f.current());
 
     let size_pref = crate::prefs::persisted_string("pagesize.traffic", "50");
     let page = Memo::new(move |_| {
@@ -229,7 +363,7 @@ pub fn Traffic() -> impl IntoView {
         older_out.set(before.is_some());
         spawn_local(async move {
             let res = crate::api::get::<LogsResponse>(url).await;
-            // A newer fetch (the filters moved on) owns the table now.
+            // A newer fetch (the filters moved on) owns the list now.
             if gen.try_get_value() != Some(mine) {
                 return;
             }
@@ -266,17 +400,17 @@ pub fn Traffic() -> impl IntoView {
         reload.track();
         fetch(None);
     });
-    let load_older = move |_| {
+    let load_older = Callback::new(move |()| {
         if let Some(last) = rows.with_untracked(|r| r.last().map(|x| x.log_id)) {
             fetch(Some(last));
         }
-    };
-    let resume = move || {
+    });
+    let resume = Callback::new(move |()| {
         paused.set(false);
         if older.get_untracked() || missed.get_untracked() > 0 {
             reload.update(|n| *n = n.wrapping_add(1));
         }
-    };
+    });
 
     // Live prepend: rows these filters select, while the view is the head.
     Effect::new(move |_| {
@@ -302,54 +436,15 @@ pub fn Traffic() -> impl IntoView {
         });
     });
 
-    // Model and Upstream share the width the other columns leave by what
-    // they hold, not by a fixed 45/25: whichever has the longer values gets
-    // more, and neither drops below a quarter of the pair (review ux:U-5).
-    let name_share = Memo::new(move |_| {
-        rows.with(|r| {
-            let widest = |f: &dyn Fn(&RequestRow) -> usize| r.iter().map(f).max().unwrap_or(0);
-            let name = widest(&|x| {
-                x.mcp_tool
-                    .as_deref()
-                    .filter(|_| x.ingress_proto == "mcp")
-                    .unwrap_or(&x.requested_alias)
-                    .chars()
-                    .count()
-                    + 3
-            });
-            let up = widest(&|x| {
-                let u = x.upstream_name.as_deref().map_or(0, |u| u.chars().count());
-                let m = x
-                    .upstream_model
-                    .as_deref()
-                    .map_or(0, |m| m.chars().count() + 3);
-                u + m
-            });
-            if name + up == 0 {
-                0.5
-            } else {
-                (name as f64 / (name + up) as f64).clamp(0.25, 0.75)
-            }
-        })
-    });
-    let col_widths = move || {
-        let share = name_share.get();
-        format!(
-            "--w-name:{:.1}%;--w-up:{:.1}%",
-            70.0 * share,
-            70.0 * (1.0 - share)
-        )
-    };
-
     let halted = Memo::new(move |_| paused.get() || older.get());
     let status = Signal::derive(move || {
         let n = rows.with(Vec::len);
         if loading.get() && n == 0 {
             return "Loading…".to_string();
         }
-        // Short enough to stay on the filter row: the page size beside it
-        // already says how long the tail is, this says what feeds it.
-        let what = format!("Showing {} rows", grouped(n as u64));
+        // The page size beside it says how long the tail is, this says what
+        // feeds it.
+        let what = count_of(n, "rows");
         if halted.get() {
             let k = missed.get();
             if k > 0 {
@@ -362,302 +457,82 @@ pub fn Traffic() -> impl IntoView {
         }
     });
 
-    // Key names for the picker. A key filter matches on the id — a name match
-    // breaks the moment a key is renamed — so the id is what travels in the
-    // URL and this is only the label for it.
-    let keys = LocalResource::new(|| crate::api::get::<KeysResponse>("/api/usage/keys"));
-    let key_options = Signal::derive(move || {
-        let mut v = vec![(String::new(), "all keys".to_string())];
-        if let Some(Ok(k)) = keys.get() {
-            v.extend(k.keys.iter().map(|k| (k.id.to_string(), k.name.clone())));
-        }
-        // A URL can carry an id the list does not know (a deleted key still has
-        // history). Show the raw id rather than silently falling back to "all".
-        let cur = key_id.get();
-        if !cur.is_empty() && !v.iter().any(|(val, _)| *val == cur) {
-            v.push((cur.clone(), format!("key #{cur}")));
-        }
-        v
-    });
-    let class_options = Signal::derive(|| {
-        vec![
-            (String::new(), "all classes".to_string()),
-            ("chat".into(), "chat".into()),
-            ("aux".into(), "aux (embed/rerank/decision)".into()),
-            ("audio".into(), "audio".into()),
-            ("image".into(), "image".into()),
-            ("tool".into(), "tool".into()),
-        ]
-    });
-    let size_options = Signal::derive(|| {
-        PAGE_SIZES
-            .iter()
-            .map(|s| {
-                let n: u64 = s.parse().unwrap_or(0);
-                (s.to_string(), format!("{} rows", grouped(n)))
-            })
-            .collect::<Vec<_>>()
-    });
+    let log = Log {
+        rows,
+        loading,
+        error,
+        more,
+        halted,
+        paused,
+        page,
+        size_pref,
+        status,
+        load_older,
+        resume,
+        vram: gpu::gpu_state(),
+        f,
+    };
 
-    // Filters a link set that no control shows: each a chip with its remover.
-    let chips = Signal::derive(move || {
-        let mut v: Vec<(String, Callback<()>)> = Vec::new();
-        let a = alias.get();
-        if !a.is_empty() {
-            v.push((
-                format!("alias = {a}"),
-                Callback::new(move |()| alias.set(String::new())),
-            ));
-        }
-        let u = upstream.get();
-        if !u.is_empty() {
-            v.push((
-                format!("upstream = {u}"),
-                Callback::new(move |()| upstream.set(String::new())),
-            ));
-        }
-        let k = error_kind.get();
-        if !k.is_empty() {
-            v.push((
-                format!("kind: {k}"),
-                Callback::new(move |()| error_kind.set(String::new())),
-            ));
-        }
-        v
+    let split = SplitState::new(CONF);
+    let narrow = split.narrow;
+    let save_key = provide_save_key();
+    let navigate = use_navigate();
+    let go = StoredValue::new(move |to: String, replace: bool| {
+        navigate(
+            &to,
+            leptos_router::NavigateOptions {
+                replace,
+                scroll: false,
+                ..Default::default()
+            },
+        )
     });
-    let own_active = Signal::derive(move || {
-        !upstream_q.with(String::is_empty)
-            || !upstream_text.with(|t| t.trim().is_empty())
-            || !class.with(String::is_empty)
-            || !key_id.with(String::is_empty)
-            || errors_only.get()
+    let open_row = Callback::new(move |(id, replace): (i64, bool)| {
+        if sel.get_untracked() != Some(id) {
+            let to = row_href(id, &location.search.get_untracked());
+            go.with_value(|g| g(to, replace));
+        }
     });
-    let clear = Callback::new(move |()| {
-        alias.set(String::new());
-        alias_q.set(String::new());
-        upstream.set(String::new());
-        upstream_q.set(String::new());
-        upstream_text.set(String::new());
-        class.set(String::new());
-        key_id.set(String::new());
-        error_kind.set(String::new());
-        errors_only_raw.set(String::new());
-    });
-
-    let vram = gpu_state();
-    let gpu_open = RwSignal::new(false);
-
-    let expanded = RwSignal::new(None::<i64>);
-    // The Measured column shows while any row in view measured something
-    // (billable units §8.4): a chat-only log has nothing to put in it.
-    let any_measured =
-        Memo::new(move |_| rows.with(|r| r.iter().any(|row| row_cost::measured(row).is_some())));
-    let cols = Signal::derive(move || if any_measured.get() { COLS } else { COLS - 1 });
-    let items = Memo::new(move |_| {
-        rows.with(|r| {
-            let mut out = Vec::with_capacity(r.len() + 4);
-            let mut day = String::new();
-            for row in r {
-                let t = log_time(&row.ts);
-                if t.day != day {
-                    day = t.day.clone();
-                    out.push(Item::Day(t.day, t.day_label));
-                }
-                out.push(Item::Row(row.clone()));
-            }
-            out
-        })
+    let order =
+        Signal::derive(move || rows.with(|r| r.iter().map(|x| x.log_id).collect::<Vec<_>>()));
+    let nav = crate::widgets::list_pane::ListNav::new(
+        crate::widgets::list_pane::ListRefs::new(),
+        order,
+        sel,
+        narrow,
+        open_row,
+        |id| format!("/traffic/{id}"),
+    );
+    let back = Callback::new(move |()| {
+        let q = crate::widgets::list_pane::query_without(&location.search.get_untracked(), &[]);
+        go.with_value(|g| g(format!("/traffic{q}"), false));
+        request_animation_frame(move || nav.focus_list());
     });
 
     view! {
-        <PageFrame
-            title="Traffic"
-            mode=PageMode::Fill
-            class="traffic"
-            head_extra=move || view! { <TrafficTabs conversations=conversations_count()/> }
-            actions=move || {
+        <NavSplit
+            split=split
+            has_sel=has_sel
+            save_key=save_key
+            search=nav.search
+            search_off=Signal::derive(move || narrow.get() && has_sel.get())
+            list=ViewFn::from(move || view! { <list::ListPane log=log nav=nav narrow=narrow/> })
+            detail=ViewFn::from(move || {
                 view! {
-                    <GpuButton vram=vram open=gpu_open/>
-                    <button
-                        class="btn ghost"
-                        title="Stop prepending live rows (they are counted meanwhile)"
-                        on:click=move |_| {
-                            if halted.get_untracked() { resume() } else { paused.set(true) }
-                        }
+                    <Show
+                        when=move || has_sel.get()
+                        fallback=move || view! { <detail::StatusPage log=log narrow=narrow back=back/> }
                     >
-                        {move || if halted.get() { "Resume" } else { "Pause" }}
-                    </button>
+                        <detail::RowDetail
+                            log=log
+                            id=Signal::derive(move || sel.get().unwrap_or_default())
+                            narrow=narrow
+                            back=back
+                        />
+                    </Show>
                 }
-            }
-            toolbar=move || {
-                view! {
-                    <FilterBar
-                        query=alias_text
-                        placeholder="alias contains…"
-                        shown=Signal::derive(move || rows.with(Vec::len))
-                        total=Signal::derive(move || rows.with(Vec::len))
-                        noun="rows"
-                        chips=chips
-                        active=own_active
-                        status=status
-                        on_clear=clear
-                        query_addon=move || {
-                            view! {
-                                <KnownValues
-                                    dim="alias"
-                                    noun="aliases"
-                                    text=alias_text
-                                    apply=alias_q
-                                />
-                            }
-                        }
-                        extra=move || {
-                            view! {
-                                <span class="known-box">
-                                    <input
-                                        class="input filter-q traffic-up"
-                                        type="search"
-                                        placeholder="upstream contains…"
-                                        autocomplete="off"
-                                        spellcheck="false"
-                                        data-untracked
-                                        prop:value=move || upstream_text.get()
-                                        on:input=move |ev| upstream_text.set(event_target_value(&ev))
-                                    />
-                                    <KnownValues
-                                        dim="upstream"
-                                        noun="upstreams"
-                                        text=upstream_text
-                                        apply=upstream_q
-                                    />
-                                </span>
-                                <Select value=class options=class_options/>
-                                <Select value=key_id options=key_options/>
-                                <label class="check errors-only">
-                                    <input
-                                        type="checkbox"
-                                        prop:checked=move || errors_only.get()
-                                        on:change=move |ev| {
-                                            errors_only_raw
-                                                .set(
-                                                    if event_target_checked(&ev) {
-                                                        "true".into()
-                                                    } else {
-                                                        String::new()
-                                                    },
-                                                )
-                                        }
-                                    />
-                                    "errors only"
-                                </label>
-                                <span
-                                    class="page-size"
-                                    title="Rows per page — and how many the live tail keeps"
-                                >
-                                    <Select value=size_pref options=size_options/>
-                                </span>
-                            }
-                        }
-                    />
-                }
-            }
-        >
-            <Show when=move || {
-                gpu_open.get()
-                    || vram
-                        .with(|v| {
-                            v.as_ref().is_some_and(|v| !v.queue.is_empty() || !v.downloading.is_empty())
-                        })
-            }>
-                <GpuPanel vram=vram/>
-            </Show>
-            {move || error.get().map(|e| view! { <div class="chart-err">"Could not load — " {e}</div> })}
-            <div class="fill-pane card pad0 log-pane" class:stale=move || loading.get() && rows.with(|r| !r.is_empty())>
-                <table class="data log-table many-cols" style=col_widths>
-                    <thead>
-                        <tr>
-                            <th title="local time">"Time"</th>
-                            <th>"Model"</th>
-                            <th>"Upstream"</th>
-                            <th class="col-p2">"Route"</th>
-                            <th>"Status"</th>
-                            <th class="num-h col-p3">"TTFB"</th>
-                            <th class="num-h">"Total"</th>
-                            <th class="num-h">"Tokens"</th>
-                            <Show when=move || any_measured.get()>
-                                <th
-                                    class="num-h"
-                                    title="what the request processed besides tokens: input audio, input characters, generated images — as measured or reported; a dash where nothing was"
-                                >
-                                    "Measured"
-                                </th>
-                            </Show>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <For each=move || items.get() key=Item::key let:it>
-                            {match it {
-                                Item::Day(_, label) => {
-                                    view! {
-                                        <tr class="day-sep">
-                                            <td colspan=move || cols.get()>{label}</td>
-                                        </tr>
-                                    }
-                                        .into_any()
-                                }
-                                Item::Row(r) => {
-                                    view! { <TrafficRow r=r expanded=expanded measured_col=any_measured/> }
-                                        .into_any()
-                                }
-                            }}
-                        </For>
-                    </tbody>
-                </table>
-                <Show when=move || !loading.get() && rows.with(Vec::is_empty)>
-                    <div class="empty">"No matching requests."</div>
-                </Show>
-                <Show when=move || rows.with(|r| !r.is_empty())>
-                    <div class="log-more">
-                        <Show
-                            when=move || more.get()
-                            fallback=|| {
-                                view! {
-                                    <span class="dim">
-                                        "The start of the log for these filters — nothing older is kept."
-                                    </span>
-                                }
-                            }
-                        >
-                            <button class="btn ghost" disabled=move || loading.get() on:click=load_older>
-                                {move || format!("Load {} older", grouped(page.get() as u64))}
-                            </button>
-                            <span class="dim">"appends below; the live tail pauses while older rows are shown"</span>
-                        </Show>
-                    </div>
-                </Show>
-            </div>
-        </PageFrame>
-    }
-}
-
-/// The log table's columns with Measured, for a row that spans them all.
-const COLS: u32 = 9;
-
-/// One entry of the log table: a day's separator, or a request.
-#[derive(Clone, PartialEq)]
-// Short-lived render rows; boxing `Row` would ripple through every match arm for no gain.
-#[allow(clippy::large_enum_variant)]
-enum Item {
-    Day(String, String),
-    Row(RequestRow),
-}
-
-impl Item {
-    fn key(&self) -> String {
-        match self {
-            Self::Day(day, _) => format!("d{day}"),
-            Self::Row(r) => r.log_id.to_string(),
-        }
+            })
+        />
     }
 }
 
@@ -747,7 +622,7 @@ fn KnownValues(
             aria-expanded=move || open.get().to_string()
             on:click=move |_| open.update(|o| *o = !*o)
         >
-            "▾"
+            <span class="select-arrow">"▾"</span>
         </button>
         <Popover open=open anchor=btn class="known-pop" min_width=260>
             {move || match shown.get() {
@@ -794,294 +669,6 @@ fn KnownValues(
     }
 }
 
-/// The GPU ledger for this page: the bus when it has spoken, else one fetch
-/// — a page opened mid-session should not wait for the next tick.
-fn gpu_state() -> Memo<Option<VramStatus>> {
-    let live = use_live();
-    let initial = LocalResource::new(|| crate::api::get::<VramStatus>("/api/vram"));
-    Memo::new(move |_| {
-        live.vram
-            .get()
-            .or_else(|| initial.get().and_then(|r| r.ok()))
-            .filter(|v| v.enabled)
-    })
-}
-
-/// The GPU in one line in the head: free memory, and anything waiting for
-/// it. A click opens the full panel above the log; a queue opens it by
-/// itself.
-#[component]
-fn GpuButton(vram: Memo<Option<VramStatus>>, open: RwSignal<bool>) -> impl IntoView {
-    view! {
-        {move || {
-            vram.get()
-                .map(|v| {
-                    let free = match v.free_bytes {
-                        Some(f) => {
-                            format!(
-                                "GPU · {} free of {}",
-                                fmt_bytes(f),
-                                fmt_bytes(v.capacity_bytes),
-                            )
-                        }
-                        None => "GPU".to_string(),
-                    };
-                    let waiting = v.queue.len();
-                    let fetching = crate::gpu_download::waiting(&v).len();
-                    view! {
-                        <button
-                            class="btn ghost gpu-line"
-                            aria-expanded=move || open.get().to_string()
-                            title=format!(
-                                "{} · {} resident — click for what is resident and what waits",
-                                if v.active { "admitting" } else { "reporting only" },
-                                v.resident.len(),
-                            )
-                            on:click=move |_| open.update(|o| *o = !*o)
-                        >
-                            {free}
-                            {(waiting > 0)
-                                .then(|| {
-                                    view! {
-                                        <span class="count attn">{format!("{waiting} waiting")}</span>
-                                    }
-                                })}
-                            {(fetching > 0)
-                                .then(|| {
-                                    view! {
-                                        <span class="count" title="Starts waiting for their download before they take anything from the card">
-                                            {format!("{fetching} downloading")}
-                                        </span>
-                                    }
-                                })}
-                            <span class="caret-icon" aria-hidden="true">"▸"</span>
-                        </button>
-                    }
-                })
-        }}
-    }
-}
-
-/// The GPU plane (quickdoc §9b): what is resident, what it is measured to cost,
-/// and anything queued behind it.
-///
-/// It lives on Traffic because a request waiting for VRAM *is* traffic — it has
-/// arrived, it is not being served yet, and the reason is here. Measured and
-/// estimated figures are labelled apart on purpose: the estimate is weights +
-/// KV + compute buffers derived from the GGUF and leaves the CUDA context out,
-/// so presenting the two as one number would be the wrong kind of tidy.
-#[component]
-fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
-    // In use and kept free apart (`gpu_figures::bar`): what admission keeps
-    // free for memory the driver cannot show yet is not in use, and counting
-    // it as used made the bar disagree with the popover.
-    let split = move || {
-        vram.get()
-            .as_ref()
-            .and_then(crate::gpu_figures::bar)
-            .unwrap_or((0.0, 0.0))
-    };
-
-    view! {
-        <section class="card gpu-card">
-        {move || {
-            let v = vram.get().unwrap_or_default();
-            let queue = v.queue.clone();
-            let resident = v.resident.clone();
-            let telemetry = v.telemetry.clone();
-            let reason = v.inactive_reason.clone();
-            let capacity = v.capacity_bytes;
-            let free = v.free_bytes;
-            let estimated = v.estimated_resident_bytes;
-            let measured = v.free_measured;
-            let hold_active = v.hold_active;
-            let draining_n = v.draining.len();
-            // The same lines as the popover's, so the two add up alike.
-            let kept_line = crate::gpu_figures::kept_free_line(&v);
-            let holders = crate::gpu_figures::holders_line(Some(&v));
-            view! {
-                    <div class="row">
-                        <strong>"GPU memory"</strong>
-                        <span class=if v.active { "chip ok" } else { "chip off" }>
-                            <span class="dot"></span>
-                            {if v.active { "admitting" } else { "reporting only" }}
-                        </span>
-                        <span class="spacer" style="flex:1"></span>
-                        <span class="dim mono-sm" title=telemetry.clone()>
-                            {match free {
-                                Some(f) => {
-                                    format!(
-                                        "{} free of {} ({})",
-                                        fmt_bytes(f),
-                                        fmt_bytes(capacity),
-                                        if measured { "measured" } else { "derived from estimates" },
-                                    )
-                                }
-                                None => telemetry.clone(),
-                            }}
-                        </span>
-                    </div>
-                    // `!= 0` rather than `> 0`: inside `view!` a bare `>`
-                    // closes the tag.
-                    <Show when=move || capacity != 0>
-                        <div class="progress split" style="margin-top:8px">
-                            <i
-                                style=move || format!("width:{:.1}%", split().0)
-                                title="in use"
-                            ></i>
-                            <i
-                                class="kept"
-                                style=move || format!("width:{:.1}%", split().1)
-                                title="kept free by admission"
-                            ></i>
-                        </div>
-                    </Show>
-                    {kept_line.map(|k| view! { <div class="dim mini-note">{k}</div> })}
-                    <div class="dim mini-note">{holders}</div>
-                    <div class="row" style="margin-top:8px">
-                        {resident
-                            .iter()
-                            .map(|r| {
-                                let hue = hue_for(&r.model);
-                                // The learned peak rides beside the idle
-                                // estimate rather than inside it: it is
-                                // what admission keeps free on top, and
-                                // the note in the tooltip says whether the
-                                // row has one at all.
-                                // What an audio model that has not loaded
-                                // yet is about to take is part of its
-                                // estimate, not on top of it: the driver
-                                // does not show it yet, so admission keeps
-                                // it free.
-                                let label = format!(
-                                    "{} · {} · {}{}{}",
-                                    r.container,
-                                    r.state,
-                                    fmt_bytes(r.estimated_bytes),
-                                    match r.peak_extra_bytes {
-                                        Some(p) => format!(" + {} peak", fmt_bytes(p)),
-                                        None => String::new(),
-                                    },
-                                    match r.pending_bytes {
-                                        Some(p) => format!(", {} of it to load", fmt_bytes(p)),
-                                        None => String::new(),
-                                    },
-                                );
-                                let title = match (&r.note, r.idle_seconds) {
-                                    (Some(n), _) => n.clone(),
-                                    (None, Some(s)) => format!("idle {s}s"),
-                                    (None, None) => "not routed to by lmgw yet".into(),
-                                };
-                                view! {
-                                    <span class="model-chip" style=format!("--hue:{hue}") title=title>
-                                        <i></i>
-                                        {r.model.clone()}
-                                        <span class="dim mono-sm">{label}</span>
-                                        <Show when={
-                                            let n = r.in_flight;
-                                            move || n > 0
-                                        }>
-                                            <span class="chip live">
-                                                <span class="dot"></span>
-                                                "busy"
-                                            </span>
-                                        </Show>
-                                    </span>
-                                }
-                            })
-                            .collect_view()}
-                        <Show when={
-                            let empty = resident.is_empty();
-                            move || empty
-                        }>
-                            <span class="dim mono-sm">"nothing resident"</span>
-                        </Show>
-                    </div>
-                    <div class="dim mini-note">
-                        {format!("estimated resident {}", fmt_bytes(estimated))}
-                        {reason.map(|r| format!(" — {r}")).unwrap_or_default()}
-                    </div>
-                    <Show when=move || hold_active>
-                        <div class="dim mini-note">{format!("Hold active · {draining_n} draining")}</div>
-                    </Show>
-                    <Show when={
-                        let n = queue.len();
-                        move || n > 0
-                    }>
-                        <div style="margin-top:10px">
-                            <strong class="mono-sm">
-                                {format!("{} waiting for GPU memory", queue.len())}
-                            </strong>
-                            {queue
-                                .iter()
-                                .map(|w| {
-                                    view! {
-                                        <div class="row mono-sm" style="margin-top:4px">
-                                            <span class="type-badge">{w.position}</span>
-                                            <span>{w.alias.clone()}</span>
-                                            <span class="dim">
-                                                {format!(
-                                                    "needs {} · {} · waiting {:.1}s",
-                                                    fmt_bytes(w.needs_bytes),
-                                                    w.stage,
-                                                    w.waiting_ms as f64 / 1000.0,
-                                                )}
-                                            </span>
-                                        </div>
-                                    }
-                                })
-                                .collect_view()}
-                        </div>
-                    </Show>
-            }
-        }}
-        <GpuDownloads vram=vram/>
-        </section>
-    }
-}
-
-/// The starts that wait for their download before admission (machine-check
-/// design §5): beside the queue, since they are waiting too, but holding no
-/// place in it and nothing on the card. Outside the panel's redraw, so a
-/// bar's motion is not restarted by every frame.
-#[component]
-fn GpuDownloads(vram: Memo<Option<VramStatus>>) -> impl IntoView {
-    let waiting = Memo::new(move |_| {
-        vram.with(|v| {
-            v.as_ref()
-                .map(crate::gpu_download::waiting)
-                .unwrap_or_default()
-        })
-    });
-    view! {
-        <Show when=move || waiting.with(|w| !w.is_empty())>
-            <div style="margin-top:10px">
-                <strong class="mono-sm">
-                    {move || match waiting.with(Vec::len) {
-                        1 => "1 start waiting for its download".to_string(),
-                        n => format!("{n} starts waiting for their download"),
-                    }}
-                </strong>
-                <For each=move || waiting.get() key=|w| (w.0.clone(), w.1.clone()) let:w>
-                    {
-                        let (class, model, alias) = w;
-                        let dl = crate::gpu_download::live_for(class.clone(), model.clone());
-                        view! {
-                            <div class="row mono-sm gpu-dl-wait" style="margin-top:4px">
-                                <span class="type-badge">{class}</span>
-                                <span title=format!("model {model}")>{alias}</span>
-                            </div>
-                            <crate::gpu_download::DlLine dl=Signal::derive(move || {
-                                dl.get().unwrap_or_default()
-                            })/>
-                        }
-                    }
-                </For>
-            </div>
-        </Show>
-    }
-}
-
 /// `(fresh, cache read, cache write)` for a row whose provider reported a
 /// cache split — `None` when it reported none, which is not the same as a row
 /// that read nothing from cache (§2.1). Fresh is the remainder, never a fourth
@@ -1123,267 +710,14 @@ pub(crate) fn fallback_words(reason: &str) -> &str {
     }
 }
 
-#[component]
-fn TrafficRow(
-    r: RequestRow,
-    expanded: RwSignal<Option<i64>>,
-    /// Whether the table shows its Measured column.
-    measured_col: Memo<bool>,
-) -> impl IntoView {
-    let id = r.log_id;
-    let ok = r.status < 400;
-    let t = log_time(&r.ts);
-    let name = if r.ingress_proto == "mcp" {
-        r.mcp_tool
-            .clone()
-            .unwrap_or_else(|| r.requested_alias.clone())
-    } else {
-        r.requested_alias.clone()
-    };
-    let hue = hue_for(&name);
-    let route = format!(
-        "{} → {}",
-        r.ingress_proto,
-        r.egress_proto.clone().unwrap_or_else(|| "—".into())
-    );
-    let tokens = match (r.prompt_tokens, r.completion_tokens) {
-        (Some(p), Some(c)) => format!("{p} → {c}"),
-        (Some(p), None) => p.to_string(),
-        _ => "—".into(),
-    };
-    // Two rows with the same token count can cost 8x each other, and the only
-    // thing that says why is how much of the input was cache. Hover says it;
-    // the detail row spells it out.
-    let split = input_split(&r);
-    let tokens_title = split
-        .map(|(fresh, read, write)| {
-            format!("input: {fresh} fresh · {read} cached · {write} written")
-        })
-        .unwrap_or_default();
-    let upstream = r.upstream_name.clone().unwrap_or_default();
-    let up_model = r.upstream_model.clone().unwrap_or_default();
-    let up_title = if up_model.is_empty() {
-        upstream.clone()
-    } else {
-        format!("{upstream} · {up_model}")
-    };
-    // A fallback answered instead of the requested local model (unified-KV
-    // design §12.32): the badge sits with the upstream it names, and the
-    // tooltip carries the raw reason for one this UI does not label yet.
-    let fallback_badge = r.fallback_reason.clone().map(|reason| {
-        let label = fallback_label(&reason);
-        view! {
-            <span class="type-badge fallback-badge" title=reason>
-                {label}
-            </span>
-        }
-    });
-    // `request_logs.degraded` (the owner's requirement, 2026-10-06): the
-    // request's content was cut to what the model that answered can take —
-    // images as placeholders, a PDF's pages as text, a voice turn as its
-    // transcript. The badge sits beside the fallback's, the marker in its
-    // tooltip and the detail row.
-    let degraded_badge = r.degraded.clone().map(|marker| {
-        view! {
-            <span class="type-badge fallback-badge" title=marker>
-                "degraded"
-            </span>
-        }
-    });
-    // `request_logs.rung` (ladder design §6, §12 entry 36): the rung this
-    // request was judged on, 1-based, empty for a row without a ladder and
-    // for one a fallback answered (`GateHeaders::fall_back` clears it, same
-    // as the header).
-    let rung_badge = r.rung.map(|k| {
-        view! {
-            <span class="type-badge" title="ladder rung this request was judged on">
-                {format!("rung {k}")}
-            </span>
-        }
-    });
-    // What it processed besides tokens: a dash where nothing was measured,
-    // never a 0 (billable units §8.4).
-    let measured = row_cost::measured(&r);
-    let measured_cell = measured.clone().unwrap_or_else(|| "—".into());
-    let unmeasured = measured.is_none();
-    let cost_line = row_cost::cost_line(&r);
-    let parts = row_cost::parts(&r);
-    let is_open = move || expanded.get() == Some(id);
-    let detail = r.clone();
-    view! {
-        <tr
-            class:err-row=!ok
-            class="clickable"
-            title=t.utc.clone()
-            on:click=move |_| expanded.update(|e| *e = if *e == Some(id) { None } else { Some(id) })
-        >
-            <td class="dim mono-sm">{t.time.clone()}</td>
-            <td class="log-name" title=name.clone()>
-                <i class="swatch" style=format!("--hue:{hue}")></i>
-                <span class="mono-sm">{name.clone()}</span>
-                {rung_badge}
-            </td>
-            <td class="clip dim" title=up_title>
-                {upstream}
-                <span class="mono-sm">
-                    {(!up_model.is_empty()).then(|| format!(" · {up_model}"))}
-                </span>
-                {fallback_badge}
-                {degraded_badge}
-            </td>
-            <td class="dim mono-sm col-p2">{route}</td>
-            <td>
-                <span class=if ok { "status-ok" } else { "status-err" }>{r.status}</span>
-                {r.streamed.then(|| view! { <span class="dim">" ~"</span> })}
-            </td>
-            <td class="num col-p3">{r.ttfb_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</td>
-            <td class="num">{r.total_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</td>
-            <td class="num" title=tokens_title>
-                {tokens}
-            </td>
-            <Show when=move || measured_col.get()>
-                <td class="num" class:dim=unmeasured>
-                    {measured_cell.clone()}
-                </td>
-            </Show>
-        </tr>
-        <Show when=is_open>
-            <tr class="detail-row">
-                <td colspan=move || if measured_col.get() { COLS } else { COLS - 1 }>
-                    <div class="detail-grid">
-                        <span class="dim">"Log id"</span>
-                        <span class="mono-sm">{detail.log_id}</span>
-                        <span class="dim">"Timestamp"</span>
-                        <span class="mono-sm">{format!("{} · {} {} local", t.utc, t.day, t.time)}</span>
-                        <span class="dim">"Requested"</span>
-                        <span class="mono-sm">{detail.requested_alias.clone()}</span>
-                        <span class="dim">"Upstream model"</span>
-                        <span class="mono-sm">{detail.upstream_model.clone().unwrap_or_default()}</span>
-                        <span class="dim">"Route"</span>
-                        <span class="mono-sm">
-                            {format!(
-                                "{} → {}",
-                                detail.ingress_proto,
-                                detail.egress_proto.clone().unwrap_or_else(|| "—".into()),
-                            )}
-                        </span>
-                        <span class="dim">"TTFB"</span>
-                        <span class="mono-sm">
-                            {detail.ttfb_ms.map(|v| format!("{v} ms")).unwrap_or_else(|| "—".into())}
-                        </span>
-                        {measured
-                            .clone()
-                            .map(|m| {
-                                view! {
-                                    <span class="dim">"Measured"</span>
-                                    <span class="mono-sm">{m}</span>
-                                }
-                            })}
-                        {cost_line
-                            .clone()
-                            .map(|c| {
-                                view! {
-                                    <span class="dim">"Cost"</span>
-                                    <span class="mono-sm">{c}</span>
-                                }
-                            })}
-                        // The OpenAI service tier the answer reported, and why
-                        // the cost is what it is when that is not plain (openai
-                        // egress design §5.7).
-                        {detail
-                            .service_tier
-                            .clone()
-                            .map(|tier| {
-                                view! {
-                                    <span class="dim">"Service tier"</span>
-                                    <span class="mono-sm">{tier}</span>
-                                }
-                            })}
-                        {detail
-                            .price_note
-                            .clone()
-                            .map(|note| {
-                                view! {
-                                    <span class="dim">"Price note"</span>
-                                    <span class="mono-sm">{note}</span>
-                                }
-                            })}
-                        {parts
-                            .clone()
-                            .into_iter()
-                            .map(|(what, how)| {
-                                view! {
-                                    <span class="dim">{what}</span>
-                                    <span class="mono-sm">{how}</span>
-                                }
-                            })
-                            .collect_view()}
-                        {split
-                            .map(|(fresh, read, write)| {
-                                view! {
-                                    <span class="dim">"Input split"</span>
-                                    <span class="mono-sm">
-                                        {format!("{fresh} fresh · {read} cached · {write} written")}
-                                    </span>
-                                }
-                            })}
-                        {detail
-                            .max_tokens_clamped
-                            .map(|n| {
-                                view! {
-                                    <span class="dim">"Max tokens"</span>
-                                    <span class="mono-sm">{format!("clamped to {n}")}</span>
-                                }
-                            })}
-                        {detail
-                            .fallback_reason
-                            .clone()
-                            .map(|reason| {
-                                view! {
-                                    <span class="dim">"Fallback"</span>
-                                    <span class="mono-sm">{fallback_label(&reason)}</span>
-                                }
-                            })}
-                        {detail
-                            .degraded
-                            .clone()
-                            .map(|marker| {
-                                view! {
-                                    <span class="dim">"Degraded"</span>
-                                    <span class="mono-sm">{marker}</span>
-                                }
-                            })}
-                        {detail
-                            .rung
-                            .map(|k| {
-                                view! {
-                                    <span class="dim">"Rung"</span>
-                                    <span class="mono-sm">{k.to_string()}</span>
-                                }
-                            })}
-                        {detail
-                            .client_key
-                            .clone()
-                            .filter(|k| !k.is_empty())
-                            .map(|k| {
-                                view! {
-                                    <span class="dim">"Client key"</span>
-                                    <span class="mono-sm">{k}</span>
-                                }
-                            })}
-                        {detail
-                            .error_kind
-                            .clone()
-                            .map(|k| {
-                                view! {
-                                    <span class="dim">"Error kind"</span>
-                                    <span class="mono-sm status-err">{k}</span>
-                                }
-                            })}
-                    </div>
-                    {detail.error_msg.clone().map(|m| view! { <pre class="preset err-pre">{m}</pre> })}
-                </td>
-            </tr>
-        </Show>
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn searching_no_model_asks_for_the_alias_the_server_stores() {
+        assert_eq!(alias_needle(" No Model "), "?");
+        assert_eq!(alias_needle("haiku"), "haiku");
+        assert_eq!(alias_needle(""), "");
     }
 }

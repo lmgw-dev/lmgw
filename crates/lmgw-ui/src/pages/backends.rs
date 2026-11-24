@@ -2,9 +2,15 @@
 //! §9.1). A **build** is the saved definition (repository, ref, extras merged
 //! on top, GPU backend, build args); a **run** is one execution of it, a
 //! background job on the shared jobs feed (`kind = "build_run"`, key
-//! `build:<id>`). The Builds tab lists the definitions with their run
-//! history; the Images tab lists every local image of the three engines,
-//! built here or not.
+//! `build:<id>`).
+//!
+//! The page is a list beside its detail on the shared split view
+//! (`crate::widgets::nav_split`, modern-sample.html): the builds as list
+//! rows with the state of their live or last run, then every local image of
+//! the three engines (built here or not) and, where lmgw runs its engines
+//! natively, the pinned release builds. The selection is the path
+//! ([`route::Sel`]): `/backends/builds/<id>`, `/backends/images`,
+//! `/backends/windows`; `/backends` shows the overview.
 //!
 //! The durable lists are re-read when a run starts or ends (the set of live
 //! `build_run` job ids changes), never on a timer: progress in between rides
@@ -24,34 +30,32 @@ use lmgw_api_types::builds::{
 };
 use lmgw_api_types::JobRow;
 
+use leptos_router::hooks::{use_location, use_navigate, use_params_map};
+use leptos_router::NavigateOptions;
+
 use crate::backends_api as api;
 use crate::scope::{Latest, Scope};
-use crate::widgets::{use_toasts, NavTab, PageFrame, PageMode, SubNav, Toasts, Tone};
+use crate::widgets::nav_split::{provide_save_key, NavSplit, SplitConf, SplitState};
+use crate::widgets::{use_toasts, Toasts};
 
 mod builds;
+mod detail;
 mod editor;
 mod extras;
 mod images;
+mod list;
 mod pull;
 mod recreate;
 mod releases;
 mod reports;
+pub mod route;
 mod run_log;
+
+use route::Sel;
 
 pub use editor::EditorSeed;
 pub use pull::PullTarget;
 pub use run_log::LogTarget;
-
-pub const TABS: &[&str] = &["builds", "images", "windows"];
-
-/// Where a tab lives.
-pub fn href(tab: &str) -> String {
-    match tab {
-        "images" => "/backends/images".to_string(),
-        "windows" => "/backends/windows".to_string(),
-        _ => "/backends".to_string(),
-    }
-}
 
 /// The jobs feed's kind for a build run (§15 "Jobs feed").
 pub const RUN_KIND: &str = "build_run";
@@ -201,7 +205,7 @@ pub struct Bk {
     pub rev: RwSignal<u64>,
     pub images: RwSignal<Option<ContainerImagesResponse>>,
     pub images_err: RwSignal<Option<String>>,
-    /// The Images tab has been shown once: from then on its list is kept
+    /// The Local images entry has been shown once: from then on its list is kept
     /// current along with the builds.
     pub images_wanted: RwSignal<bool>,
     /// A refusal from an image op, shown above the table until dismissed —
@@ -210,8 +214,6 @@ pub struct Bk {
     pub images_notice: RwSignal<Option<String>>,
     pub env: RwSignal<Option<Result<BuildEnv, String>>>,
     env_asked: RwSignal<bool>,
-    /// Build ids whose run history is unfolded.
-    pub expanded: RwSignal<HashSet<i64>>,
     pub editor: RwSignal<Option<EditorSeed>>,
     pub log: RwSignal<Option<LogTarget>>,
     /// Row "Check merge": `(build id, name)`.
@@ -461,7 +463,7 @@ impl Bk {
                         if failed > 0 {
                             msg.push_str(&format!(", {failed} could not be checked"));
                         }
-                        msg.push_str(" — registry images are on the Images tab");
+                        msg.push_str(" — registry images are under Local images");
                         if failed > 0 {
                             self.toasts.warn(msg);
                         } else {
@@ -469,7 +471,7 @@ impl Bk {
                         }
                     }
                     // The images' registry badges come along: load_builds
-                    // re-reads the Images tab too once it has been shown,
+                    // re-reads the Local images too once it has been shown,
                     // and the engine releases' check ran in the same call.
                     if self.scope.alive() {
                         self.load_builds();
@@ -495,9 +497,25 @@ pub fn use_bk() -> Bk {
     expect_context::<Bk>()
 }
 
+/// Below this pane width the view is one pane at a time (a 1024 px window
+/// at 125 % leaves the pane about 770 px), as on Models.
+const NARROW_BELOW: f64 = 800.0;
+
+const CONF: SplitConf = SplitConf {
+    class: "engines-split",
+    width_key: "engines.list.width",
+    list_width: (260, 30, 380),
+    detail_min: 460,
+    narrow_below: NARROW_BELOW,
+    handle_label: "Resize the list",
+};
+
 #[component]
 pub fn Backends() -> impl IntoView {
-    let tab = crate::url_state::use_view("tab", TABS, "builds");
+    let params = use_params_map();
+    let sel = Memo::new(move |_| params.with(|p| Sel::parse(p.get_str("tab"), p.get_str("id"))));
+    let navigate = StoredValue::new(use_navigate());
+    let location = use_location();
     let bus = crate::live::use_live();
     let live = Memo::new(move |_| {
         bus.jobs
@@ -521,7 +539,6 @@ pub fn Backends() -> impl IntoView {
         images_notice: RwSignal::new(None),
         env: RwSignal::new(None),
         env_asked: RwSignal::new(false),
-        expanded: RwSignal::new(HashSet::new()),
         editor: RwSignal::new(None),
         log: RwSignal::new(None),
         merge: RwSignal::new(None),
@@ -555,7 +572,7 @@ pub fn Backends() -> impl IntoView {
         }
         now
     });
-    // A pull ending changes the Images tab (the new image, its update chip).
+    // A pull ending changes the images (the new image, its update chip).
     let pull_jobs = Memo::new(move |_| {
         let mut ids: Vec<i64> = pulls.with(|m| m.values().map(|l| l.job_id).collect());
         ids.sort_unstable();
@@ -578,146 +595,66 @@ pub fn Backends() -> impl IntoView {
         }
         now
     });
-    // The Images tab reads its list the first time it is shown.
-    Effect::new(move |_| {
-        if tab.get() == "images" && !bk.images_wanted.get_untracked() {
-            bk.load_images();
-        }
-    });
 
-    let tabs = Signal::derive(move || {
-        let mut b = NavTab::new("Builds", href("builds")).exact();
-        if let Some(n) = bk.builds.with(|b| b.as_ref().map(Vec::len)) {
-            b = b.count(n);
-        }
-        let running = live.with(HashMap::len);
-        if running > 0 {
-            b = b.count(format!("{running} running")).tone(Tone::Attn);
-        }
-        let upd = bus
-            .updates
-            .with(|u| u.as_ref().map_or(0, |u| u.builds_with_updates));
-        if upd > 0 && running == 0 {
-            b = b
-                .count(format!("{upd} update{}", if upd == 1 { "" } else { "s" }))
-                .tone(Tone::Attn);
-        }
-        let mut i = NavTab::new("Images", href("images"));
-        if let Some(n) = bk.images.with(|r| r.as_ref().map(|r| r.images.len())) {
-            i = i.count(n);
-        }
-        let img_upd = bus
-            .updates
-            .with(|u| u.as_ref().map_or(0, |u| u.images_with_updates));
-        let pulling = pulls.with(HashMap::len);
-        if pulling > 0 {
-            i = i.count(format!("{pulling} pulling")).tone(Tone::Attn);
-        } else if img_upd > 0 {
-            i = i
-                .count(format!(
-                    "{img_upd} update{}",
-                    if img_upd == 1 { "" } else { "s" }
-                ))
-                .tone(Tone::Attn);
-        }
-        let mut tabs = vec![b, i];
-        // The pinned release builds, where lmgw runs its engines from them.
-        if bk.releases.with(|r| r.as_ref().is_some_and(|r| r.native)) {
-            let mut w = NavTab::new("Windows", href("windows"));
-            let n = bus
-                .updates
-                .with(|u| u.as_ref().map_or(0, |u| u.engines_with_updates));
-            if n > 0 {
-                w = w
-                    .count(format!(
-                        "{n} upstream release{}",
-                        if n == 1 { "" } else { "s" }
-                    ))
-                    .tone(Tone::Attn);
-            }
-            tabs.push(w);
-        }
-        tabs
-    });
-    let summary = move || {
-        let Some(n) = bk.builds.with(|b| b.as_ref().map(Vec::len)) else {
-            return "container images built from git".to_string();
-        };
-        let running = live.with(HashMap::len);
-        let builds = crate::fmt::count_of(n, "builds");
-        if running > 0 {
-            format!("{builds} · {running} running")
+    let split = SplitState::new(CONF);
+    let narrow = split.narrow;
+    let save_key = provide_save_key();
+    let refs = crate::widgets::list_pane::ListRefs::new();
+    let query = crate::url_state::use_query_signal("q");
+    let keep_q = move || {
+        let q = query.get_untracked();
+        if q.trim().is_empty() {
+            String::new()
         } else {
-            builds
+            format!("?q={}", js_sys::encode_uri_component(&q))
         }
     };
-    let refresh = move |_| {
-        bk.load_builds();
-        if tab.get_untracked() == "images" {
-            bk.load_images();
+    let open = Callback::new(move |(s, replace): (Sel, bool)| {
+        let to = format!("{}{}", s.path(), keep_q());
+        let here = format!(
+            "{}{}",
+            location.pathname.get_untracked(),
+            location.search.get_untracked()
+        );
+        if to != here {
+            navigate.with_value(|n| {
+                n(
+                    &to,
+                    NavigateOptions {
+                        replace,
+                        ..Default::default()
+                    },
+                )
+            });
         }
-        bk.load_releases();
-    };
-    let check_all = move |_| bk.check_updates(None, "update check".to_string());
-    let checking_all = move || bk.checking.with(|c| c.contains(&0));
-    let check_title = move || {
-        let last = bus
-            .updates
-            .with(|u| u.as_ref().and_then(|u| u.checked_at.clone()))
-            .map(|at| format!("Last full check {} ({}).", ago(&at), local_ts(&at)))
-            .unwrap_or_else(|| "No full check has run yet.".to_string());
-        format!(
-            "Ask the remotes now: every build's ref and unpinned extras, the registry images in use, and on Windows the pinned engine releases' upstream projects. {last} The schedule is in Settings → Engines."
-        )
-    };
-    let new_build = move |_| {
-        bk.ensure_env();
-        bk.editor.set(Some(EditorSeed::blank()));
-    };
+    });
+    let back = Callback::new(move |()| {
+        let to = format!("/backends{}", keep_q());
+        navigate.with_value(|n| n(&to, NavigateOptions::default()));
+        refs.focus_later();
+    });
 
     view! {
-        <PageFrame
-            title="Engines"
-            sub=summary
-            mode=PageMode::Fill
-            class="backends"
-            head_extra=move || view! { <SubNav tabs=tabs/> }
-            actions=move || {
-                view! {
-                    <button
-                        class="btn ghost"
-                        title="Read the builds and the local images again"
-                        on:click=refresh
-                    >
-                        "Refresh"
-                    </button>
-                    <button
-                        class="btn ghost"
-                        title=check_title
-                        disabled=checking_all
-                        on:click=check_all
-                    >
-                        {move || if checking_all() { "Checking…" } else { "Check now" }}
-                    </button>
-                    <button class="btn primary" on:click=new_build>
-                        "New build"
-                    </button>
-                }
-            }
-        >
-            {move || match tab.get() {
-                "images" => view! { <images::ImagesTab/> }.into_any(),
-                "windows" => view! { <releases::ReleasesTab/> }.into_any(),
-                _ => view! { <builds::BuildsTab/> }.into_any(),
-            }}
-            <editor::BuildEditorModal/>
-            <run_log::RunLogModal/>
-            <builds::MergeModal/>
-            <builds::DeleteBuildModal/>
-            <images::RetagModal/>
-            <images::ImageDeleteModal/>
-            <pull::PullModal/>
-        </PageFrame>
+        <NavSplit
+            split=split
+            has_sel=Signal::derive(move || sel.with(Option::is_some))
+            save_key=save_key
+            search=refs.search
+            search_off=Signal::derive(move || narrow.get() && sel.with(Option::is_some))
+            list=ViewFn::from(move || {
+                view! { <list::ListPane sel=sel narrow=narrow refs=refs query=query open=open/> }
+            })
+            detail=ViewFn::from(move || {
+                view! { <detail::DetailPane sel=sel narrow=narrow back=back/> }
+            })
+        />
+        <editor::BuildEditorModal/>
+        <run_log::RunLogModal/>
+        <builds::MergeModal/>
+        <builds::DeleteBuildModal/>
+        <images::RetagModal/>
+        <images::ImageDeleteModal/>
+        <pull::PullModal/>
     }
 }
 
@@ -731,11 +668,6 @@ pub fn engine_label(e: Engine) -> &'static str {
         Engine::Audio => "audio.cpp",
         Engine::Sdcpp => "sd.cpp",
     }
-}
-
-pub fn engine_chip(e: Engine) -> impl IntoView {
-    let title = format!("serves: {}", e.classes().join(", "));
-    view! { <span class="type-badge bk-engine" title=title>{engine_label(e)}</span> }
 }
 
 /// `https://github.com/ggml-org/llama.cpp.git` → `ggml-org/llama.cpp`; a
@@ -985,7 +917,7 @@ pub fn status_label(s: BuildRunStatus) -> &'static str {
 
 fn status_class(s: BuildRunStatus) -> &'static str {
     match s {
-        BuildRunStatus::Running => "chip live",
+        BuildRunStatus::Running => "chip info",
         BuildRunStatus::Succeeded | BuildRunStatus::UpToDate => "chip ok",
         BuildRunStatus::Unverified => "chip warn",
         BuildRunStatus::Broken | BuildRunStatus::Failed => "chip err",
@@ -1023,7 +955,7 @@ pub fn status_chip(status: BuildRunStatus, live: Option<&LiveRun>) -> AnyView {
             None => l.detail.last_line.clone(),
         };
         return view! {
-            <span class="chip live" title=title><span class="dot"></span>{label}</span>
+            <span class="chip info" title=title><span class="dot"></span>{label}</span>
         }
         .into_any();
     }

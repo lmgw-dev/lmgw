@@ -41,6 +41,37 @@ pub(in crate::machine) fn card(c: &CardFacts) -> (MachineItem, Card) {
                 Card::Problem,
             );
         }
+        if c.nvidia_denied {
+            let mut detail = card::base_detail(c);
+            if let Some(v) = module_version(&c.driver) {
+                detail.push(format!("kernel module {v} runs on the host"));
+            }
+            detail.push(format!(
+                "{NVIDIACTL} is in this container, and reading it fails with Permission denied"
+            ));
+            detail.push(format!(
+                "On the host: install lmgw's SELinux module for the card \
+                 (sudo semodule -i lmgw-gpu.cil; the text is in docs/server.md, section 5), \
+                 then restart the service ({RESTART_COMMAND})"
+            ));
+            detail.push(
+                "Alternatively sudo setsebool -P container_use_devices on also works, but it \
+                 opens every device node on the host to every container"
+                    .into(),
+            );
+            return (
+                item(
+                    id,
+                    ItemState::Problem,
+                    "On the host: SELinux keeps the lmgw container from the graphics card. \
+                     Install lmgw's SELinux module (docs/server.md), then restart the lmgw \
+                     service.",
+                    detail,
+                    Some(MachineCause::CardDeniedBySelinux),
+                ),
+                Card::Problem,
+            );
+        }
         if !c.nvidia_nodes {
             let mut detail = card::base_detail(c);
             if let Some(v) = module_version(&c.driver) {

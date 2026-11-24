@@ -144,7 +144,7 @@ def check_stream(events):
 
 def assemble(events):
     """The final message's content blocks from a stream, as the SDK's accumulator builds them."""
-    out, stop, seq, usage, mid = {}, None, None, {}, ""
+    out, stop, seq, usage, mid, start_usage = {}, None, None, {}, "", None
     for _, data in events:
         try:
             ev = json.loads(data)
@@ -155,6 +155,7 @@ def assemble(events):
             msg = ev.get("message") or {}
             mid = msg.get("id", "")
             usage = dict(msg.get("usage") or {})
+            start_usage = dict(usage)
         elif t == "content_block_start":
             b = dict(ev.get("content_block") or {})
             b["_json"] = ""
@@ -192,4 +193,5 @@ def assemble(events):
             except ValueError:
                 b["input"] = buf
         blocks.append(b)
-    return {"id": mid, "content": blocks, "stop_reason": stop, "stop_sequence": seq, "usage": usage}
+    return {"id": mid, "content": blocks, "stop_reason": stop, "stop_sequence": seq, "usage": usage,
+            "_start_usage": start_usage}

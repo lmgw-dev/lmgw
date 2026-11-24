@@ -293,6 +293,7 @@ fn the_lists_are_byte_for_byte_the_old_ones() {
     let old = json!({
         "threads": stored.iter().map(|t| old_thread_row_json(t, &purge())).collect::<Vec<_>>(),
         "archived_count": 11,
+        "active_count": 7,
         "temporary": temporary.iter().map(|t| old_thread_row_json(t, &purge())).collect::<Vec<_>>(),
         "folders": folders,
     });
@@ -302,6 +303,7 @@ fn the_lists_are_byte_for_byte_the_old_ones() {
             .map(|t| thread_row(t, &purge(), None))
             .collect(),
         archived_count: 11,
+        active_count: 7,
         temporary: temporary
             .iter()
             .map(|t| thread_row(t, &purge(), None))

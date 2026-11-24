@@ -66,13 +66,13 @@
     "the render node /dev/dri/renderD128 is usable by this account (group render)",
   ]);
   const CDI_MISSING = item("card_for_models", "problem",
-    "One piece is missing so models can use the graphics card. lmgw can set it up.", [
+    "The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. lmgw can set it up.", [
       "NVIDIA Container Toolkit not installed (/usr/bin/nvidia-ctk is not there)",
       "it comes from NVIDIA's repository (nvidia.github.io), which is not on this computer yet",
       "no spec in the system's spec dirs (/etc/cdi, /var/run/cdi) defines nvidia.com/gpu=all",
     ], { kind: "toolkit_missing" });
   const CDI_STEPS = item("card_for_models", "problem",
-    "One piece is missing so models can use the graphics card. Here's how to add it.", [
+    "The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. Here's how to add it.", [
       "NVIDIA Container Toolkit not installed (/usr/bin/nvidia-ctk is not there)",
       "lmgw runs from an AppImage: /home/demo/Applications/lmgw-0.5.0-x86_64.AppImage",
     ], { kind: "toolkit_missing" });
@@ -168,13 +168,13 @@
   const READY = check("ready", "This computer is ready for local models.",
     [GPU_OK, CDI_OK, PODMAN_OK, FIT_OK, ROOM, DL_DONE]);
   const NEEDS_FIX = check("needs_fix",
-    "One thing is missing so models can use the graphics card. lmgw can set it up.",
+    "One piece is missing so models can use the graphics card.",
     [GPU_OK, CDI_MISSING, PODMAN_OK, FIT_OK, ROOM, DL_TODO], helper([S1, S2, S4]));
   // After a run whose install failed: the source and the key are there now.
   const NEEDS_FIX_AFTER = check("needs_fix", NEEDS_FIX.headline,
     [GPU_OK, CDI_MISSING, PODMAN_OK, FIT_OK, ROOM, DL_TODO], helper([S4], "4a1c".repeat(16)));
   const NEEDS_STEPS = check("needs_steps",
-    "One thing is missing so models can use the graphics card. Here's how to add it.",
+    "One piece is missing so models can use the graphics card.",
     [GPU_OK, CDI_STEPS, PODMAN_OK, FIT_OK, ROOM, DL_TODO], {
       hash: HASH,
       how: { kind: "instructions", why: "lmgw from an AppImage can't change the system, so here are the commands to run in a terminal. Or install lmgw's RPM, which can do this for you." },
@@ -303,7 +303,7 @@
   window.__fakeTurns = () => turns;
   // The setups (WP8b): their /v1/models catalog, their local rows and aliases, their upstreams.
   const MODEL = (id, owned_by) => ({ id, object: "model", owned_by, capabilities: { task: "chat" } });
-  const ROW = (id, pub) => ({ public_name: id, model: { id: 1, model_id: id,
+  const ROW = (id, pub) => ({ public_name: id, model: { id: 901, model_id: id,
     gguf_path: "demo/qwen-demo-8b-Q4_K_M.gguf", idle_seconds: 300, enabled: true, public: pub } });
   const ALIAS = (alias, upstream_id, model) =>
     ({ id: 1, alias, upstream_id, upstream_model_id: model, enabled: true });
@@ -327,7 +327,7 @@
   const setup = SETUPS[want.models];
   // gpu_setup's message, in core's words (machine/blame.rs, vram/start_failed.rs).
   const GPU_SETUP = "'qwen-demo-8b' could not start on the graphics card of the computer lmgw " +
-    "runs on. One piece is missing so models can use the graphics card. lmgw can set it up. " +
+    "runs on. The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. lmgw can set it up. " +
     "Open lmgw there to see what to do. (its start said: Error: setting up CDI devices: " +
     "unresolvable CDI devices nvidia.com/gpu=all)";
   // A written switch, kept across the documents of this tab: the settings read as it left them.

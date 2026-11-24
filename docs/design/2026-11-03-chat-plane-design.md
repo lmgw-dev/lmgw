@@ -979,9 +979,10 @@ Not built yet:
     keeps the cursor and adds it to the next feed.
   - **A narrow `.chat-head` that does not wrap:** at 280 px "Export" wraps onto a second row of the
     head. The sidebar's stylesheet keeps Export on the first line as an icon.
-  - **The fonts' licence:** lmgw-ui's IBM Plex fonts carry no licence text beside them (the SIL
-    Open Font License asks that it go with them); kai-firefox ships its own copy as
-    `fonts/OFL.txt`.
+  - **The fonts' licence:** lmgw-ui's IBM Plex fonts carried no licence text beside them (the
+    SIL Open Font License asks that it go with them); kai-firefox ships its own copy as
+    `fonts/OFL.txt`. Since 2026-11-15 the fonts are Adwaita Sans and Adwaita Mono, with their
+    `fonts/OFL.txt` beside them.
 
 ### 9.9 The rebase onto WP8b and the review round
 

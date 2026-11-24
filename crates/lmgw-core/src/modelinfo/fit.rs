@@ -4,10 +4,16 @@
 //! One function over the plan's input ([`PlanFiles`]), the planned shape
 //! (the plan's own parameters, through [`plan_fit::Sizer`], the footprint
 //! admission charges) and a capacity, taken against two measures:
-//! - **the whole card** (D5): what admission measures against, the declared
-//!   GPU memory budget or else the devices' total, with the headroom added
-//!   to every footprint and nothing else on the card, because admission
-//!   unloads lmgw's other models when this one is asked for;
+//! - **the whole card** (D5): the card with lmgw's other models unloaded,
+//!   because admission unloads them when this one is asked for: what is
+//!   free on it now for a start (admission's own reading of the card,
+//!   `Ledger::capacity_on`) and what lmgw's models there hold, beside the
+//!   engine's cost and the floor — the figures the one-card choice and an
+//!   owner's start decide by (a bug found 2026-11-18: the whole card read
+//!   the card's total less what other programs hold at rest, so the
+//!   driver's reserve counted as room and the engine's cost was left out,
+//!   and the header said "fits" where the one-card choice said "not room
+//!   now"). Without a device read: the declared budget, beside the floors;
 //! - **beside what runs now** (D120): the same card less what other
 //!   programs hold on it now (the ledger's outside use) and less lmgw's own
 //!   models on it now, each its charge plus what admission keeps free for
@@ -20,7 +26,7 @@
 //! fits, and the note says nothing refuses the start.
 
 use lmgw_api_types::model_find::{
-    BesideTerms, CardMeasure, CardResident, FileFit, FitMark, FitMeasure, FitTerms,
+    BesideTerms, CardMeasure, CardResident, FileFit, FitCard, FitMark, FitMeasure, FitTerms,
 };
 
 use crate::config::Snapshot;
@@ -40,16 +46,55 @@ pub struct CardNow {
     pub hold: bool,
     pub outside: Option<u64>,
     pub residents: Vec<CardResident>,
+    /// What admission keeps beside a start beside what runs now: with
+    /// nothing of lmgw's on the card, and beside lmgw's models there
+    /// ([`Self::keep`]); with lmgw's models unloaded the first.
+    pub beside_alone: u64,
+    pub beside_with: u64,
     /// lmgw's models on the card now that serve the planned file, left out
     /// of `residents` ([`Self::beside_itself`]).
     pub left_out: Vec<String>,
+    /// Which card, on a computer with several: the one with the most room
+    /// for lmgw (device-ledger design §5.3, §10), under a declared budget
+    /// too. `None` on one card and without a device read.
+    pub which: Option<FitCard>,
+    /// Every card, one by one, for the fit over the cards (device-ledger
+    /// design WP12, [`super::cards_fit`]), under a declared budget as
+    /// admission reads them; `None` without a device reading.
+    pub(crate) cards: Option<std::sync::Arc<crate::vram::place::marks::CardsNow>>,
 }
 
 impl CardNow {
     /// The card of this install now, or `None` while admission has nothing
     /// to measure against (no GPU telemetry and no declared budget, D9).
     pub async fn of(state: &SharedState, snap: &Snapshot) -> Option<Self> {
-        let now = state.vram.on_card_now(state, snap).await?;
+        Self::of_row(state, snap, None).await
+    }
+
+    /// [`Self::of`] for the `class` row `model_id` (Fit again): only the
+    /// cards admission may put it on are read — its pin's, and a row's own
+    /// split kept on its pin over those cards (device-ledger design §8,
+    /// §7.2; owner, 2026-11-18).
+    pub async fn for_row(
+        state: &SharedState,
+        snap: &Snapshot,
+        class: crate::runtime::Class,
+        model_id: &str,
+    ) -> Option<Self> {
+        let row = crate::vram::Target {
+            class,
+            model_id: model_id.to_string(),
+        };
+        Self::of_row(state, snap, Some(&row)).await
+    }
+
+    async fn of_row(
+        state: &SharedState,
+        snap: &Snapshot,
+        row: Option<&crate::vram::Target>,
+    ) -> Option<Self> {
+        let now = state.vram.on_card_now(state, snap, row).await?;
+        let which = now.card.clone();
         Some(Self {
             card: Card {
                 capacity: now.capacity,
@@ -58,6 +103,8 @@ impl CardNow {
                 admission: snap.settings.vram.enabled,
             },
             hold: snap.settings.hold.active,
+            beside_alone: now.alone,
+            beside_with: now.with,
             outside: now.outside,
             residents: now
                 .residents
@@ -69,6 +116,12 @@ impl CardNow {
                 })
                 .collect(),
             left_out: Vec::new(),
+            which,
+            cards: state
+                .vram
+                .cards_now(state, snap, true, row)
+                .await
+                .map(std::sync::Arc::new),
         })
     }
 
@@ -112,6 +165,9 @@ impl CardNow {
             .partition(|r| r.class == class && models.contains(&r.model.as_str()));
         self.residents = kept;
         self.left_out.extend(out.into_iter().map(|r| r.model));
+        if let Some(cards) = self.cards.as_mut() {
+            std::sync::Arc::make_mut(cards).leave_out(class, models);
+        }
     }
 
     pub fn residents_bytes(&self) -> u64 {
@@ -121,10 +177,30 @@ impl CardNow {
             .fold(0, u64::saturating_add)
     }
 
-    /// The room `measure` leaves, before the headroom.
+    /// What admission keeps free beside a llama.cpp start by `measure`, as
+    /// it reads it (device-ledger design §5.6, §5.8, WP13): on the whole
+    /// card, what its too-large test keeps — the engine's cost and what the
+    /// card needs beside a model at rest, no margin; beside what runs now,
+    /// the engine's cost and the floor alone where nothing of lmgw's is on
+    /// the card (what admission starts it with at the last), its whole
+    /// headroom and margin beside lmgw's models, which stay. So the
+    /// context a fit lands on is one admission starts (a bug found
+    /// 2026-11-18 on a one-card machine).
+    pub fn keep(&self, measure: FitMeasure) -> u64 {
+        match measure {
+            // lmgw's models there unloaded: nothing of lmgw's is left.
+            FitMeasure::WholeCard => self.beside_alone,
+            FitMeasure::Beside if self.residents.is_empty() => self.beside_alone,
+            FitMeasure::Beside => self.beside_with,
+        }
+    }
+
+    /// The room `measure` leaves, before the headroom: on the whole card
+    /// what is free there and lmgw's models there (module doc), beside
+    /// what runs now what is free there.
     pub fn room(&self, measure: FitMeasure) -> u64 {
         match measure {
-            FitMeasure::WholeCard => self.card.capacity,
+            FitMeasure::WholeCard => self.card.capacity.saturating_sub(self.outside.unwrap_or(0)),
             FitMeasure::Beside => self
                 .card
                 .capacity
@@ -143,6 +219,7 @@ impl CardNow {
             hold: self.hold,
             outside_bytes: self.outside,
             residents: self.residents.clone(),
+            card: self.which.clone(),
         }
     }
 
@@ -157,6 +234,15 @@ impl CardNow {
                 "admission is off ({}), so nothing refuses a start that doesn't fit; \"fits\" \
                  still means the model fits",
                 crate::config::ADMISSION_LABEL
+            ));
+        }
+        if let Some(c) = &self.which {
+            notes.push(format!(
+                "measured against {}, the one of this computer's {} graphics cards with the most \
+                 room for lmgw now; lmgw starts a model on one card, and splits a chat model over \
+                 several only where it sets its context and no card holds it",
+                c.named(),
+                c.of
             ));
         }
         if measure == FitMeasure::Beside && !self.left_out.is_empty() {
@@ -201,8 +287,23 @@ impl CardNow {
 }
 
 /// The fit of a planned file (module doc). `card` is `None` without a card
-/// to measure against, which is the `NoCard` mark.
+/// to measure against, which is the `NoCard` mark. It carries the fit over
+/// the cards (device-ledger design WP12, [`super::cards_fit`]).
 pub fn fit(
+    files: &PlanFiles,
+    sizer: &Sizer,
+    card: Option<&CardNow>,
+    measure: FitMeasure,
+) -> FileFit {
+    let mut f = one_card(files, sizer, card, measure);
+    if f.cards.is_none() {
+        f.cards = card.and_then(|c| super::cards_fit::judge(files, sizer, c, &f));
+    }
+    f
+}
+
+/// [`fit`] on one card.
+fn one_card(
     files: &PlanFiles,
     sizer: &Sizer,
     card: Option<&CardNow>,
@@ -237,8 +338,9 @@ pub fn fit(
         fit.ctx = sizer.ctx;
         if let Some(card) = card {
             fit.notes.extend(card.notes(measure));
+            fit.card = card.which.clone();
             fit.capacity_bytes = card.room(measure);
-            fit.headroom_bytes = card.card.headroom;
+            fit.headroom_bytes = card.keep(measure);
             fit.beside = card.beside(measure);
         }
         fit.notes
@@ -255,11 +357,13 @@ pub fn fit(
         return fit;
     };
     fit.notes.extend(card.notes(measure));
+    fit.card = card.which.clone();
     fit.capacity_bytes = card.room(measure);
-    fit.headroom_bytes = card.card.headroom;
+    fit.headroom_bytes = card.keep(measure);
     fit.beside = card.beside(measure);
     let room = Card {
         capacity: fit.capacity_bytes,
+        headroom: fit.headroom_bytes,
         ..card.card
     };
     let take = |fit: &mut FileFit, fp: crate::vram::Footprint| {
@@ -282,7 +386,17 @@ pub fn fit(
         take(&mut fit, fp);
         return fit;
     };
-    match plan_fit::largest_fitting(&room, ctx, |c| sizer.at(c)) {
+    // A row's own split kept on its pin: held where each of the pin's cards
+    // holds its part (device-ledger design §7.2), not one card's room.
+    let own = card.cards.as_deref().filter(|c| c.has_own());
+    let whole = measure == FitMeasure::WholeCard;
+    let fits = |fp: &crate::vram::Footprint| match own {
+        Some(c) => c
+            .own_fits(fp.by_layer.as_deref(), whole)
+            .unwrap_or_else(|| room.fits(fp)),
+        None => room.fits(fp),
+    };
+    match plan_fit::largest_fitting_by(ctx, |c| sizer.at(c), fits) {
         Search::All => {
             fit.mark = if trained.is_none_or(|t| ctx >= t) {
                 FitMark::Fits
@@ -332,8 +446,10 @@ pub fn by_size(
     };
     fit.notes.extend(card.notes(measure));
     fit.notes.push(why);
+    fit.cards = super::cards_fit::by_size(bytes, card);
+    fit.card = card.which.clone();
     fit.capacity_bytes = card.room(measure);
-    fit.headroom_bytes = card.card.headroom;
+    fit.headroom_bytes = card.keep(measure);
     fit.beside = card.beside(measure);
     fit.mark = match bytes {
         None => {
@@ -342,7 +458,7 @@ pub fn by_size(
             );
             FitMark::Unknown
         }
-        Some(b) if b.saturating_add(card.card.headroom) <= fit.capacity_bytes => {
+        Some(b) if b.saturating_add(fit.headroom_bytes) <= fit.capacity_bytes => {
             FitMark::FitsBySize
         }
         Some(_) => FitMark::DoesNotFitBySize,

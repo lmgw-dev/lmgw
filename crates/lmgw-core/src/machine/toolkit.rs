@@ -300,16 +300,18 @@ pub(super) fn judge(t: &ToolkitFacts) -> (MachineItem, Option<MachinePlan>, Tool
             let dto = plan_dto(&p, &h, t);
             let (sentence, outcome) = match (&h, dto.steps.is_empty()) {
                 (How::Helper, _) => (
-                    "One piece is missing so models can use the graphics card. lmgw can set it up.",
+                    "The NVIDIA Container Toolkit is missing: models can't use the graphics card \
+                     without it. lmgw can set it up.",
                     Toolkit12::Fixable,
                 ),
                 (How::Instructions { .. }, false) => (
-                    "One piece is missing so models can use the graphics card. Here's how to add it.",
+                    "The NVIDIA Container Toolkit is missing: models can't use the graphics card \
+                     without it. Here's how to add it.",
                     Toolkit12::Steps,
                 ),
                 (How::Instructions { .. }, true) => (
-                    "One piece is missing so models can use the graphics card. lmgw can't add it \
-                     here; the details say why.",
+                    "The NVIDIA Container Toolkit is missing: models can't use the graphics card \
+                     without it. lmgw can't add it here; the details say why.",
                     Toolkit12::Steps,
                 ),
             };
@@ -538,6 +540,20 @@ fn spec_detail(t: &ToolkitFacts, detail: &mut Vec<String>) {
             stamp.userspace.as_deref().unwrap_or("unknown"),
             stamp.nvidia_ctk.version.as_deref().unwrap_or("unknown")
         ));
+    }
+    // lmgw starts a model it placed on one card of several by that card's
+    // UUID (device-ledger design §7.1): the spec has to name every card so.
+    match s.cards_named {
+        Some((cards, by_uuid)) if cards > 1 && by_uuid >= cards => detail.push(format!(
+            "it names each of the {cards} graphics cards by its UUID, as lmgw passes a card it \
+             placed a model on"
+        )),
+        Some((cards, by_uuid)) if cards > 1 => detail.push(format!(
+            "it names {by_uuid} of the {cards} graphics cards by UUID: a model lmgw places on \
+             one of the others fails to start until the toolkit writes a description that \
+             names every card by UUID"
+        )),
+        _ => {}
     }
     match &s.now {
         Some(Judgement::Fresh) => detail.push("true of this machine now".into()),

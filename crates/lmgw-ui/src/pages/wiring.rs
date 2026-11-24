@@ -18,7 +18,7 @@ use crate::fmt::{age, hue_for, of};
 use crate::live::{use_live, LiveBus};
 use crate::url_state::use_query_signal;
 use crate::widgets::{
-    filter_words, CopyBtn, Facet, FacetSet, FilterBar, PageFrame, Popover, Section,
+    filter_words, CopyBtn, Facet, FacetSet, FilterBar, Ico, Icon, PageFrame, Popover, Section,
 };
 
 fn edit_href(id: i64) -> String {
@@ -253,6 +253,7 @@ pub fn Wiring() -> impl IntoView {
         <PageFrame
             title="Wiring"
             sub="chat models, from download to container"
+            class="wiring"
             actions=move || {
                 move || {
                     base_v1
@@ -573,17 +574,20 @@ fn LocalRow(c: LocalChain, live: LiveBus) -> impl IntoView {
                         Some((s, secs)) if s == "ready" => {
                             ("chip ok", format!("running · {}", age(secs)), "Its container is up")
                         }
-                        Some((s, _)) => ("chip live", s, "Its container is changing state"),
+                        Some((s, _)) => ("chip info", s, "Its container is changing state"),
                         None => (
                             "chip off",
                             "idle · on demand".to_string(),
                             "Not running; its first request starts it",
                         ),
                     };
+                    // The words give way to the dot in a narrow card; the tooltip
+                    // then holds them.
+                    let title = format!("{tip} \u{b7} {label}");
                     view! {
-                        <span class=cls title=tip>
+                        <span class=format!("{cls} wire-run") title=title>
                             <span class="dot"></span>
-                            {label}
+                            <span class="chip-word">{label}</span>
                         </span>
                     }
                 }}
@@ -597,11 +601,11 @@ fn LocalRow(c: LocalChain, live: LiveBus) -> impl IntoView {
 
     view! {
         <tr class:muted=muted>
-            <td>
-                <a href=edit class="row-link" title="Open the editor">
+            <td class="wire-model">
+                <a href=edit class="row-link" title=format!("{} · open the editor", c.model_id)>
                     <span class="model-chip" style=format!("--hue:{hue}")>
                         <i></i>
-                        {c.model_id.clone()}
+                        <span class="wire-model-id">{c.model_id.clone()}</span>
                     </span>
                 </a>
             </td>
@@ -712,7 +716,7 @@ fn OrphanSections(shown: Memo<Shown>, narrowed: Signal<bool>) -> impl IntoView {
 
 #[component]
 fn WeightsRow(o: OrphanGguf) -> impl IntoView {
-    // The create form reads both from the query string (see local_edit.rs).
+    // The create form reads both from the query string (see pages/models/detail/local.rs).
     let wire_up = format!(
         "/models/local/new?gguf={}&model_id={}",
         q(&o.gguf_path),
@@ -793,7 +797,8 @@ fn MoreNames(names: Vec<String>) -> impl IntoView {
             title="Every name, each with a copy button"
             on:click=move |_| open.update(|o| *o = !*o)
         >
-            {format!("+{} ▾", crate::fmt::count_of(more, "aliases"))}
+            {format!("+{}", crate::fmt::count_of(more, "aliases"))}
+            <Icon ico=Ico::Down class="menu-btn-ico"/>
         </button>
         <Popover open=open anchor=btn class="names-pop" min_width=240>
             <div class="pop-count names-count">

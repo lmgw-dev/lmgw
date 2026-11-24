@@ -202,6 +202,11 @@ pub struct ChatMessageRow {
     /// `None` on every other row, and then left out of the JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images_note: Option<String>,
+    /// A reply's notices (migration 0107): the MCP labels its thread or
+    /// folder attached that offered the turn no tools, as the turn said
+    /// them. Empty on every other row, and then left out of the JSON.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<lmgw_api_types::chat_frames::LabelNotice>,
     /// How the turn was spoken (chat-voice design §3); `None` for a typed
     /// turn.
     pub voice: Option<MessageVoice>,
@@ -302,6 +307,7 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         model: row.get("model"),
         answered_by: row.get("answered_by"),
         images_note: row.get("images_note"),
+        notices: super::chat_notices::from_column(row.get("notices")),
         voice: MessageVoice::from_stored(row.get("voice")),
         origin: row.get("origin"),
         pending_approvals: PendingApprovals::parse(
@@ -539,6 +545,20 @@ pub async fn list_chat_threads_by_ids(
 pub async fn count_archived_chat_threads(pool: &SqlitePool, admin: AdminThreads) -> DbResult<i64> {
     let n: i64 = sqlx::query_scalar(concat!(
         "SELECT COUNT(*) FROM chat_threads WHERE archived_at IS NOT NULL AND ",
+        self_admin_thread!(""),
+        " < ?1"
+    ))
+    .bind(admin.reach())
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+/// How many stored threads are active (not archived), the number the
+/// sidebar's "Active (n)" label shows whichever list was asked for.
+pub async fn count_active_chat_threads(pool: &SqlitePool, admin: AdminThreads) -> DbResult<i64> {
+    let n: i64 = sqlx::query_scalar(concat!(
+        "SELECT COUNT(*) FROM chat_threads WHERE archived_at IS NULL AND ",
         self_admin_thread!(""),
         " < ?1"
     ))

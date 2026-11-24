@@ -12,6 +12,8 @@ mod dev_models_dir;
 pub use dev_models_dir::*;
 mod devices;
 pub use devices::*;
+mod documents;
+pub use documents::*;
 mod proxies;
 pub use proxies::*;
 mod tls;
@@ -505,6 +507,10 @@ pub struct Settings {
     /// owner changes what "default" means.
     #[serde(default)]
     pub docs_search: DocsSearchSettings,
+    /// Settings › Documents (document-conversion design §4.4): the tool
+    /// pool's size so far.
+    #[serde(default)]
+    pub documents: DocumentsSettings,
     /// Model alias the rerank stage calls (quickdoc §6, §9a). Empty means
     /// "whichever rerank model the aux router has enabled"; when there is none,
     /// the stage is skipped and the search trace says why.
@@ -657,6 +663,7 @@ impl Default for Settings {
             docs_embed_batch: default_docs_embed_batch(),
             docs_fetch_delay_ms: default_docs_fetch_delay_ms(),
             docs_search: DocsSearchSettings::default(),
+            documents: DocumentsSettings::default(),
             docs_rerank_model: String::new(),
             vram: VramSettings::default(),
             hold: HoldSettings::default(),

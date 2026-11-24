@@ -23,6 +23,7 @@ fn tool(exposed: &str, wire: &str) -> LabelTool {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            anthropic_fields: Default::default(),
         },
         wire: wire.into(),
     }

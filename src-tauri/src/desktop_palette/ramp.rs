@@ -1,9 +1,10 @@
 //! The neutrals the page takes from the desktop's title-bar shade.
 //!
 //! The steps are the bundled palette's own (the kit.css tokens), measured as
-//! OKLCH lightness above or below its --bg0, re-based on the title bar's
-//! shade and kept in its hue and chroma: the panes become lighter greys of
-//! that shade, where the bundled ones get bluer as they get lighter.
+//! OKLCH lightness above or below its --bg0 (the sidebar), re-based on the
+//! title bar's shade and kept in its hue and chroma: the view and the pane
+//! become darker greys of that shade in the dark theme and lighter ones in
+//! the light theme, the cards and popovers the steps above them.
 //! Re-measure them when the bundled neutrals change.
 //!
 //! Plain `#rrggbb` values, not CSS relative colours: codeblocks.js hands
@@ -13,15 +14,16 @@ use super::Rgb;
 
 /// (token without its `--`, step in the dark theme, step in the light one).
 const STEPS: &[(&str, f64, f64)] = &[
-    ("bg1", 0.03, 0.03),
-    ("surface", 0.06, 0.055),
-    ("surface-hi", 0.095, 0.065),
-    ("border", 0.13, -0.055),
-    ("border-strong", 0.205, -0.145),
-    ("grid", 0.11, -0.007),
-    ("seq0", 0.08, 0.025),
-    ("text-3", 0.34, -0.285),
-    ("text-2", 0.495, -0.44),
+    ("bg1", -0.053, 0.057),
+    ("pane", -0.036, 0.036),
+    ("surface", 0.008, 0.057),
+    ("surface-hi", 0.036, 0.015),
+    ("border", 0.044, -0.025),
+    ("border-strong", 0.112, -0.096),
+    ("grid", 0.052, -0.014),
+    ("seq0", 0.024, 0.017),
+    ("text-3", 0.281, -0.287),
+    ("text-2", 0.446, -0.436),
 ];
 
 /// Every stepped neutral, by token name.
@@ -180,11 +182,12 @@ mod tests {
     }
 
     #[test]
-    fn breeze_dark_steps_lighter_in_the_same_shade() {
+    fn breeze_dark_steps_in_the_same_shade() {
         let base = [41, 44, 48];
         let got: std::collections::HashMap<_, _> = neutrals(base, true).into_iter().collect();
+        // The view is a darker grey of the sidebar's shade.
         let bg1 = rgb(&got["bg1"]);
-        assert!(near(bg1, [48, 52, 56]), "{bg1:?}");
+        assert!(near(bg1, [28, 31, 35]), "{bg1:?}");
         let [_, c0, h0] = to_oklch(base);
         let [_, c1, h1] = to_oklch(bg1);
         assert!(

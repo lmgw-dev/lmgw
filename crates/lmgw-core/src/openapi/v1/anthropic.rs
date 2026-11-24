@@ -23,7 +23,10 @@ fn content_block() -> Value {
             tool blocks, a type newer than lmgw) goes to an Anthropic upstream as written; \
             any other upstream is sent none of it, and x-lmgw-params-ignored names it as \
             content.<type>. A block without a type is refused with 400. A custom tool \
-            without input_schema (a server tool) is refused with 400.",
+            without input_schema (a server tool) is refused with 400. A cache_control on a \
+            text, image, tool_use or tool_result block (and on a text or image inside a \
+            tool_result) goes to an Anthropic model on that block, as written; every other \
+            model is sent none, and x-lmgw-params-ignored names cache_control.",
     })
 }
 
@@ -46,7 +49,12 @@ fn tool_schema() -> Value {
             "name": {"type": "string"},
             "description": {"type": "string"},
             "input_schema": {"type": "object", "additionalProperties": true}
-        }
+        },
+        "additionalProperties": true,
+        "description": "Every other field of the tool (cache_control, \
+            eager_input_streaming, input_examples, a field newer than lmgw) goes to an \
+            Anthropic model as written; every other model is sent none, and \
+            x-lmgw-params-ignored names cache_control and tools.<field>."
     })
 }
 
@@ -63,7 +71,9 @@ pub(crate) fn messages_request(g: &mut SchemaGenerator) -> Schema {
             "properties": {
                 "model": {"type": "string"},
                 "messages": {"type": "array", "items": message_schema()},
-                "system": {"description": "A string, or an array of {type:text,text} blocks, \
+                "system": {"description": "A string, or an array of {type:text,text} blocks. \
+                    An Anthropic model gets the string, or the blocks with their \
+                    cache_control, as written; every other model gets the blocks' texts \
                     joined with blank lines."},
                 "tools": {"type": "array", "items": tool_schema(), "description": "Custom \
                     tools only (input_schema required); a server tool (web_search, computer \
@@ -126,6 +136,15 @@ pub(crate) fn messages_request(g: &mut SchemaGenerator) -> Schema {
                         no equivalent: it is left out and named in x-lmgw-params-ignored. A \
                         model's capabilities.context_editing.compaction says which types it \
                         takes."
+                },
+                "cache_control": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Anthropic's automatic prompt caching ({type: ephemeral, \
+                        ttl?}): Anthropic places the cache breakpoint itself. To an Anthropic \
+                        model it goes as written; every other model's provider has no \
+                        equivalent: it is left out and named in x-lmgw-params-ignored \
+                        (cache_control)."
                 }
             },
             "additionalProperties": true
@@ -159,6 +178,16 @@ fn usage_schema() -> Value {
                 the upstream reported a cache read."},
             "cache_creation_input_tokens": {"type": "integer", "description": "Present only \
                 when the upstream reported cache writes."},
+            "cache_creation": {
+                "type": "object",
+                "required": ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"],
+                "properties": {
+                    "ephemeral_5m_input_tokens": {"type": "integer"},
+                    "ephemeral_1h_input_tokens": {"type": "integer"}
+                },
+                "description": "The cache writes split by TTL. Present only when the upstream \
+                    reported the split (an Anthropic model)."
+            },
             "iterations": {"type": "array", "items": {"type": "object", "additionalProperties": true},
                 "description": "An Anthropic model's per-iteration usage, as it reported it \
                 (a compaction entry for a compaction it ran, which the top-level counts \
@@ -239,7 +268,10 @@ pub(crate) fn stream_event(g: &mut SchemaGenerator) -> Schema {
             },
             "additionalProperties": true,
             "description": "SSE event: <type>, data: <this object>, one per line of the \
-                sequence above."
+                sequence above. An Anthropic model's message_start carries its input counts in \
+                message.usage (input_tokens, the cache counters, cache_creation), as Anthropic \
+                reported them; every other model's has zeros there, and its counts come on \
+                message_delta."
         }),
     )
 }
@@ -268,7 +300,8 @@ pub(crate) fn count_request(g: &mut SchemaGenerator) -> Schema {
                 "tools": {"type": "array", "items": tool_schema()},
                 "tool_choice": {"description": "{type:auto|any|none|tool}."},
                 "thinking": {"type": "object", "additionalProperties": true},
-                "output_config": {"type": "object", "additionalProperties": true}
+                "output_config": {"type": "object", "additionalProperties": true},
+                "cache_control": {"type": "object", "additionalProperties": true}
             },
             "additionalProperties": true
         }),

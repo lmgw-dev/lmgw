@@ -42,7 +42,7 @@ async fn the_stored_conversations_are_the_documented_types() {
     assert!(index.store_enabled);
     assert_eq!(
         index.rules,
-        "evicted after 7 idle day(s), keeping at most 500"
+        "Evicted after 7 idle days, keeping at most 500"
     );
     let (status, refused) = get(&gw, "/api/responses/chain?id=nope").await;
     assert_eq!(status, 400, "{refused}");

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use lmgw_api_types::machine::{MachineVerdict, PlanHow, PlanStepKind};
 use lmgw_core::vram::{GpuMemory, GpuProbe};
 
+use crate::support::fake_machine::Machine;
 use crate::support::machine_world::{World, NVIDIA_OWNER};
 
 fn install_helper(w: &World) {
@@ -28,13 +29,7 @@ struct Probe(Option<&'static str>);
 impl GpuProbe for Probe {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
         match self.0 {
-            Some(name) => Ok(vec![GpuMemory {
-                index: 0,
-                name: name.into(),
-                total_bytes: 24 << 30,
-                used_bytes: 0,
-                free_bytes: 24 << 30,
-            }]),
+            Some(name) => Ok(Machine::one_card(name, 24 << 30).devices()),
             None => Err("NVML unavailable: Driver Not Loaded".into()),
         }
     }

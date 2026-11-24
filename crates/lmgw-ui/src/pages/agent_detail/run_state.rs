@@ -233,6 +233,11 @@ pub struct RunState {
     /// as it lands. Backpressure, not a cap: nothing is dropped, the newest ask
     /// simply wins.
     queued: RwSignal<Option<i64>>,
+    /// Which agent's surface this is, as a count: [`Self::clear`] moves it
+    /// on when the selection moves, and a read or a start that went out
+    /// before lands on nothing (the page stays mounted for the next agent,
+    /// whose run it is not).
+    epoch: StoredValue<u64>,
     /// The page's lifetime: a run read that lands after the page was left is
     /// dropped (review code:C4).
     pub scope: Scope,
@@ -263,6 +268,7 @@ impl RunState {
             pinned: RwSignal::new(None),
             fetching: RwSignal::new(false),
             queued: RwSignal::new(None),
+            epoch: StoredValue::new(0),
             scope: Scope::new(),
         }
     }
@@ -317,8 +323,25 @@ impl RunState {
         self.summary.get().map(|s| s.job_id)
     }
 
+    /// The surface of the agent shown now, as a ticket for a read or a
+    /// start about to go out.
+    fn epoch(&self) -> u64 {
+        self.epoch.get_value()
+    }
+
+    /// Is the agent a read went out for still the one shown?
+    fn current(&self, epoch: u64) -> bool {
+        self.epoch.try_get_value() == Some(epoch)
+    }
+
+    /// Everything about the agent shown before, for the next one. A read
+    /// still out belongs to the run being cleared away: it lands on nothing
+    /// ([`Self::epoch`]), so the next agent's first read goes out at once,
+    /// and so does its first start.
     pub(super) fn clear(&self) {
-        // A queued read belongs to the run that is being cleared away.
+        self.epoch.update_value(|e| *e += 1);
+        self.fetching.set(false);
+        self.busy.set(false);
         self.queued.set(None);
         self.summary.set(None);
         self.rows.set(Vec::new());
@@ -355,25 +378,44 @@ impl RunState {
         if me.summary.get_untracked().map(|s| s.job_id) != Some(job_id) {
             me.forget_review();
         }
+        let epoch = me.epoch();
         me.scope.spawn(async move {
-            match crate::api::get::<AgentRunDetail>(&format!("/api/agents/runs/{job_id}")).await {
-                Ok(d) => {
-                    let shape = d.batch.clone().unwrap_or_default();
-                    me.rows.set(review_rows(&d.rows, &shape));
-                    me.shape.set(d.batch);
-                    me.result.set(d.result);
-                    me.log.set(d.log);
-                    me.summary.set(Some(d.job));
-                    me.error.set(None);
-                }
-                Err(e) => me.error.set(Some(e.to_string())),
-            }
-            me.fetching.set(false);
-            if let Some(next) = me.queued.get_untracked() {
-                me.queued.set(None);
+            let res = crate::api::get::<AgentRunDetail>(&format!("/api/agents/runs/{job_id}"))
+                .await
+                .map_err(|e| e.to_string());
+            if let Some(next) = me.land(epoch, res) {
                 me.load(next);
             }
         });
+    }
+
+    /// One run read landing: on the surface it went out for, the rows, the
+    /// log and the result replace what was shown, and the run asked for in
+    /// the meantime is what to read next. A read of an agent the page has
+    /// since left changes nothing, not even the in-flight mark, which is the
+    /// next agent's by now.
+    fn land(&self, epoch: u64, res: Result<AgentRunDetail, String>) -> Option<i64> {
+        if !self.current(epoch) {
+            return None;
+        }
+        match res {
+            Ok(d) => {
+                let shape = d.batch.clone().unwrap_or_default();
+                self.rows.set(review_rows(&d.rows, &shape));
+                self.shape.set(d.batch);
+                self.result.set(d.result);
+                self.log.set(d.log);
+                self.summary.set(Some(d.job));
+                self.error.set(None);
+            }
+            Err(e) => self.error.set(Some(e)),
+        }
+        self.fetching.set(false);
+        let next = self.queued.get_untracked();
+        if next.is_some() {
+            self.queued.set(None);
+        }
+        next
     }
 
     /// Start a phase and follow the job it returns.
@@ -387,8 +429,17 @@ impl RunState {
         // Starting a run is asking to watch it, so any pinned older run lets
         // go of the surface here.
         me.pinned.set(None);
+        let epoch = me.epoch();
         spawn_local(async move {
             let res = crate::api::post::<AgentRunStarted, _>("/api/op/agent_run", &args).await;
+            // Started for an agent the page has left: its own page reads it
+            // when it is opened again, this one shows another agent now.
+            if !me.current(epoch) {
+                if let Err(e) = res {
+                    toasts.err(e.to_string());
+                }
+                return;
+            }
             me.busy.set(false);
             match res {
                 Ok(started) => {
@@ -408,5 +459,81 @@ impl RunState {
                 Err(e) => me.error.set(Some(e.to_string())),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detail_of(job_id: i64) -> AgentRunDetail {
+        AgentRunDetail {
+            job: AgentRunSummary {
+                job_id,
+                ..Default::default()
+            },
+            rows: vec![json!({ "id": "r1", "columns": {} })],
+            ..Default::default()
+        }
+    }
+
+    /// The selection moved while agent a's run read was out: the answer
+    /// lands on nothing, and b's surface is free to read its own run.
+    #[test]
+    fn a_run_read_of_the_agent_left_lands_on_nothing() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let run = RunState::new();
+            let a = run.epoch();
+            run.fetching.set(true);
+            run.queued.set(Some(8));
+            run.busy.set(true);
+            run.clear();
+            assert!(
+                !run.fetching.get_untracked(),
+                "b's first read goes out at once"
+            );
+            assert!(
+                !run.busy.get_untracked(),
+                "b's buttons are not held by a's start"
+            );
+            assert_eq!(run.queued.get_untracked(), None);
+            // b's own read is out when a's answer arrives.
+            run.fetching.set(true);
+            assert_eq!(run.land(a, Ok(detail_of(7))), None);
+            assert!(
+                run.summary.get_untracked().is_none(),
+                "a's run is not on b's page"
+            );
+            assert!(run.rows.get_untracked().is_empty());
+            assert!(
+                run.fetching.get_untracked(),
+                "b's read is still the one out"
+            );
+            assert_eq!(run.land(a, Err("gone".into())), None);
+            assert_eq!(run.error.get_untracked(), None);
+        });
+    }
+
+    /// A read for the agent shown lands, and the ask that came in while it
+    /// was out is what goes next.
+    #[test]
+    fn a_run_read_of_the_agent_shown_lands_and_serves_the_queued_ask() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let run = RunState::new();
+            run.clear();
+            let b = run.epoch();
+            run.fetching.set(true);
+            run.queued.set(Some(12));
+            assert_eq!(run.land(b, Ok(detail_of(11))), Some(12));
+            assert_eq!(run.summary.get_untracked().map(|s| s.job_id), Some(11));
+            assert_eq!(run.rows.get_untracked().len(), 1);
+            assert!(!run.fetching.get_untracked());
+            assert_eq!(run.queued.get_untracked(), None);
+            assert_eq!(run.land(b, Err("refused".into())), None);
+            assert_eq!(run.error.get_untracked().as_deref(), Some("refused"));
+        });
+        owner.cleanup();
     }
 }

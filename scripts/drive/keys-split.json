@@ -1,0 +1,422 @@
+[
+ {
+  "js": "'Keys & budgets as a list beside the selected key (modern design WP11): the status page with nothing selected (the global budget, the New key form, pairing, the link strip, the transfers), the rows under their kind\\'s heading, a click selecting a key (its path, the hero, the Spend group and the policy groups), the arrows moving the selection, a deep link selecting its row, the search (/ focuses, Esc clears, a second Esc back to the list), the Usage views switch under the title, a device\\'s detail (its Connection group and its admin-tools dropdown), the policy as rows: a note typed (the accent dot, the save toast), the guard asking when another row is picked, Ctrl+S saving, the saved note read back after a reload, Ctrl+S with nothing changed sending nothing, a past expiry asking before it is saved and again for another past moment, then Revoke from its danger row (its question, done, back to the status page), a new key\\'s page showing its plaintext and Loading… while the list is read again, a row picked while a create is out (the plaintext still reaches the new key\\'s page), and the narrow window (one pane at a time, the back button). It CREATES and REVOKES client keys named wp11-drive, wp11-fresh and wp11-left and saves the first one\\'s note: a dev copy only, never production. Run: scripts/ui-drive.py scripts/drive/keys-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr>'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');for(const k of (r.keys||[]))if(k.name==='wp11-drive')await j('/api/op/key_delete',{id:k.id});const c=await j('/api/op/key_create',{name:'wp11-drive',kind:'client'});sessionStorage.setItem('wp11.id',String(c.id));localStorage.removeItem('lmgw.ui.keys.list.width');return 'created '+c.id})()"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "until": "document.querySelector('.mlist .lrow[data-key=\"/usage/keys/' + sessionStorage.getItem('wp11.id') + '\"]')",
+  "timeout": 15,
+  "label": "the list has the drive's key"
+ },
+ {
+  "js": "window.__id = sessionStorage.getItem('wp11.id'); window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__row = t => [...document.querySelectorAll('.kdetail .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent.startsWith(t)); window.__posts = 0; const f = window.fetch; window.fetch = (u, o) => { if (String((u && u.url) || u).includes('/api/op/key_set')) window.__posts++; return f(u, o); }; 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.keys-split:not(.narrow)') && document.querySelector('.kstatus') && __sel().length === 0",
+  "label": "wide: nothing selected shows the status page beside the list"
+ },
+ {
+  "expect": "['Global budget', 'New key', 'Devices', 'Transfers'].every(t => [...document.querySelectorAll('.kstatus .pref-head h2')].some(h => h.textContent === t))",
+  "label": "the status page has the global budget, New key, Devices and Transfers"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mlist .list-head')].map(h => h.firstChild.textContent).every(t => ['Owner keys', 'Client keys', 'Devices', 'Agent tokens', 'Internal identities', 'Other keys'].includes(t))",
+  "label": "the rows sit under their kind's heading"
+ },
+ {
+  "expect": "document.querySelectorAll('.keys-views .sub-nav a').length === 3 && document.querySelector('.keys-views .sub-nav a[aria-current]').textContent.startsWith('Keys')",
+  "label": "the Usage views switch is under the title, Keys current"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "shot": "keys-status"
+ },
+ {
+  "js": "document.querySelector('.mlist .lrow[data-key=\"/usage/keys/' + __id + '\"]').setAttribute('data-drive', 'k'); 'marked'"
+ },
+ {
+  "click": ".mlist .lrow[data-drive=k]"
+ },
+ {
+  "until": "location.pathname === '/usage/keys/' + __id && document.querySelector('.kdetail .detail-hero h1') && document.querySelector('.kdetail .detail-hero h1').textContent === 'wp11-drive'",
+  "timeout": 10,
+  "label": "a click selects the row: its path, and the hero"
+ },
+ {
+  "expect": "__sel().length === 1 && __sel()[0] === '/usage/keys/' + __id && ['Spend', 'Access', 'Scope', 'Budget and rate limits', 'Rotate, revoke, delete'].every(t => [...document.querySelectorAll('.kdetail .pref-head h2')].some(h => h.textContent === t))",
+  "label": "the row is highlighted; the detail has Spend, Access, Scope, Budget and rate limits, and the danger group"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.mlist')",
+  "label": "the list has the focus"
+ },
+ {
+  "shot": "keys-detail"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname !== '/usage/keys/' + __id && __sel()[0] === location.pathname",
+  "timeout": 5,
+  "label": "ArrowDown moves the selection, and the detail follows"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "until": "location.pathname === '/usage/keys/' + __id",
+  "timeout": 5,
+  "label": "ArrowUp moves it back"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "/ focuses the search"
+ },
+ {
+  "type": "wp11-dri"
+ },
+ {
+  "until": "document.querySelectorAll('.mlist .lrow').length === 1 && /^1 of \\d+ keys$/.test(document.querySelector('.mlist-head .sub').textContent)",
+  "timeout": 5,
+  "label": "the search narrows the list and the title says how many it shows"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelector('.msearch input').value === '' && document.querySelectorAll('.mlist .lrow').length > 1",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.mlist')",
+  "label": "a second Esc goes back to the list"
+ },
+ {
+  "js": "const heads = [...document.querySelectorAll('.mlist > *')]; let inDev = false, dev = null; for (const e of heads) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { dev = e; break; } } if (dev) dev.setAttribute('data-drive', 'd'); dev ? dev.dataset.key : 'no device'"
+ },
+ {
+  "click": ".mlist .lrow[data-drive=d]"
+ },
+ {
+  "until": "document.querySelector('.kdetail .prow.dev-admin .select') && [...document.querySelectorAll('.kdetail .pref-head h2')].some(h => h.textContent === 'Connection')",
+  "timeout": 10,
+  "label": "a device's detail has its Connection group and its admin-tools level (needs a paired device in the copy)"
+ },
+ {
+  "expect": "!document.querySelector('.kdetail .prow.dirty') && !document.querySelector('.save-toast.show')",
+  "label": "a loaded device has no changes"
+ },
+ {
+  "shot": "keys-device"
+ },
+ {
+  "js": "history.replaceState(null, '', '/usage/keys/' + sessionStorage.getItem('wp11.id')); location.reload(); 'reloading'"
+ },
+ {
+  "until": "document.querySelector('.kdetail .detail-hero h1') && document.querySelector('.kdetail .detail-hero h1').textContent === 'wp11-drive'",
+  "timeout": 15,
+  "label": "a deep link selects its key"
+ },
+ {
+  "js": "window.__id = sessionStorage.getItem('wp11.id'); window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__row = t => [...document.querySelectorAll('.kdetail .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent.startsWith(t)); window.__posts = 0; const f = window.fetch; window.fetch = (u, o) => { if (String((u && u.url) || u).includes('/api/op/key_set')) window.__posts++; return f(u, o); }; 'helpers'"
+ },
+ {
+  "expect": "__sel()[0] === '/usage/keys/' + __id",
+  "label": "the deep link's row is highlighted"
+ },
+ {
+  "js": "(() => { const i = __row('Note').querySelector('input'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); return 'focused'; })()"
+ },
+ {
+  "type": "wp11 note"
+ },
+ {
+  "until": "__row('Note').classList.contains('dirty') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "typing marks the row changed and shows the save toast"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent === '1 unsaved change'",
+  "label": "the toast counts one change"
+ },
+ {
+  "shot": "keys-dirty"
+ },
+ {
+  "js": "document.querySelector('.mlist .lrow:not(.sel)').click(); 'other row'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on this key'))",
+  "timeout": 5,
+  "label": "picking another row asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname === '/usage/keys/' + __id && __row('Note').classList.contains('dirty')",
+  "label": "Stay keeps the key and the change"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && !__row('Note').classList.contains('dirty') && __posts === 1",
+  "timeout": 10,
+  "label": "Ctrl+S saves: one key_set, no change left"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "__posts === 1",
+  "label": "Ctrl+S with nothing changed sends nothing"
+ },
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "js": "history.replaceState(null, '', '/usage/keys/' + sessionStorage.getItem('wp11.id')); location.reload(); 'reloading'"
+ },
+ {
+  "until": "document.querySelector('.kdetail .detail-hero h1') && [...document.querySelectorAll('.kdetail .prow')].some(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent === 'Note' && r.querySelector('input').value === 'wp11 note')",
+  "timeout": 15,
+  "label": "after a reload the saved note is read back"
+ },
+ {
+  "js": "window.__id = sessionStorage.getItem('wp11.id'); window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__row = t => [...document.querySelectorAll('.kdetail .prow')].find(r => r.querySelector('.prow-title') && r.querySelector('.prow-title').textContent.startsWith(t)); window.__posts = 0; const f = window.fetch; window.fetch = (u, o) => { if (String((u && u.url) || u).includes('/api/op/key_set')) window.__posts++; return f(u, o); }; 'helpers'"
+ },
+ {
+  "js": "(() => { const i = __row('Expires').querySelector('input'); i.focus(); i.select(); return 'focused'; })()"
+ },
+ {
+  "type": "2020-01-01"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "[...document.querySelectorAll('.kdetail .notice-row.warn')].some(r => r.textContent.startsWith('That moment has passed')) && __posts === 0",
+  "timeout": 5,
+  "label": "a past expiry asks first: the warning, nothing sent"
+ },
+ {
+  "js": "(() => { const i = __row('Expires').querySelector('input'); i.focus(); i.select(); return 'focused'; })()"
+ },
+ {
+  "type": "2020-01-02"
+ },
+ {
+  "until": "![...document.querySelectorAll('.kdetail .notice-row.warn')].some(r => r.textContent.startsWith('That moment has passed'))",
+  "timeout": 5,
+  "label": "another moment typed takes the warning away"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "[...document.querySelectorAll('.kdetail .notice-row.warn')].some(r => r.textContent.startsWith('That moment has passed'))",
+  "timeout": 5,
+  "label": "Save with the other past moment asks again"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "__posts === 0 && __row('Expires').classList.contains('dirty')",
+  "label": "and sends nothing: the key is not expired without its second yes"
+ },
+ {
+  "js": "[...document.querySelectorAll('.save-toast.show .btn')].find(b => b.textContent === 'Discard').click(); 'discard'"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && __row('Expires').querySelector('input').value === ''",
+  "timeout": 5,
+  "label": "Discard puts the expiry back"
+ },
+ {
+  "js": "[...document.querySelectorAll('.kdetail .prow.action')].find(r => r.textContent.startsWith('Revoke the key')).click(); 'revoke'"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Revoke wp11-drive?'))",
+  "timeout": 5,
+  "label": "Revoke asks first, naming the key"
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .btn.danger')].find(b => b.textContent === 'Revoke the key').click(); 'yes'"
+ },
+ {
+  "until": "location.pathname === '/usage/keys' && document.querySelector('.kstatus') && !document.querySelector('.mlist .lrow[data-key=\"/usage/keys/' + sessionStorage.getItem('wp11.id') + '\"]')",
+  "timeout": 10,
+  "label": "revoked: back on the status page, its row gone"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');let n=0;for(const k of (r.keys||[]))if(k.name==='wp11-left'||k.name==='wp11-fresh'){await j('/api/op/key_delete',{id:k.id});n++}return 'deleted '+n})()"
+ },
+ {
+  "js": "window.__slow = {}; const f0 = window.fetch; window.fetch = (u, o) => { const url = String((u && u.url) || u); const m = ((o && o.method) || (u && u.method) || 'GET').toUpperCase(); const p = f0(u, o); for (const [k, until] of Object.entries(window.__slow)) { const [mm, path] = k.split(' '); if (m === mm && url.includes(path) && Date.now() < until) return p.then(r => new Promise(res => setTimeout(() => res(r), until - Date.now()))); } return p; }; window.__made = []; 'slow fetch'"
+ },
+ {
+  "js": "(() => { const i = document.querySelector('.key-create input'); i.focus(); return 'focused'; })()"
+ },
+ {
+  "type": "wp11-fresh"
+ },
+ {
+  "js": "window.__slow['GET /api/usage/keys'] = Date.now() + 3000; document.querySelector('.key-create .btn.suggested').click(); 'create'"
+ },
+ {
+  "until": "/^\\/usage\\/keys\\/\\d+$/.test(location.pathname) && document.querySelector('.fresh-key') && document.querySelector('.fresh-key').textContent.includes(\"Key 'wp11-fresh' created\") && [...document.querySelectorAll('.mdetail-scroll .notice-row')].some(r => r.textContent === 'Loading…')",
+  "timeout": 3,
+  "label": "the new key's page shows its plaintext at once, and Loading… while the list is read again"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.mdetail-scroll .notice-row')].some(r => r.textContent.startsWith('No key'))",
+  "label": "not 'revoked' before the list has it"
+ },
+ {
+  "until": "document.querySelector('.kdetail .detail-hero h1') && document.querySelector('.kdetail .detail-hero h1').textContent === 'wp11-fresh' && document.querySelector('.kdetail .fresh-key')",
+  "timeout": 10,
+  "label": "once the list has it, the hero, with the plaintext still shown"
+ },
+ {
+  "js": "[...document.querySelectorAll('.fresh-key .btn')].find(b => b.textContent === 'Dismiss').click(); history.pushState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'back to status'"
+ },
+ {
+  "until": "location.pathname === '/usage/keys' && document.querySelector('.kstatus .key-create input')",
+  "timeout": 5,
+  "label": "back on the status page"
+ },
+ {
+  "js": "(() => { const i = document.querySelector('.key-create input'); i.focus(); return 'focused'; })()"
+ },
+ {
+  "type": "wp11-left"
+ },
+ {
+  "js": "window.__slow['POST /api/op/key_create'] = Date.now() + 2000; document.querySelector('.key-create .btn.suggested').click(); 'create'"
+ },
+ {
+  "click": ".mlist .lrow"
+ },
+ {
+  "until": "/^\\/usage\\/keys\\/\\d+$/.test(location.pathname) && !document.querySelector('.kstatus')",
+  "timeout": 3,
+  "label": "a row picked while the create is out ends the status page"
+ },
+ {
+  "until": "[...document.querySelectorAll('.toast-host .toast.warn')].some(t => t.textContent.includes(\"key 'wp11-left' was created: its page in the list shows it\"))",
+  "timeout": 8,
+  "label": "the create's answer says where its plaintext is"
+ },
+ {
+  "until": "[...document.querySelectorAll('.mlist .lrow')].some(r => r.textContent.includes('wp11-left'))",
+  "timeout": 10,
+  "label": "the list has the new key"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mlist .lrow')].find(r => r.textContent.includes('wp11-left')).click(); 'open it'"
+ },
+ {
+  "until": "document.querySelector('.kdetail .detail-hero h1') && document.querySelector('.kdetail .detail-hero h1').textContent === 'wp11-left' && document.querySelector('.kdetail .fresh-key') && document.querySelector('.kdetail .fresh-key').textContent.includes(\"Key 'wp11-left' created\") && /\\S{20,}/.test(document.querySelector('.kdetail .fresh-key-text').textContent)",
+  "timeout": 8,
+  "label": "its page shows the plaintext the create returned"
+ },
+ {
+  "js": "[...document.querySelectorAll('.fresh-key .btn')].find(b => b.textContent === 'Dismiss').click(); 'dismissed'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');let n=0;for(const k of (r.keys||[]))if(k.name==='wp11-left'||k.name==='wp11-fresh'){await j('/api/op/key_delete',{id:k.id});n++}return 'deleted '+n})()"
+ },
+ {
+  "js": "history.pushState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'back to status'"
+ },
+ {
+  "until": "location.pathname === '/usage/keys' && document.querySelector('.kstatus')",
+  "timeout": 5,
+  "label": "back on the status page"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "until": "document.querySelector('.keys-split.narrow') && document.querySelector('.mlist-pane').getBoundingClientRect().width > 0 && document.querySelector('.mdetail-pane').getBoundingClientRect().width === 0",
+  "timeout": 5,
+  "label": "narrow, nothing selected: the list alone"
+ },
+ {
+  "click": ".mlist .lrow"
+ },
+ {
+  "until": "document.querySelector('.mdetail-pane').getBoundingClientRect().width > 0 && document.querySelector('.mlist-pane').getBoundingClientRect().width === 0 && document.querySelector('.mdetail-head .icon-btn[title=\"Back to the list\"]')",
+  "timeout": 5,
+  "label": "narrow: a click shows the detail alone, with a back button"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth && document.querySelector('.mdetail-scroll').scrollWidth <= document.querySelector('.mdetail-scroll').clientWidth + 1",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "shot": "keys-narrow-detail"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the list\"]"
+ },
+ {
+  "until": "location.pathname === '/usage/keys' && document.querySelector('.mlist-pane').getBoundingClientRect().width > 0",
+  "timeout": 5,
+  "label": "back shows the list"
+ },
+ {
+  "size": "1229x691"
+ }
+]

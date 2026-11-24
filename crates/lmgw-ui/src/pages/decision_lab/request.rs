@@ -52,7 +52,7 @@ pub(super) fn RequestCard(lab: Lab) -> impl IntoView {
         })
     });
     view! {
-        <details class="card req-card wrap dl-request" open>
+        <details class="req-card wrap dl-request" open>
             <summary>
                 "Request — " <span class="mono-sm">{ENDPOINT}</span>
                 {move || lab.override_text.with(Option::is_some).then_some(" · override")}

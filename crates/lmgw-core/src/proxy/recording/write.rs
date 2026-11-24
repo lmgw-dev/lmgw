@@ -13,7 +13,8 @@ use crate::store::{self, NewRequestLog};
 use crate::telemetry::{RequestSummary, TelemetryBus};
 
 /// Insert `row`, then close the gauge with it and put it on the live feed.
-pub(super) async fn write_row(state: &SharedState, row: NewRequestLog, status: u16) {
+/// The row's id (0 when the insert failed, which is logged).
+pub(crate) async fn write_row(state: &SharedState, row: NewRequestLog, status: u16) -> i64 {
     let st = state.clone();
     // A stopping server waits for the row whatever happens to the handler
     // (review F-2): a quit does not lose it.
@@ -27,10 +28,11 @@ pub(super) async fn write_row(state: &SharedState, row: NewRequestLog, status: u
                 0
             });
         finished(&st.telemetry, log_id, row, status);
+        log_id
     });
     // A panic in the task has already been reported by the runtime; the
     // handler answers either way.
-    let _ = task.await;
+    task.await.unwrap_or(0)
 }
 
 fn finished(telemetry: &TelemetryBus, log_id: i64, row: NewRequestLog, status: u16) {

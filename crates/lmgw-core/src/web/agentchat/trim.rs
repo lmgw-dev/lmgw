@@ -108,6 +108,7 @@ mod tests {
             id: "call_1".into(),
             name: "f".into(),
             args: json!({}),
+            cache_control: None,
         };
         let turn = vec![
             assistant(vec![call.clone()]),
@@ -118,6 +119,7 @@ mod tests {
                     name: None,
                     content: crate::ir::ToolResultBlock::one("ok"),
                     is_error: false,
+                    cache_control: None,
                 }],
             },
             assistant(vec![
@@ -186,6 +188,7 @@ mod tests {
                 id: "c".into(),
                 name: "f".into(),
                 args: json!({}),
+                cache_control: None,
             },
         ])];
         let (record, seals) = record_or_seals(tool.clone(), 0, false);

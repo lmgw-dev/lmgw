@@ -1,0 +1,90 @@
+[
+ {
+  "js": "'A settled reply written node by node (chat/morph.rs) holds what a fresh render of its text holds, decorations included: a reply with math, a highlighted code block, a diagram and a diagram that fails is continued, and its rendered markdown is then compared with the same thread opened afresh (a full reload, the first write into an empty element, which is innerHTML). The failing diagram says its error once, inside its own code block (codeblocks.js adds no top-level node), and the last paragraph is there once. Needs the echo mock (ECHO=1 scripts/mock-openai.py PORT) and the fake-echo alias (scripts/chat-actions-setup.sh); scripts/chat-drives.sh starts both. Writes one thread and its two messages.'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.morph.tid'); localStorage.removeItem('lmgw.morph.continued'); fetch('/chat/api/threads', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({model_alias: 'fake-echo', kind: 'chat'})}).then(r => r.json()).then(t => localStorage.setItem('lmgw.morph.tid', String(t.id))); return 'creating a thread'; })()"
+ },
+ {
+  "until": "localStorage.getItem('lmgw.morph.tid')",
+  "timeout": 15,
+  "label": "a thread of its own"
+ },
+ {
+  "js": "(location.assign('/chat?t=' + localStorage.getItem('lmgw.morph.tid')), 'opening it')"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "until": "new URLSearchParams(location.search).get('t') === localStorage.getItem('lmgw.morph.tid') && !!document.querySelector('.composer-input') && document.querySelectorAll('.chat-col .msg-item').length === 0",
+  "timeout": 15,
+  "label": "the empty thread is open"
+ },
+ {
+  "js": "(() => { const ta = document.querySelector('.composer-input'); ta.value = 'intro words with $x^2$ in them\\n\\n```rust\\nfn main() { let x = 1; }\\n```\\n\\n```mermaid\\ngraph TD; A-->B\\n```\\n\\n```mermaid\\nthis is not a diagram\\n```\\n\\nclosing words'; ta.dispatchEvent(new Event('input', {bubbles: true})); return 'typed'; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { document.querySelector('.composer-send.primary').click(); return 'sent'; })()"
+ },
+ {
+  "until": "(() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; const l = a[a.length - 1]; const md = l && l.querySelector('.md'); return !!md && !l.querySelector('.caret') && !!l.dataset.mid && !!md.querySelector('.katex') && !!md.querySelector('code.hljs.language-rust') && !!md.querySelector('.mermaid-view svg') && !!md.querySelector('.mermaid-error') && md.querySelectorAll('.code-tools').length === 4; })()",
+  "timeout": 30,
+  "label": "the reply settled with every decoration: math, highlighting, toolbars, the diagram and the failed diagram's error"
+ },
+ {
+  "until": "!!document.querySelector('.chat-col .msg-actions button[aria-label=\"Continue\"]')",
+  "timeout": 10,
+  "label": "Continue is offered"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Continue\"]",
+  "nth": 0
+ },
+ {
+  "until": "(() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; const l = a[a.length - 1]; const md = l && l.querySelector('.md'); return !!md && !l.querySelector('.caret') && md.textContent.trim().endsWith('closing words…and then some more words.') && !!document.querySelector('.composer-send[aria-label=\"Send\"]'); })()",
+  "timeout": 30,
+  "label": "the continuation landed in the reply"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "(() => { const md = [...document.querySelectorAll('.chat-col .msg-assistant .md')].pop(); const errs = md.querySelectorAll('.mermaid-error'); return errs.length === 1 && errs[0].parentElement.classList.contains('code-wrap') && [...md.children].every(c => !c.classList.contains('mermaid-error')); })()",
+  "label": "the failed diagram says its error once, inside its code block, not as a block of its own"
+ },
+ {
+  "expect": "(() => { const md = [...document.querySelectorAll('.chat-col .msg-assistant .md')].pop(); return md.textContent.split('closing words').length === 2 && md.querySelectorAll('.mermaid-wrap').length === 1 && md.querySelectorAll('.code-wrap > pre > code.language-rust').length === 1; })()",
+  "label": "the last paragraph is there once, every block once"
+ },
+ {
+  "js": "(() => { const md = [...document.querySelectorAll('.chat-col .msg-assistant .md')].pop(); const c = md.cloneNode(true); c.querySelectorAll('.mermaid-view').forEach(v => { v.textContent = ''; }); localStorage.setItem('lmgw.morph.continued', c.innerHTML); return c.innerHTML.length + ' chars kept'; })()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(location.assign('/chat?t=' + localStorage.getItem('lmgw.morph.tid')), 'opening it afresh')"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "until": "(() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; const md = a.length && a[a.length - 1].querySelector('.md'); return !!md && !!md.querySelector('.katex') && !!md.querySelector('.mermaid-view svg') && !!md.querySelector('.mermaid-error') && md.querySelectorAll('.code-tools').length === 4; })()",
+  "timeout": 30,
+  "label": "the thread opened afresh, its reply decorated"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(() => { const md = [...document.querySelectorAll('.chat-col .msg-assistant .md')].pop(); const c = md.cloneNode(true); c.querySelectorAll('.mermaid-view').forEach(v => { v.textContent = ''; }); const a = localStorage.getItem('lmgw.morph.continued'), b = c.innerHTML; if (a !== b) { let i = 0; while (i < a.length && a[i] === b[i]) i++; console.log('continued: …' + a.slice(Math.max(0, i - 80), i + 200)); console.log('afresh:    …' + b.slice(Math.max(0, i - 80), i + 200)); } return a === b; })()",
+  "label": "the continued reply's markdown is what a fresh render of it holds (the diagram's SVG aside, its ids differ)"
+ }
+]

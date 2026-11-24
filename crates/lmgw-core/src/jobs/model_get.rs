@@ -13,21 +13,37 @@
 //! 2. **Answer** a row that already serves the file (D87): the one this get
 //!    created before a restart (its note written if the restart cut it
 //!    off), or one someone else made. Nothing is created then.
-//! 3. **Plan** the file on disk, now that every companion is there, and
-//! 4. **fit** it to the measure the card showed, as the card is now
+//! 3. **Wait for the engine** (device-ledger design, ruling 13): the image
+//!    the class's models run in, which the op began to download beside the
+//!    files. The create reads the engine's flags from it (`llama-server
+//!    --help`), and a row created before it is here is not checked against
+//!    them. The image is asked about again here, as the op asks, and its
+//!    download begun or joined ([`pull::pull_and_wait`], keyed by the
+//!    image): never followed by a job id kept from the op, since a pull is
+//!    not resumed at boot and a get that goes on after a restart would wait
+//!    on a job that is gone. A download that fails, or an image no registry
+//!    gives, does not fail the get: the files are here, so the row is
+//!    created, and the create's "could not read llama-server --help"
+//!    carries the download's own sentence in place of podman's. An image
+//!    podman cannot say anything about is not waited for, as a start does
+//!    not wait for it.
+//! 4. **Plan** the file on disk, now that every companion is there, and
+//! 5. **fit** it to the measure the card showed, as the card is now
 //!    ([`crate::modelinfo::refit::for_get`]): the largest context that fits,
 //!    an aux row re-planned at it.
-//! 5. **Create** the row, its id settled again against the names taken by
+//! 6. **Create** the row, its id settled again against the names taken by
 //!    now (D28) under the routing-write lock the create commits under, its
 //!    note recorded on the get first and written after.
-//! 6. **Done**, with the row. Nothing starts the model (D27): loading it is
+//! 7. **Done**, with the row. Nothing starts the model (D27): loading it is
 //!    the Test button's job, or the first message's.
 //!
 //! The intent is the `model_gets` row. At boot, after the cut downloads went
 //! on ([`super::hf_download::resume_at_boot`]), [`reattach_at_boot`] gives
 //! every get still running its job again. A get's cancel stops the
 //! downloads it started itself and no other get waits for; one it joined
-//! (a projector another get or `hf_add` was fetching) goes on.
+//! (a projector another get or `hf_add` was fetching) goes on, and so does
+//! the engine's download, which the next start of any model of the class
+//! needs as much.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -38,6 +54,7 @@ use lmgw_api_types::model_get::{
 };
 
 use super::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
+use crate::backends::pull::{self, Presence};
 use crate::config::AuxKind;
 use crate::erased::Erased;
 use crate::modelinfo::refit;
@@ -255,19 +272,27 @@ fn detail(row: &ModelGetRow, stage: ModelGetStage, waiting: Vec<GetWaiting>) -> 
     .unwrap_or(Value::Null)
 }
 
-/// Steps 1 to 6 (module doc).
+/// Steps 1 to 7 (module doc).
 async fn run(ctx: &JobCtx, row: &ModelGetRow) -> Result<ModelGetDone, Stop> {
     wait_for_downloads(ctx, row).await?;
     if ctx.canceled() {
         return Err(Stop::Canceled);
     }
+    // A row that serves the file already is the answer (step 2), and
+    // creates nothing that would read the engine.
+    let engine = match served(&ctx.state, row) {
+        true => None,
+        false => wait_for_engine(ctx, row).await?,
+    };
     ctx.progress_now(JobProgress {
         stage: "setting up".into(),
         detail: detail(row, ModelGetStage::SettingUp, Vec::new()),
         ..current(ctx)
     })
     .await;
-    let done = set_up(&ctx.state, row).await.map_err(Stop::Failed)?;
+    let done = set_up(&ctx.state, row, engine.as_ref())
+        .await
+        .map_err(Stop::Failed)?;
     ctx.progress_now(JobProgress {
         stage: "ready".into(),
         detail: detail(row, ModelGetStage::Ready, Vec::new()),
@@ -404,6 +429,114 @@ async fn wait_for_downloads(ctx: &JobCtx, row: &ModelGetRow) -> Result<(), Stop>
     }
 }
 
+/// Whether a row of the get's class already serves its file (step 2).
+fn served(state: &SharedState, row: &ModelGetRow) -> bool {
+    crate::hf::dest_rel_path(&row.repo, &row.file)
+        .is_ok_and(|rel| found(&state.snapshot(), row, &rel).is_some())
+}
+
+/// The engine image that did not arrive (step 3): the image, and the
+/// download's own sentence for why it is not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineMissing {
+    image: String,
+    sentence: String,
+}
+
+/// Step 3 (module doc): `None` once the class's image is here, or when
+/// there is nothing to wait for (no image set, an engine that runs no
+/// container, podman not able to say); else why it did not arrive.
+async fn wait_for_engine(ctx: &JobCtx, row: &ModelGetRow) -> Result<Option<EngineMissing>, Stop> {
+    use crate::web::hf::engine;
+    use tokio::sync::broadcast::error::RecvError;
+    let state = &ctx.state;
+    if !state.runtime().launcher().runs_containers() {
+        return Ok(None);
+    }
+    let Some(image) = engine::class_image(state, &row.target) else {
+        return Ok(None);
+    };
+    match engine::within(
+        engine::PRESENCE_BOUND,
+        &image,
+        pull::presence(state, &image),
+    )
+    .await
+    {
+        Presence::Present => return Ok(None),
+        Presence::Unknown(why) => {
+            tracing::info!(
+                "the get of {}/{}: whether {image} is on this machine is not known ({why}); \
+                 setting the model up without waiting for it",
+                row.repo,
+                row.file
+            );
+            return Ok(None);
+        }
+        Presence::Missing => {}
+    }
+    // Subscribed before the wait begins, so no cancel's frame is missed.
+    let mut feed = state.telemetry.subscribe();
+    ctx.progress_now(JobProgress {
+        stage: "waiting for the engine".into(),
+        detail: detail(row, ModelGetStage::WaitingForEngine, Vec::new()),
+        ..current(ctx)
+    })
+    .await;
+    tracing::info!(
+        "the get of {}/{}: its files are here, {image} is not yet — setting the model up once \
+         it is",
+        row.repo,
+        row.file
+    );
+    // Dropping the wait (a cancel, a shutdown) stops the waiting, not the
+    // download.
+    let pulled = pull::pull_and_wait(state, &image, |_| {});
+    tokio::pin!(pulled);
+    let ended = loop {
+        if ctx.canceled() {
+            return Err(Stop::Canceled);
+        }
+        tokio::select! {
+            ended = &mut pulled => break ended,
+            frame = feed.recv() => match frame {
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => {
+                    return Err(Stop::ShuttingDown(
+                        "the gateway is shutting down; the get goes on at its next start".into(),
+                    ))
+                }
+            },
+        }
+    };
+    Ok(ended.err().map(|failed| {
+        let missing = EngineMissing {
+            sentence: format!("it is not on this machine, and {failed}"),
+            image: image.clone(),
+        };
+        tracing::warn!(
+            "the get of {}/{}: {}: {}; setting the model up without it",
+            row.repo,
+            row.file,
+            missing.image,
+            missing.sentence
+        );
+        missing
+    }))
+}
+
+/// The create's warning that it could not read `missing.image`'s flags,
+/// with the engine download's own sentence for why (step 3): podman's own
+/// ("image not known") says only that the image is not here.
+fn engine_said(warnings: &mut [String], missing: &EngineMissing) {
+    let head = crate::runtime::registry::help_unread(&missing.image, "");
+    for w in warnings.iter_mut() {
+        if w.starts_with(&head) && w.ends_with(crate::ops::NOT_VALIDATED) {
+            *w = format!("{head}{}{}", missing.sentence, crate::ops::NOT_VALIDATED);
+        }
+    }
+}
+
 /// Why a download row that nothing transfers waits, by the note it keeps
 /// (WP7, D108): the boot's metered pause, none, or another.
 pub fn wait_reason(note: Option<&str>) -> WaitReason {
@@ -472,8 +605,13 @@ fn found(snap: &crate::config::Snapshot, row: &ModelGetRow, rel: &str) -> Option
     })
 }
 
-/// Steps 2 to 5 (module doc).
-async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, String> {
+/// Steps 2 and 4 to 6 (module doc). `engine`: the image that did not
+/// arrive (step 3), when one did not.
+async fn set_up(
+    state: &SharedState,
+    row: &ModelGetRow,
+    engine: Option<&EngineMissing>,
+) -> Result<ModelGetDone, String> {
     let class = class_of(row);
     let rel = crate::hf::dest_rel_path(&row.repo, &row.file)?;
     let snap = state.snapshot();
@@ -484,7 +622,11 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
         "whole_card" => FitMeasure::WholeCard,
         _ => FitMeasure::Beside,
     };
-    let fitted = refit::for_get(state, class, &rel, measure).await?;
+    let layout = row
+        .layout
+        .as_deref()
+        .and_then(lmgw_api_types::model_find::GetLayout::parse);
+    let fitted = refit::for_get(state, class, &rel, measure, layout).await?;
     if fitted.plan["apply_ready"] == Value::Bool(false) {
         return Err(format!(
             "{} can't be set up as it is: {}",
@@ -534,7 +676,7 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
     patch.insert("action".into(), json!("create"));
     patch.insert("model_id".into(), json!(model_id));
     let mut warnings = fitted.warnings.clone();
-    let row_id = match class {
+    let (row_id, mut created) = match class {
         Class::Aux => {
             let saved = crate::ops::aux_model_set_holding(
                 state,
@@ -542,8 +684,7 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
                 crate::ops::patch_from_args(Some(patch))?,
             )
             .await?;
-            warnings.extend(saved.warnings.unwrap_or_default());
-            saved.id
+            (saved.id, saved.warnings.unwrap_or_default())
         }
         _ => {
             let saved = crate::ops::local_model_set_holding(
@@ -552,10 +693,13 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
                 crate::ops::patch_from_args(Some(patch))?,
             )
             .await?;
-            warnings.extend(saved.warnings.unwrap_or_default());
-            saved.id
+            (saved.id, saved.warnings.unwrap_or_default())
         }
     };
+    if let Some(missing) = engine {
+        engine_said(&mut created, missing);
+    }
+    warnings.extend(created);
     store::set_model_get_row(&state.db, row.id, row_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -574,6 +718,7 @@ async fn set_up(state: &SharedState, row: &ModelGetRow) -> Result<ModelGetDone, 
         fit: Some(fitted.fit),
         note: fitted.note,
         warnings,
+        layout,
     })
 }
 
@@ -628,6 +773,7 @@ async fn answer_found(
         note,
         fit: None,
         warnings: vec![warning],
+        layout: None,
     })
 }
 

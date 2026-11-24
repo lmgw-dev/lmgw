@@ -209,6 +209,7 @@ pub fn parse_request(body: &Value) -> Result<ResponsesRequest, GatewayError> {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         },
         client_tools,
         mcp_tools,
@@ -442,6 +443,7 @@ fn parse_tools(
                 // None where the client said none: a Responses tool is then
                 // strict when its schema allows it (ToolDef::strict).
                 strict: t.get("strict").and_then(Value::as_bool),
+                anthropic_fields: Default::default(),
             }),
             Some("mcp") => {
                 mcp.push(crate::mcp::spec::parse_mcp_tool(t).map_err(GatewayError::BadRequest)?)
@@ -552,7 +554,10 @@ fn push_input_item(
                 {
                     m.content.extend(content);
                 }
-                _ => out.push(Message { role, content }),
+                // A system message's text parts are one text, joined as
+                // they were before the system role's own rule
+                // (`Message::joined_text`).
+                _ => out.push(Message { role, content }.with_system_text_joined()),
             }
         }
         Some("function_call") => {
@@ -562,6 +567,7 @@ fn push_input_item(
                     .unwrap_or_default(),
                 name: str_at(item, "name").unwrap_or_default(),
                 args: parse_arguments(item.get("arguments")),
+                cache_control: None,
             };
             append_to_assistant(out, call);
         }
@@ -577,6 +583,7 @@ fn push_input_item(
                     id: id.clone(),
                     name: name.clone(),
                     args: parse_arguments(item.get("arguments")),
+                    cache_control: None,
                 },
             );
             let error = item.get("error").and_then(Value::as_str);
@@ -592,6 +599,7 @@ fn push_input_item(
                             .unwrap_or_default(),
                     ),
                     is_error: error.is_some(),
+                    cache_control: None,
                 }],
             });
         }
@@ -608,6 +616,7 @@ fn push_input_item(
                     name: None,
                     content,
                     is_error: false,
+                    cache_control: None,
                 }],
             })
         }

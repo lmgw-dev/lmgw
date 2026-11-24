@@ -8,6 +8,7 @@ use super::*;
 use lmgw_core::config::LlamaParams;
 use lmgw_core::gguf::synth;
 use lmgw_core::runtime::Class;
+use lmgw_core::vram::headroom::LLAMA_MARGIN;
 
 const MIB: u64 = 1024 * 1024;
 
@@ -89,7 +90,7 @@ fn entry(f: &Fixture, model_id: &str) -> lmgw_core::runtime::registry::RuntimeVi
 /// ledger charges what it was given, and the entry says it.
 #[tokio::test]
 async fn a_fit_row_starts_with_the_context_that_fits() {
-    let f = fixture(96 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default(), &[]).await;
     let out = start(&f, "fit-model").await;
     assert_eq!(out["ok"], true, "{out}");
@@ -121,7 +122,7 @@ async fn a_fit_row_starts_with_the_context_that_fits() {
 #[tokio::test]
 async fn a_fit_row_starts_partially_with_a_warning() {
     // The floor context is 16 MiB of cache and 36 MiB of weights.
-    let f = fixture(40 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(40 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default(), &[]).await;
     let out = start(&f, "fit-model").await;
     assert_eq!(out["ok"], true, "{out}");
@@ -147,6 +148,8 @@ async fn a_fit_row_starts_partially_with_a_warning() {
 /// what the least needs.
 #[tokio::test]
 async fn a_fit_row_too_large_for_even_its_least_is_refused_with_numbers() {
+    // Too large is judged beside the floor alone: the margin is given up
+    // last and never refuses a model (WP13, owner 2026-11-17).
     let f = fixture(5 * MIB, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default(), &[]).await;
     let err = lmgw_core::ops::container(&f.state, None, Some("fit-model"), "start", false, None)
@@ -166,6 +169,7 @@ async fn a_fit_row_too_large_for_even_its_least_is_refused_with_numbers() {
 /// `--fit off`, nothing lowered, and too large for the card is refused.
 #[tokio::test]
 async fn an_explicit_row_is_honoured_as_written() {
+    // Too large beside the floor alone (the margin never refuses a model).
     let f = fixture(40 * MIB, 8 * MIB, 8 * MIB, 4).await;
     let pinned = LlamaParams {
         ctx_size: Some(8192),
@@ -182,7 +186,7 @@ async fn an_explicit_row_is_honoured_as_written() {
     assert!(argv(&f, "pinned").is_empty(), "never started");
 
     // The same with room: started exactly as written.
-    let f = fixture(96 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     let pinned = LlamaParams {
         ctx_size: Some(8192),
         n_gpu_layers: Some(999),
@@ -206,7 +210,7 @@ async fn an_explicit_row_is_honoured_as_written() {
 /// all of it would not fit, and is charged less than the whole.
 #[tokio::test]
 async fn a_partial_n_gpu_layers_row_is_charged_its_share() {
-    let f = fixture(40 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(40 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     let part = LlamaParams {
         ctx_size: Some(8192),
         n_gpu_layers: Some(3),
@@ -233,5 +237,47 @@ async fn a_partial_n_gpu_layers_row_is_charged_its_share() {
             .unwrap_or_default()
             .contains("--n-gpu-layers 3 puts 2 of its 8 layers"),
         "{r}"
+    );
+}
+
+/// The pinned-row bug (device-ledger design §12): a row whose arguments
+/// pass card 1 alone, on a machine with far more free in all, is fitted to
+/// what card 1 has free and not to the machine's sum — which would have
+/// started it whole at its trained context.
+#[tokio::test]
+async fn a_row_pinned_to_a_card_is_fitted_to_that_card() {
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
+    f.world().cards = vec![
+        ("card 0".into(), 96 * MIB + LLAMA_MARGIN),
+        ("card 1".into(), 96 * MIB + LLAMA_MARGIN),
+    ];
+    // Card 1 has 76 MiB free; the machine 172 MiB.
+    f.world().outside_on.push((1, 20 * MIB));
+    let mut s = f.state.snapshot().settings.clone();
+    s.router.extra_run_args = vec!["--device".into(), "nvidia.com/gpu=1".into()];
+    store::save_settings(&f.state.db, &s).await.unwrap();
+    add_row(&f, "fit-model", LlamaParams::default(), &[]).await;
+    // Twice: the first ledger read learns the cards.
+    let _ = f.state.vram.view(&f.state).await;
+    let out = start(&f, "fit-model").await;
+    assert_eq!(out["ok"], true, "{out}");
+    let a = argv(&f, "fit-model");
+    assert_eq!(flag(&a, "--fit").as_deref(), Some("off"), "{a:?}");
+    let ctx: u64 = flag(&a, "--ctx-size")
+        .expect("a fitted context")
+        .parse()
+        .unwrap();
+    assert!((4096..32768).contains(&ctx), "{ctx}");
+    let g = entry(&f, "fit-model").grant.expect("its grant");
+    assert!(
+        g.bytes <= 72 * MIB,
+        "within card 1's free memory less the headroom: {g:?}"
+    );
+    // Started with its arguments as written: its placement is the card
+    // they pass.
+    assert!(
+        a.windows(2)
+            .any(|w| w[0] == "--device" && w[1] == "nvidia.com/gpu=1"),
+        "{a:?}"
     );
 }

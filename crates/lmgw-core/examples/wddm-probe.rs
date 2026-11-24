@@ -73,7 +73,8 @@ mod windows {
         let nvml = NvmlProbe::detect();
         println!("NVML: {}", nvml.source());
         let devices = nvml.devices().unwrap_or_default();
-        let pcis = nvml.pci_addresses().unwrap_or_default();
+        let cards = nvml.device_addresses().unwrap_or_default();
+        let pcis: Vec<wddm::PciAddress> = cards.iter().map(|(_, p)| *p).collect();
         for (d, p) in devices.iter().zip(pcis.iter()) {
             println!(
                 "  device {} {} at PCI {p}: total {}, used {}, free {}",
@@ -86,9 +87,11 @@ mod windows {
         }
         match nvml.processes(&[], &[]) {
             Ok(list) => {
-                for p in list {
-                    let bytes = p.bytes.map_or("[N/A]".to_string(), mib);
-                    println!("  NVML process {}: {bytes}", p.pid);
+                for (index, d) in list.iter().enumerate() {
+                    for p in &d.processes {
+                        let bytes = p.bytes.map_or("[N/A]".to_string(), mib);
+                        println!("  NVML process {} on device {index}: {bytes}", p.pid);
+                    }
                 }
             }
             Err(e) => println!("  NVML processes: {e}"),
@@ -209,11 +212,20 @@ mod windows {
                 .devices()
                 .map(|d| d.iter().map(|d| d.used_bytes).sum::<u64>())
                 .map_or_else(|e| e, mib);
-            let listed = wddm::processes(&d3dkmt::Real, &pcis, &args.pids, &[]);
+            let listed = wddm::processes(&d3dkmt::Real, &cards, &args.pids, &[]);
             let listed = match listed {
                 Ok(l) => l
                     .iter()
-                    .map(|p| format!("{}: {}", p.pid, p.bytes.map_or("?".into(), mib)))
+                    .enumerate()
+                    .flat_map(|(index, d)| {
+                        d.processes.iter().map(move |p| {
+                            format!(
+                                "{} on device {index}: {}",
+                                p.pid,
+                                p.bytes.map_or("?".into(), mib)
+                            )
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join("; "),
                 Err(e) => e,

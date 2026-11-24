@@ -229,6 +229,29 @@ pub fn render_single_model_config(s: &AudioSettings, model: &AudioModel) -> Stri
     render_server_config(s, std::slice::from_ref(model))
 }
 
+/// `s` as a container lmgw hands its cards is started with
+/// (device-ledger design §8.1): the engine sees those cards alone and
+/// numbers them from 0, so the class's device index, which numbers the
+/// cards of the whole machine, is 0 there.
+pub fn handed_settings(s: &AudioSettings) -> AudioSettings {
+    AudioSettings {
+        device: 0,
+        ..s.clone()
+    }
+}
+
+/// An audio descriptor as a start that lmgw hands its cards renders it
+/// ([`handed_settings`]); `None` where nothing changes (another class, or
+/// a device index of 0 already).
+pub fn on_handed_cards(
+    rt: &crate::runtime::descriptor::ModelRuntime,
+) -> Option<crate::runtime::descriptor::ModelRuntime> {
+    let s = rt.audio_settings.as_ref().filter(|s| s.device != 0)?;
+    let mut out = rt.clone();
+    out.audio_settings = Some(handed_settings(s));
+    Some(out)
+}
+
 /// [`render_single_model_config`] in `view`: what a launcher that starts
 /// audio.cpp as a host process writes for it.
 pub fn render_single_model_config_in(

@@ -47,15 +47,20 @@ use crate::sdcpp_caps::SdcppCaps;
 use super::Class;
 
 mod aux_models;
+mod engine_cards;
 mod llama_fit;
 mod podman;
 mod view;
 
-pub use llama_fit::{Fitted, Left, LlamaPlacement, FITTED_LABEL};
+pub use engine_cards::{
+    card_flags, own_split, own_split_of, split_card_flags, CardFlags, OwnSplit, HANDED_LABEL,
+    OWN_SPLIT_LABEL,
+};
+pub use llama_fit::{Fitted, Left, LlamaPlacement, TensorSplit, FITTED_LABEL, MAX_SPLIT};
 
 pub use podman::{
-    command_line, never_pull, podman_run_argv, run_args_digest, stamp_owner, OWNER_LABEL,
-    RUN_ARGS_LABEL,
+    command_line, never_pull, passes_cdi, podman_run_argv, run_args_digest, stamp_owner,
+    OWNER_LABEL, RUN_ARGS_LABEL,
 };
 pub use view::EngineView;
 
@@ -90,6 +95,13 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("gpu-layers", "n-gpu-layers"),
     ("temperature", "temp"),
     ("s", "seed"),
+    // The flags of a split lmgw renders (device-ledger design §7.2), so a
+    // row's own spelling of them is dropped beside lmgw's.
+    ("sm", "split-mode"),
+    ("ts", "tensor-split"),
+    ("mg", "main-gpu"),
+    ("devd", "spec-draft-device"),
+    ("device-draft", "spec-draft-device"),
 ];
 
 /// Dedups a short-spelled flag against a typed field's long name when
@@ -190,6 +202,55 @@ pub enum LlamaArgs {
         threads: Option<i64>,
         args: Vec<String>,
     },
+}
+
+/// The `--spec-type` value a drafter given without a type is started with
+/// (device-ledger design ruling 18).
+pub const DEFAULT_DRAFT_SPEC_TYPE: &str = "draft-simple";
+
+impl LlamaArgs {
+    /// Whether this is a chat row that sets a drafter (`draft_gguf_path`, or
+    /// `--model-draft`/`-md`/`--spec-draft-model` in its arguments) and no
+    /// speculative type (`spec_type`, or `--spec-type` in its arguments).
+    ///
+    /// llama-server's `--spec-type` defaults to `none`, and a drafter given
+    /// without a type is loaded and freed at once ("no implementations
+    /// specified for speculative decoding", measured 2026-11-16): the row
+    /// asks for a drafter and gets none, while its estimate charges one.
+    pub fn drafter_lacks_spec_type(&self) -> bool {
+        let Self::Chat { params, args, .. } = self else {
+            return false;
+        };
+        crate::ops::ladder_checks::effective_draft_path_is_set(params, args)
+            && crate::ops::ladder_checks::effective_spec_type(params, args).is_none()
+    }
+
+    /// This row with `spec_type` set to [`DEFAULT_DRAFT_SPEC_TYPE`], when
+    /// [`Self::drafter_lacks_spec_type`]; `None` otherwise. The caller asks
+    /// only where the image's `--help` lists that value
+    /// (`Registry::with_draft_type`): the renderer stays pure and emits
+    /// `--spec-type draft-simple` for the row it is handed, like every other
+    /// field.
+    pub fn with_default_spec_type(&self) -> Option<Self> {
+        if !self.drafter_lacks_spec_type() {
+            return None;
+        }
+        let Self::Chat {
+            gguf_path,
+            params,
+            args,
+        } = self
+        else {
+            return None;
+        };
+        let mut params = params.clone();
+        params.spec_type = Some(DEFAULT_DRAFT_SPEC_TYPE.to_string());
+        Some(Self::Chat {
+            gguf_path: gguf_path.clone(),
+            params,
+            args: args.clone(),
+        })
+    }
 }
 
 fn gguf_path(llama: &LlamaArgs) -> &str {
@@ -381,6 +442,17 @@ pub struct RenderSpec {
     /// ([`FITTED_LABEL`]) so boot adopts it. `None` for every other start,
     /// and wherever no start is rendered.
     pub fitted: Option<Fitted>,
+    /// What VRAM admission charged this start on the cards
+    /// ([`crate::vram::CardCharge`], device-ledger design §3.3): recorded on
+    /// the container ([`crate::vram::charge::PLACEMENT_LABEL`]) so boot
+    /// adopts it with that charge. Where its cards are handed
+    /// ([`crate::vram::CardCharge::handed_cards`], device-ledger design
+    /// §7.1) the run arguments pass those cards, llama-server's own flags
+    /// that number a card are not passed (`engine_cards`) and the
+    /// container carries [`HANDED_LABEL`]. `None` for a start no decision
+    /// stood behind and no pin hands its cards (§5.7), and wherever no
+    /// start is rendered.
+    pub charge: Option<crate::vram::CardCharge>,
 }
 
 impl RenderSpec {
@@ -479,8 +551,23 @@ fn llama_args_in(spec: &RenderSpec, view: &EngineView) -> Vec<String> {
         .map(String::from)
         .collect();
 
+    // Where lmgw hands the engine its cards, llama-server's own flags that
+    // number a card are not passed (device-ledger design §8.1,
+    // `engine_cards`), nor the row's own split with what goes with it —
+    // unless it is kept, on as many cards as it has entries (§7.2).
+    let drop = spec
+        .charge
+        .as_ref()
+        .is_some_and(|c| c.handed_cards().is_some() && !c.keeps_own_split());
+    let own = |args: &Vec<String>| -> Vec<String> {
+        match drop {
+            true => split_card_flags(args).0,
+            false => args.clone(),
+        }
+    };
     match llama {
         LlamaArgs::Chat { params, args, .. } => {
+            let args = &own(args);
             let fitted = spec.fitted.map(|f| {
                 let mut p = (**params).clone();
                 f.placement.apply(&mut p);
@@ -488,6 +575,20 @@ fn llama_args_in(spec: &RenderSpec, view: &EngineView) -> Vec<String> {
             });
             let params: &LlamaParams = fitted.as_ref().unwrap_or(params);
             push_chat_params(&mut out, params, &mut taken, view);
+            // A split lmgw placed over several cards (device-ledger design
+            // §7.2): its flags, and none of the row's own beside them.
+            if let Some(split) = spec.fitted.and_then(|f| f.placement.split) {
+                out.extend(split.args());
+                taken.extend(
+                    [
+                        "split-mode",
+                        "tensor-split",
+                        "main-gpu",
+                        "spec-draft-device",
+                    ]
+                    .map(String::from),
+                );
+            }
             push_freeform_args(&mut out, args, &taken);
         }
         LlamaArgs::Aux {
@@ -513,7 +614,7 @@ fn llama_args_in(spec: &RenderSpec, view: &EngineView) -> Vec<String> {
                 threads: *threads,
             };
             aux_models::push_aux_flags(&mut out, flags, &mut taken, view);
-            push_freeform_args(&mut out, args, &taken);
+            push_freeform_args(&mut out, &own(args), &taken);
         }
     }
     out

@@ -207,7 +207,8 @@ async fn a_pipeline_whose_whole_fits_is_charged_the_whole() {
 }
 
 /// Fix 1 and 6, and item 2 of the second review: a Windows test card in round
-/// figures — 4 GiB, 512 MiB headroom, 5.5 GiB of files with
+/// figures — 4 GiB, 512 MiB headroom (1.5 GiB with the image margin on top
+/// of a whole start), 5.5 GiB of files with
 /// `offload_to_cpu`, no context measured. Its on-card part (its largest file
 /// and the 1.0 GiB set aside for its context) does not fit, nothing else is
 /// on the card and no fallback answers, so it starts with all that is free,
@@ -234,7 +235,7 @@ async fn a_pipeline_larger_than_the_card_starts_held_to_its_grant() {
     let w = got["warnings"][0].as_str().unwrap_or_default();
     assert!(
         w.starts_with(LEAD)
-            && w.contains("5.5 GiB in full plus 512 MiB headroom and the GPU holds 4.0 GiB")
+            && w.contains("5.5 GiB in full plus 1.5 GiB headroom and the GPU holds 4.0 GiB")
             && w.contains("offload_to_cpu keeps its weights in RAM")
             && w.contains(
                 "gives it 4.0 GiB on the card (its largest file, diffusion_model, and 1.0 GiB \
@@ -248,7 +249,7 @@ async fn a_pipeline_larger_than_the_card_starts_held_to_its_grant() {
     let w = out["warnings"][0].as_str().unwrap_or_default().to_string();
     assert!(
         w.starts_with(LEAD)
-            && w.contains("needs 5.5 GiB in full plus 512 MiB headroom and 4.0 GiB is free")
+            && w.contains("needs 5.5 GiB in full plus 1.5 GiB headroom and 4.0 GiB is free")
             && w.contains(
                 "gives it 3.5 GiB, all that is free beyond the headroom: short of the 4.0 GiB"
             )
@@ -426,7 +427,9 @@ async fn below_its_on_card_part_a_working_budget_decides() {
 
     // The chat model holds 3 GiB: with nothing measured, the Start waits
     // for nothing and is refused, saying why.
-    drop(super::image_pipeline_peak::acquire_model(&f, Class::Chat, "chat-model").await);
+    // A request has run on it, so it keeps no start margin beside it (in
+    // every mode since WP13), as a model in use does not.
+    assert_eq!(chat(&f.gateway).await.status(), 200);
     let refused = |want: &'static [&'static str]| {
         let f = &f;
         async move {
@@ -681,6 +684,9 @@ async fn auto_fit_and_per_module_rows_adapt_and_only_pinned_rows_are_refused() {
     assert_eq!(body["error"]["code"], "vram_too_large", "{body}");
     let msg = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
+        // The floor alone: the image margin, its context's stand-in, is
+        // given up last and never makes a model too large (WP13, owner
+        // 2026-11-17).
         msg.contains("needs 5.5 GiB of GPU memory plus 512 MiB headroom")
             && msg.contains("the GPU holds 4.0 GiB in total")
             && msg.contains("auto_fit off keeps all of its weights on the card")
@@ -749,6 +755,8 @@ async fn the_entry_keeps_its_grant_from_claim_to_ready() {
                 llama: None,
             }),
             note: None,
+            charge: None,
+            moved: None,
         },
     );
     // Another reservation's drop does not take it away.

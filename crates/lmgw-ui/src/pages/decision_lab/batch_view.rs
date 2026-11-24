@@ -350,7 +350,8 @@ fn BatchPage(id: i64) -> impl IntoView {
                         <RowMenu
                             items=menu
                             title="Export this run's items as a file"
-                            label=Signal::derive(|| "Export ▾".to_string())
+                            label=Signal::derive(|| "Export".to_string())
+                            chevron=true
                         />
                     </span>
                 }
@@ -362,7 +363,7 @@ fn BatchPage(id: i64) -> impl IntoView {
                     .map(|e| {
                         view! {
                             <div class="notice err">
-                                {format!("⚠ Set run #{id} did not read: {e}")}
+                                {format!("Set run #{id} did not read: {e}")}
                                 " "
                                 <button class="btn ghost sm" on:click=move |_| page.refresh()>
                                     "Retry"

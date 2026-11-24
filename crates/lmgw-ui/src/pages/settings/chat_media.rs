@@ -13,7 +13,7 @@ use leptos::prelude::*;
 use lmgw_api_types::chat_media::{MediaDefaultsView, MediaField};
 
 use super::{bridge, f, Ctl, Def, Page};
-use crate::widgets::Field;
+use crate::pages::settings::prow::SetField as Field;
 use lmgw_chat_ui::media_defaults::{use_view, MediaModelBox, MediaVoiceBox};
 
 /// The group's rows, in page order.

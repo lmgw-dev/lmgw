@@ -94,7 +94,7 @@ fn parts_json(
                     out.push(json!({"text": text}));
                 }
             }
-            ContentPart::Image { mime, source } => match source {
+            ContentPart::Image { mime, source, .. } => match source {
                 ImageSource::Base64 { data } => {
                     out.push(json!({"inlineData": {"mimeType": mime, "data": data}}));
                 }
@@ -107,7 +107,7 @@ fn parts_json(
             ContentPart::Audio { mime, data } => {
                 out.push(json!({"inlineData": {"mimeType": mime, "data": data}}));
             }
-            ContentPart::ToolUse { id, name, args } => {
+            ContentPart::ToolUse { id, name, args, .. } => {
                 let mut part = json!({"functionCall": {"name": name, "args": crate::ir::object_call_args(args)}});
                 // The model's own signature, carried in the id since its
                 // answer (gateway design §7.1), goes back on its part as it
@@ -311,6 +311,7 @@ fn parse_parts(content: Option<&Value>, ids: &mut CallIds) -> (Vec<ContentPart>,
                         .unwrap_or_default()
                         .to_string(),
                     args: fc.get("args").cloned().unwrap_or(json!({})),
+                    cache_control: None,
                 });
             }
         }
@@ -343,6 +344,7 @@ fn parse_usage(v: Option<&Value>) -> Usage {
                 },
                 cached_input_tokens: n("cachedContentTokenCount"),
                 cache_write_tokens: None,
+                cache_write_1h_tokens: None,
                 // The thinking share of that completion, for information only,
                 // exactly like the IR field.
                 reasoning_tokens: thoughts,
@@ -602,7 +604,7 @@ impl EgressStreamDecoder for GeminiDecoder {
             for p in parts {
                 match p {
                     ContentPart::Text { text, .. } => out.push(StreamDelta::TextDelta(text)),
-                    ContentPart::ToolUse { id, name, args } => {
+                    ContentPart::ToolUse { id, name, args, .. } => {
                         self.saw_tool = true;
                         // Gemini delivers complete functionCall parts: emit
                         // start + full args in one go.

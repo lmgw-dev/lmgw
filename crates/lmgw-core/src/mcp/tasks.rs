@@ -292,7 +292,7 @@ pub(in crate::mcp) fn ending_blocks(
         Ending::Result { result, .. } => {
             let mut blocks = super::exec::blocks_from_result(result);
             match blocks.first_mut() {
-                Some(ToolResultBlock::Text { text }) => *text = format!("{head}\n{text}"),
+                Some(ToolResultBlock::Text { text, .. }) => *text = format!("{head}\n{text}"),
                 _ => blocks.insert(0, ToolResultBlock::text(head)),
             }
             blocks

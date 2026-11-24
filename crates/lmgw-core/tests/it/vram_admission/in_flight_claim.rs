@@ -119,6 +119,7 @@ async fn a_tool_loop_holds_the_gpu_across_its_turns_and_releases_at_the_end() {
         .as_i64()
         .unwrap();
 
+    let turns_before = chat_turns(&f.first).await;
     let gateway = f.gateway.clone();
     let chatting = tokio::spawn(async move {
         gateway
@@ -133,10 +134,15 @@ async fn a_tool_loop_holds_the_gpu_across_its_turns_and_releases_at_the_end() {
             .unwrap()
     });
 
-    // Long enough for turn 1 to have finished and the tool call to have run:
-    // the loop is now between turns, which is exactly where an unclaimed model
-    // would be evicted.
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    // Turn 1 has finished and the tool call has run once turn 2's request is
+    // at the model: the loop has crossed a turn boundary, which is exactly
+    // where an unclaimed model would be evicted, and turn 2's answer is
+    // still 3 s away.
+    let first = &f.first;
+    common::patience::until_async("the loop's second turn at the model", || async {
+        chat_turns(first).await >= turns_before + 2
+    })
+    .await;
     let v = vram_status(&f.gateway).await;
     let chat = v["resident"]
         .as_array()
@@ -173,4 +179,15 @@ async fn a_tool_loop_holds_the_gpu_across_its_turns_and_releases_at_the_end() {
         "and now it is evictable again"
     );
     assert_eq!(f.stops(), vec!["chat-model".to_string()]);
+}
+
+/// How many chat turns `server` has been asked for.
+async fn chat_turns(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/v1/chat/completions")
+        .count()
 }

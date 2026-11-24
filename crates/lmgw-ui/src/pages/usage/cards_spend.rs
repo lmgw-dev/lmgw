@@ -31,16 +31,15 @@ pub(super) fn SpendCard(
     let draw_anyway = RwSignal::new(false);
     let note = Signal::derive(move || {
         let g = group_by.get();
-        let how = if g == "none" {
-            "not stacked".to_string()
+        if g == "none" {
+            "Not stacked".to_string()
         } else {
-            format!("stacked by {g}")
-        };
-        format!("{how} · local models are free_local and never appear here")
+            format!("Stacked by {g}")
+        }
     });
     view! {
         <div class="card chart-card u-spend">
-            <ChartHead title="Spend over time" note=move || note.get() tv=tv/>
+            <ChartHead title="Spend over time" note=move || note.get() explain="Local models are free and never appear here." tv=tv/>
             <CardErr err=series.err/>
             <div class="chart-box" node_ref=node class:stale=move || series.stale()>
                 {move || {
@@ -53,7 +52,7 @@ pub(super) fn SpendCard(
                     let n = g.nb();
                     if n == 0 {
                         return view! {
-                            <div class="chart-empty">"No buckets in this window."</div>
+                            <div class="card-empty-line">"No spend in this window"</div>
                         }
                             .into_any();
                     }
@@ -320,7 +319,7 @@ pub(super) fn BudgetCard(
     let draw_anyway = RwSignal::new(false);
     view! {
         <div class="card chart-card u-budget">
-            <ChartHead title="This period vs budget" note="dashed = linear projection" tv=tv/>
+            <ChartHead title="This period vs budget" note="Projected: dashed" explain="The dashed line is a linear projection to the end of the period." tv=tv/>
             <CardErr err=series.err/>
             <div class="chart-box" node_ref=node class:stale=move || series.stale()>
                 {move || {
@@ -332,7 +331,8 @@ pub(super) fn BudgetCard(
                     let g = Grid::build(&r);
                     let n = g.nb();
                     if n == 0 {
-                        return view! { <div class="chart-empty">"No buckets."</div> }.into_any();
+                        return view! { <div class="card-empty-line">"No spend in this window"</div> }
+                            .into_any();
                     }
                     let cur = r.currency.clone();
                     let anim = entry.get_untracked();

@@ -19,7 +19,7 @@ use lmgw_api_types::lab_store::{
 use sqlx::SqlitePool;
 use zip::write::SimpleFileOptions;
 
-use super::{artifacts, export_csv, export_csv_media, views};
+use super::{artifacts, export_csv, export_csv_documents, export_csv_media, views};
 use crate::store::{self, LabArtifactRow, LabGroupFilter, LabGroupScope};
 
 /// `format=files`: the Image and Audio labs' files, a zip with a manifest
@@ -166,6 +166,7 @@ fn csv_header(lab: LabKind) -> String {
         LabKind::Decision => export_csv::decision_header(),
         LabKind::Image => export_csv_media::image_header(),
         LabKind::Audio => export_csv_media::audio_header(),
+        LabKind::Documents => export_csv_documents::header(),
     }
 }
 
@@ -175,6 +176,7 @@ fn csv_rows(lab: LabKind, g: &lmgw_api_types::lab_store::LabGroupView) -> String
         LabKind::Decision => export_csv::decision_rows(g),
         LabKind::Image => export_csv_media::image_rows(g),
         LabKind::Audio => export_csv_media::audio_rows(g),
+        LabKind::Documents => export_csv_documents::rows(g),
     }
 }
 

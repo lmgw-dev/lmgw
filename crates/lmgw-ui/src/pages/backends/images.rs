@@ -18,8 +18,6 @@ use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
 use crate::widgets::{ConfirmButton, MenuItem, Modal, ModalFooter, RowMenu};
 
-const COLS: u32 = 9;
-
 /// The tag "Set as default" writes: a build's moving tag when the image
 /// holds it (following the build is what a default wants), else its first
 /// tag. `None` for an untagged image.
@@ -126,28 +124,64 @@ pub fn split_ref(r: &str) -> (String, String) {
     }
 }
 
+/// The images by engine, in the order the page shows them: llama.cpp,
+/// audio.cpp, sd.cpp, then the images no engine claims; in a group lmgw's
+/// own first, then the rest by name. Ids only: a re-read list order needs
+/// to be stable enough to sort by, never an identity.
+pub fn image_groups(images: &[ContainerImage]) -> Vec<(Option<Engine>, Vec<String>)> {
+    let mut v: Vec<&ContainerImage> = images.iter().collect();
+    v.sort_by(|a, b| {
+        let key = |i: &ContainerImage| {
+            (
+                i.engine.is_none(),
+                i.engine,
+                i.provenance.is_none(),
+                i.tags.first().cloned().unwrap_or_default(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    let mut groups: Vec<(Option<Engine>, Vec<String>)> = Vec::new();
+    for i in v {
+        match groups.last_mut() {
+            Some((e, ids)) if *e == i.engine => ids.push(i.id.clone()),
+            _ => groups.push((i.engine, vec![i.id.clone()])),
+        }
+    }
+    groups
+}
+
+/// An image's tags after its first, for the line under it: a tag in the
+/// first one's repository as `:tag` (the repository is on the line above),
+/// any other as its whole reference.
+pub fn other_tags(tags: &[String]) -> Vec<String> {
+    let Some((first, rest)) = tags.split_first() else {
+        return Vec::new();
+    };
+    let repo = split_ref(first).0;
+    rest.iter()
+        .map(|t| {
+            let (r, tag) = split_ref(t);
+            if !repo.is_empty() && r == repo {
+                format!(":{tag}")
+            } else {
+                t.clone()
+            }
+        })
+        .collect()
+}
+
 #[component]
 pub fn ImagesTab() -> impl IntoView {
     let bk = use_bk();
-    // Keyed by image id (below), so a re-read list order only needs to be
-    // stable enough to sort by, never an identity: lmgw's own first (by
-    // build), then the rest by name.
-    let image_ids = Memo::new(move |_| {
-        let mut v = bk
-            .images
-            .with(|r| r.as_ref().map(|r| r.images.clone()).unwrap_or_default());
-        v.sort_by(|a, b| {
-            let key = |i: &ContainerImage| {
-                (
-                    i.provenance.is_none(),
-                    i.engine,
-                    i.tags.first().cloned().unwrap_or_default(),
-                )
-            };
-            key(a).cmp(&key(b))
-        });
-        v.into_iter().map(|i| i.id).collect::<Vec<_>>()
+    let groups = Memo::new(move |_| {
+        bk.images.with(|r| {
+            r.as_ref()
+                .map(|r| image_groups(&r.images))
+                .unwrap_or_default()
+        })
     });
+    let engines = move || groups.with(|g| g.iter().map(|(e, _)| *e).collect::<Vec<_>>());
     let loaded = move || bk.images.with(Option::is_some);
     let empty = move || {
         bk.images
@@ -183,47 +217,75 @@ pub fn ImagesTab() -> impl IntoView {
                     }
                 })
         }}
-        <div class="fill-pane card pad0">
-            <table class="data bk-images">
-                <thead>
-                    <tr>
-                        <th>"Image"</th>
-                        <th class="col-p3">"Engine"</th>
-                        <th class="bk-early">"GPU backend"</th>
-                        <th class="num-h">"Size"</th>
-                        <th class="bk-early">"Created"</th>
-                        <th class="col-p2">"Provenance"</th>
-                        <th>"Used by"</th>
-                        <th class="col-p3" title="The run that built it (lmgw's images), or the registry update check (pulled images in use)">
-                            "Status"
-                        </th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <Show when=move || !loaded() && bk.images_err.with(Option::is_none)>
-                        <tr>
-                            <td colspan=COLS class="dim">"Loading…"</td>
-                        </tr>
-                    </Show>
-                    <Show when=empty>
-                        <tr>
-                            <td colspan=COLS class="empty">
-                                "No llama.cpp, audio.cpp or sd.cpp image on this machine yet — a build's first run makes one."
-                            </td>
-                        </tr>
-                    </Show>
-                    // Keyed by the image: a re-read updates the row in
-                    // place, so an open menu, an armed confirm and a live
-                    // pull survive it (the builds
-                    // table does the same).
-                    <For each=move || image_ids.get() key=|id| id.clone() let:id>
-                        <ImageRow id=id bk=bk/>
-                    </For>
-                </tbody>
-            </table>
+        <Show when=move || !loaded() && bk.images_err.with(Option::is_none)>
+            <div class="boxed">
+                <div class="prow bk-img-note dim">"Loading…"</div>
+            </div>
+        </Show>
+        <Show when=empty>
+            <div class="boxed">
+                <div class="prow bk-img-note dim">
+                    "No llama.cpp, audio.cpp or sd.cpp image on this machine yet — a build's first run makes one."
+                </div>
+            </div>
+        </Show>
+        // A group per engine, keyed by it, and in it a row per image, keyed
+        // by the image: a re-read updates the row in place, so an open menu,
+        // an armed confirm and a live pull survive it (the builds do the
+        // same).
+        <div class="bk-img-groups">
+            <For each=engines key=|e| *e let:engine>
+                <ImageGroup engine=engine groups=groups bk=bk/>
+            </For>
         </div>
         {move || bk.images.with(|r| r.as_ref().map(|r| disk_line(&r.disk)))}
+    }
+}
+
+/// One engine's images: its name, how many and their size, then the
+/// images as rows in a box.
+#[component]
+fn ImageGroup(
+    engine: Option<Engine>,
+    groups: Memo<Vec<(Option<Engine>, Vec<String>)>>,
+    bk: Bk,
+) -> impl IntoView {
+    let ids = Memo::new(move |_| {
+        groups.with(|g| {
+            g.iter()
+                .find(|(e, _)| *e == engine)
+                .map(|(_, ids)| ids.clone())
+                .unwrap_or_default()
+        })
+    });
+    let meta = move || {
+        let (n, bytes) = bk.images.with(|r| {
+            r.as_ref().map_or((0, 0), |r| {
+                r.images
+                    .iter()
+                    .filter(|i| i.engine == engine)
+                    .fold((0usize, 0u64), |(n, b), i| (n + 1, b + i.size))
+            })
+        });
+        format!(
+            "{n} image{} · {}",
+            if n == 1 { "" } else { "s" },
+            fmt_bytes(bytes)
+        )
+    };
+    let label = engine.map(engine_label).unwrap_or("Other images");
+    view! {
+        <section class="pref-group bk-img-group">
+            <div class="pref-head">
+                <h2>{label}</h2>
+                <span class="bk-img-count">{meta}</span>
+            </div>
+            <div class="boxed">
+                <For each=move || ids.get() key=|id| id.clone() let:id>
+                    <ImageRow id=id bk=bk/>
+                </For>
+            </div>
+        </section>
     }
 }
 
@@ -257,7 +319,7 @@ fn disk_line(d: &DiskInfo) -> impl IntoView {
     }
 }
 
-/// The images table's row for image `id`. Mirrors `BuildRow`: kept
+/// The row for image `id` in its engine's group. Mirrors `BuildRow`: kept
 /// by id, not by its whole `Debug` text, and every cell reads this row's
 /// image from the live list (a `Memo`), so the row element — and whatever it
 /// holds (an open menu, an armed delete confirm, a live pull) — survives a
@@ -276,13 +338,15 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
     });
 
     let head = Memo::new(move |_| {
-        img.with(|i| match i.tags.split_first() {
-            Some((first, rest)) => (first.clone(), rest.len()),
-            None => (format!("<none> {}", sha7(&i.id)), 0),
+        img.with(|i| match i.tags.first() {
+            Some(first) => first.clone(),
+            None => format!("<none> {}", sha7(&i.id)),
         })
     });
-    // The repository gives way first: the tag is what tells images apart.
-    let pfx_base = Memo::new(move |_| split_ref(&head.get().0));
+    // The repository muted, the tag in full: the tag is what tells images
+    // apart. Both wrap rather than cut.
+    let pfx_base = Memo::new(move |_| split_ref(&head.get()));
+    let more_tags = Memo::new(move |_| img.with(|i| other_tags(&i.tags)));
     let title = move || {
         img.with(|i| {
             let mut t = i.tags.join("\n");
@@ -333,20 +397,26 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
                     });
                 let title = format!("build: {who}\n{title}");
                 view! {
-                    <span class="mono-sm" title=title>
-                        {who} " " <span class="pfx">{sha7(&p.base)}</span> {extras_line}
+                    <span class="bk-img-prov" title=title>
+                        "build " {who} ", base "
+                        <span class="mono-sm">{sha7(&p.base)} {extras_line}</span>
                     </span>
                 }
                 .into_any()
             }
             None => {
-                let kind = external_kind(i);
-                let title = if kind == "registry" {
-                    "pulled from a registry; lmgw did not build it"
+                let (words, title) = if external_kind(i) == "registry" {
+                    (
+                        "pulled from a registry",
+                        "pulled from a registry; lmgw did not build it",
+                    )
                 } else {
-                    "no lmgw labels: built by hand (build.sh) or imported"
+                    (
+                        "external",
+                        "no lmgw labels: built by hand (build.sh) or imported",
+                    )
                 };
-                view! { <span class="dim" title=title>{kind}</span> }.into_any()
+                view! { <span class="bk-img-prov" title=title>{words}</span> }.into_any()
             }
         })
     };
@@ -414,7 +484,7 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
                 None => l.detail.last_line.clone(),
             };
             return view! {
-                <span class="chip live" title=title>
+                <span class="chip info" title=title>
                     <span class="dot"></span>
                     {label}
                 </span>
@@ -526,27 +596,38 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
             .into_any()
         }
     };
+    // Line one the image's tag and its other tags, line two the facts,
+    // line three what state it is in and what uses it; the actions at the
+    // end of line one.
     view! {
-        <tr>
-            <td class="clip mono-sm" title=title>
-                <div class="id-cell">
+        <div class="prow bk-img-row">
+            <div class="prow-text">
+                <span class="prow-title bk-img-name" title=title>
                     <span class="pfx">{move || pfx_base.get().0}</span>
-                    <span class="id-base">{move || pfx_base.get().1}</span>
-                    {move || {
-                        let more = head.get().1;
-                        (more > 0).then(|| view! { <span class="count id-flag">{format!("+{more}")}</span> })
-                    }}
-                </div>
-            </td>
-            <td class="col-p3">
-                {move || engine.get().map(engine_label).unwrap_or("—")}
-            </td>
-            <td class="bk-early mono-sm">{move || backend.get().unwrap_or_else(|| "—".to_string())}</td>
-            <td class="num">{move || fmt_bytes(size.get())}</td>
-            <td class="bk-early dim" title=move || local_ts(&created.get())>{move || ago(&created.get())}</td>
-            <td class="col-p2 bk-cut-s">{provenance}</td>
-            <td class="bk-cut">
-                <span class="bk-chips" title=use_list>
+                    {move || pfx_base.get().1}
+                </span>
+                {move || {
+                    let more = more_tags.get();
+                    (!more.is_empty())
+                        .then(|| {
+                            view! {
+                                <span class="bk-img-tags">
+                                    "also tagged "
+                                    <span class="mono-sm">{more.join(", ")}</span>
+                                </span>
+                            }
+                        })
+                }}
+                <span class="prow-sub bk-img-sub">
+                    {move || backend.get().map(|b| view! { <span class="mono-sm">{crate::labels::backend_label(&b)}</span> })}
+                    <span>{move || fmt_bytes(size.get())}</span>
+                    <span title=move || local_ts(&created.get())>
+                        "created " {move || ago(&created.get())}
+                    </span>
+                    {provenance}
+                </span>
+                <span class="bk-img-state" title=use_list>
+                    {status_cell}
                     {move || {
                         if used.with(Vec::is_empty) {
                             view! { <span class="dim">"unused"</span> }.into_any()
@@ -555,9 +636,8 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
                         }
                     }}
                 </span>
-            </td>
-            <td class="col-p3">{status_cell}</td>
-            <td class="actions">
+            </div>
+            <div class="prow-end bk-img-end">
                 <span class="row-acts">
                     {move || {
                         if let Some(l) = live_pull.get() {
@@ -607,8 +687,8 @@ fn ImageRow(id: String, bk: Bk) -> impl IntoView {
                     {delete_btn}
                     <RowMenu items=menu/>
                 </span>
-            </td>
-        </tr>
+            </div>
+        </div>
     }
 }
 
@@ -994,6 +1074,61 @@ mod tests {
             Some("localhost/lmgw-llama-server:official-master-abc1234-def567")
         );
         assert_eq!(preferred_tag(&img(&[])), None);
+    }
+
+    #[test]
+    fn images_group_by_engine_with_lmgws_own_first_and_the_unclaimed_last() {
+        let mk = |id: &str, tag: &str, engine: Option<Engine>, ours: bool| {
+            let mut i = img(&[tag]);
+            i.id = id.into();
+            i.engine = engine;
+            i.provenance = ours.then(ImageProvenance::default);
+            i
+        };
+        let images = vec![
+            mk("x", "localhost/thing:1", None, false),
+            mk("s", "localhost/lmgw-sd-server:a", Some(Engine::Sdcpp), true),
+            mk("a2", "ghcr.io/o/audio.cpp:b", Some(Engine::Audio), false),
+            mk(
+                "l2",
+                "localhost/llama-server-cuda:a",
+                Some(Engine::Llama),
+                false,
+            ),
+            mk("a1", "localhost/lmgw-audio:z", Some(Engine::Audio), true),
+            mk(
+                "l1",
+                "localhost/lmgw-llama-server:z",
+                Some(Engine::Llama),
+                true,
+            ),
+        ];
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            image_groups(&images),
+            vec![
+                (Some(Engine::Llama), ids(&["l1", "l2"])),
+                (Some(Engine::Audio), ids(&["a1", "a2"])),
+                (Some(Engine::Sdcpp), ids(&["s"])),
+                (None, ids(&["x"])),
+            ]
+        );
+        assert!(image_groups(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_images_other_tags_drop_the_repository_they_share_with_the_first() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            other_tags(&tags(&[
+                "localhost/lmgw-llama-server:official-master-abc1234",
+                "localhost/lmgw-llama-server:official-master",
+                "ghcr.io/o/llama:x",
+            ])),
+            tags(&[":official-master", "ghcr.io/o/llama:x"])
+        );
+        assert!(other_tags(&tags(&["localhost/x:1"])).is_empty());
+        assert!(other_tags(&[]).is_empty());
     }
 
     #[test]

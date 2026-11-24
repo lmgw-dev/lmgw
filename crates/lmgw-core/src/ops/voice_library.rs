@@ -44,7 +44,7 @@ pub async fn voice_transcribe(
             ),
         });
     }
-    let bulk = transcribe_missing(state, &alias).await?;
+    let bulk = Box::pin(transcribe_missing(state, &alias)).await?;
     if bulk.transcribed.is_empty() {
         if let Some(why) = bulk.stopped {
             return Err(why);

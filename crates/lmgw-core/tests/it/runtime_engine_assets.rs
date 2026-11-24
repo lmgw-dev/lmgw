@@ -28,9 +28,7 @@ use lmgw_core::runtime::engine_assets::pins::{
 };
 use lmgw_core::runtime::engine_assets::{self, fallback, install, Engines};
 use lmgw_core::runtime::launcher::{Native, Unwatched};
-use lmgw_core::runtime::registry::{
-    ephemeral_port, AcquireSpec, CmdOutput, CommandRunner, Registry, RuntimeState,
-};
+use lmgw_core::runtime::registry::{AcquireSpec, CmdOutput, CommandRunner, Registry, RuntimeState};
 use lmgw_core::runtime::{container_name, Class};
 use sha2::Digest;
 
@@ -67,13 +65,22 @@ fn registry_over(native: Arc<Native>) -> Arc<Registry> {
     ))
 }
 
+/// A port no other test process holds: [`free_port`]'s claim, below the
+/// kernel's ephemeral range and held until this process ends (an abstract
+/// socket, so nothing is left behind). `ephemeral_port` closes its probe
+/// before the engine binds, so two processes at the same moment (parallel
+/// gates, a flake-hunt's copies) could be handed one port, and a fake engine
+/// that never binds (`--fake-exit`) then had its `/health` answered by the
+/// other process's engine.
+///
+/// [`free_port`]: crate::support::device_link::free_port
 fn port() -> std::io::Result<u16> {
     static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     let Some((lo, hi)) = std::env::var("LMGW_LIVE_PORT_RANGE").ok().and_then(|r| {
         let (a, b) = r.split_once('-')?;
         Some((a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?))
     }) else {
-        return ephemeral_port();
+        return Ok(crate::support::device_link::free_port());
     };
     let span = hi.saturating_sub(lo) + 1;
     for _ in 0..span {
@@ -114,6 +121,7 @@ fn chat_runtime_with(
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 
@@ -1279,6 +1287,7 @@ async fn engine_assets_live_kokoro_speaks_through_espeak() {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     };
     let name = container_name("lmgw", Class::Audio, "kokoro");
     let speak = |endpoint: String| async move {
@@ -1453,6 +1462,7 @@ async fn engine_assets_live_z_image_draws_after_the_fallback() {
         }),
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     };
     let name = container_name("lmgw", Class::Image, "z-image");
     let marks = || {

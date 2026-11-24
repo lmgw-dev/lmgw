@@ -10,9 +10,13 @@ use crate::support::machine_world::{sentences, World};
 /// The words a newcomer never meets in a sentence.
 const PLUMBING: [&str; 3] = ["container", "cdi", "podman"];
 
-/// A package name the person may have to recognise is allowed in a step's
-/// bullet (§4.5's own bullet names the retired package).
-const PACKAGE_NAMES: [&str; 1] = ["golang-github-nvidia-container-toolkit"];
+/// A package or product name the person may have to recognise is allowed in
+/// a sentence (§4.5's own bullet names the retired package; the missing
+/// toolkit is named by its product name).
+const PACKAGE_NAMES: [&str; 2] = [
+    "golang-github-nvidia-container-toolkit",
+    "nvidia container toolkit",
+];
 
 fn assert_plain(label: &str, c: &MachineCheck) {
     let mut all = sentences(c);

@@ -53,8 +53,8 @@ pub(crate) async fn within(
 }
 
 /// The image `target`'s models run in by default: its class's Image
-/// setting; `None` for a target no class has.
-fn class_image(state: &SharedState, target: &str) -> Option<String> {
+/// setting; `None` for a target no class has, or a class with no image set.
+pub(crate) fn class_image(state: &SharedState, target: &str) -> Option<String> {
     let snap = state.snapshot();
     let s = &snap.settings;
     let image = match target {

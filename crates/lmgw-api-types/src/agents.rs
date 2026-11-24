@@ -476,9 +476,12 @@ pub struct AgentToken {
     /// A token has been minted. `false` until the first run or the first Copy
     /// token: an agent that is never run never mints a credential.
     pub has_value: bool,
-    /// The derived scope in words — "token: any model", or the aliases it is
-    /// fenced to. Shown next to Copy token so the scope is never invisible.
+    /// The derived scope in words — "Its token reaches any model", or the
+    /// aliases it is fenced to. Shown next to Copy token so the scope is never
+    /// invisible.
     pub scope_note: String,
+    /// The model names and patterns its token reaches; empty = any model.
+    pub scope_models: Vec<String>,
 }
 
 /// One editable output field. An empty `options` means free text: there is no
@@ -766,7 +769,7 @@ pub struct AgentConfigSaved {
     pub ok: bool,
     pub id: String,
     /// The agent's token scope, re-derived from the saved config, in words:
-    /// `token: any model` or the aliases it is fenced to.
+    /// "Its token reaches any model" or the aliases it is fenced to.
     pub token_scope: String,
     /// The folder and file slots whose stored path changed, cleared ones
     /// included.

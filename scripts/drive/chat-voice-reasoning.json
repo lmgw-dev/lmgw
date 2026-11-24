@@ -20,9 +20,7 @@
  {
   "js": "window.lmgwRealtimeMock.patchThread({})"
  },
- {
-  "click": "button[title^='New temporary chat']"
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='New temporary chat']"},
  {
   "until": "location.search.startsWith('?t=-') && !!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
   "timeout": 15,

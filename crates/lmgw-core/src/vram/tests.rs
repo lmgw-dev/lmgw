@@ -1,7 +1,10 @@
+use super::attribution::CardHeld;
+use super::nvml::{DeviceId, DeviceProcesses};
 use super::slot_is_busy;
 use super::{
-    external_table, larger_per_pid, pooled, trigger_off, unmeasured_start, ExternalShortfall,
-    ExternalVerdict, GpuMemory, ProcessMemory, Reservation, Roster, Shares, Target,
+    card_shares, external_table, larger_per_pid, pooled, trigger_off, unmeasured_start,
+    ExternalShortfall, ExternalVerdict, GpuMemory, Measured, ProcessMemory, Reservation, Roster,
+    Shares, Target,
 };
 use crate::config::Snapshot;
 use crate::runtime::registry::{RuntimeState, RuntimeView};
@@ -74,9 +77,21 @@ fn the_trigger_is_off_for_the_switch_admission_and_the_hold() {
     let mut snap = Snapshot::default();
     assert!(snap.settings.vram.fallback_on_external, "on by default");
     assert_eq!(trigger_off(&snap), None);
+    // Every reason is one clause with its own full stop: the Realtime page
+    // and the hold popover add none.
+    for (enabled, external) in [(true, false), (false, true)] {
+        let mut off = Snapshot::default();
+        off.settings.vram.enabled = enabled;
+        off.settings.vram.fallback_on_external = external;
+        let why = trigger_off(&off).unwrap();
+        assert!(why.ends_with('.') && !why.contains(" — "), "{why}");
+    }
 
     snap.settings.hold.active = true;
-    assert!(trigger_off(&snap).unwrap().contains("hold"));
+    assert_eq!(
+        trigger_off(&snap).unwrap(),
+        "while the hold is on, every local request goes to its own fallback or is refused."
+    );
     snap.settings.vram.enabled = false;
     assert!(trigger_off(&snap).unwrap().contains("Arbitrate GPU memory"));
     snap.settings.vram.fallback_on_external = false;
@@ -121,6 +136,8 @@ fn entry(model: &str, state: RuntimeState) -> RuntimeView {
         served: false,
         adopted: false,
         engine_key: None,
+        card_charge: None,
+        moved: false,
     }
 }
 
@@ -129,7 +146,7 @@ fn reservation(model: &str) -> Reservation {
         id: 1,
         class: Class::Chat,
         model_id: model.into(),
-        bytes: GIB,
+        charge: super::CardCharge::over(Vec::new(), GIB),
     }
 }
 
@@ -188,41 +205,82 @@ fn the_roster_sees_every_change_to_what_lmgw_holds() {
 }
 
 /// Review finding 2: the two process readings around the device read
-/// merge per PID at the larger figure; a PID one reading lists keeps
-/// that figure; a figure either reading could not give is unknown.
+/// merge per device and PID at the larger figure; a PID one reading lists
+/// keeps that figure; a figure either reading could not give is unknown.
 #[test]
 fn two_process_readings_merge_at_the_larger_figure() {
     let pm = |pid, bytes| ProcessMemory { pid, bytes };
+    let card = |n: u32, processes| DeviceProcesses {
+        device: id(n),
+        processes,
+    };
+    let merged = larger_per_pid(
+        &[card(
+            0,
+            vec![
+                pm(1, Some(10)),
+                pm(2, Some(50)),
+                pm(3, Some(7)),
+                pm(5, None),
+            ],
+        )],
+        &[card(
+            0,
+            vec![
+                pm(1, Some(30)),
+                pm(2, Some(20)),
+                pm(4, Some(9)),
+                pm(5, Some(1)),
+            ],
+        )],
+    );
+    assert_eq!(
+        merged,
+        vec![card(
+            0,
+            vec![
+                pm(1, Some(30)),
+                pm(2, Some(50)),
+                pm(3, Some(7)),
+                pm(4, Some(9)),
+                pm(5, None),
+            ]
+        )]
+    );
+
+    // Per card (device-ledger design §2.3): a process on two cards keeps
+    // the larger figure on each, and a card only the second reading lists
+    // comes last.
     let merged = larger_per_pid(
         &[
-            pm(1, Some(10)),
-            pm(2, Some(50)),
-            pm(3, Some(7)),
-            pm(5, None),
+            card(0, vec![pm(1, Some(10))]),
+            card(1, vec![pm(1, Some(40))]),
         ],
         &[
-            pm(1, Some(30)),
-            pm(2, Some(20)),
-            pm(4, Some(9)),
-            pm(5, Some(1)),
+            card(1, vec![pm(1, Some(20)), pm(2, None)]),
+            card(0, vec![pm(1, Some(30))]),
+            card(2, vec![pm(3, Some(1))]),
         ],
     );
     assert_eq!(
         merged,
         vec![
-            pm(1, Some(30)),
-            pm(2, Some(50)),
-            pm(3, Some(7)),
-            pm(4, Some(9)),
-            pm(5, None),
+            card(0, vec![pm(1, Some(30))]),
+            card(1, vec![pm(1, Some(40)), pm(2, None)]),
+            card(2, vec![pm(3, Some(1))]),
         ]
     );
+}
+
+fn id(n: u32) -> DeviceId {
+    DeviceId(format!("GPU-{n}"))
 }
 
 /// The verdict's capacity and free memory follow the ledger's rule.
 #[test]
 fn pooled_follows_the_ledgers_rule() {
     let dev = |total: u64, used: u64| GpuMemory {
+        id: id(0),
         index: 0,
         name: "g".into(),
         total_bytes: total,
@@ -233,6 +291,88 @@ fn pooled_follows_the_ledgers_rule() {
     assert_eq!(pooled(0, &devices), (12 * GIB, 8 * GIB));
     assert_eq!(pooled(6 * GIB, &devices), (6 * GIB, 2 * GIB));
     assert_eq!(pooled(2 * GIB, &devices), (2 * GIB, 0));
+}
+
+/// A measurement per card (device-ledger design §2.3): each card's used
+/// memory and lmgw's share there, and the sums the decisions read. The
+/// outside use is the used memory less lmgw's share, both summed: a card on
+/// which the process reading saw more of lmgw's than the device reading
+/// counts below zero, as the pooled figure did.
+#[test]
+fn a_measurement_is_per_card_and_its_shares_are_the_sums() {
+    let devices = [card(0, 10 * GIB), card(1, 3 * GIB)];
+    let cards = card_shares(
+        &devices,
+        [
+            held(0, Ok(6 * GIB)),
+            held(1, Ok(4 * GIB)),
+            held(0, Ok(GIB)),
+            // A card the device read did not list: its share still counts.
+            held(7, Ok(GIB)),
+        ],
+    );
+    assert_eq!(
+        cards
+            .iter()
+            .map(|c| (c.id.clone(), c.used, c.lmgw.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (id(0), 10 * GIB, Ok(7 * GIB)),
+            (id(1), 3 * GIB, Ok(4 * GIB)),
+            (id(7), 0, Ok(GIB)),
+        ]
+    );
+    let m = Measured {
+        cards,
+        members: Vec::new(),
+        total: 48 * GIB,
+        raw_free: 35 * GIB,
+    };
+    assert_eq!(m.shares(), Ok(shares(12 * GIB, GIB)));
+}
+
+/// One card whose share is unknown (the driver lists one of lmgw's
+/// processes there without a figure) is unknown on its own: the other
+/// cards keep theirs, and the sums the decisions read are unknown, with
+/// that card's reason (device-ledger design WP1 and WP2).
+#[test]
+fn an_unknown_card_is_unknown_alone_and_the_sums_with_it() {
+    let devices = [card(0, 10 * GIB), card(1, 3 * GIB)];
+    let cards = card_shares(
+        &devices,
+        [
+            held(0, Ok(6 * GIB)),
+            held(1, Err("chat/b is not attributed".into())),
+            held(1, Ok(GIB)),
+        ],
+    );
+    assert_eq!(cards[0].lmgw, Ok(6 * GIB));
+    assert_eq!(cards[1].lmgw, Err("chat/b is not attributed".into()));
+    let m = Measured {
+        cards,
+        members: Vec::new(),
+        total: 48 * GIB,
+        raw_free: 35 * GIB,
+    };
+    assert_eq!(m.shares(), Err("chat/b is not attributed".into()));
+}
+
+fn card(n: u32, used: u64) -> GpuMemory {
+    GpuMemory {
+        id: id(n),
+        index: n,
+        name: "g".into(),
+        total_bytes: 24 * GIB,
+        used_bytes: used,
+        free_bytes: 24 * GIB - used,
+    }
+}
+
+fn held(n: u32, bytes: Result<u64, String>) -> CardHeld {
+    CardHeld {
+        device: id(n),
+        bytes,
+    }
 }
 
 /// A start the driver cannot show yet makes the share a low guess: a
@@ -334,7 +474,7 @@ fn a_stage_in_words_clears_the_phase_and_the_watch_hears_no_repeat() {
         alias: "image/z".into(),
         model: "z".into(),
         class: Class::Image,
-        needs: 7 * GIB,
+        needs: super::CardCharge::over(Vec::new(), 7 * GIB),
         since: std::time::Instant::now(),
         stage: String::new(),
         phase: None,
@@ -346,6 +486,7 @@ fn a_stage_in_words_clears_the_phase_and_the_watch_hears_no_repeat() {
     let room = WaitPhase::WaitingForRoom {
         needs_bytes: 7 * GIB,
         free_bytes: 2 * GIB,
+        cards: Vec::new(),
     };
     q.set_phase(1, room.clone(), Some("waiting for a busy model to finish"));
     q.set_stage(1, "needs 7 GiB, 2 GiB free — evicting");

@@ -13,7 +13,7 @@
 //! "Fit again" (D26) is [`model_fit_again`], the model editor's.
 
 use lmgw_api_types as dto;
-use lmgw_api_types::model_find::FitMeasure;
+use lmgw_api_types::model_find::{FitMeasure, GetLayout};
 use lmgw_api_types::model_get::{
     DiskRoom, ModelFitAgain, ModelFitAgainArgs, ModelGetArgs, ModelGetDetail, ModelGetDone,
     ModelGetStarted, ModelGetState, ModelGetStatus, ModelGetStatusArgs,
@@ -294,6 +294,37 @@ pub async fn model_get(state: &SharedState, a: ModelGetArgs) -> Result<ModelGetS
     };
     let model_id = free_model_id(&snap, &pt, class, kind, &base, &pending)?;
 
+    // Where no single card holds the file at its full context, the person
+    // chooses how it is set up (device-ledger design WP12): without a
+    // layout the answer is the choices, and nothing is downloaded.
+    if let Some(asked) = choices(
+        state, &repo, &file, &listing, weights, target, measure, a.layout,
+    )
+    .await?
+    {
+        let public_name = public_name_of(&snap, class, kind, &model_id);
+        let ways: Vec<String> = asked
+            .iter()
+            .map(|c| format!("{}: {}", c.layout.as_str(), c.sentence))
+            .collect();
+        return Ok(ModelGetStarted {
+            message: format!(
+                "No single graphics card holds {file} at its full context, so Get it asks how to \
+                 set it up; nothing was downloaded or created. Call lmgw__model_get again with \
+                 layout set to one of: {}",
+                ways.join(" | ")
+            ),
+            choices: asked,
+            model_id,
+            public_name,
+            target: target.to_string(),
+            measure,
+            repo,
+            file,
+            ..ModelGetStarted::default()
+        });
+    }
+
     // The files `hf_add` fetches; those already on disk aren't fetched again.
     let (wanted, companions) = super::huggingface::with_companions(&listing, &file, target);
     let tracked = store::list_hf_models(&state.db)
@@ -358,6 +389,7 @@ pub async fn model_get(state: &SharedState, a: ModelGetArgs) -> Result<ModelGetS
             public_name,
             target: target.to_string(),
             measure,
+            layout: a.layout,
             repo,
             file,
             companions,
@@ -377,6 +409,56 @@ pub async fn model_get(state: &SharedState, a: ModelGetArgs) -> Result<ModelGetS
     })
     .await
     .map_err(|r| r.message)?
+}
+
+/// The ways Get it can set `file` up where it asks (device-ledger design
+/// WP12): `Some` where no single card holds the file at its full context
+/// and `layout` is not given; `None` where it does not ask — a file one
+/// card holds, no card to measure against, a header that could not be
+/// read (the get goes on as before), or a layout given. A layout of
+/// `experts_in_ram` for a file without experts is refused here, before
+/// anything is downloaded.
+#[allow(clippy::too_many_arguments)]
+async fn choices(
+    state: &SharedState,
+    repo: &str,
+    file: &str,
+    listing: &[hf::HfFile],
+    weights: &hf::HfFile,
+    target: &str,
+    measure: FitMeasure,
+    layout: Option<GetLayout>,
+) -> Result<Option<Vec<lmgw_api_types::model_find::GetChoice>>, String> {
+    match layout {
+        Some(GetLayout::ExpertsInRam) => {
+            let header = hf::remote_header(state, repo, weights).await?;
+            if !crate::vram::plan::chat::fit::has_experts(&header.summary) {
+                return Err(format!(
+                    "{file} is not a mixture-of-experts model: it has no experts to keep in RAM \
+                     (layout experts_in_ram)"
+                ));
+            }
+            if target != "chat" {
+                return Err(format!(
+                    "{file} is set up as an aux model, which runs on one card: leave layout out"
+                ));
+            }
+            Ok(None)
+        }
+        Some(GetLayout::Split) if target != "chat" => Err(format!(
+            "{file} is set up as an aux model, which runs on one card: leave layout out"
+        )),
+        Some(_) => Ok(None),
+        None => {
+            let fits =
+                crate::modelinfo::hub_fit::file_fit(state, repo, file, listing, Some(target)).await;
+            let fit = match measure {
+                FitMeasure::WholeCard => fits.fit.whole_card,
+                FitMeasure::Beside => fits.fit.beside,
+            };
+            Ok(fit.cards.filter(|c| c.asks()).map(|c| c.choices))
+        }
+    }
 }
 
 /// What [`model_get`] settled before it writes anything.
@@ -408,6 +490,7 @@ async fn record_and_start(state: &SharedState, p: Prepared) -> Result<ModelGetSt
             measure: measure_key(started.measure),
             model_id: &started.model_id,
             kind: kind.map(|k| k.as_str()),
+            layout: started.layout.map(GetLayout::as_str),
         },
     )
     .await

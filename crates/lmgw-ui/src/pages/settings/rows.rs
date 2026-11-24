@@ -59,42 +59,61 @@ pub(super) const COMMON: &[Def] = &[
         "retention",
         "logs",
         "retention_days",
-        "Log retention",
+        "Keep for",
         Ctl::Int(0),
     )
     .s()
     .unit("days")
-    .terms("request log traffic"),
+    .hint("0 = keep all")
+    .terms("log retention request log traffic"),
     f(
         "retention",
         "logs",
         "retention_max_rows",
-        "Log retention",
+        "Keep at most",
         Ctl::Int(0),
     )
     .s()
-    .unit("max rows")
-    .terms("request log traffic"),
+    .unit("rows")
+    .hint("0 = keep all")
+    .terms("log retention request log traffic"),
     f(
         "retention",
         "jobs",
         "jobs_retention_days",
-        "Job history",
+        "Keep for",
         Ctl::Int(0),
     )
     .s()
     .unit("days")
-    .hint("0 = keep all"),
+    .hint("0 = keep all")
+    .terms("job history retention"),
     f(
         "retention",
         "jobs",
         "jobs_max_rows",
-        "Job history",
+        "Keep at most",
         Ctl::Int(0),
     )
     .s()
-    .unit("max rows")
-    .hint("0 = keep all"),
+    .unit("rows")
+    .hint("0 = keep all")
+    .terms("job history retention"),
+    f(
+        "retention",
+        "conversions",
+        "documents_job_retention_days",
+        "Conversion jobs",
+        Ctl::Int(0),
+    )
+    .s()
+    .unit("days")
+    .hint(
+        "how long an ended background conversion keeps its converted text for the caller to \
+         fetch; 0 = keep all. A docling caller's fetched result goes 5 minutes after its first \
+         fetch",
+    )
+    .terms("documents conversion convert job jobs result results docling"),
     f(
         "retention",
         "chat",
@@ -162,8 +181,7 @@ pub(super) const COMMON: &[Def] = &[
         Ctl::Int(0),
     )
     .s()
-    .unit("conversations")
-    .hint("0 = unlimited"),
+    .hint("Conversations; 0 = unlimited"),
     // Usage & cost
     f("usage-cost", "money", "currency", "Currency", Ctl::Text)
         .s()
@@ -178,8 +196,8 @@ pub(super) const COMMON: &[Def] = &[
         Ctl::Money,
     )
     .s()
-    .unit("units")
-    .hint("in that currency; empty = none")
+    .unit_from("currency")
+    .hint("Empty: no budget")
     .ph("none")
     .terms("spend ceiling limit"),
     f(
@@ -274,19 +292,25 @@ pub(super) const COMMON: &[Def] = &[
         "Headroom",
         Ctl::Choice(HEADROOM_MODES),
     )
-    .hint("room kept free for other programs and for models still starting")
-    .terms("vram auto fixed headroom"),
+    .hint(
+        "room kept free for other programs on each card: auto keeps a floor and the room they \
+         used beyond what they hold now, given up last; fixed keeps the floor as written",
+    )
+    .terms("vram auto fixed headroom learned room"),
     f(
         "gpu",
         "admission",
         "vram.headroom_mb",
-        "Fixed headroom",
+        "Floor per card",
         Ctl::Int(0),
     )
     .s()
     .unit("MiB")
-    .hint("used when fixed, and by auto until it has learned enough")
-    .terms("vram"),
+    .hint(
+        "always kept free for other programs on each graphics card: by auto no more than the \
+         most they held there, as written when fixed",
+    )
+    .terms("vram fixed headroom"),
     f(
         "gpu",
         "admission",
@@ -298,12 +322,22 @@ pub(super) const COMMON: &[Def] = &[
     f(
         "gpu",
         "admission",
-        "headroom_now.forget",
-        "Learned growth",
-        Ctl::HeadroomForget,
+        "vram.keep_free",
+        "Each card",
+        Ctl::HeadroomCards,
     )
-    .hint("for a growth a one-off taught, such as a game run without the hold")
-    .terms("vram auto headroom learned forget game"),
+    .terms(
+        "vram auto headroom learned keep free always nothing card forget game readings \
+         suggestion other programs",
+    ),
+    f(
+        "gpu",
+        "admission",
+        "headroom_now.engine_sentence",
+        "Engine cost per card",
+        Ctl::Said("/headroom_now/engine_sentence"),
+    )
+    .terms("vram engine cuda context card cost learned"),
     f(
         "gpu",
         "admission",
@@ -457,7 +491,8 @@ pub(super) const AUDIO: &[Def] = &[
         "Device index",
         Ctl::Int(i64::MIN),
     )
-    .s(),
+    .s()
+    .hint("which card a Vulkan, HIP or Metal build uses, numbered among all the cards it sees; on an NVIDIA build lmgw hands each audio model its card: a number other than 0 becomes the GPU pin of the audio models that have none and goes back to 0, and a model with a pin keeps it"),
     f(
         "runtimes",
         "audio",

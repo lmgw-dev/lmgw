@@ -242,7 +242,7 @@ pub(super) fn GroupCard(lab: Lab, id: i64) -> impl IntoView {
                         Some(c) => {
                             Some(
                                 view! {
-                                    <span class="chip live">
+                                    <span class="chip info" data-state="running">
                                         <i class="dot"></i>
                                         {format!("asking cell {} of {}…", c + 1, g.plan.len())}
                                     </span>
@@ -254,7 +254,7 @@ pub(super) fn GroupCard(lab: Lab, id: i64) -> impl IntoView {
                         None if g.in_flight => {
                             Some(
                                 view! {
-                                    <span class="chip live">
+                                    <span class="chip info" data-state="running">
                                         <i class="dot"></i>
                                         "in flight — its answer is on its way"
                                     </span>

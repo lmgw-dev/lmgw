@@ -224,6 +224,7 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
 
     let completion = sample_once(
@@ -348,6 +349,7 @@ async fn sample_once_logs_failures() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
 
     let err = sample_once(
@@ -595,6 +597,7 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
                     source: crate::ir::ImageSource::Base64 {
                         data: "iVBORw0KGgo=".into(),
                     },
+                    cache_control: None,
                 },
             ],
         }],
@@ -609,6 +612,7 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     sample_once(
         &state,

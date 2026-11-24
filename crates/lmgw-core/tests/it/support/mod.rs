@@ -10,6 +10,7 @@ pub mod device_link;
 pub mod device_pair;
 pub mod docs_world;
 pub mod dropped_op;
+pub mod fake_machine;
 pub mod fallback_world;
 pub mod fallbacks;
 pub mod golden;

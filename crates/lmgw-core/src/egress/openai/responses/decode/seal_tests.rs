@@ -222,6 +222,7 @@ fn a_whole_response_s_items_are_sealed_in_place() {
                 id: "call_1".into(),
                 name: "f".into(),
                 args: json!({}),
+                cache_control: None
             },
         ]
     );
@@ -250,6 +251,7 @@ fn the_platform_sends_back_its_own_row_s_seals_only() {
                 id: "call_1".into(),
                 name: "f".into(),
                 args: json!({}),
+                cache_control: None,
             },
         ],
     });

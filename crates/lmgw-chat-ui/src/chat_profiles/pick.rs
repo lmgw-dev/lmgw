@@ -25,9 +25,16 @@ pub(crate) fn ProfileField(
     // has one.
     let place = crate::host::use_place();
     let href = Memo::new(move |_| {
+        // With a profile picked the editor opens on it.
+        let picked = value.get();
+        let base = if picked.is_empty() {
+            "/chat/profiles".to_string()
+        } else {
+            format!("/chat/profiles/{picked}")
+        };
         place.href(&match thread.get() {
-            Some(id) => format!("/chat/profiles?thread={id}"),
-            None => "/chat/profiles".to_string(),
+            Some(id) => format!("{base}?thread={id}"),
+            None => base,
         })
     });
     let hint = move || {

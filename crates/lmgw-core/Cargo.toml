@@ -44,6 +44,12 @@ crc32fast = "1.5.0"
 csv = "1.4"
 futures = "0.3.32"
 hex = "0.4.3"
+# The one URL parser behind the docling adapter's web sources
+# (document-conversion design §7.4.1, WP5b): a source URL is parsed once and
+# only its parts are used; `Host::parse` reads Settings › Documents' allowed
+# sites the same way (IDNA, every IPv4 spelling). The version reqwest already
+# locks.
+url = "2.5.8"
 # `Limited`, the body wrapper enforcing the `max_body_mb` setting (§13). Same
 # version axum itself uses, so axum recognises its `LengthLimitError` and turns
 # a tripped limit into a 413 rejection rather than an opaque body error.
@@ -111,6 +117,18 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 # `quick-xml` reads their XML, spreadsheets included (own sparse readers).
 quick-xml = "0.41"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# Document conversion's reader (document-conversion design §5.2, WP4): HTML,
+# EPUB, e-mail, legacy .xls and image files are parsed, and a PDF page's
+# render is cut into its pictures (§5.3), by the `lmgw-doc-reader`
+# executable, a child process, never in the gateway. This is
+# that package's library: the answer's wire types and the charset decoding
+# only. The parsers (htmd/html5ever, mail-parser, calamine, the `image` and
+# `tiff` decoders) are dependencies of the executable alone, so nothing in
+# the gateway can call them.
+lmgw-doc-reader = { path = "../lmgw-doc-reader" }
+# The OLE2 stream names that tell an .xls apart in the sniffer (already in
+# the lock through `msi`): the compound file's directory is read, no stream.
+cfb = "0.16"
 # eSpeak NG's only Windows release asset is an MSI (Windows design §4.2): `msi`
 # reads its tables and streams (its cabinet is read by
 # `runtime::engine_assets::cab`), so lmgw unpacks it without msiexec, which a
@@ -231,6 +249,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 # detour through one alphabetizes a manifest's config-form fields (agents §2.6).
 serde_json = { version = "1.0.150", features = ["raw_value"] }
 sha2 = "0.11.0"
+# The name LibreOffice gives its single-instance socket in /tmp (an MD5 of
+# its profile's URL), which a confined LibreOffice cannot remove itself
+# (document-conversion WP7 review round). Already in the lock. MIT OR Apache-2.0.
+md-5 = { version = "0.11.0", default-features = false }
 # Account passwords (headless server design D12, §5.2): argon2id with RFC
 # 9106's second recommended parameter set, PHC strings. RustCrypto's crate;
 # without its `parallel` feature it computes the four lanes one after another
@@ -302,6 +324,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
@@ -322,6 +345,12 @@ bench = false
 opus-bundled = ["opusic-c/bundled"]
 
 [dev-dependencies]
+# The text-recognition tests write their scans as PNG files. Test-only: the
+# gateway itself decodes no image (lmgw-doc-reader does, as a child).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The picture-export tests read the crops' PNGs (their size, a pixel's
+# colour). Test-only, as `image` above: the crops are cut by lmgw-doc-reader.
+png = { version = "0.18.1", default-features = false }
 # The tests state a machine in memory (`fake::FakeFacts`) instead of reading
 # the one the suite runs on: lmgw's own CDI spec, and the boots that take the
 # machine as a host seam.
@@ -329,7 +358,8 @@ lmgw-machine = { path = "../lmgw-machine", features = ["fake"] }
 # The service-mode proxy tests stand up a fake container that speaks a raw
 # HTTP upgrade, which needs the same two crates the proxy itself uses. The
 # device suites' proxy (tests/it/support/device_pair.rs) is a client too.
-hyper = { version = "1.10.1", features = ["client", "server", "http1"] }
+# `http2`: the h2c client of the document answers' stream-reset test.
+hyper = { version = "1.10.1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 insta = "1.47.2"
 # The client crate read against the real gateway: its readers (refusals in

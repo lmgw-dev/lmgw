@@ -4,7 +4,7 @@ use lmgw_api_types::{AgentProvenance, AgentPulled, AgentReimported, AgentRuntime
 use serde_json::json;
 
 use crate::pages::agents::short_ts;
-use crate::widgets::{use_toasts, Explain, Section};
+use crate::widgets::{use_toasts, Explain};
 
 // ---------------------------------------------------------------------------
 // The batch run surface (§6.2)
@@ -137,8 +137,9 @@ pub fn runtime_summary(r: Option<&AgentRuntime>, p: Option<&AgentProvenance>) ->
 /// from an image (§3.4), where the document came from plus the two acts that
 /// keep it current: **Pull image** and **Re-import from image**.
 ///
-/// Folded to its one-line summary: it is read before a first run and looked
-/// up after, never scanned on every visit.
+/// Two boxed groups of rows: the bounds (a `container` agent's), and the
+/// package (a row installed from an image). A long value (an image
+/// reference, a digest) ellipsizes with the whole of it in its tooltip.
 #[component]
 pub(super) fn RuntimeBlock(
     id: String,
@@ -197,7 +198,6 @@ pub(super) fn RuntimeBlock(
         });
     };
 
-    let summary = runtime_summary(runtime.as_ref(), provenance.as_ref());
     let title = if runtime.is_some() {
         "Runtime"
     } else {
@@ -219,25 +219,25 @@ pub(super) fn RuntimeBlock(
         runtime
             .map(|r| {
                 vec![
-                    ("image".to_string(), r.image.clone()),
-                    ("pull".into(), r.pull.clone()),
-                    ("phases".into(), r.phases.join(", ")),
-                    ("memory".into(), memory_text(r.memory_mb, "unlimited (0)")),
+                    ("Image".to_string(), r.image.clone()),
+                    ("Pull policy".into(), r.pull.clone()),
+                    ("Phases".into(), r.phases.join(", ")),
+                    ("Memory".into(), memory_text(r.memory_mb, "unlimited (0)")),
                     (
-                        "cpus".into(),
+                        "CPUs".into(),
                         if r.cpus <= 0.0 {
                             "unlimited (0)".to_string()
                         } else {
                             r.cpus.to_string()
                         },
                     ),
-                    ("pids".into(), limit_text(r.pids, "", "unlimited (0)")),
+                    ("Processes".into(), limit_text(r.pids, "", "unlimited (0)")),
                     (
-                        "deadline".into(),
+                        "Deadline".into(),
                         limit_text(r.deadline_seconds, "s", "unbounded (0)"),
                     ),
                     (
-                        "stop grace".into(),
+                        "Stop grace".into(),
                         // `0` here is *stricter*, not looser, and the page
                         // says so rather than calling it unlimited (§4.1).
                         limit_text(
@@ -247,96 +247,119 @@ pub(super) fn RuntimeBlock(
                         ),
                     ),
                     (
-                        "filesystem".into(),
+                        "Filesystem".into(),
                         if r.read_only {
                             "read-only, with a tmpfs on /tmp".to_string()
                         } else {
                             "writable".to_string()
                         },
                     ),
-                    ("output".into(), output_line(&r)),
+                    ("Output checked".into(), output_line(&r)),
                 ]
             })
             .unwrap_or_default(),
     );
     let podman = StoredValue::new(podman);
 
+    let has_limits = limits.with_value(|l| !l.is_empty());
     Some(view! {
-        <div class="card run-rt">
-            <Section
-                title=title
-                summary=Signal::derive(move || summary.clone())
-                persist="agents.runtime"
-                default_open=false
-            >
-                <Show when=move || limits.with_value(|l| !l.is_empty())>
-                    <table class="data kv-table">
-                        <tbody>
-                            <For each=move || limits.get_value() key=|(k, _)| k.clone() let:row>
-                                <tr>
-                                    <td class="dim mono-sm">{row.0}</td>
-                                    <td class="mono-sm clip" title=row.1.clone()>{row.1.clone()}</td>
-                                </tr>
-                            </For>
-                        </tbody>
-                    </table>
-                    {podman
+        {has_limits
+            .then(|| {
+                view! {
+                    <section class="pref-group run-rt">
+                        <div class="pref-head">
+                            <h2>{title}</h2>
+                        </div>
+                        <Explain summary="0 means no limit — except stop grace." persist="agents.explain.bounds">
+                            "Every bound is a manifest field with its value printed here. 0 means no limit "
+                            "everywhere except stop grace, where it means SIGKILL at once."
+                        </Explain>
+                        <div class="boxed">
+                            {limits
+                                .get_value()
+                                .into_iter()
+                                .map(|(k, v)| view! { <KvRow title=k value=v/> })
+                                .collect_view()}
+                            {podman
+                                .get_value()
+                                .map(|(ok, line)| {
+                                    view! {
+                                        <div class=if ok { "prow notice-row" } else { "prow problem-row" }>
+                                            {line}
+                                        </div>
+                                    }
+                                })}
+                        </div>
+                    </section>
+                }
+            })}
+        <Show when=move || has_package>
+            <section class="pref-group run-pkg">
+                <div class="pref-head">
+                    <h2>"Package"</h2>
+                </div>
+                <Explain
+                    summary=if from_package {
+                        "Installed from an image that carries its manifest."
+                    } else {
+                        "Written here; only the image below has been pulled."
+                    }
+                    persist="agents.explain.package"
+                >
+                    "Pull asks podman for that image again and says whether it moved; "
+                    "re-import reads the manifest out of it and keeps this row's config. "
+                    "Nothing polls in the background."
+                </Explain>
+                <div class="boxed">
+                    {prov_rows
                         .get_value()
-                        .map(|(ok, line)| {
-                            view! { <p class=if ok { "dim mono-sm" } else { "notice err" }>{line}</p> }
-                        })}
-                    <Explain summary="0 means no limit — except stop grace." persist="agents.explain.bounds">
-                        "Every bound is a manifest field with its value printed here. 0 means no limit "
-                        "everywhere except stop grace, where it means SIGKILL at once."
-                    </Explain>
-                </Show>
-                <Show when=move || has_package>
-                    <div class="mini-head">"Package"</div>
-                    <Explain
-                        summary=if from_package {
-                            "Installed from an image that carries its manifest."
-                        } else {
-                            "Written here; only the image below has been pulled."
-                        }
-                        persist="agents.explain.package"
-                    >
-                        "Pull asks podman for that image again and says whether it moved; "
-                        "re-import reads the manifest out of it and keeps this row's config. "
-                        "Nothing polls in the background."
-                    </Explain>
-                    <table class="data kv-table">
-                        <tbody>
-                            <For each=move || prov_rows.get_value() key=|(k, _)| k.clone() let:row>
-                                <tr>
-                                    <td class="dim mono-sm">{row.0}</td>
-                                    <td class="mono-sm clip" title=row.1.clone()>{row.1.clone()}</td>
-                                </tr>
-                            </For>
-                        </tbody>
-                    </table>
-                    {move || pulled.get().map(|m| view! { <div class="notice">{m}</div> })}
-                    <div class="run-acts">
-                        <button
-                            class="btn ghost sm"
-                            disabled=move || busy.get()
-                            title="podman pull, and a digest comparison afterwards"
-                            on:click=move |_| press(false)
-                        >
-                            {move || if busy.get() { "Working…" } else { "Pull image" }}
-                        </button>
-                        <button
-                            class=move || {
-                                if offer_reimport.get() { "btn primary sm" } else { "btn ghost sm" }
-                            }
-                            disabled=move || busy.get()
-                            title="read the manifest out of the image again, keeping the config"
-                            on:click=move |_| press(true)
-                        >
-                            "Re-import from image"
-                        </button>
+                        .into_iter()
+                        .map(|(k, v)| view! { <KvRow title=crate::labels::capitalise(&k) value=v/> })
+                        .collect_view()}
+                    {move || pulled.get().map(|m| view! { <div class="prow notice-row">{m}</div> })}
+                    <div class="prow">
+                        <div class="prow-text">
+                            <span class="prow-title">"Keep it current"</span>
+                            <span class="prow-sub">"podman pull and a digest comparison; or the manifest read out of the image again"</span>
+                        </div>
+                        <div class="prow-end">
+                            <button
+                                class="btn flat sm"
+                                disabled=move || busy.get()
+                                title="podman pull, and a digest comparison afterwards"
+                                on:click=move |_| press(false)
+                            >
+                                {move || if busy.get() { "Working…" } else { "Pull image" }}
+                            </button>
+                            <button
+                                class=move || {
+                                    if offer_reimport.get() { "btn suggested sm" } else { "btn sm" }
+                                }
+                                disabled=move || busy.get()
+                                title="read the manifest out of the image again, keeping the config"
+                                on:click=move |_| press(true)
+                            >
+                                "Re-import"
+                            </button>
+                        </div>
                     </div>
-                </Show>
-            </Section>
-        </div>
+                </div>
+            </section>
+        </Show>
     })
+}
+
+/// A title and its value, read only; a value too long for the row
+/// ellipsizes and its tooltip holds the whole of it.
+#[component]
+fn KvRow(title: String, value: String) -> impl IntoView {
+    let tip = value.clone();
+    view! {
+        <div class="prow kv-row">
+            <div class="prow-text">
+                <span class="prow-title">{title}</span>
+            </div>
+            <span class="prow-value mono" title=tip>{value}</span>
+        </div>
+    }
 }

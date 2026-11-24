@@ -15,7 +15,7 @@ use super::chat_approvals::merge_cards;
 /// cleared too, as an edit elsewhere clears a reply's thinking, token
 /// counts and tool record):
 /// - its text, reasoning, voice, origin, token counts, model and the alias
-///   that answered, the images note, its attachments;
+///   that answered, the images note, its notices, its attachments;
 /// - a user message's knowledge picks, and an answer's retrieval, which is
 ///   the stored one of the user message before it;
 /// - the tool record: cleared when the row has none, made (by `make`, under
@@ -62,6 +62,9 @@ pub(super) fn patch(
         m.images_note.with_untracked(|x| *x != r.images_note),
         &|| m.images_note.set(r.images_note.clone()),
     );
+    take(m.notices.with_untracked(|n| *n != r.notices), &|| {
+        m.notices.set(r.notices.clone())
+    });
     take(
         m.attachments.with_untracked(|a| *a != r.attachments),
         &|| m.attachments.set(r.attachments.clone()),

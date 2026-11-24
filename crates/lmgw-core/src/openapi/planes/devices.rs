@@ -18,7 +18,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             gets its certificate (clientAuth, for that key, valid devices.client_cert_days), \
             lmgw's device CA, the dates, its URLs and the confirmation code of its key, 201 \
             Created. Every request of the device is then refused 403 device_unconfirmed until \
-            the owner confirms that code on the Devices card. The same key presenting the \
+            the owner confirms that code on the device's page in lmgw (Usage → Keys & budgets). The same key presenting the \
             same token again while it lives (devices.token_minutes from its minting, unless \
             the owner ended it) gets the same answer; another key gets 410 pairing_token_used \
             and the device is marked contested. Refusals: 400 bad_request (not this shape), \

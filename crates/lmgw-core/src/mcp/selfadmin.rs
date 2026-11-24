@@ -121,6 +121,23 @@ fn fallback_p(of_type: &str) -> Value {
          allowed; a loop is refused. clear: 'fallback' removes it."
     ))
 }
+/// The one `gpu_pin` argument every local model setter takes (device-ledger
+/// design §8): the cards a model may run on, by the ids `lmgw__status` lists
+/// under `vram.devices` and Settings → GPU names.
+fn gpu_pin_p() -> Value {
+    strs_p(
+        "The graphics cards this model may run on, one card id per entry: the ids \
+         lmgw__status lists under vram.devices[].id (an NVIDIA card's is 'GPU-<uuid>'), \
+         the cards Settings → GPU names. One card: the model runs there or not at all — \
+         where that card is gone, it does not start on another and its fallback answers. \
+         Several: lmgw picks among them. A running model moves at its next start \
+         (lmgw__container action=apply starts it again now). Absent leaves the pin \
+         unchanged; an empty list or clear: 'gpu_pin' removes it, and lmgw picks the card. \
+         lmgw__local_model_get reads it back (gpu_pin) and says under the command line \
+         which card it would start on.",
+    )
+}
+
 /// A ladder's higher rungs (ladder design §4.1, §6): a JSON array of
 /// `{gguf_path, ctx_size}` objects, given as a JSON-encoded **string** —
 /// every argument in this module stays a flat scalar (module doc: "no
@@ -495,6 +512,9 @@ pub async fn call_capped(
     if let Some(e) = guards::access_refusal(name, args.as_ref()) {
         return refused(audit, crate::audit::tool_call::REFUSED, e).await;
     }
+    if let Some(e) = guards::outbound_refusal(&state.snapshot(), name, args.as_ref()) {
+        return refused(audit, crate::audit::tool_call::REFUSED, e).await;
+    }
     if CLOSED_ARG_TOOLS.contains(&def.name) {
         if let Some(e) = unknown_arg(&def, args.as_ref()) {
             return refused(audit, 400, e).await;
@@ -578,6 +598,15 @@ async fn run(
             )
             .await,
         ),
+        "lmgw__doc_tools" => {
+            ops::backends::to_json(crate::extract::convert::doc_tools(state).await)
+        }
+        "lmgw__doc_adapter_usage" => {
+            ops::backends::to_json(crate::extract::convert::calls::adapter_usage(state).await)
+        }
+        "lmgw__doc_jobs_stored" => {
+            ops::backends::to_json(Ok(crate::extract::convert::jobs::stored(state).await))
+        }
         "lmgw__agents" => ops::backends::to_json(ops::agents(state).await),
         "lmgw__agent_get" => ops::backends::to_json(
             ops::agent_get(state, arg_str(&a, "id")?.ok_or("id is required")?).await,
@@ -706,6 +735,10 @@ async fn run(
                 ops::image_recipe_add(state, key, arg_str(&a, "diffusion_file")?).await,
             )
         }
+        "lmgw__doc_model_add" => {
+            let id = arg_str(&a, "id")?.ok_or("id is required (see models of lmgw__doc_tools)")?;
+            ops::backends::to_json(crate::extract::convert::doc_model_add(state, id).await)
+        }
         "lmgw__image_upscaler_add" => {
             let key = arg_str(&a, "key")?
                 .ok_or("key is required (see upscalers.shipped of lmgw__image_recipes)")?;
@@ -803,6 +836,7 @@ async fn run(
             let mut a = args.unwrap_or_default();
             hoist_json_arg(&mut a, "realtime")?;
             hoist_json_arg(&mut a, "chat_media_defaults")?;
+            hoist_json_arg(&mut a, "keep_free")?;
             // The plane's answer is the refusal's sentence; `setting_pinned`
             // is the code the HTTP paths carry beside the same sentence.
             ops::backends::to_json(
@@ -1050,6 +1084,37 @@ mod tests {
                     t.name
                 );
             }
+        }
+    }
+
+    /// Every local model setter offers the GPU pin the op takes
+    /// (device-ledger design §8), a list of card ids, and names it among
+    /// what `clear` resets.
+    #[test]
+    fn the_model_setters_offer_the_gpu_pin() {
+        for name in [
+            "lmgw__local_model_set",
+            "lmgw__aux_model_set",
+            "lmgw__image_model_set",
+            "lmgw__audio_model_set",
+        ] {
+            let t = catalog().into_iter().find(|t| t.name == name).unwrap();
+            let pin = t.props.iter().find(|(k, _)| *k == "gpu_pin");
+            let (_, spec) = pin.unwrap_or_else(|| panic!("{name} lacks gpu_pin"));
+            assert_eq!(spec["type"], "array", "{name}");
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("lmgw__status") && d.contains("clear: 'gpu_pin'")),
+                "{name}"
+            );
+            let (_, clear) = t.props.iter().find(|(k, _)| *k == "clear").unwrap();
+            assert!(
+                clear["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("'gpu_pin'")),
+                "{name}"
+            );
         }
     }
 

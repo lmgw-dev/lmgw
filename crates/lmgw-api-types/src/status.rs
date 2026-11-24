@@ -423,7 +423,11 @@ pub struct VramStatus {
     pub telemetry: String,
     pub telemetry_ok: bool,
     pub headroom_bytes: u64,
+    /// Memory admission plans against: all cards' total, or the declared
+    /// budget when one is set.
     pub capacity_bytes: u64,
+    /// Free memory on all cards together, less `kept_free`: measured, or
+    /// derived from the estimate when there is no measurement.
     pub free_bytes: Option<u64>,
     /// False when `free_bytes` was derived from the estimate rather than read
     /// from the driver.
@@ -438,6 +442,9 @@ pub struct VramStatus {
     /// cannot back).
     pub kept_free: VramKeptFree,
     pub estimated_resident_bytes: u64,
+    /// Every card, in the driver's order, each with its own figures and
+    /// lmgw's models on it. `capacity_bytes`, `free_bytes`,
+    /// `lmgw_share_bytes` and `outside_share_bytes` are the cards' sums.
     pub devices: Vec<VramDevice>,
     pub resident: Vec<VramResident>,
     pub queue: Vec<VramWaiter>,
@@ -460,11 +467,13 @@ pub struct VramStatus {
     /// in flight or waiting — `vram::VramView`'s
     /// `kv_pools`. Absent from an older gateway's frame, hence the default.
     pub kv_pools: Vec<VramKvPool>,
-    /// lmgw's own share of the pooled devices' used memory, measured per
-    /// process. `None` when it
-    /// cannot be measured — see `external_trigger_reason`.
+    /// lmgw's own share of the used memory of all cards together, measured
+    /// per process (each card's is the device's own). `None` when it cannot
+    /// be measured — see `external_trigger_reason`; one card whose share is
+    /// unknown makes the sum unknown.
     pub lmgw_share_bytes: Option<u64>,
-    /// Used memory that is not lmgw's — games, the desktop, other apps.
+    /// Used memory that is not lmgw's — games, the desktop, other apps —
+    /// on all cards together: their used memory less `lmgw_share_bytes`.
     /// `None` exactly when `lmgw_share_bytes` is.
     pub outside_share_bytes: Option<u64>,
     /// Whether the outside-VRAM fallback can fire right now.
@@ -532,15 +541,104 @@ pub struct VramKvPoolWaiter {
     pub waiting_ms: u64,
 }
 
+/// A graphics card's stable id (device-ledger design D1): `GPU-<uuid>` for
+/// an NVIDIA card, as NVML and the CDI spec name it, and the PCI address
+/// (`0000:17:00.0`) for an AMD one. The index is a position in the driver's
+/// list and moves when a card is added or fails; this does not. It is not a
+/// label: a card is shown by its name and index, with the id in a detail line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DeviceId(pub String);
+
+impl DeviceId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VramDevice {
+    /// The card's stable id: NVIDIA's `GPU-<uuid>`, or an AMD card's PCI
+    /// address. Not a label; the card is shown by its name and index.
+    pub id: DeviceId,
     pub index: u32,
     pub name: String,
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub free_bytes: u64,
+    /// lmgw's share of this card's used memory, measured per process.
+    /// `None` when it cannot be measured: `external_trigger_reason` says
+    /// why, or `share_unknown` where it is this card alone.
+    pub lmgw_share_bytes: Option<u64>,
+    /// This card's used memory less lmgw's share, never below zero: other
+    /// programs, and what the driver keeps for itself. `None` exactly when
+    /// `lmgw_share_bytes` is.
+    pub outside_share_bytes: Option<u64>,
+    /// Why lmgw's share on this card is not known while the other cards'
+    /// are: the driver lists one of lmgw's processes here without saying
+    /// how much it holds. The sums are unknown with it.
+    pub share_unknown: Option<String>,
+    /// What admission keeps free on this card on top of the memory in use:
+    /// the starts in flight, image peaks and pending loads of the models
+    /// charged on this card alone. Absent where a model charged on several
+    /// cards together keeps something free (how it divides among them is
+    /// not known); the top-level `kept_free` is all cards' together. On a
+    /// machine with one card it is all of that.
+    pub kept_free: Option<VramKeptFree>,
+    /// lmgw's models on this card, with what each holds here, as the
+    /// per-process measurement reads them: a model split over several
+    /// cards is on each of them. Empty where lmgw's share is not measured.
+    pub resident: Vec<VramDeviceResident>,
+}
+
+/// One of lmgw's models on a card.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VramDeviceResident {
+    /// `chat | aux | audio | image`.
+    pub container: String,
+    pub model: String,
+    /// What its processes hold on this card. `None` where the driver lists
+    /// one of them here without saying how much it holds.
+    pub bytes: Option<u64>,
+}
+
+/// One part of a resident's charge: `bytes` on `cards` together.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VramChargePart {
+    /// The cards' ids, as the devices' `id`, in the driver's order. One
+    /// card: what is charged on it. Several: what is charged on them
+    /// together.
+    pub cards: Vec<DeviceId>,
+    pub bytes: u64,
+}
+
+/// One card a resident model's processes are on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VramResidentCard {
+    /// The card's id, as the device's `id`.
+    pub id: DeviceId,
+    /// What its processes hold on that card. `None` where the driver lists
+    /// one of them there without saying how much it holds.
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -553,7 +651,17 @@ pub struct VramResident {
     /// `starting | ready` as the runtime registry holds it, or `reserved` for
     /// a start the scheduler has admitted whose container is not up yet.
     pub state: String,
+    /// What admission charges it: the sum of `charge`.
     pub estimated_bytes: u64,
+    /// What admission charges it on the cards: a part per card where that
+    /// is known, else one part for the cards it sees together, whose bytes
+    /// are on those cards as a group (how they divide is not known; `cards`
+    /// has what its processes hold on each where that is measured). A part
+    /// with no card: no card is known (a declared budget without
+    /// telemetry). Empty where it is charged nowhere: every card its
+    /// container was started on is gone (`note` says which). Absent from an
+    /// older gateway's frame.
+    pub charge: Vec<VramChargePart>,
     pub in_flight: usize,
     pub idle_seconds: Option<u64>,
     /// What one generation of a resident image pipeline has been measured to
@@ -569,6 +677,11 @@ pub struct VramResident {
     /// processes hold at least that much now), and for every other class.
     pub pending_bytes: Option<u64>,
     pub note: Option<String>,
+    /// The cards its processes are on, with what they hold on each, as
+    /// lmgw's per-process measurement reads them: a model split over two
+    /// cards has both. Empty where lmgw's share is not measured, and for a
+    /// reservation.
+    pub cards: Vec<VramResidentCard>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -622,12 +735,64 @@ pub enum WaitPhase {
     Measuring,
     /// Stopping an idle model to make room: `<class>/<model>`
     /// (`chat/qwen3-30b`).
-    Evicting { victim: String },
+    Evicting {
+        victim: String,
+        /// On a computer with several graphics cards, the card or cards it
+        /// is stopped on (device-ledger design §6.1). Empty on one card.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cards: Vec<WaitCard>,
+        /// Another card holds the stopped model now, and lmgw starts it
+        /// again there once it has stopped (device-ledger design §6.2).
+        #[serde(default, skip_serializing_if = "is_false")]
+        moves: bool,
+    },
     /// Nothing idle is left to stop: waiting for a busy model to finish, or
     /// for memory held outside lmgw.
-    WaitingForRoom { needs_bytes: u64, free_bytes: u64 },
+    WaitingForRoom {
+        needs_bytes: u64,
+        free_bytes: u64,
+        /// On a computer with several graphics cards, the card or cards the
+        /// start waits for (device-ledger design §5.5): `needs_bytes` and
+        /// `free_bytes` are theirs. For a model split over several cards,
+        /// the card that is short. Empty on one card.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cards: Vec<WaitCard>,
+    },
     /// Room is there: the container is starting.
     Starting,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A graphics card a wait is on, as lmgw names a card: its name and index,
+/// with the id beside them (device-ledger design §2.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WaitCard {
+    pub id: DeviceId,
+    /// The driver's index (`nvidia-smi`'s).
+    pub index: u32,
+    pub name: String,
+}
+
+impl WaitCard {
+    /// "NVIDIA RTX 6000 Ada Generation (card 2)".
+    pub fn words(&self) -> String {
+        format!("{} (card {})", self.name, self.index)
+    }
+
+    /// `cards` in words: "A (card 0)", "A (card 0) and B (card 1)".
+    pub fn list(cards: &[WaitCard]) -> String {
+        let names: Vec<String> = cards.iter().map(Self::words).collect();
+        match names.as_slice() {
+            [] => String::new(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
 }
 
 /// One registered MCP server's connection state: `status` is `connecting` |

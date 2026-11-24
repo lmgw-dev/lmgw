@@ -88,7 +88,12 @@ async fn no_toolkit_offers_the_plan() {
     assert_eq!(toolkit.cause, Some(MachineCause::ToolkitMissing));
     assert_eq!(
         c.headline,
-        "One piece is missing so models can use the graphics card. Here's how to add it."
+        "One piece is missing so models can use the graphics card."
+    );
+    assert_eq!(
+        toolkit.sentence,
+        "The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. \
+         Here's how to add it."
     );
     let plan = c.plan.as_ref().unwrap();
     let kinds: Vec<PlanStepKind> = plan.steps.iter().map(|s| s.kind).collect();
@@ -163,7 +168,12 @@ async fn no_toolkit_offers_the_plan() {
     assert_eq!(c.plan.as_ref().unwrap().how, PlanHow::Helper);
     assert_eq!(
         c.headline,
-        "One piece is missing so models can use the graphics card. lmgw can set it up."
+        "One piece is missing so models can use the graphics card."
+    );
+    assert_eq!(
+        item(&c, MachineItemId::CardForModels).sentence,
+        "The NVIDIA Container Toolkit is missing: models can't use the graphics card without it. \
+         lmgw can set it up."
     );
     // The sentences and sizes are not hashed: the same plan, the same hash.
     assert_eq!(c.plan.unwrap().hash, expected.hash());

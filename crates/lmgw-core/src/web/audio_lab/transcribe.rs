@@ -115,14 +115,20 @@ pub(crate) async fn transcribe_clip(
         .first_or_octet_stream()
         .as_ref()
         .to_string();
-    let heard = proxy::transcribe_voice_clip(state, alias, Bytes::from(bytes), &name, &mime)
-        .await
-        .map_err(|e| match e.kind() {
-            "gpu_hold" | "gpu_benchmark" | proxy::ASR_REQUIRED | "unknown_alias" => {
-                ClipError::Refused(e.to_string())
-            }
-            _ => ClipError::Clip(e.to_string()),
-        })?;
+    let heard = Box::pin(proxy::transcribe_voice_clip(
+        state,
+        alias,
+        Bytes::from(bytes),
+        &name,
+        &mime,
+    ))
+    .await
+    .map_err(|e| match e.kind() {
+        "gpu_hold" | "gpu_benchmark" | proxy::ASR_REQUIRED | "unknown_alias" => {
+            ClipError::Refused(e.to_string())
+        }
+        _ => ClipError::Clip(e.to_string()),
+    })?;
     let by = proxy::answered_line(alias, heard.answered_by.as_ref());
     // One line per clip in the index.
     let text = heard.text.replace(['\n', '\r'], " ").trim().to_string();
@@ -195,7 +201,7 @@ pub(crate) async fn transcribe_missing(state: &SharedState, alias: &str) -> Resu
         ..Default::default()
     };
     for clip in missing {
-        match transcribe_clip(state, &clip, alias).await {
+        match Box::pin(transcribe_clip(state, &clip, alias)).await {
             Ok(w) => bulk
                 .transcribed
                 .push((clip, w.transcript.chars().count(), w)),

@@ -9,7 +9,7 @@
   "nav": "/knowledge"
  },
  {
-  "expect": "document.querySelector('.page-head h1').textContent==='Knowledge'",
+  "expect": "document.querySelector('.mlist-head h1').textContent==='Knowledge'",
   "label": "the Knowledge page opens"
  },
  {
@@ -17,11 +17,11 @@
   "label": "the sidebar has a Knowledge entry"
  },
  {
-  "expect": "document.querySelector('.empty')&&document.querySelector('.empty').textContent.includes('No knowledge bases yet')",
+  "expect": "document.querySelector('.kb-list .mlist-empty')&&document.querySelector('.kb-list .mlist-empty').textContent.includes('No knowledge bases yet')",
   "label": "an empty list says so"
  },
  {
-  "click": ".page-head .actions .btn.primary"
+  "click": ".mlist-head .actions .icon-btn[title='New knowledge base']"
  },
  {
   "wait": 0.4
@@ -31,14 +31,14 @@
   "label": "New knowledge base opens a modal"
  },
  {
-  "click": "dialog[open] .field input.input",
+  "click": "dialog[open] .prow-entry",
   "nth": 0
  },
  {
   "type": "Taxes"
  },
  {
-  "click": "dialog[open] .field input.input",
+  "click": "dialog[open] .prow-entry",
   "nth": 1
  },
  {
@@ -65,14 +65,14 @@
   "label": "the embedding alias is picked"
  },
  {
-  "expect": "document.querySelector('dialog[open] .kb-limit').textContent.length>20",
+  "expect": "[...document.querySelectorAll('dialog[open] .pref-desc')].some(p=>p.textContent.includes('chunk size'))",
   "label": "the chunk-size hint says what limits it"
  },
  {
   "shot": "knowledge-new"
  },
  {
-  "click": "dialog[open] .modal-foot .btn.primary"
+  "click": "dialog[open] .modal-foot .btn.suggested"
  },
  {
   "until": "location.pathname.startsWith('/knowledge/')",
@@ -80,7 +80,7 @@
   "timeout": 30
  },
  {
-  "until": "document.querySelector('.page-head h1')&&document.querySelector('.page-head h1').textContent==='Taxes'",
+  "until": "document.querySelector('.detail-hero h1')&&document.querySelector('.detail-hero h1').textContent==='Taxes'",
   "label": "the base's name is the title",
   "timeout": 30
  },
@@ -89,7 +89,7 @@
   "label": "three tabs"
  },
  {
-  "expect": "document.querySelector('.kb-facts').textContent.includes('per-input limit unknown')||document.querySelector('.kb-facts').textContent.includes('tokens per input')",
+  "expect": "/per.input/i.test(document.querySelector('.kb-facts').textContent)",
   "label": "the embedding pin and its input limit are shown"
  },
  {
@@ -99,12 +99,12 @@
   "js": "(()=>{const b=Uint8Array.from(atob('JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA4MSA+PgpzdHJlYW0KQlQgL0YxIDE0IFRmIDcyIDcyMCBUZCAoVGhlIGxhbmRsb3JkIHJhaXNlZCB0aGUgcmVudCB0byA5NTAgRVVSIGZyb20gSnVseS4pIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDY3ID4+CnN0cmVhbQpCVCAvRjEgMTQgVGYgNzIgNzIwIFRkIChLb250b2F1c3p1ZyBHaXJva29udG8gU2FsZG8gMTIzNCBFVVIpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNyAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDI0NyAwMDAwMCBuIAowMDAwMDAwMzc4IDAwMDAwIG4gCjAwMDAwMDA1MDQgMDAwMDAgbiAKMDAwMDAwMDYyMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDggL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjY5MQolJUVPRgo='),c=>c.charCodeAt(0));const dt=new DataTransfer();dt.items.add(new File([b],'letter.pdf',{type:'application/pdf'}));document.querySelector('.kb-drop').dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));return 'dropped'})()"
  },
  {
-  "until": "document.querySelectorAll('.kb-files tbody tr').length===2",
+  "until": "document.querySelectorAll('.kb-files .kb-file').length===2",
   "label": "both files are listed",
   "timeout": 30
  },
  {
-  "until": "[...document.querySelectorAll('.kb-files tbody .chip')].length===2&&[...document.querySelectorAll('.kb-files tbody .chip')].every(c=>c.textContent.trim()==='ready')",
+  "until": "[...document.querySelectorAll('.kb-files .kb-file .chip')].length===2&&[...document.querySelectorAll('.kb-files .kb-file .chip')].every(c=>c.textContent.trim()==='ready')",
   "label": "both files reach ready",
   "timeout": 60
  },
@@ -113,18 +113,18 @@
   "label": "the upload outcome is listed"
  },
  {
-  "expect": "[...document.querySelectorAll('.kb-files tbody tr')].some(r=>r.textContent.includes('letter.pdf')&&r.querySelectorAll('td')[4].textContent.trim()==='2')",
+  "expect": "[...document.querySelectorAll('.kb-files .kb-file')].some(r=>r.textContent.includes('letter.pdf')&&r.querySelector('.kb-file-meta').textContent.includes('2 pages'))",
   "label": "the PDF shows its two pages"
  },
  {
-  "expect": "[...document.querySelectorAll('.kb-files tbody tr')].every(r=>+r.querySelectorAll('td')[6].textContent.replace(/\\D/g,'')>0)",
+  "expect": "[...document.querySelectorAll('.kb-files .kb-file')].every(r=>/[1-9][\\d\\u202f]* chunks/.test(r.querySelector('.kb-file-meta').textContent))",
   "label": "every file has chunks"
  },
  {
   "shot": "knowledge-files"
  },
  {
-  "click": ".kb-files tbody tr .link-btn",
+  "click": ".kb-files .kb-file .link-btn",
   "nth": 0
  },
  {
@@ -147,15 +147,15 @@
   "label": "Esc closes the viewer"
  },
  {
-  "click": ".sub-nav .seg-btn",
+  "click": ".mdetail-head .sub-nav .seg-btn",
   "nth": 1
  },
  {
-  "expect": "document.querySelector('.kb-search input.input')",
+  "expect": "document.querySelector('.kb-query input')",
   "label": "the Search tab has a query box"
  },
  {
-  "click": ".kb-search input.input",
+  "click": ".kb-query input",
   "nth": 0
  },
  {
@@ -178,13 +178,13 @@
   "label": "it carries score and tokens"
  },
  {
-  "click": ".sec-toggle"
+  "click": ".kb-trace-toggle"
  },
  {
   "wait": 0.3
  },
  {
-  "expect": "document.querySelector('.sec-body:not([hidden])')&&document.querySelector('.sec-body:not([hidden])').textContent.includes('FTS query')",
+  "expect": "document.querySelector('.kb-trace .trace-card')&&document.querySelector('.kb-trace .trace-card').textContent.includes('FTS query')",
   "label": "the trace opens in its section"
  },
  {
@@ -213,32 +213,32 @@
   "wait": 0.4
  },
  {
-  "click": ".sub-nav .seg-btn",
+  "click": ".mdetail-head .sub-nav .seg-btn",
   "nth": 2
  },
  {
-  "expect": "document.querySelector('.card .spec-grid')",
+  "expect": "document.querySelector('.mdetail-scroll .pref-group .prow-entry')",
   "label": "the Settings tab shows the fields"
  },
  {
-  "js": "(()=>{const i=[...document.querySelectorAll('input.input.mono')].find(x=>x.value==='512');i.value='300';i.dispatchEvent(new Event('input',{bubbles:true}));return i.value})()"
+  "js": "(()=>{const i=[...document.querySelectorAll('.mdetail-scroll .spin-field')].find(x=>x.value==='512');i.value='300';i.dispatchEvent(new Event('change',{bubbles:true}));return i.value})()"
  },
  {
   "wait": 0.3
  },
  {
-  "expect": "[...document.querySelectorAll('.notice.warn')].some(n=>n.textContent.includes('re-chunks every file'))",
+  "expect": "[...document.querySelectorAll('.prow.notice-row.warn')].some(n=>n.textContent.includes('re-chunks every file'))&&document.querySelector('.save-toast.show')",
   "label": "a chunk change warns that it re-chunks every file"
  },
  {
-  "expect": "[...document.querySelectorAll('.btn.primary')].some(b=>b.textContent.includes('re-chunk'))",
+  "expect": "document.querySelector('.save-toast .btn.suggested').textContent.includes('re-chunk')",
   "label": "Save says what it will do"
  },
  {
-  "click": "input[type=checkbox]"
+  "click": ".mdetail-scroll .prow.action .switch"
  },
  {
-  "click": ".card .btn.primary"
+  "click": ".save-toast .btn.suggested"
  },
  {
   "until": "fetch('/api/knowledge/bases/'+location.pathname.split('/')[2]).then(r=>r.json()).then(j=>j.base.chunk_tokens===300&&j.base.mcp_visible===false)",
@@ -254,19 +254,19 @@
   "nav": "/knowledge"
  },
  {
-  "until": "document.querySelector('.kb-table tbody tr')",
+  "until": "document.querySelector('.kb-list .lrow')",
   "label": "the list shows the base",
   "timeout": 30
  },
  {
-  "expect": "(()=>{const r=document.querySelector('.kb-table tbody tr');return r.textContent.includes('Taxes')&&r.textContent.includes('fake-embed')&&r.querySelectorAll('td')[2].textContent.includes('2')})()",
+  "expect": "(()=>{const r=document.querySelector('.kb-list .lrow');return r.textContent.includes('Taxes')&&r.textContent.includes('fake-embed')&&r.textContent.includes('2 files')})()",
   "label": "name, file count and embedding alias are in the row"
  },
  {
   "shot": "knowledge-list"
  },
  {
-  "click": ".kb-table tbody tr a"
+  "click": ".kb-list .lrow"
  },
  {
   "until": "/^\\/knowledge\\/\\d+$/.test(location.pathname)",
@@ -274,35 +274,29 @@
   "timeout": 30
  },
  {
-  "click": ".sub-nav .seg-btn",
+  "click": ".mdetail-head .sub-nav .seg-btn",
   "nth": 2
  },
  {
-  "click": ".sec-toggle"
+  "click": ".mdetail-scroll .prow.danger"
  },
  {
-  "wait": 0.3
+  "wait": 0.4
  },
  {
-  "click": ".sec-body:not([hidden]) .btn"
- },
- {
-  "wait": 0.6
- },
- {
-  "expect": "document.querySelector('.sec-body:not([hidden]) .btn.danger')&&document.querySelector('.sec-body:not([hidden])').textContent.includes('Delete')",
-  "label": "the first click only arms the delete"
+  "expect": "document.querySelector('dialog[open]')&&document.querySelector('dialog[open]').textContent.includes('Delete')",
+  "label": "Delete asks first"
  },
  {
   "expect": "fetch('/api/knowledge/bases').then(r=>r.json()).then(j=>j.bases.length===1)",
-  "label": "the base is still there after one click"
+  "label": "the base is still there while it asks"
  },
  {
-  "click": ".sec-body:not([hidden]) .btn.danger"
+  "click": "dialog[open] .btn.destructive"
  },
  {
   "until": "location.pathname==='/knowledge'",
-  "label": "the second click deletes it and returns to the list",
+  "label": "confirming deletes it and returns to the list",
   "timeout": 30
  },
  {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "lmgw",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "identifier": "io.github.lmgw-dev.lmgw",
   "build": {},
   "app": {
@@ -31,9 +31,11 @@
     "linux": {
       "rpm": {
         "compression": { "type": "zstd", "level": 6 },
-        "depends": ["git", "podman", "poppler-utils", "opus", "polkit"],
+        "depends": ["git", "podman", "opus", "polkit"],
+        "recommends": ["poppler-utils", "tesseract", "tesseract-osd"],
         "files": {
           "/usr/libexec/lmgw/lmgw-machine-helper": "../target/release/lmgw-machine-helper",
+          "/usr/libexec/lmgw/lmgw-doc-reader": "../target/release/lmgw-doc-reader",
           "/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.policy": "../crates/lmgw-machine-helper/polkit/io.github.lmgw-dev.lmgw.machine-setup.policy",
           "/usr/share/licenses/lmgw/onnxruntime/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-onnxruntime",
           "/usr/share/licenses/lmgw/onnxruntime/ThirdPartyNotices.txt": "../crates/lmgw-core/assets/realtime/ThirdPartyNotices-onnxruntime.txt",
@@ -44,6 +46,7 @@
       },
       "appimage": {
         "files": {
+          "/usr/libexec/lmgw/lmgw-doc-reader": "../target/release/lmgw-doc-reader",
           "/usr/share/licenses/lmgw/onnxruntime/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-onnxruntime",
           "/usr/share/licenses/lmgw/onnxruntime/ThirdPartyNotices.txt": "../crates/lmgw-core/assets/realtime/ThirdPartyNotices-onnxruntime.txt",
           "/usr/share/licenses/lmgw/silero-vad/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-silero",

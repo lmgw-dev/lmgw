@@ -483,8 +483,14 @@ fn the_containerfile_starts_lmgw_server_in_container_mode_under_an_init() {
         "catatonit is PID 1 (D5)"
     );
     let entry = read("entrypoint.sh");
-    assert!(entry.contains("exec /usr/local/bin/lmgw-server"), "{entry}");
+    // Through the user namespace step, which is empty under a rootless outer Podman.
+    assert!(
+        entry.contains(r#"exec "${into_userns[@]}" /usr/local/bin/lmgw-server"#),
+        "{entry}"
+    );
     assert!(c.contains("COPY lmgw-server /usr/local/bin/lmgw-server"));
+    // The document reader is looked for beside the server's executable.
+    assert!(c.contains("COPY lmgw-doc-reader /usr/local/bin/lmgw-doc-reader"));
 }
 
 #[test]
@@ -582,15 +588,67 @@ fn the_build_context_holds_exactly_what_the_containerfile_copies() {
         "the Containerfile's COPY sources vs ci/build-image.sh's context"
     );
 
-    // packaging/server/'s files are the image's or the host's (the unit and its volumes): none is
-    // left out of both.
+    // packaging/server/'s files are the image's or the host's (the unit and its volumes, the SELinux
+    // module, and docker/ with the compose file for a Docker host): none is left out of both.
     for entry in std::fs::read_dir(packaging_dir()).unwrap() {
         let name = entry.unwrap().file_name().into_string().unwrap();
-        let host = name.ends_with(".container") || name.ends_with(".volume");
+        let host = name.ends_with(".container")
+            || name.ends_with(".volume")
+            || name.ends_with(".cil")
+            || name == "docker";
         assert!(
             host || from_packaging.contains(name.as_str()),
             "packaging/server/{name} is neither copied into the image nor a host unit"
         );
         assert!(!(host && from_packaging.contains(name.as_str())), "{name}");
     }
+}
+
+/// The compose file for a Docker host (`docker/docker-compose.yml`) starts the same image with
+/// what the unit gives it: the stop budget, the volumes, the secret's place, the published
+/// listeners and the probe. Read as text: the file is the administrator's to edit, and these
+/// are the lines the image depends on.
+#[test]
+fn the_compose_file_gives_the_image_what_the_unit_does() {
+    let compose = read("docker/docker-compose.yml");
+    let unit = Unit(entries(&read("lmgw.container")));
+    let has = |line: &str| {
+        assert!(
+            compose.lines().any(|l| l.trim() == line),
+            "docker-compose.yml lacks the line: {line}"
+        );
+    };
+    has(&format!("image: {}", unit.one("Container", "Image")));
+    has("pull_policy: never");
+    // The quit's bound, in both places lmgw and Docker read it (D20).
+    let stop = unit.one("Container", "StopTimeout");
+    has(&format!("stop_grace_period: {stop}s"));
+    has(&format!("{STOP_TIMEOUT_VAR}: \"{stop}\""));
+    has(&format!("autoheal.stop.timeout: \"{stop}\""));
+    for volume in unit.all("Container", "Volume") {
+        let (source, target) = volume.split_once(':').unwrap();
+        match source.strip_suffix(".volume") {
+            Some(name) => has(&format!("- {name}:{target}")),
+            // The TLS pair's host directory: beside the compose file, read-only.
+            None => has(&format!("- ./tls:{}:ro", target.split(':').next().unwrap())),
+        }
+    }
+    for port in unit.all("Container", "PublishPort") {
+        has(&format!("- \"{port}\""));
+    }
+    has("- source: lmgw-wrap-key");
+    has("target: lmgw-wrap-key");
+    let probe = unit.one("Container", "HealthCmd");
+    let quoted: Vec<String> = probe.split(' ').map(|w| format!("\"{w}\"")).collect();
+    has(&format!("test: [\"CMD\", {}]", quoted.join(", ")));
+    // The entrypoint's user namespace needs these three; nothing wider is asked for.
+    has("- SYS_ADMIN");
+    has("- seccomp=unconfined");
+    has("- apparmor=unconfined");
+    assert!(!compose.contains("privileged: true"), "never --privileged");
+    let entry = read("entrypoint.sh");
+    assert!(
+        entry.contains("unshare --user \"--map-users=0:0:${USERNS_IDS}\""),
+        "the entrypoint makes the user namespace the compose file's options are for"
+    );
 }

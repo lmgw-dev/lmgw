@@ -13,7 +13,8 @@ use std::time::Duration;
 use lmgw_core::bench::BenchLauncher;
 use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner};
-use lmgw_core::vram::{GpuMemory, GpuPower, GpuProbe, ProcessMemory};
+use lmgw_core::vram::nvml::DeviceProcesses;
+use lmgw_core::vram::{GpuMemory, GpuPower, GpuProbe};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -263,7 +264,7 @@ impl GpuProbe for HeldProbe {
         self.inner.process_support()
     }
 
-    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         self.inner.processes(own, retired)
     }
 

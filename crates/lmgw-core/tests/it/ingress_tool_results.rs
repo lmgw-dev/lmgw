@@ -66,6 +66,7 @@ fn responses_reads_text_and_a_data_url_image_into_blocks_and_keeps_an_unknown_it
             ToolResultBlock::Image {
                 mime: "image/png".into(),
                 data: PNG_B64.into(),
+                cache_control: None
             },
             // Today's JSON text, of the item alone.
             ToolResultBlock::text(unknown.to_string()),
@@ -112,6 +113,7 @@ fn responses_names_a_url_image_as_a_resource_and_keeps_what_it_cannot_read_as_js
             ToolResultBlock::Image {
                 mime: "image/gif".into(),
                 data: GIF_B64.into(),
+                cache_control: None
             },
             ToolResultBlock::text(by_file_id.to_string()),
             ToolResultBlock::text(svg_utf8.to_string()),
@@ -151,10 +153,12 @@ fn responses_takes_an_image_only_in_a_format_anthropic_takes_and_its_bytes_are()
         ToolResultBlock::Image {
             mime: "image/jpeg".into(),
             data: JPEG_B64.into(),
+            cache_control: None,
         },
         ToolResultBlock::Image {
             mime: "image/png".into(),
             data: PNG_B64.into(),
+            cache_control: None,
         },
     ];
     want.extend(kept.iter().map(|k| ToolResultBlock::text(k.to_string())));
@@ -326,6 +330,7 @@ fn anthropic_names_a_url_tool_image_as_a_resource() {
             ToolResultBlock::Image {
                 mime: "image/gif".into(),
                 data: GIF_B64.into(),
+                cache_control: None
             },
             ToolResultBlock::AnthropicBlock(lmgw_core::ir::AnthropicBlock::from_client(file)),
             ToolResultBlock::Json { value: no_url },

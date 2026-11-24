@@ -259,6 +259,14 @@ pub async fn prepare(
     let mut runtime = model_runtime_at(snap, Class::Chat, id, overrides.rung as usize)
         .expect("the row was found above");
     apply_overrides(&mut runtime, &overrides);
+    // As a start of the row gives it (ruling 18), against the image it runs.
+    if let Some(drafted) = state
+        .runtime()
+        .with_draft_type(&snap.settings.container_prefix, &runtime)
+        .await
+    {
+        runtime = drafted;
+    }
     let settings = settings_of(&runtime, &overrides);
     let model = model_identity(state, &models_dir, id, &settings.gguf_path, overrides.rung)
         .await

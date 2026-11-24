@@ -32,6 +32,7 @@ mod device_name;
 mod device_rows;
 mod hf_models_dest_identity;
 mod key_device_tools;
+mod lab_documents;
 mod lab_sets;
 mod lab_store;
 mod llama_cpp;
@@ -40,6 +41,7 @@ mod one_fallback;
 mod openai_compatible;
 mod service_tier_prices;
 mod upstream_catalog_all_modalities;
+mod vram_engine_readings;
 
 /// An in-memory database migrated up to `version` and no further — the state an
 /// install that has not taken the aux-router upgrade yet is sitting in.

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+ xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+ xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+ xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+ office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.text">
+ <office:font-face-decls>
+  <style:font-face style:name="Serif" svg:font-family="'Liberation Serif'"/>
+  <style:font-face style:name="Sans" svg:font-family="'Liberation Sans'"/>
+  <style:font-face style:name="Mono" svg:font-family="'Liberation Mono'"/>
+ </office:font-face-decls>
+ <office:styles>
+  <style:default-style style:family="paragraph">
+   <style:paragraph-properties fo:margin-bottom="0.2cm" fo:text-align="justify"/>
+   <style:text-properties style:font-name="Serif" fo:font-size="10pt" fo:language="en" fo:country="US"/>
+  </style:default-style>
+  <style:style style:name="Title" style:family="paragraph"><style:paragraph-properties fo:text-align="center" fo:margin-bottom="0.3cm"/><style:text-properties style:font-name="Sans" fo:font-size="18pt" fo:font-weight="bold"/></style:style>
+  <style:style style:name="Authors" style:family="paragraph"><style:paragraph-properties fo:text-align="center" fo:margin-bottom="0.5cm"/></style:style>
+  <style:style style:name="H1" style:family="paragraph"><style:paragraph-properties fo:text-align="start" fo:margin-top="0.3cm" fo:margin-bottom="0.15cm" fo:keep-with-next="always"/><style:text-properties style:font-name="Sans" fo:font-size="12pt" fo:font-weight="bold"/></style:style>
+  <style:style style:name="Code" style:family="paragraph"><style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/><style:text-properties style:font-name="Mono" fo:font-size="8pt"/></style:style>
+  <style:style style:name="Caption" style:family="paragraph"><style:paragraph-properties fo:text-align="start" fo:margin-top="0.1cm" fo:margin-bottom="0.3cm"/><style:text-properties fo:font-size="9pt"/></style:style>
+  <style:style style:name="Formula" style:family="paragraph"><style:paragraph-properties fo:text-align="center" fo:margin-top="0.2cm" fo:margin-bottom="0.2cm"/><style:text-properties fo:font-style="italic"/></style:style>
+  <style:style style:name="Cell" style:family="paragraph"><style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/><style:text-properties fo:font-size="9pt"/></style:style>
+  <style:style style:name="Running" style:family="paragraph"><style:paragraph-properties fo:text-align="start" fo:margin-bottom="0cm"/><style:text-properties fo:font-size="8pt"/></style:style>
+  <text:list-style style:name="Bullets"><text:list-level-style-bullet text:level="1" text:bullet-char="•"><style:list-level-properties text:space-before="0.3cm" text:min-label-width="0.4cm"/></text:list-level-style-bullet></text:list-style>
+  <text:list-style style:name="Numbers"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."><style:list-level-properties text:space-before="0.3cm" text:min-label-width="0.5cm"/></text:list-level-style-number></text:list-style>
+  <style:style style:name="Shape" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.03cm" svg:stroke-color="#1f4e79" draw:fill="solid" draw:fill-color="#f2f2f2"/></style:style>
+  <style:style style:name="Bar" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-color="#1f4e79" draw:fill="solid" draw:fill-color="#2e75b6"/></style:style>
+  <style:style style:name="Label" style:family="graphic"><style:graphic-properties draw:stroke="none" draw:fill="none" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:padding-left="0cm" fo:padding-right="0cm"/></style:style>
+  <style:style style:name="Axis" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.04cm" svg:stroke-color="#000000"/></style:style>
+ </office:styles>
+ <office:automatic-styles>
+  <style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="21cm" fo:page-height="29.7cm" fo:margin-top="1.5cm" fo:margin-bottom="1.5cm" fo:margin-left="2cm" fo:margin-right="2cm"/><style:header-style><style:header-footer-properties fo:min-height="0.8cm" fo:margin-bottom="0.5cm"/></style:header-style><style:footer-style><style:header-footer-properties fo:min-height="0.8cm" fo:margin-top="0.5cm"/></style:footer-style></style:page-layout>
+  <style:style style:name="TwoCol" style:family="section"><style:section-properties><style:columns fo:column-count="2" fo:column-gap="0.8cm"/></style:section-properties></style:style>
+  <style:style style:name="Tbl" style:family="table"><style:table-properties style:width="8.1cm" table:align="left" style:may-break-between-rows="false" fo:keep-with-next="auto"/></style:style>
+  <style:style style:name="TblCol" style:family="table-column"><style:table-column-properties style:column-width="2.7cm"/></style:style>
+  <style:style style:name="TblCell" style:family="table-cell"><style:table-cell-properties fo:padding="0.08cm" fo:border-bottom="0.02cm solid #000000"/></style:style>
+  <style:style style:name="FigFrame" style:family="graphic"><style:graphic-properties style:wrap="none" style:vertical-pos="top" style:horizontal-pos="center" fo:border="none"/></style:style>
+ </office:automatic-styles>
+ <office:master-styles>
+  <style:master-page style:name="Standard" style:page-layout-name="pm1">
+   <style:header><text:p text:style-name="Running">Example Journal of Layout Studies, volume 0 (example.org)</text:p></style:header>
+   <style:footer><text:p text:style-name="Running">Page <text:page-number text:select-page="current">1</text:page-number> of the example paper</text:p></style:footer>
+  </style:master-page>
+ </office:master-styles>
+ <office:body><office:text>
+  <text:p text:style-name="Title">An Example Paper About Example Things</text:p>
+  <text:p text:style-name="Authors">Ada Example, Example University, ada@example.org — Ben Sample, Sample Institute, ben@sample.example</text:p>
+  <text:section text:style-name="TwoCol" text:name="Body">
+   <text:p text:style-name="H1">Abstract</text:p>
+   <text:p>This example paper exists to give a layout model something to look at. It has two columns, section headings, lists, a table, a drawn figure, a formula and a piece of code, and nothing in it means anything. Every name in it is an example name and every number is made up for the page.</text:p>
+   <text:p text:style-name="H1">1 Introduction</text:p>
+   <text:p>Example documents are written so that tests can read them. The first paragraph of this section talks about the weather in Example City, which is always mild, and about the example river that runs through it from the north to the south without ever changing its width.</text:p>
+   <text:p>The second paragraph lists what the example reader should look for in the pages that follow:</text:p>
+   <text:list text:style-name="Bullets">
+    <text:list-item><text:p>a first example item about apples and their colours;</text:p></text:list-item>
+    <text:list-item><text:p>a second example item that is long enough to wrap onto a second line of the narrow column;</text:p></text:list-item>
+    <text:list-item><text:p>a third example item about pears.</text:p></text:list-item>
+   </text:list>
+   <text:p text:style-name="H1">2 Example Method</text:p>
+   <text:p>The example method has three steps, each of which is made up:</text:p>
+   <text:list text:style-name="Numbers">
+    <text:list-item><text:p>Collect example values from the example table.</text:p></text:list-item>
+    <text:list-item><text:p>Add them up with the example formula.</text:p></text:list-item>
+    <text:list-item><text:p>Print the sum with the example program.</text:p></text:list-item>
+   </text:list>
+   <text:p>The sum of the example values is given by the following formula, which is as simple as a formula can be:</text:p>
+   <text:p text:style-name="Formula">s = a + b + c    (1)</text:p>
+   <text:p>The example program below prints that sum. It is written in no language in particular and would not run anywhere:</text:p>
+   <text:p text:style-name="Code">fn example_sum(a, b, c) {</text:p>
+   <text:p text:style-name="Code"><text:s text:c="4"/>let s = a + b + c;</text:p>
+   <text:p text:style-name="Code"><text:s text:c="4"/>print("sum", s);</text:p>
+   <text:p text:style-name="Code">}</text:p>
+   <text:p text:style-name="H1">3 Example Results</text:p>
+   <text:p>Table 1 lists the example values. They were chosen so that no two of them are the same and so that a reader can tell the columns apart at a glance.</text:p>
+   <text:p text:style-name="Caption">Table 1: Example values by example fruit.</text:p>
+   <table:table table:name="Values" table:style-name="Tbl">
+    <table:table-column table:style-name="TblCol" table:number-columns-repeated="3"/>
+    <table:table-row><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Fruit</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Count</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Weight</text:p></table:table-cell></table:table-row>
+    <table:table-row><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Apple</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">12</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">1.5 kg</text:p></table:table-cell></table:table-row>
+    <table:table-row><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Pear</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">7</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">0.9 kg</text:p></table:table-cell></table:table-row>
+    <table:table-row><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Plum</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">31</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">1.1 kg</text:p></table:table-cell></table:table-row>
+    <table:table-row><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">Cherry</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">58</text:p></table:table-cell><table:table-cell table:style-name="TblCell"><text:p text:style-name="Cell">0.4 kg</text:p></table:table-cell></table:table-row>
+   </table:table>
+   <text:p>Figure 1 shows the same example values as bars. The bars are drawn, not photographed, so no image is stored in the file for them.</text:p>
+   <text:p text:style-name="Authors"><draw:g text:anchor-type="as-char" draw:z-index="1">
+      <draw:rect draw:style-name="Shape" svg:x="0cm" svg:y="0cm" svg:width="7.2cm" svg:height="4.4cm"/>
+      <draw:line draw:style-name="Axis" svg:x1="0.8cm" svg:y1="3.6cm" svg:x2="6.8cm" svg:y2="3.6cm"/>
+      <draw:line draw:style-name="Axis" svg:x1="0.8cm" svg:y1="0.4cm" svg:x2="0.8cm" svg:y2="3.6cm"/>
+      <draw:rect draw:style-name="Bar" svg:x="1.2cm" svg:y="2.9cm" svg:width="0.9cm" svg:height="0.7cm"/>
+      <draw:rect draw:style-name="Bar" svg:x="2.6cm" svg:y="3.2cm" svg:width="0.9cm" svg:height="0.4cm"/>
+      <draw:rect draw:style-name="Bar" svg:x="4.0cm" svg:y="1.8cm" svg:width="0.9cm" svg:height="1.8cm"/>
+      <draw:rect draw:style-name="Bar" svg:x="5.4cm" svg:y="0.6cm" svg:width="0.9cm" svg:height="3.0cm"/>
+      <draw:custom-shape draw:style-name="Label" svg:x="1.0cm" svg:y="3.7cm" svg:width="1.3cm" svg:height="0.5cm"><text:p text:style-name="Running">Apple</text:p><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape>
+      <draw:custom-shape draw:style-name="Label" svg:x="2.4cm" svg:y="3.7cm" svg:width="1.3cm" svg:height="0.5cm"><text:p text:style-name="Running">Pear</text:p><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape>
+      <draw:custom-shape draw:style-name="Label" svg:x="3.8cm" svg:y="3.7cm" svg:width="1.3cm" svg:height="0.5cm"><text:p text:style-name="Running">Plum</text:p><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape>
+      <draw:custom-shape draw:style-name="Label" svg:x="5.2cm" svg:y="3.7cm" svg:width="1.4cm" svg:height="0.5cm"><text:p text:style-name="Running">Cherry</text:p><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape>
+     </draw:g></text:p>
+   <text:p text:style-name="Caption">Figure 1: Example counts by example fruit, drawn as bars.</text:p>
+   <text:p text:style-name="H1">4 Example Discussion</text:p>
+   <text:p>The example results show that cherries are counted more often than plums in Example City, which surprises nobody who has been there in the example summer. The example authors therefore suggest that the example reader</text:p>
+   <text:p>The discussion goes on for a while so that the text reaches the second page. A long example paragraph follows, and it says the same thing several times in slightly different words, because the only thing that matters about it is its length and the place where the page ends. The example river is still as wide as it was. The example weather is still mild. The example fruit is still counted every example morning by the same example people, who write the example numbers into the same example table and never make an example mistake while they do it, as far as anyone at Example University can tell from the example records.</text:p>
+   <text:p>A second long example paragraph makes sure of it. The example city has an example market on every example day of the example week, and the example fruit is sold there by example weight. Nobody has ever measured the example weight twice and found two different example numbers, which is one more reason to trust the example table above. The paragraph ends on the next page, where its last words are, so that a reader of the converted text can see whether a paragraph that is cut in two by a page break comes out as one paragraph or as two separate ones in the middle of a sentence, which would be the wrong way to read it, and this sentence keeps going for exactly that reason until the page is full and the text has to continue in the next column or on the next page of this example paper, where it says a few more example words about the example market, the example fruit and the example people who count it, before it finally comes to its example end.</text:p>
+   <text:p text:style-name="H1">5 Example Conclusion</text:p>
+   <text:p>Nothing was learned, as planned. The example paper ends here, with a last example paragraph that thanks the example reader for the patience and wishes the layout model a pleasant page.</text:p>
+   <text:p>Example footnotes would go here if the example authors had anything to add, which they do not.</text:p>
+  </text:section>
+ </office:text></office:body>
+</office:document>

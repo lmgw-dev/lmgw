@@ -25,12 +25,13 @@ struct UiDist;
 /// API call with HTML and hide the mistake. Prefixes end in `/` so a sibling
 /// SPA route can't be swallowed (`/mcp-servers` is a page, `/mcp` is the MCP
 /// protocol endpoint and matches its own route anyway).
-const API_PREFIXES: [&str; 9] = [
+const API_PREFIXES: [&str; 10] = [
     "api/",
     "v1/",
     "chat/api/",
     "audio-lab/api/",
     "image-lab/api/",
+    "documents-lab/api/",
     "decision-lab/api/",
     "voice-lab/api/",
     "labs/api/",

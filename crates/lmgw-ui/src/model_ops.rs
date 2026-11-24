@@ -222,6 +222,7 @@ pub fn container_action(
             (_, res) => {
                 let done = match action {
                     "start" => "started",
+                    "apply" => "applied",
                     "restart" => "restarted",
                     "stop" => "stopped",
                     _ => "done",
@@ -460,7 +461,7 @@ fn LogsBody(class: &'static str, model_id: String, open: RwSignal<bool>) -> impl
 }
 
 /// State chip + Logs + Apply for one model — the compact strip the model
-/// editors (local_edit.rs, and the aux/audio forms in model_editors.rs) show
+/// editors (the aux/audio forms in model_editors.rs) show
 /// near their per-model container override fields. `model_id` empty (still
 /// unsaved — create mode) hides the whole row: there is nothing to control
 /// until the model exists.
@@ -503,8 +504,8 @@ pub fn ContainerStatusRow(
                 }
                 let (cls, label) = match state().as_deref() {
                     Some("ready") => ("chip ok", "ready"),
-                    Some("starting") => ("chip live", "starting"),
-                    Some("stopping") => ("chip live", "stopping"),
+                    Some("starting") => ("chip info", "starting"),
+                    Some("stopping") => ("chip info", "stopping"),
                     _ => ("chip off", "stopped"),
                 };
                 view! {

@@ -20,6 +20,10 @@ use super::super::v1::{anthropic, aux_models, chat, mcp, media, models, response
 
 /// `POST /v1/realtime/calls` and its hangup.
 mod calls;
+/// The docling-serve-compatible routes.
+mod docling;
+/// `POST /v1/documents/convert` and its jobs.
+mod documents;
 
 /// A `DocRoute` with every field the inference plane leaves at its default —
 /// `Resp::Untyped` on `response` is never actually served: every route below
@@ -59,6 +63,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
     let mut routes = own();
     // WebRTC calls (realtime calls design §9).
     routes.extend(calls::routes());
+    routes.extend(documents::routes());
+    routes.extend(docling::routes());
     routes
 }
 
@@ -284,7 +290,9 @@ fn own() -> Vec<DocRoute> {
                 thinking: {type: between_tools} and thinking.display go to an Anthropic \
                 upstream as written; elsewhere the off is that provider's own \
                 (x-lmgw-reasoning-ignored: between_tools) and display is named in \
-                x-lmgw-params-ignored. An unknown thinking type is refused with 400.",
+                x-lmgw-params-ignored. An unknown thinking type is refused with 400. An \
+                Anthropic model's answer, whole or streamed, carries its request-id header, \
+                and its own error also request_id in the body; lmgw makes none of its own yet.",
             request: Req::Json(anthropic::messages_request),
             response: Resp::JsonOrSse {
                 json: anthropic::messages_response,
@@ -830,9 +838,14 @@ fn own() -> Vec<DocRoute> {
         DocRoute {
             description: "Aggregates enabled aliases, public local models and expose-all \
                 upstream catalogs. Served OpenAI-shaped unless the caller sends \
-                anthropic-version, in which case the Anthropic SDK's own shape. This \
-                document names the OpenAI error dialect as default; an Anthropic-dialect \
-                caller gets an Anthropic-shaped error body in practice.",
+                anthropic-version, in which case the Anthropic SDK's own shape, paged as \
+                Anthropic's list is: limit (1 to 1000, default 20), after_id and before_id \
+                (not together; an id outside the list is a 400), the answer carrying \
+                has_more, first_id and last_id. The OpenAI shape ignores the three \
+                parameters and lists everything. This document names the OpenAI error \
+                dialect as default; an Anthropic-dialect caller gets an Anthropic-shaped \
+                error body in practice.",
+            query: Some(|g| g.root_schema_for::<crate::server::ModelsPageQuery>()),
             response: Resp::Json(models::model_list),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI, endpoint_group::ANTHROPIC],

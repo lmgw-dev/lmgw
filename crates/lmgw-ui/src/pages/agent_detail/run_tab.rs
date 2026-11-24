@@ -1,16 +1,19 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::use_navigate;
 use lmgw_api_types::{
-    AgentBatchShape, AgentChatOpened, AgentConfigSaved, AgentDecide, AgentDetail, AgentField,
-    AgentRunCancelled, AgentRuntime, AgentWarning,
+    AgentBatchShape, AgentConfigSaved, AgentDecide, AgentDetail, AgentField, AgentRunCancelled,
+    AgentRuntime, AgentWarning,
 };
 use serde_json::{json, Value};
 
 use super::*;
 use crate::pages::agents::short_ts;
+use crate::widgets::nav_split::{track_scroll, SaveKey};
 use crate::widgets::schema_form::{Draft, SchemaForm};
-use crate::widgets::{use_toasts, Explain, Side, SplitPane};
+use crate::widgets::{
+    use_toasts, ActionRow, Explain, Ico, Icon, InfoRow, PrefGroup, SaveToast, Side, SplitPane,
+    StackRow, Switch,
+};
 
 // ---------------------------------------------------------------------------
 // Run
@@ -22,24 +25,24 @@ use crate::widgets::{use_toasts, Explain, Side, SplitPane};
 /// decided in one place.
 #[derive(Clone, Copy)]
 pub(super) struct RunCtx {
-    agent_id: StoredValue<String>,
-    fields: Signal<Vec<AgentField>>,
+    pub(super) agent_id: StoredValue<String>,
+    pub(super) fields: Signal<Vec<AgentField>>,
     /// The config form, sent with every start: a run uses the values as they
     /// stand at the click, the same way a thread does.
-    draft: Draft,
+    pub(super) draft: Draft,
     pub(super) run: RunState,
-    toasts: crate::widgets::Toasts,
+    pub(super) toasts: crate::widgets::Toasts,
     /// What this manifest can actually do, from the server: a button for a
     /// stage the agent does not declare would be a button that fails. The
     /// shape a *run* came back with lives in `run.shape` and is what the table
     /// is drawn from, so reopening an old run cannot be confused by an edit to
     /// the manifest since.
-    pub(super) shape: StoredValue<AgentBatchShape>,
+    pub(super) shape: Memo<AgentBatchShape>,
     /// What a `container` agent runs under. `None` for a `batch` agent.
-    pub(super) runtime: StoredValue<Option<AgentRuntime>>,
-    pub(super) budget: StoredValue<lmgw_api_types::AgentBudget>,
+    pub(super) runtime: Memo<Option<AgentRuntime>>,
+    pub(super) budget: Memo<lmgw_api_types::AgentBudget>,
     /// The gateway's display currency, for the run's cost line.
-    pub(super) currency: StoredValue<String>,
+    pub(super) currency: Memo<String>,
     /// Why nothing may start right now — the agent is off, its tools do not
     /// resolve, a warning blocks it (§4.3), or the form is missing a required
     /// value — or `None`. Reactive, because the form half of it is.
@@ -49,48 +52,60 @@ pub(super) struct RunCtx {
     /// set with neither the model nor a set in the form (labs-store design
     /// §4). List only needs neither.
     pub(super) classify_blocked_by: Signal<Option<String>>,
-    /// The config form's own problem: a number that does not parse, a save
-    /// the server refused (it names the field; the form is where to say it).
-    problem: RwSignal<Option<String>>,
+    /// The config form's own problem: a number that does not parse (the form
+    /// is where to say it).
+    pub(super) problem: RwSignal<Option<String>>,
+    /// A save the server refused (it names the field): the save toast says it.
+    save_error: RwSignal<Option<String>>,
     saving: RwSignal<bool>,
 }
 
 impl RunCtx {
-    fn new(d: &AgentDetail, draft: Draft, run: RunState) -> Self {
-        let fields = StoredValue::new(d.fields.clone());
-        let fields: Signal<Vec<AgentField>> = Signal::derive(move || fields.get_value());
+    /// Made once per agent, from the agent as last read: each part follows
+    /// it on its own, so a re-read (a run that ended, a save) moves what it
+    /// changed and leaves the rest — the form's rows above all — as it is.
+    pub(super) fn new(d: Memo<AgentDetail>, draft: Draft, run: RunState) -> Self {
+        let fields = Memo::new(move |_| d.with(|d| d.fields.clone()));
+        let fields: Signal<Vec<AgentField>> = fields.into();
         // Tracked, so filling the field in un-blocks the buttons as you type
         // rather than at the next save.
         let gap = Signal::derive(move || config_gap(&unfilled_required(&fields.get(), draft)));
-        let decide = StoredValue::new(d.batch.as_ref().and_then(|b| b.decide.clone()));
+        let shape = Memo::new(move |_| d.with(|d| d.batch.clone().unwrap_or_default()));
         let classify_gap = Signal::derive(move || {
-            decide.with_value(|d| {
-                d.as_ref()
+            shape.with(|s| {
+                s.decide
+                    .as_ref()
                     .and_then(|d| unfilled_model_and_set(&fields.get(), draft, d))
             })
         });
-        let enabled = d.enabled;
-        let requires_ok = d.requires_ok;
-        let chat = d.kind == "chat";
-        // §4.3's warnings: `blocks_start` is what turns one of these into a
-        // disabled button rather than a line of text.
-        let blocking = StoredValue::new(
-            d.warnings
-                .iter()
-                .find(|w| w.blocks_start)
-                .map(|w| w.message.clone()),
-        );
+        // What may stop a start, apart from the form: the switch, the tools,
+        // and §4.3's warnings, where `blocks_start` is what turns one of them
+        // into a disabled button rather than a line of text.
+        let gate = Memo::new(move |_| {
+            d.with(|d| {
+                (
+                    d.enabled,
+                    d.requires_ok,
+                    d.kind == "chat",
+                    d.warnings
+                        .iter()
+                        .find(|w| w.blocks_start)
+                        .map(|w| w.message.clone()),
+                )
+            })
+        });
         let blocked_by = Signal::derive(move || {
+            let (enabled, requires_ok, chat, blocking) = gate.get();
             if !enabled {
-                Some("this agent is disabled".to_string())
+                Some("This agent is disabled".to_string())
             } else if chat {
                 // A thread with a missing tool server still opens and says
                 // so; only an unfilled form stops it (`agent_open_chat`
                 // refuses one, naming the field).
                 gap.get()
             } else if !requires_ok {
-                Some("this agent's tools do not resolve on this gateway".to_string())
-            } else if let Some(w) = blocking.get_value() {
+                Some("This agent's tools do not resolve on this gateway".to_string())
+            } else if let Some(w) = blocking {
                 Some(w)
             } else {
                 gap.get()
@@ -99,18 +114,19 @@ impl RunCtx {
         let classify_blocked_by =
             Signal::derive(move || blocked_by.get().or_else(|| classify_gap.get()));
         Self {
-            agent_id: StoredValue::new(d.id.clone()),
+            agent_id: StoredValue::new(d.with_untracked(|d| d.id.clone())),
             fields,
             draft,
             run,
             toasts: use_toasts(),
-            shape: StoredValue::new(d.batch.clone().unwrap_or_default()),
-            runtime: StoredValue::new(d.runtime.clone()),
-            budget: StoredValue::new(d.budget.clone()),
-            currency: StoredValue::new(d.currency.clone()),
+            shape,
+            runtime: Memo::new(move |_| d.with(|d| d.runtime.clone())),
+            budget: Memo::new(move |_| d.with(|d| d.budget.clone())),
+            currency: Memo::new(move |_| d.with(|d| d.currency.clone())),
             blocked_by,
             classify_blocked_by,
             problem: RwSignal::new(None),
+            save_error: RwSignal::new(None),
             saving: RwSignal::new(false),
         }
     }
@@ -137,7 +153,7 @@ impl RunCtx {
         }
     }
 
-    fn start(&self, phase: &'static str) {
+    pub(super) fn start(&self, phase: &'static str) {
         let Some(values) = self.form_values() else {
             return;
         };
@@ -218,10 +234,17 @@ impl RunCtx {
         // Ticked "clear" boxes travel as their own list: an empty control means
         // "keep the stored secret", so forgetting one has to be said out loud.
         let clear = self.draft.clear_list(&fields);
-        let (problem, saving, toasts, draft) = (self.problem, self.saving, self.toasts, self.draft);
+        let (problem, save_error, saving, toasts, draft) = (
+            self.problem,
+            self.save_error,
+            self.saving,
+            self.toasts,
+            self.draft,
+        );
         let sent = draft.snapshot();
         let id = self.agent_id.get_value();
         problem.set(None);
+        save_error.set(None);
         saving.set(true);
         spawn_local(async move {
             let res = crate::api::post::<AgentConfigSaved, _>(
@@ -240,123 +263,204 @@ impl RunCtx {
                     reload.try_run(());
                 }
                 // The server validates against the schema and names the field;
-                // showing it at the form beats a toast that scrolls away.
-                Err(e) => problem.set(Some(e.to_string())),
+                // the save toast keeps it until the next save.
+                Err(e) => save_error.set(Some(e.to_string())),
             }
         });
     }
 }
 
-/// The Run tab. With no run on screen it is the config form beside the run
-/// column — Start, what the start will mount, what stands in its way, the
-/// runtime folded to a line — which stays in view while the form scrolls.
-/// With a run open (live, just finished, or reopened from Runs) the review
-/// takes the page: the config and the run column fold into a panel on the
-/// right, and the table, its filters and Apply fill the rest.
+/// The Run tab. With no run on screen it is the agent's overview as a
+/// preferences page ([`RunSetup`]); with a run open (live, just finished, or
+/// reopened from Runs) the review takes the body: the run group and the
+/// config fold into a panel on the right, and the table, its filters and
+/// Apply fill the rest. The config's save toast and Ctrl+S are there in both.
 #[component]
 pub(super) fn RunTab(
-    d: AgentDetail,
-    draft: Draft,
+    /// The agent as last read; the tab is made once per agent and its
+    /// groups follow it.
+    d: Memo<AgentDetail>,
+    ctx: RunCtx,
     reload: Callback<()>,
-    run: RunState,
     runs: RunList,
+    acts: AgentActs,
+    scrolled: RwSignal<bool>,
 ) -> impl IntoView {
-    let ctx = RunCtx::new(&d, draft, run);
-    let batchy = d.kind != "chat";
+    let run = ctx.run;
+    let batchy = d.with_untracked(|d| d.kind != "chat");
     let reviewing = Memo::new(move |_| batchy && run.summary.with(Option::is_some));
-    let d = StoredValue::new(d);
+    let draft = ctx.draft;
+    let unsaved = Memo::new(move |_| draft.changed().len());
+    // Like the Definition tab's: a form with nothing changed is not sent, or
+    // the schema's defaults it shows would be stored as chosen values.
+    SaveKey::install(Callback::new(move |()| {
+        if unsaved.get_untracked() > 0 {
+            ctx.save_config(reload);
+        }
+    }));
+    // The review is drawn from the shape the manifest declares: a manifest
+    // saved with another one rebuilds it.
+    let review = move || {
+        ctx.shape.track();
+        view! { <ReviewPane ctx=ctx/> }
+    };
     view! {
         <Show
             when=move || reviewing.get()
-            fallback=move || view! { <RunSetup d=d.get_value() ctx=ctx reload=reload runs=runs/> }
-        >
-            <SplitPane
-                side=Side::Right
-                persist="agents.review"
-                label="Config & run"
-                default_open=false
-                width=(300, 30, 420)
-                auto_collapse_below=640
-                class="review-dock"
-                side_view=move || {
-                    view! {
-                        <div class="run-side-panel">
-                            <RunColumn d=d.get_value() ctx=ctx reload=reload runs=runs/>
-                            <ConfigCard ctx=ctx reload=reload/>
-                        </div>
-                    }
+            fallback=move || {
+                view! {
+                    <RunSetup d=d ctx=ctx reload=reload runs=runs acts=acts scrolled=scrolled/>
                 }
-            >
-                <ReviewPane ctx=ctx/>
-            </SplitPane>
+            }
+        >
+            <div class="adetail-body">
+                <SplitPane
+                    side=Side::Right
+                    persist="agents.review"
+                    label="Config & run"
+                    default_open=false
+                    width=(300, 30, 420)
+                    auto_collapse_below=640
+                    class="review-dock"
+                    side_view=move || {
+                        view! {
+                            <div class="run-side-panel">
+                                {run_group(d, ctx, runs)}
+                                <ConfigGroup ctx=ctx/>
+                            </div>
+                        }
+                    }
+                >
+                    {review}
+                </SplitPane>
+            </div>
         </Show>
+        <SaveToast
+            dirty_count=Signal::derive(move || unsaved.get())
+            saving=ctx.saving
+            error=ctx.save_error
+            on_save=Callback::new(move |()| ctx.save_config(reload))
+            on_discard=Callback::new(move |()| {
+                ctx.save_error.set(None);
+                draft.discard();
+            })
+            save_label="Save config"
+        />
     }
 }
 
+/// The run group, rebuilt only when what it shows of the agent changes (its
+/// kind, its threads, what the manifest can classify), not on every re-read.
+fn run_group(d: Memo<AgentDetail>, ctx: RunCtx, runs: RunList) -> impl IntoView {
+    let key = Memo::new(move |_| {
+        let has_classify = ctx.shape.with(|s| s.has_classify);
+        d.with(|d| (d.id.clone(), d.kind.clone(), d.threads, has_classify))
+    });
+    move || {
+        key.track();
+        view! { <RunGroup d=d.get_untracked() ctx=ctx runs=runs/> }
+    }
+}
+
+/// No run on screen: the hero, what stands in the way of a run, the run
+/// kind's group, the config form as rows, the runtime and the package, the
+/// agent's own switch and the Delete row, in two columns over 1000 px.
+///
+/// Made once per agent: each group follows the part of the agent it shows,
+/// so a re-read leaves the config form's rows (and the field being typed
+/// in) alone.
 #[component]
-fn RunSetup(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -> impl IntoView {
+fn RunSetup(
+    d: Memo<AgentDetail>,
+    ctx: RunCtx,
+    reload: Callback<()>,
+    runs: RunList,
+    acts: AgentActs,
+    scrolled: RwSignal<bool>,
+) -> impl IntoView {
+    let attention =
+        Memo::new(move |_| d.with(|d| (d.id.clone(), d.requires.clone(), d.warnings.clone())));
+    let package =
+        Memo::new(move |_| d.with(|d| (d.id.clone(), d.runtime.clone(), d.provenance.clone())));
+    let agent = Memo::new(move |_| {
+        d.with(|d| {
+            (
+                d.id.clone(),
+                d.enabled,
+                d.source.clone(),
+                d.version.clone(),
+                d.updated_at.clone(),
+                d.token.scope_note.clone(),
+            )
+        })
+    });
     view! {
-        <div class="fill-pane run-setup">
-            <div class="run-grid">
-                <div class="run-main">
-                    <ConfigCard ctx=ctx reload=reload/>
-                </div>
-                <aside class="run-side">
-                    <RunColumn d=d ctx=ctx reload=reload runs=runs/>
-                </aside>
+        <div
+            class="detail-scroll mdetail-scroll run-setup"
+            tabindex="-1"
+            on:scroll=move |ev| track_scroll(&ev, scrolled)
+        >
+            <div class="detail-flow">
+                <Hero d=d run=ctx.run/>
+                {move || {
+                    attention.track();
+                    view! { <Attention d=d.get_untracked()/> }
+                }}
+                {run_group(d, ctx, runs)}
+                <ConfigGroup ctx=ctx/>
+                // Whatever the run kind is: the image and its limits belong
+                // to a container agent, but the *package* half belongs to any
+                // row installed from an image — a `chat` agent can arrive that
+                // way too, and would otherwise have nowhere to show where it
+                // came from.
+                {move || {
+                    let (id, runtime, provenance) = package.get();
+                    view! {
+                        <RuntimeBlock id=id runtime=runtime provenance=provenance reload=reload/>
+                    }
+                }}
+                {move || {
+                    agent.track();
+                    view! { <AgentGroup d=d.get_untracked() acts=acts reload=reload/> }
+                }}
+                <PrefGroup>
+                    <ActionRow
+                        title="Delete agent…"
+                        sub="Removes it from the catalog; its chat threads are kept"
+                        danger=true
+                        on_click=Callback::new(move |()| acts.del_open.set(true))
+                    />
+                </PrefGroup>
             </div>
         </div>
     }
 }
 
+/// The config form (§2.6) as a boxed group of rows.
 #[component]
-fn ConfigCard(ctx: RunCtx, reload: Callback<()>) -> impl IntoView {
-    let n = ctx.fields.with_untracked(Vec::len);
-    let saving = ctx.saving;
+fn ConfigGroup(ctx: RunCtx) -> impl IntoView {
     let problem = ctx.problem;
-    let draft = ctx.draft;
-    let unsaved = Memo::new(move |_| draft.changed().len());
+    let decide = Memo::new(move |_| ctx.shape.with(|s| s.decide.clone()));
     view! {
-        <section class="card config-card">
-            <div class="card-head">
-                <span class="mini-head">"Config"</span>
-                <span class="count">{n}</span>
-                <span class="spacer"></span>
-                <Show when=move || unsaved.get() != 0>
-                    <span
-                        class="count attn"
-                        title="Fields that differ from the saved config; a start uses them as they are"
-                    >
-                        {move || format!("{} unsaved", unsaved.get())}
-                    </span>
-                    <button
-                        class="link-btn"
-                        title="Put the saved values back in the form"
-                        on:click=move |_| draft.discard()
-                    >
-                        "Discard"
-                    </button>
-                </Show>
-                <button
-                    class="btn sm"
-                    title="Keep these values as what the next start opens with"
-                    disabled=move || saving.get()
-                    on:click=move |_| ctx.save_config(reload)
-                >
-                    {move || if saving.get() { "Saving…" } else { "Save config" }}
-                </button>
+        <section class="pref-group config-group">
+            <div class="pref-head">
+                <h2>"Config"</h2>
+                <span class="count">{move || ctx.fields.with(Vec::len)}</span>
             </div>
-            <SchemaForm
-                fields=ctx.fields
-                draft=ctx.draft
-                decide=ctx.shape.with_value(|s| s.decide.clone())
-            />
-            {move || problem.get().map(|p| view! { <div class="notice err">{p}</div> })}
             // Said out loud, because the two are deliberately different acts
             // and nothing else on the page would tell you.
-            <p class="dim mini-note">
+            <p class="pref-desc">
                 "A start uses the form as it stands; Save config sets what the next one opens with."
             </p>
+            <div class="boxed">
+                // Rebuilt only for another question-set output: the rows
+                // follow the fields themselves.
+                {move || {
+                    let decide = decide.get();
+                    view! { <SchemaForm fields=ctx.fields draft=ctx.draft decide=decide/> }
+                }}
+                {move || problem.get().map(|p| view! { <div class="prow problem-row">{p}</div> })}
+            </div>
         </section>
     }
 }
@@ -366,75 +470,150 @@ pub(super) fn status_chip(status: &str) -> &'static str {
     match status {
         "done" => "chip ok",
         "failed" => "chip err",
-        "running" | "queued" => "chip live",
+        "running" | "queued" => "chip info",
         _ => "chip off",
     }
 }
 
-/// The run column: the start, what it will mount, what stands in its way,
-/// and the runtime folded to one line.
+/// What a run of this kind is and does, as the run group's heading, its
+/// sentence and the fold under it.
+fn run_words(kind: &str) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        "chat" => (
+            "Chat",
+            "Opening creates an ordinary Chat thread seeded from this manifest.",
+            "The model in Config, the system prompt and the tools the agent attaches go with \
+             it. It then behaves like any other thread, and lists under Threads here.",
+        ),
+        "container" => (
+            "Container run",
+            "A run starts the agent's image and writes nothing: the review is the gate.",
+            "The image reports rows on stdout. Check the rows you want, fix what needs fixing, \
+             then apply, which runs the same image again with LMGW_PHASE=apply.",
+        ),
+        _ => (
+            "Batch run",
+            "A run lists, fetches and classifies, and writes nothing: the review is the gate.",
+            "Check the rows you want, fix what the model got wrong, then apply.",
+        ),
+    }
+}
+
+/// The run kind's group: what stands in the way of a start, the last run
+/// (one click from its review) or the threads, and what a start mounts. The
+/// start buttons are the header's ([`RunActions`]).
 #[component]
-fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -> impl IntoView {
+fn RunGroup(d: AgentDetail, ctx: RunCtx, runs: RunList) -> impl IntoView {
     let run = ctx.run;
-    let toasts = ctx.toasts;
     let is_chat = d.kind == "chat";
-    let is_container = d.kind == "container";
-    let has_classify = ctx.shape.with_value(|s| s.has_classify);
-    // `StoredValue`, not a local clone: these handlers live inside `<Show>`
-    // children, which are re-rendered, so a handler that moved a cloned
-    // navigator out of its environment would be `FnOnce` and take the child
-    // tree's `Fn` bound with it.
-    let navigate = StoredValue::new(use_navigate());
-    let busy = RwSignal::new(false);
-    let live = Signal::derive(move || run.summary.with(|s| s.as_ref().is_some_and(is_live)));
-    let off = Signal::derive(move || ctx.blocked() || run.busy.get() || live.get());
-    let classify_off =
-        Signal::derive(move || ctx.classify_blocked() || run.busy.get() || live.get());
-    let why = move || ctx.blocked_by.get().unwrap_or_default();
-    let classify_why = move || ctx.classify_blocked_by.get().unwrap_or_default();
-
-    let open_chat = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        // The form as it stands, not what is stored: selecting a model and
-        // opening a thread with it is one gesture, and the thread is seeded
-        // from what the person is looking at. Save config is a separate act
-        // that sets the defaults this falls back to.
-        let values = match ctx.draft.patch(&ctx.fields.get_untracked()) {
-            Ok(p) => p,
-            Err(e) => {
-                ctx.problem.set(Some(e));
-                return;
-            }
-        };
-        ctx.problem.set(None);
-        busy.set(true);
-        let id = ctx.agent_id.get_value();
-        spawn_local(async move {
-            let res = crate::api::post::<AgentChatOpened, _>(
-                "/api/op/agent_open_chat",
-                &json!({ "id": id, "values": values }),
-            )
-            .await;
-            busy.set(false);
-            match res {
-                Ok(v) => {
-                    for w in v.warnings {
-                        // Amber, not red: the thread was created. A warning
-                        // here is "it opened, and here is what is off about
-                        // it" — an unserved alias, a missing MCP server.
-                        toasts.warn(w);
+    let has_classify = ctx.shape.with_untracked(|s| s.has_classify);
+    let (head, summary, body) = run_words(&d.kind);
+    let threads = d.threads;
+    let runs_href = tab_href(&d.id, "runs");
+    // The last run, one click from its review — only while none is on screen.
+    let last = Signal::derive(move || {
+        runs.with(|r| {
+            r.as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|l| l.first().cloned())
+        })
+    });
+    let loaded = Signal::derive(move || runs.with(|r| r.as_ref().is_some_and(Result::is_ok)));
+    let show_last =
+        move || !is_chat && run.summary.with(Option::is_none) && last.with(Option::is_some);
+    let never = move || !is_chat && loaded.get() && last.with(Option::is_none);
+    view! {
+        <section class="pref-group run-group">
+            <div class="pref-head">
+                <h2>{head}</h2>
+            </div>
+            <Explain summary=summary persist="agents.explain.run">
+                {body}
+            </Explain>
+            <div class="boxed">
+                // Named, because the form is right there: most of these are a
+                // two-second fix, not a fault. A batch agent that classifies
+                // says what keeps its classify off too, which is everything
+                // that keeps List off and more.
+                {move || {
+                    let why = if has_classify {
+                        ctx.classify_blocked_by.get()
+                    } else {
+                        ctx.blocked_by.get()
+                    };
+                    match why {
+                        Some(w) => view! { <div class="prow notice-row warn run-why">{w}</div> }.into_any(),
+                        None => view! {
+                            <div class="prow notice-row run-ready">
+                                "Ready: the header's buttons start it with the form as it stands."
+                            </div>
+                        }
+                        .into_any(),
                     }
-                    if let Some(go) = navigate.try_get_value() {
-                        go(&v.url, Default::default());
-                    }
-                }
-                Err(e) => toasts.err(e.to_string()),
-            }
-        });
-    };
+                }}
+                {is_chat
+                    .then(|| {
+                        view! {
+                            <a class="prow action" href=runs_href.clone()>
+                                <div class="prow-text">
+                                    <span class="prow-title">"Threads"</span>
+                                    <span class="prow-sub">"Opened from this agent, on the Threads tab"</span>
+                                </div>
+                                <span class="prow-value">{threads}</span>
+                                <Icon ico=Ico::Right class="prow-chevron"/>
+                            </a>
+                        }
+                    })}
+                <Show when=show_last>
+                    {move || {
+                        last.get()
+                            .map(|r| {
+                                let job_id = r.job_id;
+                                let when = short_ts(r.finished_at.as_deref().unwrap_or(&r.created_at));
+                                view! {
+                                    <div class="prow run-last">
+                                        <div class="prow-text">
+                                            <span class="prow-title">"Last run"</span>
+                                            <span class="prow-sub mono-sm">
+                                                {format!("#{job_id} · {} · {when}", r.phase)}
+                                            </span>
+                                        </div>
+                                        <div class="prow-end">
+                                            <span class=status_chip(&r.status)>
+                                                <span class="dot"></span>
+                                                {r.status.clone()}
+                                            </span>
+                                            <button
+                                                class="btn flat sm link-btn"
+                                                title="show this run's rows here"
+                                                on:click=move |_| {
+                                                    run.load(job_id);
+                                                    run.pinned.set(Some(job_id));
+                                                }
+                                            >
+                                                "Open"
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
+                            })
+                    }}
+                </Show>
+                <Show when=never>
+                    <div class="prow notice-row">"Never run yet."</div>
+                </Show>
+                {(!is_chat).then(|| view! { <MountSummary fields=ctx.fields draft=ctx.draft/> })}
+            </div>
+        </section>
+    }
+}
 
+/// What stands in the way of this agent, before anything else: the tool
+/// gaps (with the way to the MCP page) and §4.3's warnings, a blocking one in
+/// red. A manifest this build cannot read is said over every tab instead
+/// (the page's notice).
+#[component]
+fn Attention(d: AgentDetail) -> impl IntoView {
     let gaps: Vec<String> = d
         .requires
         .iter()
@@ -458,194 +637,115 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
             }
         })
         .collect();
-    let gaps = StoredValue::new(gaps);
-    // §4.3's second warning list, beside the tool gaps and rendered in the same
-    // place.
-    let warnings = StoredValue::new(d.warnings.clone());
+    if gaps.is_empty() && d.warnings.is_empty() {
+        return None;
+    }
     let definition = tab_href(&d.id, "definition");
-
-    // The last run, one click from its review — only while none is on screen.
-    let last = Signal::derive(move || {
-        runs.with(|r| {
-            r.as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(|l| l.first().cloned())
-        })
-    });
-    let show_last =
-        move || !is_chat && run.summary.with(Option::is_none) && last.with(Option::is_some);
-
-    let (head, explain_summary, explain_body) = if is_chat {
-        (
-            "Chat",
-            "Opening creates an ordinary Chat thread seeded from this manifest.",
-            "The model in Config, the system prompt and the tools the agent attaches go with \
-             it. It then behaves like any other thread, and lists under Threads here.",
-        )
-    } else if is_container {
-        (
-            "Container run",
-            "A run starts the agent's image and writes nothing: the review is the gate.",
-            "The image reports rows on stdout. Check the rows you want, fix what needs fixing, \
-             then apply, which runs the same image again with LMGW_PHASE=apply.",
-        )
-    } else {
-        (
-            "Batch run",
-            "A run lists, fetches and classifies, and writes nothing: the review is the gate.",
-            "Check the rows you want, fix what the model got wrong, then apply.",
-        )
-    };
-
-    view! {
-        <section class="card run-card">
-            <div class="card-head">
-                <span class="mini-head">{head}</span>
-            </div>
-            <div class="run-acts">
-                {if is_chat {
+    Some(view! {
+        <PrefGroup title="Needs attention">
+            {gaps
+                .into_iter()
+                .map(|g| {
                     view! {
-                        <button
-                            class="btn primary"
-                            disabled=move || busy.get() || ctx.blocked()
-                            title=why
-                            on:click=open_chat
-                        >
-                            {move || if busy.get() { "Opening…" } else { "Open in Chat" }}
-                        </button>
+                        <div class="prow notice-row warn">
+                            <div class="prow-text">
+                                <b>{g}</b>
+                                <span class="prow-sub">
+                                    "Register it on " <a href="/mcp-servers">"MCP servers"</a>
+                                    "; the agent is installed and waiting."
+                                </span>
+                            </div>
+                        </div>
                     }
-                        .into_any()
-                } else if is_container {
-                    view! {
-                        <button
-                            class="btn primary"
-                            title=why
-                            disabled=move || off.get()
-                            on:click=move |_| ctx.start("run")
-                        >
-                            "Start run"
-                        </button>
-                    }
-                        .into_any()
-                } else {
-                    view! {
-                        <button
-                            class="btn"
-                            title=move || {
-                                if ctx.blocked() {
-                                    why()
-                                } else {
-                                    "source and fetch only — no model call".to_string()
-                                }
-                            }
-                            disabled=move || off.get()
-                            on:click=move |_| ctx.start("list")
-                        >
-                            "List only"
-                        </button>
-                        {has_classify
-                            .then(|| {
-                                view! {
-                                    <button
-                                        class="btn primary"
-                                        title=classify_why
-                                        disabled=move || classify_off.get()
-                                        on:click=move |_| ctx.start("classify")
-                                    >
-                                        "Dry run · classify"
-                                    </button>
-                                }
-                            })}
-                    }
-                        .into_any()
-                }}
-            </div>
-            // Named, because the form is right there: most of these are a
-            // two-second fix, not a fault.
-            // A batch agent that classifies says what keeps its classify off
-            // too, which is everything that keeps List off and more.
-            {move || {
-                let why = if has_classify {
-                    ctx.classify_blocked_by.get()
-                } else {
-                    ctx.blocked_by.get()
-                };
-                why.map(|w| view! { <div class="run-why">{w}</div> })
-            }}
-            {(!is_chat).then(|| view! { <MountSummary fields=ctx.fields draft=ctx.draft/> })}
-            <Show when=show_last>
-                {move || {
-                    last.get()
-                        .map(|r| {
-                            let job_id = r.job_id;
-                            let when = short_ts(r.finished_at.as_deref().unwrap_or(&r.created_at));
-                            view! {
-                                <div class="run-last">
-                                    <span class="dim">"Last run"</span>
-                                    <span class="mono-sm">{format!("#{job_id} · {}", r.phase)}</span>
-                                    <span class=status_chip(&r.status)>
-                                        <span class="dot"></span>
-                                        {r.status.clone()}
-                                    </span>
-                                    <span class="dim mono-sm">{when}</span>
-                                    <button
-                                        class="link-btn"
-                                        title="show this run's rows here"
-                                        on:click=move |_| {
-                                            run.load(job_id);
-                                            run.pinned.set(Some(job_id));
-                                        }
-                                    >
-                                        "Open"
-                                    </button>
-                                </div>
-                            }
-                        })
-                }}
-            </Show>
-            <Explain summary=explain_summary persist="agents.explain.run">
-                {explain_body}
-            </Explain>
-        </section>
-
-        <For each=move || gaps.get_value() key=|g| g.clone() let:g>
-            <div class="notice warn">
-                <b>{g}</b>
-                <span class="detail">
-                    "Register it on " <a href="/mcp-servers">"MCP servers"</a>
-                    "; the agent is installed and waiting."
-                </span>
-            </div>
-        </For>
-
-        <For each=move || warnings.get_value() key=|w: &AgentWarning| w.code.clone() let:w>
-            <div class=if w.blocks_start { "notice err" } else { "notice warn" }>
-                <b>{w.message.clone()}</b>
-                <span class="detail">{w.code.clone()}</span>
-                // §5.1's way out lives on the Definition tab, with the rest of
-                // what replaces the manifest; the notice points there.
-                {(w.code == "builtin_update_available")
-                    .then(|| {
+                })
+                .collect_view()}
+            {d.warnings
+                .iter()
+                .map(|w: &AgentWarning| {
+                    let cls = if w.blocks_start { "prow problem-row" } else { "prow notice-row warn" };
+                    // §5.1's way out lives on the Definition tab, with the rest
+                    // of what replaces the manifest; the row points there.
+                    let reset = (w.code == "builtin_update_available").then(|| {
                         let href = definition.clone();
                         view! {
-                            <span class="detail">
-                                "Reset to shipped is under " <a href=href>"Definition"</a> "."
+                            <span class="prow-sub">
+                                "Reset to shipped is in the header's menu; the shipped text is under "
+                                <a href=href>"Definition"</a> "."
                             </span>
                         }
-                    })}
-            </div>
-        </For>
+                    });
+                    view! {
+                        <div class=cls title=format!("Code: {}", w.code)>
+                            <div class="prow-text">
+                                <b>{w.message.clone()}</b>
+                                {reset}
+                            </div>
+                        </div>
+                    }
+                })
+                .collect_view()}
+        </PrefGroup>
+    })
+}
 
-        // Whatever the run kind is: the image and its limits belong to a
-        // container agent, but the *package* half belongs to any row installed
-        // from an image — a `chat` agent can arrive that way too, and would
-        // otherwise have nowhere to show where it came from.
-        <RuntimeBlock
-            id=d.id.clone()
-            runtime=d.runtime.clone()
-            provenance=d.provenance.clone()
-            reload=reload
-        />
+/// The agent itself: its switch (which applies at once), where it came
+/// from, when it changed, and what its own token may reach.
+#[component]
+fn AgentGroup(d: AgentDetail, acts: AgentActs, reload: Callback<()>) -> impl IntoView {
+    let on = RwSignal::new(d.enabled);
+    let id = StoredValue::new(d.id.clone());
+    Effect::new(move |prev: Option<bool>| {
+        let v = on.get();
+        if prev.is_some_and(|p| p != v) {
+            acts.set_enabled(id.get_value(), v, reload);
+        }
+        v
+    });
+    let source = match d.source.as_str() {
+        "builtin" => "Shipped with lmgw",
+        "imported" => "Imported",
+        "authored" => "Written here",
+        _ => "Unknown",
+    };
+    let version = (!d.version.is_empty()).then(|| format!("v{}", d.version));
+    let scope_models = d.token.scope_models.clone();
+    view! {
+        <PrefGroup title="Agent">
+            <div class="prow action" on:click=move |_| {
+                if !acts.busy.get_untracked() {
+                    on.update(|v| *v = !*v);
+                }
+            }>
+                <div class="prow-text">
+                    <span class="prow-line">
+                        <span class="prow-title">"Enabled"</span>
+                        <span class="prow-tag">"applies now"</span>
+                    </span>
+                    <span class="prow-sub">"A disabled agent stays in the catalog and refuses to run"</span>
+                </div>
+                <Switch value=on label="Enabled" disabled=Signal::derive(move || acts.busy.get())/>
+            </div>
+            <InfoRow title="Source" value=source/>
+            {version.map(|v| view! { <InfoRow title="Version" value=v/> })}
+            <InfoRow title="Updated" value=short_ts(&d.updated_at) mono=true/>
+            // Which models this agent's bearer can reach (par:PAR-7): it
+            // changes with every saved model field.
+            {if scope_models.is_empty() {
+                view! { <InfoRow title="Its token reaches" value="Any model"/> }.into_any()
+            } else {
+                view! {
+                    <StackRow title="Its token reaches">
+                        <div class="chips">
+                            {scope_models
+                                .into_iter()
+                                .map(|m| view! { <span class="chip mono-sm">{m}</span> })
+                                .collect_view()}
+                        </div>
+                    </StackRow>
+                }
+                    .into_any()
+            }}
+        </PrefGroup>
     }
 }
 
@@ -702,7 +802,7 @@ pub(super) fn unfilled_model_and_set(
 /// What Classify says when neither the model nor a question set is in the
 /// form, named as the form shows them.
 pub(super) fn model_or_set_gap(model: &str, set: &str) -> String {
-    format!("set {model} or {set} in Config above — a classify needs one of them")
+    format!("Set {model} or {set} in Config below — a classify needs one of them")
 }
 
 /// What the Start and Open buttons say when they are off, or `None` when the
@@ -715,7 +815,7 @@ pub(super) fn config_gap(unfilled: &[String]) -> Option<String> {
     // Named, because the form is right above: this is a two-second fix, not a
     // fault.
     Some(format!(
-        "set {} in Config above — this agent ships no default for it",
+        "Set {} in Config below — this agent ships no default for it",
         unfilled.join(" and ")
     ))
 }

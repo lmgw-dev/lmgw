@@ -116,6 +116,20 @@ pub fn fmt_bytes_of(done: u64, total: u64) -> String {
     format!("{} of {}", s.figures(d), words(s, t))
 }
 
+/// `b` as a figure of GiB, without the unit, for a field typed in GiB:
+/// from 1 GiB to below 1 TiB the figure [`fmt_bytes`] says ("217", "15.8"),
+/// so a field and a sentence beside it show the same number; below 1 GiB
+/// two decimals ("0.50"), from 1 TiB whole GiB ("1536").
+pub fn gib_figure(b: u64) -> String {
+    let s = said(b);
+    let gib = b as f64 / 1024f64.powi(3);
+    match s.unit {
+        3 => s.figures((b as f64 / s.step()).round() as u64),
+        u if u > 3 => format!("{gib:.0}"),
+        _ => format!("{gib:.2}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +160,18 @@ mod tests {
         // 99.96 KiB is said whole, not "100.0 KiB".
         assert_eq!(fmt_bytes(102_360), "100 KiB");
         assert_eq!(fmt_bytes(99 * KIB), "99.0 KiB");
+    }
+
+    #[test]
+    fn a_gib_field_shows_the_figure_its_sentence_says() {
+        let b = 217 * GIB + GIB / 2 - 1;
+        assert_eq!(fmt_bytes(b), "217 GiB");
+        assert_eq!(gib_figure(b), "217");
+        assert_eq!(fmt_bytes(17_000_000_000), "15.8 GiB");
+        assert_eq!(gib_figure(17_000_000_000), "15.8");
+        assert_eq!(gib_figure(GIB - 30_000), "1.0");
+        assert_eq!(gib_figure(512 * MIB), "0.50");
+        assert_eq!(gib_figure(1536 * GIB), "1536");
     }
 
     #[test]

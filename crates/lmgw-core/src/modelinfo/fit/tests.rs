@@ -70,9 +70,13 @@ fn card(capacity: u64) -> CardNow {
             admission: true,
         },
         hold: false,
+        beside_alone: 64 * MIB,
+        beside_with: 64 * MIB,
         outside: Some(0),
         residents: Vec::new(),
         left_out: Vec::new(),
+        which: None,
+        cards: None,
     }
 }
 
@@ -107,7 +111,14 @@ fn a_shorter_context_fits_and_is_the_plans_number() {
     let n = w.ctx.unwrap();
     let sizer = Sizer::chat(&f, &params);
     assert!(c.card.fits(&sizer.at(n)) && !c.card.fits(&sizer.at(n + 1)));
-    let warning = plan_fit::over_card(&c.card, 131_072, sizer.instead, |x| sizer.at(x)).unwrap();
+    let warning = plan_fit::over_card(
+        &c.card,
+        plan_fit::On::default(),
+        131_072,
+        sizer.instead,
+        |x| sizer.at(x),
+    )
+    .unwrap();
     assert!(
         warning.contains(&format!("largest ctx_size that fits is {n} ")),
         "{warning}"
@@ -177,6 +188,57 @@ fn beside_takes_off_the_outside_use_and_the_residents() {
     );
 }
 
+/// The whole card is the card with lmgw's models unloaded, as admission and
+/// the one-card choice read it (a bug found 2026-11-18): what is free there
+/// for a start and what lmgw's models there hold, beside the engine's cost
+/// and the floor — not the card's total less what other programs hold at
+/// rest, which counted the driver's reserve as room and left the engine's
+/// cost out. The context it lands on is one the cards' own verdict says
+/// has room once lmgw's idle model there unloads.
+#[test]
+fn the_whole_card_is_the_card_with_lmgw_s_models_unloaded() {
+    use crate::vram::place::marks::{CardsNow, StatedCard};
+    use lmgw_api_types::model_find::FreeState;
+    let f = files(summary(1_048_576, 6 * GIB));
+    let params = chat_params(1_048_576);
+    let sizer = Sizer::chat(&f, &params);
+    // 24 GiB: 10 GiB not lmgw's to free now (other programs, the driver's
+    // reserve), 4 GiB of lmgw's idle model, 10 GiB free; the engine's cost
+    // and the floor 1 GiB; at rest other programs held 8 GiB.
+    let holders = [("other", 4 * GIB, true)];
+    let cards = CardsNow::stated(&[StatedCard {
+        index: 0,
+        total: 24 * GIB,
+        free: 10 * GIB,
+        keep: GIB,
+        holders: &holders,
+    }]);
+    let mut c = card(24 * GIB);
+    c.card.budget = false;
+    c.card.headroom = 9 * GIB;
+    c.outside = Some(10 * GIB);
+    c.residents = vec![CardResident {
+        class: "chat".into(),
+        model: "other".into(),
+        bytes: 4 * GIB,
+    }];
+    c.beside_alone = GIB;
+    c.beside_with = 2 * GIB;
+    c.cards = Some(std::sync::Arc::new(cards));
+    let w = fit(&f, &sizer, Some(&c), FitMeasure::WholeCard);
+    assert_eq!(w.mark, FitMark::FitsShorter, "{w:?}");
+    assert_eq!(
+        (w.capacity_bytes, w.headroom_bytes),
+        (14 * GIB, GIB),
+        "{w:?}"
+    );
+    assert!(w.uses_bytes + GIB <= 14 * GIB, "{w:?}");
+    // The cards at that context: room once lmgw's idle model unloads.
+    let judged = w.cards.as_ref().expect("the cards");
+    assert_eq!(judged.ctx, w.ctx, "{judged:?}");
+    assert_eq!(judged.free.state, FreeState::AfterUnloading, "{judged:?}");
+}
+
 /// The hold changes no mark (D10); it adds the line saying where to resume.
 #[test]
 fn the_hold_adds_its_line_and_changes_no_mark() {
@@ -188,7 +250,7 @@ fn the_hold_adds_its_line_and_changes_no_mark() {
     let h = whole(&f, &params, &held);
     assert_eq!((h.mark, h.ctx), (free.mark, free.ctx));
     assert!(h.notes.iter().any(|n| n == HOLD_LINE), "{:?}", h.notes);
-    assert!(HOLD_LINE.contains("HOLD button") && HOLD_LINE.contains("tray menu"));
+    assert!(HOLD_LINE.contains("On hold pill") && HOLD_LINE.contains("tray menu"));
     assert!(!free.notes.iter().any(|n| n == HOLD_LINE));
 }
 
@@ -300,7 +362,14 @@ fn an_aux_fit_moves_its_ubatch_and_batch_with_the_context() {
     let n = w.ctx.unwrap();
     // The tie held in the search: at n with a ubatch of n it fits, and the
     // plan's own warning names the same n.
-    let warning = plan_fit::over_card(&c.card, 32_768, sizer.instead, |x| sizer.at(x)).unwrap();
+    let warning = plan_fit::over_card(
+        &c.card,
+        plan_fit::On::default(),
+        32_768,
+        sizer.instead,
+        |x| sizer.at(x),
+    )
+    .unwrap();
     assert!(warning.contains(&format!("fits is {n} ")), "{warning}");
     let fitted = fitted_params(&params, &w).unwrap();
     assert_eq!(fitted["ctx_size"], n);

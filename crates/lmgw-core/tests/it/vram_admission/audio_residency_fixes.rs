@@ -230,7 +230,9 @@ async fn an_unloaded_model_s_reload_is_pending_while_it_runs() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     let a = audio_resident(&vram_status(&f.gateway).await);
-    assert_eq!(a["pending_bytes"], 2 * GIB, "{a}");
+    // The load and its margin until the residency is learned (WP13: the
+    // margin in every mode).
+    assert_eq!(a["pending_bytes"], 2 * GIB + 2 * GIB, "{a}");
     assert!(note(&a).contains("Unloaded after idling 200 ms"), "{a}");
 
     let claim = acquire_model(&f, Class::Audio, "tts").await;
@@ -238,7 +240,7 @@ async fn an_unloaded_model_s_reload_is_pending_while_it_runs() {
     assert_eq!(a["in_flight"], 1);
     assert_eq!(
         a["pending_bytes"],
-        2 * GIB,
+        2 * GIB + 2 * GIB,
         "a request in flight on an unloaded model is a reload, still pending: {a}"
     );
     drop(claim);

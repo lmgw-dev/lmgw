@@ -257,6 +257,37 @@ else
   python3 scripts/compat_live_test.py
 fi
 
+# scripts/multi-card-measure.py is WP0 of the device-ledger design, run by hand against a live
+# lmgw on a machine with several cards; its parsing, plans and free-memory checks, and its
+# clean-up against a fake lmgw, are tested here (no network, no lmgw, no GPU).
+if $changed && [[ "$RUN_CARDS" == 0 ]]; then
+  echo "==> multi-card measurement check skipped (see the selection above)"
+else
+  stage "multi-card measurement check (scripts/multi_card_measure_test.py)"
+  python3 scripts/multi_card_measure_test.py
+fi
+
+# scripts/convert-compare.py is WP0b of the document-conversion design, run by hand, where the documents are,
+# against a docling-serve and an lmgw; its privacy guard (whitelist, scan, what it prints), its
+# report and its resume are tested here against two mock servers on loopback (no network, no
+# lmgw, no docling-serve).
+if $changed && [[ "$RUN_CONVERT_COMPARE" == 0 ]]; then
+  echo "==> comparison script check skipped (see the selection above)"
+else
+  stage "comparison script check (scripts/convert_compare_test.py)"
+  python3 scripts/convert_compare_test.py
+fi
+
+# scripts/window-frame.py draws the README screenshots' window frame the way the shell's does; its
+# test compares the shadow, the radius and the scale it copies with the shell's sources and frames a
+# made-up shot (no browser, no lmgw).
+if $changed && [[ "$RUN_FRAME" == 0 ]]; then
+  echo "==> window frame check skipped (see the selection above)"
+else
+  stage "window frame check (scripts/window_frame_test.py)"
+  python3 scripts/window_frame_test.py
+fi
+
 # ci/rpm_guard.py stands between the bundle and what root installs (ci/build.sh runs it on
 # every RPM). Its test builds sample RPMs with rpmbuild under target/ (no root, no network;
 # skipped, visibly, without rpm-build) and checks ci/rpm-allowlist.toml against what
@@ -266,6 +297,29 @@ if $changed && [[ "$RUN_RPM_GUARD" == 0 ]]; then
 else
   stage "RPM guard check (sample RPMs)"
   python3 ci/rpm_guard_test.py
+  # Its counterpart for the Arch package (the same allowlist): sample tars, no tools.
+  python3 ci/arch_guard_test.py
+fi
+
+# The document-conversion tests that run poppler, tesseract, pandoc, LibreOffice or ffmpeg
+# skip themselves where the tool is not installed (a skipped test passes). Said here, before
+# the suite, so a gate that ran none of them says so in its output instead of looking like one
+# that ran them all. lmgw's own reader (crates/lmgw-doc-reader) is built by cargo and is never
+# among the missing.
+doc_tools_missing=()
+for tool in pdftotext pdftoppm pdftohtml tesseract pandoc soffice ffmpeg; do
+  command -v "$tool" >/dev/null || doc_tools_missing+=("$tool")
+done
+if ((${#doc_tools_missing[@]})); then
+  echo "==> NOTE: not installed here: ${doc_tools_missing[*]}. The document-conversion tests" \
+       "that run them are SKIPPED (PDF layout: poppler-utils; text recognition: tesseract and" \
+       "poppler-utils; RTF, LaTeX and Word equations: pandoc; old Word and PowerPoint files:" \
+       "LibreOffice (soffice); the sound of videos: ffmpeg); the suite below passes without" \
+       "having run them."
+else
+  echo "==> document tools for the suite: poppler-utils, tesseract, pandoc, LibreOffice and" \
+       "ffmpeg are installed, so the PDF, text-recognition, pandoc, LibreOffice and video" \
+       "tests run."
 fi
 
 if $changed && have_nextest; then

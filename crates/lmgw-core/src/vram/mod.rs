@@ -57,6 +57,7 @@
 pub mod amdgpu;
 pub mod attribution;
 mod background;
+pub mod charge;
 mod climb;
 pub(crate) mod compute;
 mod fit_vocab;
@@ -64,6 +65,7 @@ pub mod headroom;
 pub mod nvml;
 pub mod partial;
 pub mod peak;
+pub(crate) mod place;
 pub mod plan;
 pub mod residency;
 pub mod wddm;
@@ -73,6 +75,7 @@ pub use climb::{climb, climb_for, Climbed};
 
 pub use amdgpu::AmdSysfsProbe;
 pub use attribution::{ProcFs, ProcTree};
+pub use charge::{CardCharge, ChargePart};
 pub use nvml::{GpuMemory, GpuPower, GpuProbe, NvmlProbe, ProcessMemory};
 pub use plan::Footprint;
 

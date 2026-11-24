@@ -111,10 +111,11 @@ fn pending_names(raw: Option<&str>) -> Vec<String> {
 /// rather than leaving two numbers for the reader to combine.
 pub(crate) fn describe_rules(retention_hours: i64, max_chains: i64) -> String {
     let age = match retention_hours {
-        0 => "kept indefinitely".to_string(),
-        1 => "evicted after 1 idle hour".to_string(),
-        h if h % 24 == 0 => format!("evicted after {} idle day(s)", h / 24),
-        h => format!("evicted after {h} idle hours"),
+        0 => "Kept indefinitely".to_string(),
+        1 => "Evicted after 1 idle hour".to_string(),
+        24 => "Evicted after 1 idle day".to_string(),
+        h if h % 24 == 0 => format!("Evicted after {} idle days", h / 24),
+        h => format!("Evicted after {h} idle hours"),
     };
     let count = match max_chains {
         0 => "with no cap on how many are kept".to_string(),

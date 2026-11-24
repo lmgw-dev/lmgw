@@ -87,12 +87,20 @@ fn loopback(base_url: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// A local stage lmgw has a figure for: what is placed on the cards.
+struct Sized {
+    stage: String,
+    target: Target,
+    fp: crate::vram::Footprint,
+}
+
 /// One alias-backed stage, sized. `seen` holds the local models counted so
 /// far: a model two stages share is held once.
 async fn stage(
     state: &SharedState,
     snap: &Snapshot,
     seen: &mut Vec<Target>,
+    sized: &mut Vec<Sized>,
     (id, label): (&str, &str),
     alias: Option<String>,
     unset: &str,
@@ -172,6 +180,11 @@ async fn stage(
                 Some(fp) => {
                     out.bytes = Some(fp.total_bytes);
                     parts.push(basis(state, snap, &target, &fp).await);
+                    sized.push(Sized {
+                        stage: id.to_string(),
+                        target: target.clone(),
+                        fp,
+                    });
                 }
             }
             out.note = parts.join("; ");
@@ -201,7 +214,8 @@ async fn basis(
             let mut s = match fp.ctx_tokens {
                 Some(ctx) => format!(
                     "GGUF weights {} + KV cache {} + compute buffers {} at {ctx} tokens; the \
-                     CUDA context and a projector's compute buffer are the headroom's",
+                     engine's own cost on its card (the CUDA context) is counted beside it, a \
+                     projector's compute buffer is the headroom's",
                     fmt_bytes(fp.weights_bytes),
                     fmt_bytes(fp.kv_cache_bytes),
                     fmt_bytes(fp.compute_bytes)
@@ -228,7 +242,7 @@ async fn basis(
             let mut s = match fp.ctx_tokens {
                 Some(ctx) => format!(
                     "GGUF weights {} + KV cache {} + compute buffer {} at {ctx} tokens; the \
-                     CUDA context is the headroom's",
+                     engine's own cost on its card (the CUDA context) is counted beside it",
                     fmt_bytes(fp.weights_bytes),
                     fmt_bytes(fp.kv_cache_bytes),
                     fmt_bytes(fp.compute_bytes)
@@ -278,6 +292,7 @@ pub async fn realtime_budget(
     let check_alias = pick(a.barge_in_check_alias, &rt.barge_in_check_alias);
 
     let mut seen: Vec<Target> = Vec::new();
+    let mut sized: Vec<Sized> = Vec::new();
     let mut stages = vec![dto::RealtimeBudgetStage {
         stage: "turn".into(),
         label: "Turn detection".into(),
@@ -293,6 +308,7 @@ pub async fn realtime_budget(
             state,
             &snap,
             &mut seen,
+            &mut sized,
             ("chat", labels::CHAT_MODEL),
             chat,
             &format!(
@@ -306,6 +322,7 @@ pub async fn realtime_budget(
         state,
         &snap,
         &mut seen,
+        &mut sized,
         ("asr", labels::SPEECH_TO_TEXT),
         asr.clone(),
         &format!(
@@ -334,6 +351,7 @@ pub async fn realtime_budget(
                     state,
                     &snap,
                     &mut seen,
+                    &mut sized,
                     ("check", "Barge-in word check"),
                     Some(alias.clone()),
                     "",
@@ -348,6 +366,7 @@ pub async fn realtime_budget(
             state,
             &snap,
             &mut seen,
+            &mut sized,
             ("tts", labels::TEXT_TO_SPEECH),
             tts,
             &format!(
@@ -364,9 +383,43 @@ pub async fn realtime_budget(
         .filter(|s| s.bytes.is_none())
         .map(|s| s.stage.clone())
         .collect();
+    let lower = if unknown.is_empty() { "" } else { "at least " };
+    // On a machine of several cards the cascade is placed model by model
+    // (device-ledger design §3.1); on one card it is the sum of before.
+    let models: Vec<(Target, crate::vram::Footprint)> = sized
+        .iter()
+        .map(|z| (z.target.clone(), z.fp.clone()))
+        .collect();
+    let placed = match models.len() {
+        0 => None,
+        _ => state.vram.place_group(state, &snap, &models).await,
+    };
+    if let Some(g) = placed {
+        return Ok(on_cards(
+            stages,
+            &sized,
+            &g,
+            unknown,
+            total_bytes,
+            lower,
+            &snap,
+        ));
+    }
+    // The engine's own cost (§4.2), on the card or the cards each model is
+    // charged on.
+    let mut engine_bytes = 0u64;
+    for z in &sized {
+        let e = state.vram.engine_pooled(&snap, &z.target);
+        engine_bytes = engine_bytes.saturating_add(e);
+        if let Some(st) = stages.iter_mut().find(|st| st.stage == z.stage) {
+            st.engine_bytes = (e > 0).then_some(e);
+        }
+    }
     let view = state.vram.view(state).await;
     let headroom_bytes = view.headroom_bytes;
-    let needed_bytes = total_bytes.saturating_add(headroom_bytes);
+    let needed_bytes = total_bytes
+        .saturating_add(engine_bytes)
+        .saturating_add(headroom_bytes);
     let (capacity_bytes, capacity_source) = if view.capacity_bytes > 0 {
         let vs = &snap.settings.vram;
         let source = if vs.budget_mb > 0 {
@@ -397,8 +450,8 @@ pub async fn realtime_budget(
     };
     let outside_bytes = view.outside_share_bytes;
     let outside_note = view.external_trigger_reason.clone();
+    let made_of = made_of(total_bytes, engine_bytes, headroom_bytes);
 
-    let lower = if unknown.is_empty() { "" } else { "at least " };
     let (verdict, summary) = match capacity_bytes {
         None => (
             "unknown",
@@ -411,22 +464,18 @@ pub async fn realtime_budget(
         Some(cap) if needed_bytes > cap => (
             "too_large",
             format!(
-                "the cascade needs {lower}{} ({} + {} headroom) and lmgw may use {} — not all \
-                 of it can be resident at once, so its models will evict each other",
+                "the cascade needs {lower}{} ({made_of}) and lmgw may use {} — not all of it can \
+                 be resident at once, so its models will evict each other",
                 fmt_bytes(needed_bytes),
-                fmt_bytes(total_bytes),
-                fmt_bytes(headroom_bytes),
                 fmt_bytes(cap)
             ),
         ),
         Some(cap) if !unknown.is_empty() => (
             "unknown",
             format!(
-                "the known stages need {} ({} + {} headroom) of the {} lmgw may use; {} has no \
-                 figure, so whether all of it fits is unknown",
+                "the known stages need {} ({made_of}) of the {} lmgw may use; {} has no figure, \
+                 so whether all of it fits is unknown",
                 fmt_bytes(needed_bytes),
-                fmt_bytes(total_bytes),
-                fmt_bytes(headroom_bytes),
                 fmt_bytes(cap),
                 unknown.join(", ")
             ),
@@ -435,12 +484,10 @@ pub async fn realtime_budget(
             Some(out) if needed_bytes > cap.saturating_sub(out) => (
                 "tight",
                 format!(
-                    "the cascade needs {} ({} + {} headroom) of the {} lmgw may use, but other \
+                    "the cascade needs {} ({made_of}) of the {} lmgw may use, but other \
                      programs hold {} now — beside them it does not fit, and a start waits or \
                      falls back",
                     fmt_bytes(needed_bytes),
-                    fmt_bytes(total_bytes),
-                    fmt_bytes(headroom_bytes),
                     fmt_bytes(cap),
                     fmt_bytes(out)
                 ),
@@ -448,10 +495,8 @@ pub async fn realtime_budget(
             _ => (
                 "fits",
                 format!(
-                    "the cascade needs {} ({} + {} headroom) of the {} lmgw may use",
+                    "the cascade needs {} ({made_of}) of the {} lmgw may use",
                     fmt_bytes(needed_bytes),
-                    fmt_bytes(total_bytes),
-                    fmt_bytes(headroom_bytes),
                     fmt_bytes(cap)
                 ),
             ),
@@ -461,6 +506,7 @@ pub async fn realtime_budget(
         stages,
         total_bytes,
         unknown,
+        engine_bytes,
         headroom_bytes,
         needed_bytes,
         capacity_bytes,
@@ -470,6 +516,146 @@ pub async fn realtime_budget(
         verdict: verdict.into(),
         summary,
     })
+}
+
+/// What a figure the cascade needs is made of, in words: the models, the
+/// engine's cost where there is one, and the headroom.
+fn made_of(total: u64, engine: u64, headroom: u64) -> String {
+    match engine {
+        0 => format!("{} + {} headroom", fmt_bytes(total), fmt_bytes(headroom)),
+        e => format!(
+            "{} + {} the engine costs on its cards + {} headroom",
+            fmt_bytes(total),
+            fmt_bytes(e),
+            fmt_bytes(headroom)
+        ),
+    }
+}
+
+/// The budget on a machine of several cards (device-ledger design §3.1):
+/// the local stages placed model by model, each beside the ones before it
+/// (`VramScheduler::place_group`). It fits where every model finds a card
+/// beside what other programs hold now; it is tight where they find one
+/// only on the cards' totals; it is too large where not even those hold
+/// them all.
+fn on_cards(
+    mut stages: Vec<dto::RealtimeBudgetStage>,
+    sized: &[Sized],
+    g: &crate::vram::place::in_turn::GroupPlaced,
+    unknown: Vec<String>,
+    total_bytes: u64,
+    lower: &str,
+    snap: &Snapshot,
+) -> dto::RealtimeBudget {
+    let fits_now = g.now.iter().all(|p| p.card.is_some());
+    let fits_ever = g.ever.iter().all(|p| p.card.is_some());
+    // The placing shown: beside what other programs hold now where that
+    // holds every model, else on the cards' totals.
+    let shown = if fits_now { &g.now } else { &g.ever };
+    let (mut engine_bytes, mut headroom_bytes) = (0u64, 0u64);
+    for (z, p) in sized.iter().zip(shown) {
+        engine_bytes = engine_bytes.saturating_add(p.engine);
+        headroom_bytes = headroom_bytes.saturating_add(p.keep);
+        if let Some(st) = stages.iter_mut().find(|st| st.stage == z.stage) {
+            st.engine_bytes = p.card.as_ref().map(|_| p.engine).filter(|e| *e > 0);
+            st.card = p.label.clone();
+        }
+    }
+    let needed_bytes = total_bytes
+        .saturating_add(engine_bytes)
+        .saturating_add(headroom_bytes);
+    let n = g.cards.devices.len();
+    let capacity = g.cards.usable(false);
+    let outside = g.cards.outside_sum();
+    let where_: Vec<String> = sized
+        .iter()
+        .zip(shown)
+        .filter_map(|(z, p)| {
+            Some(format!(
+                "{}/{} on {}",
+                z.target.class.as_str(),
+                z.target.model_id,
+                p.label.as_ref()?
+            ))
+        })
+        .collect();
+    let first_short = |placed: &[crate::vram::place::in_turn::InTurn]| {
+        sized
+            .iter()
+            .zip(placed)
+            .find(|(_, p)| p.card.is_none())
+            .map(|(z, _)| format!("{}/{}", z.target.class.as_str(), z.target.model_id))
+            .unwrap_or_default()
+    };
+    let made_of = made_of(total_bytes, engine_bytes, headroom_bytes);
+    let placed_words = match where_.is_empty() {
+        true => String::new(),
+        false => format!(": {}", crate::vram::place::in_words(&where_)),
+    };
+    let (verdict, summary) = if !fits_ever {
+        (
+            "too_large",
+            format!(
+                "the cascade does not fit on the {n} graphics cards together: placed one by \
+                 one, with nothing else of lmgw's on them, {} finds no card with room — not \
+                 all of it can be resident at once, so its models will evict each other",
+                first_short(&g.ever)
+            ),
+        )
+    } else if !unknown.is_empty() {
+        (
+            "unknown",
+            format!(
+                "the known stages need {} ({made_of}), placed one by one on the {n} graphics \
+                 cards{placed_words}; {} has no figure, so whether all of it fits is unknown",
+                fmt_bytes(needed_bytes),
+                unknown.join(", ")
+            ),
+        )
+    } else if !fits_now {
+        (
+            "tight",
+            format!(
+                "the cascade needs {} ({made_of}), placed one by one on the {n} graphics \
+                 cards{placed_words}; but other programs hold {} on them now, and beside that \
+                 {} finds no card with room — a start waits or falls back",
+                fmt_bytes(needed_bytes),
+                fmt_bytes(outside),
+                first_short(&g.now)
+            ),
+        )
+    } else {
+        (
+            "fits",
+            format!(
+                "the cascade needs {lower}{} ({made_of}), placed one by one on the {n} graphics \
+                 cards{placed_words}",
+                fmt_bytes(needed_bytes)
+            ),
+        )
+    };
+    let enabled = snap.settings.vram.enabled;
+    dto::RealtimeBudget {
+        stages,
+        total_bytes,
+        unknown,
+        engine_bytes,
+        headroom_bytes,
+        needed_bytes,
+        capacity_bytes: Some(capacity),
+        capacity_source: match enabled {
+            true => format!("the {n} graphics cards' totals"),
+            false => format!(
+                "the {n} graphics cards' totals; admission is off ({}), so nothing is refused \
+                 for it",
+                labels::ADMISSION_AT
+            ),
+        },
+        outside_bytes: Some(outside),
+        outside_note: None,
+        verdict: verdict.into(),
+        summary,
+    }
 }
 
 #[cfg(test)]

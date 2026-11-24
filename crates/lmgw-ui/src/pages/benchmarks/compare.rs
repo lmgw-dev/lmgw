@@ -14,6 +14,7 @@ use lmgw_api_types::bench_compare::{compare, not_comparable};
 use lmgw_api_types::bench_ops::BenchRun;
 
 use super::delta::{tally, DeltaTable, ThresholdControl};
+use super::frame::BnFrame;
 use super::phase_charts::{PhaseCharts, RunLine};
 use super::probes::ProbesSide;
 use super::{build_words, run_href, use_bn};
@@ -22,7 +23,7 @@ use crate::charts::slot_color;
 use crate::fmt::hue_for;
 use crate::pages::backends::local_ts;
 use crate::scope::Scope;
-use crate::widgets::{PageFrame, Section};
+use crate::widgets::{Ico, Section};
 
 #[component]
 pub fn CompareView(ids: Vec<i64>) -> impl IntoView {
@@ -105,12 +106,7 @@ pub fn CompareView(ids: Vec<i64>) -> impl IntoView {
         compare_sub(&ids.get_value(), loaded.as_deref(), &failed.get())
     };
     view! {
-        <PageFrame
-            title="Compare runs"
-            sub=Signal::derive(sub)
-            class="bench"
-            actions=|| view! { <A href="/benchmarks" attr:class="btn ghost">"All runs"</A> }
-        >
+        <BnFrame title="Compare runs" sub=Signal::derive(sub) glyph=Ico::Layers>
             {move || {
                 errors
                     .get()
@@ -138,7 +134,7 @@ pub fn CompareView(ids: Vec<i64>) -> impl IntoView {
                     }}
                 </Section>
             </Show>
-        </PageFrame>
+        </BnFrame>
     }
 }
 

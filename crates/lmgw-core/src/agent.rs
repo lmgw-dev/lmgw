@@ -462,6 +462,7 @@ impl TurnAccumulator {
             id: c.id.clone(),
             name: c.name.clone(),
             args: crate::ir::parse_call_args(&c.args_json),
+            cache_control: None,
         };
         let mut content: Vec<ContentPart> = match self.order.sealed_pieces() {
             Some(pieces) => turn_order::parts(pieces, |slot| self.calls.get(slot).map(call)),
@@ -842,6 +843,7 @@ pub async fn run(
                 name: Some(d.call.name.clone()),
                 content: outcome.blocks,
                 is_error: outcome.is_error,
+                cache_control: None,
             });
         }
         // The cancel landed while the batch ran: what ran keeps its
@@ -908,7 +910,7 @@ pub async fn run(
                         return Err(RunError {
                             error,
                             messages: ir.messages,
-                            usage,
+                            usage: Box::new(usage),
                         })
                     }
                 }
@@ -973,7 +975,7 @@ pub async fn run(
             .content
             .iter()
             .filter_map(|p| match p {
-                ContentPart::ToolUse { id, name, args } => {
+                ContentPart::ToolUse { id, name, args, .. } => {
                     Some((id.clone(), name.clone(), args.clone()))
                 }
                 _ => None,
@@ -1123,6 +1125,7 @@ pub async fn run(
                 name: Some(name.clone()),
                 content: outcome.blocks,
                 is_error: outcome.is_error,
+                cache_control: None,
             });
         }
 
@@ -1257,6 +1260,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object", "properties": {}}),
             strict: None,
+            anthropic_fields: Default::default(),
         }
     }
 
@@ -1282,6 +1286,7 @@ mod tests {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         }
     }
 
@@ -1326,7 +1331,7 @@ mod tests {
                                     sink.on_delta(&StreamDelta::TextDelta(ch.to_string()));
                                 }
                             }
-                            ContentPart::ToolUse { id, name, args } => {
+                            ContentPart::ToolUse { id, name, args, .. } => {
                                 sink.on_delta(&StreamDelta::ToolCallStart {
                                     index: idx,
                                     id: id.clone(),
@@ -1384,6 +1389,7 @@ mod tests {
                     id: (*id).into(),
                     name: (*name).into(),
                     args: json!({"q": 1}),
+                    cache_control: None,
                 })
                 .collect(),
             reasoning: String::new(),
@@ -1767,11 +1773,13 @@ mod tests {
                     id: "c1".into(),
                     name: "search".into(),
                     args: json!({"q": 1}),
+                    cache_control: None,
                 },
                 ContentPart::ToolUse {
                     id: "c2".into(),
                     name: "search".into(),
                     args: json!({"q": 2}),
+                    cache_control: None,
                 },
             ],
             reasoning: String::new(),

@@ -8,13 +8,24 @@
 ARG FEDORA_RELEASE
 FROM registry.fedoraproject.org/fedora:${FEDORA_RELEASE}
 
+# The document tools' text recognition languages (document-conversion design §6.2, D10): tesseract
+# language codes, one tesseract-langpack-<code> each. English and German by default; an
+# administrator who builds their own image passes another list (ci/build-image.sh forwards
+# TESSERACT_LANGS from the environment).
+ARG TESSERACT_LANGS="eng deu"
+
 # NVIDIA's toolkit repository with package checks on (D19, as machine check D5 does for the
 # desktop): only nvidia-container-toolkit-base, against NVIDIA's key pinned by its fingerprint.
 # The fingerprint is lmgw_machine::plan::embedded::NVIDIA_KEY_FINGERPRINT; a test in
 # crates/lmgw-server/tests/it/packaging.rs keeps the two equal. The import must add exactly one
 # key to rpm's keyring, and its fingerprint (the first field of `rpmkeys --list`) must be that one.
 # Then the base's packages are brought up to date in the same RUN, so the image never carries a
-# base older than the packages installed on top of it.
+# base older than the packages installed on top of it. The document tools (document-conversion
+# design §6.2): PDF text (poppler-utils), text recognition with its language packs (tesseract)
+# and its orientation data (tesseract-osd: pages scanned on their side), and the sound of videos
+# (ffmpeg-free). Weak dependencies stay off, so each is named here.
+# pandoc and LibreOffice are not in the image yet: Settings > Documents shows the derived image
+# that adds them (docs/documents.md).
 COPY nvidia-container-toolkit.repo /etc/yum.repos.d/lmgw-nvidia-container-toolkit.repo
 COPY RPM-GPG-KEY-lmgw-nvidia-container-toolkit /etc/pki/rpm-gpg/RPM-GPG-KEY-lmgw-nvidia-container-toolkit
 RUN rpmkeys --list | cut -d' ' -f1 | sort > /tmp/keys.before \
@@ -30,7 +41,9 @@ RUN rpmkeys --list | cut -d' ' -f1 | sort > /tmp/keys.before \
     && dnf -y install --setopt=install_weak_deps=False \
         podman crun catatonit conmon passt fuse-overlayfs netavark aardvark-dns \
         nvidia-container-toolkit-base \
-        git poppler-utils opus \
+        git opus \
+        poppler-utils tesseract tesseract-osd ffmpeg-free \
+        $(for lang in ${TESSERACT_LANGS}; do printf 'tesseract-langpack-%s ' "$lang"; done) \
         procps-ng iproute curl jq util-linux-core shadow-utils libcap \
     && dnf clean all \
     # A rootless build drops shadow-utils' file capabilities; a non-root inner podman needs them
@@ -44,6 +57,9 @@ COPY storage.conf /etc/containers/storage.rootful.conf.d/99-lmgw.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY licenses/ /usr/share/licenses/lmgw-server/
 COPY lmgw-server /usr/local/bin/lmgw-server
+# lmgw's document reader, beside it: the child that parses web pages, e-books, e-mail, old Excel
+# files and pictures (document-conversion design §5.2), found next to the server's executable.
+COPY lmgw-doc-reader /usr/local/bin/lmgw-doc-reader
 
 # LMGW_DEPLOYMENT=container is what makes this a server start (D1, D2). XDG_RUNTIME_DIR: root in a
 # container has none, and lmgw's CDI spec and pull-service socket live under it (the report).

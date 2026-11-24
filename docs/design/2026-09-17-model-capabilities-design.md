@@ -289,6 +289,26 @@ and both SDKs' model types accept unknown fields (the existing
 not be read has no `capabilities` in either shape (Anthropic's field is
 optional and nullable).
 
+#### 2.2.0 Paging *(rev 2026-11-12)*
+
+The Anthropic shape of `GET /v1/models` pages as Anthropic's own list does
+(`server/models_page.rs`). `limit` is an integer from 1 to 1000, default 20;
+`after_id` answers the page immediately after that id in the list's order,
+`before_id` the page immediately before it. The answer holds `data`,
+`has_more` (more entries exist in the direction of travel: beyond the page for
+`after_id` and for the first page, before it for `before_id`), `first_id` and
+`last_id` (the page's first and last id, `null` for an empty page) and the
+`lmgw` block. The order is the name order of `exposed_entries`, the same on
+every call, so `after_id = last_id` walks the whole list and `before_id =
+first_id` walks back. Anthropic's reference is silent on three cases, which
+are a 400 `invalid_request_error` in the Anthropic error envelope: a `limit`
+that is not an integer in 1 to 1000, `after_id` together with `before_id`, and
+a cursor id that is not in the list (the message names it). The OpenAI shape
+has no paging and ignores these parameters.
+
+Not yet: Anthropic's `lifecycle` filter is not served, and the list is in
+name order where Anthropic lists the most recently released models first.
+
 #### 2.2.1 Anthropic's blocks, mapped from lmgw's facts
 
 Built by `capabilities::anthropic_blocks` from the same `ModelCapabilities`

@@ -512,7 +512,7 @@ pub(super) fn NewRunModal(lab: Lab) -> impl IntoView {
                     </span>
                 </div>
                 {move || nr.start_err.get().map(|e| view! {
-                    <div class="notice err dl-start-err">{format!("⚠ Not started: {e}")}</div>
+                    <div class="notice err dl-start-err">{format!("Not started: {e}")}</div>
                 })}
             </div>
         </Modal>

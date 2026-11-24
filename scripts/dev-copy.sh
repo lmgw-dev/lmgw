@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # A headless dev gateway on a copy of production's database, detached — the "dev copy" recipe.
 #
-# Usage: scripts/dev-copy.sh copy  [dir] [addr]   fresh copy of production's lmgw.sqlite into dir
+# Usage: [LMGW_DEV_COPY_PREFIX=<name>] [LMGW_DEV_COPY_HOLD=1] \
+#          scripts/dev-copy.sh copy  [dir] [addr]   fresh copy of production's lmgw.sqlite into dir
 #        scripts/dev-copy.sh start [dir] [addr]   build the headless runner and start it on dir, detached
 #        scripts/dev-copy.sh stop  [dir]          graceful stop (SIGINT, as Ctrl-C), waits for the exit
 #
 # dir defaults to target/dev-copy, addr to 127.0.0.1:8899. Never /tmp: it is RAM.
 #
 # copy reads production's database with `sqlite3 -readonly … .backup` and nothing else of it, then
-# sets the copy apart before anything boots on it: container_prefix lmgw-dev, bind_addr addr, every
+# sets the copy apart before anything boots on it: container_prefix (lmgw-dev unless
+# LMGW_DEV_COPY_PREFIX), bind_addr addr, every
 # agent disabled, and legacy_container_names emptied — a boot sweeps those names, and they are
 # production's (examples/headless.rs only steers the prefix of a dir still on the default one).
 # Hugging Face downloads production had queued or in flight are marked failed in the copy (with a
@@ -17,6 +19,15 @@
 # other write a dev instance would make into a models dir outside its data dir (downloads, deletes,
 # voice-library clips); copy prints the two ways that stay open. It refuses to overwrite a copy,
 # and refuses production's own dir under every name it has.
+#
+# Two environment variables for copy, both off by default (the copy is then as described above):
+# LMGW_DEV_COPY_PREFIX=<name> is the copy's container_prefix instead of lmgw-dev; it must match
+# [a-z0-9][a-z0-9-]* and not be lmgw (production's). Set it when several copies run at once, one
+# prefix each: copies sharing a prefix fight over container names, and a boot's reconcile treats
+# every container with its prefix as its own. Pass the same prefix to the UI drivers' --podman-guard.
+# LMGW_DEV_COPY_HOLD=1 starts the copy with the GPU hold on (hold.active = true, the hold's other
+# fields as production has them), so no local model can load. Set it for a copy that must not
+# touch the card (a run that must not use the card, a check that needs no model).
 #
 # Production's dir is LMGW_PROD_DIR, else $XDG_DATA_HOME/lmgw, else ~/.local/share/lmgw (the app's
 # own rule); dir may be none of those three, so a moved XDG_DATA_HOME or LMGW_PROD_DIR cannot make
@@ -57,16 +68,29 @@ copy)
         echo "refusing: $dir/lmgw.sqlite exists (remove it for a fresh copy)" >&2
         exit 1
     fi
+    prefix="${LMGW_DEV_COPY_PREFIX:-lmgw-dev}"
+    case "$prefix" in
+        lmgw) echo "refusing: LMGW_DEV_COPY_PREFIX=lmgw is production's container prefix" >&2; exit 2 ;;
+        [a-z0-9]*) ;;
+        *) echo "refusing: LMGW_DEV_COPY_PREFIX must match [a-z0-9][a-z0-9-]*, got '$prefix'" >&2; exit 2 ;;
+    esac
+    case "$prefix" in
+        *[!a-z0-9-]*) echo "refusing: LMGW_DEV_COPY_PREFIX must match [a-z0-9][a-z0-9-]*, got '$prefix'" >&2; exit 2 ;;
+    esac
+    hold="${LMGW_DEV_COPY_HOLD:-}"
+    case "$hold" in '' | 0 | 1) ;; *) echo "refusing: LMGW_DEV_COPY_HOLD must be 1 (or unset), got '$hold'" >&2; exit 2 ;; esac
     mkdir -p "$dir"
     sqlite3 -readonly "$prod/lmgw.sqlite" ".backup '$dir/lmgw.sqlite'"
-    python3 - "$dir/lmgw.sqlite" "$addr" <<'EOF'
+    python3 - "$dir/lmgw.sqlite" "$addr" "$prefix" "$hold" <<'EOF'
 import json, sqlite3, sys
-db, addr = sys.argv[1], sys.argv[2]
+db, addr, prefix, hold = sys.argv[1:5]
 NOTE = ("not resumed in this dev copy (scripts/dev-copy.sh copy): production had it queued or "
         "in flight, and the copy's models dirs are production's; retry it in production")
 c = sqlite3.connect(db)
 s = json.loads(c.execute("SELECT value FROM settings WHERE key = 'settings'").fetchone()[0])
-s.update(container_prefix="lmgw-dev", bind_addr=addr, legacy_container_names=[])
+s.update(container_prefix=prefix, bind_addr=addr, legacy_container_names=[])
+if hold == "1":
+    s.setdefault("hold", {})["active"] = True
 c.execute("UPDATE settings SET value = ? WHERE key = 'settings'", (json.dumps(s),))
 c.execute("UPDATE agents SET enabled = 0")
 stopped = c.execute("UPDATE hf_models SET status = 'failed', error = ? "
@@ -77,6 +101,7 @@ on = c.execute("SELECT count(*) FROM agents WHERE enabled = 1").fetchone()[0]
 live = c.execute("SELECT count(*) FROM hf_models "
                  "WHERE status IN ('queued', 'downloading')").fetchone()[0]
 print(f"copied: prefix {s['container_prefix']}, bind {s['bind_addr']}, "
+      f"{'hold on, ' if hold == '1' else ''}"
       f"legacy names {s['legacy_container_names']}, agents enabled {on}, "
       f"hf downloads marked failed {stopped} (left to resume {live})")
 EOF
@@ -142,7 +167,7 @@ stop)
     exit 1
     ;;
 *)
-    sed -n '2,8p' "$0" >&2
+    sed -n '2,9p' "$0" >&2
     exit 2
     ;;
 esac

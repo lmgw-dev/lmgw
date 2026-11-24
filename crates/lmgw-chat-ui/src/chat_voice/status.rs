@@ -306,7 +306,7 @@ pub(crate) fn VoiceStatusLine(pv: PageVoice) -> impl IntoView {
                             aria-label="Drop the dictation mark"
                             on:click=move |_| d.mark.set(None)
                         >
-                            "✕"
+                            <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
                         </button>
                     </span>
                 </Show>
@@ -359,7 +359,7 @@ pub(crate) fn VoiceStatusLine(pv: PageVoice) -> impl IntoView {
                                         view! {
                                             <button type="button" class="vs-x" aria-label="Dismiss"
                                                 on:click=move |_| pv.status.dismiss(&n)>
-                                                "✕"
+                                                <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
                                             </button>
                                         }
                                     })

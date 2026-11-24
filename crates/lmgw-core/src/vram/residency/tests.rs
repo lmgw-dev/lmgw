@@ -65,6 +65,7 @@ fn files(on_disk: u64) -> Footprint {
         note: Some("the on-disk size".into()),
         partial: None,
         llama: None,
+        by_layer: None,
     }
 }
 
@@ -591,23 +592,27 @@ fn the_notes_say_what_it_holds_now() {
 #[test]
 fn what_it_holds_now_is_the_smaller_of_two_readings() {
     use super::now::smaller_held;
+    use crate::vram::nvml::{DeviceId, DeviceProcesses};
     use crate::vram::ProcessMemory;
     let pm = |pid, bytes| ProcessMemory { pid, bytes };
+    let card = |n: u32, processes| DeviceProcesses {
+        device: DeviceId(format!("GPU-{n}")),
+        processes,
+    };
+    // 11 on two cards: what it holds is the sum of the two.
     let before = Ok(vec![
-        pm(10, Some(GIB)),
-        pm(11, Some(GIB)),
-        pm(99, Some(5 * GIB)),
+        card(0, vec![pm(10, Some(GIB)), pm(11, Some(GIB / 2))]),
+        card(1, vec![pm(11, Some(GIB / 2)), pm(99, Some(5 * GIB))]),
     ]);
     let after = Ok(vec![
-        pm(10, Some(3 * GIB)),
-        pm(11, Some(GIB)),
-        pm(99, Some(GIB)),
+        card(0, vec![pm(10, Some(3 * GIB)), pm(11, Some(GIB / 2))]),
+        card(1, vec![pm(11, Some(GIB / 2)), pm(99, Some(GIB))]),
     ]);
     assert_eq!(smaller_held(&[10, 11], &before, &after), Ok(2 * GIB));
     assert_eq!(smaller_held(&[10, 11], &after, &before), Ok(2 * GIB));
     assert_eq!(smaller_held(&[12], &before, &after), Ok(0), "none listed");
     assert!(smaller_held(&[10], &before, &Err("gone".into())).is_err());
-    let blind = Ok(vec![pm(10, None)]);
+    let blind = Ok(vec![card(0, vec![pm(10, None)])]);
     assert!(smaller_held(&[10], &before, &blind).is_err());
 }
 

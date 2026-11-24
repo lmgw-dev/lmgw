@@ -103,7 +103,9 @@ fn placeholder(part: &Value, why: &str) -> (String, String) {
         .or_else(|| part.pointer("/image_url/url").and_then(Value::as_str))
         .filter(|u| !u.is_empty());
     if let Some(url) = url {
-        if let ContentPart::Image { mime, source } = crate::ingress::openai::parse_image_url(url) {
+        if let ContentPart::Image { mime, source, .. } =
+            crate::ingress::openai::parse_image_url(url)
+        {
             return (
                 image_note(&mime, &source),
                 image_placeholder(&mime, &source, why),

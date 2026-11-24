@@ -4,8 +4,8 @@
 use leptos::prelude::*;
 
 use super::super::{Def, Page};
+use crate::pages::settings::prow::SetField as Field;
 use crate::widgets::voice_picker::{use_voices, VoiceInput};
-use crate::widgets::Field;
 
 /// The TTS model the draft names: the first of `keys` that is set — the
 /// Chat's own alias falls back to realtime's, as the gateway resolves it.

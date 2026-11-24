@@ -8,7 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 
+mod cards;
 mod share;
+pub use cards::{
+    CardPart, CardsFit, ExpertsInRam, FreeState, FreeVram, GetChoice, GetLayout, MinCards,
+    MinCardsState, Sign,
+};
 pub use share::{display_name, share_name, share_text, share_url};
 
 /// Which of the two measures of "fits" a [`FileFit`] was taken against
@@ -85,6 +90,34 @@ pub struct CardResident {
     pub bytes: u64,
 }
 
+/// The graphics card a fit was measured against on a computer with several
+/// (device-ledger design §10): the one with the most room for lmgw now, its
+/// total less what other programs hold there. lmgw keeps a model whose
+/// context is fitted, as Get it fits it, on one card (device-ledger design
+/// §5.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FitCard {
+    /// The driver's index (`nvidia-smi`'s).
+    pub index: u32,
+    pub name: String,
+    /// How many graphics cards the computer has.
+    pub of: u32,
+}
+
+impl FitCard {
+    /// "card 2".
+    pub fn short(&self) -> String {
+        format!("card {}", self.index)
+    }
+
+    /// "NVIDIA RTX 6000 Ada Generation (card 2)", as lmgw names a card.
+    pub fn named(&self) -> String {
+        format!("{} (card {})", self.name, self.index)
+    }
+}
+
 /// The card a fit was measured against (design §3.1, §9.2), from one ledger
 /// read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +143,11 @@ pub struct CardMeasure {
     /// lmgw's own models on the card now, with what admission keeps free for
     /// them.
     pub residents: Vec<CardResident>,
+    /// Which card, on a computer with several; absent on one card and under
+    /// a declared budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub card: Option<FitCard>,
 }
 
 impl CardMeasure {
@@ -164,6 +202,18 @@ pub struct FileFit {
     /// What the reader should also know, each a sentence: the hold, admission
     /// off, a term that couldn't be sized, why the header wasn't read.
     pub notes: Vec<String>,
+    /// The card it was measured against, on a computer with several; absent
+    /// on one card, under a declared budget and without a card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub card: Option<FitCard>,
+    /// The fit over the cards (device-ledger design WP12): Min. cards, Free
+    /// VRAM, experts in RAM and the choices Get it asks for, judged at the
+    /// context Get it would create with this measure. Absent without a card
+    /// to measure against and for a model planned on the CPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub cards: Option<CardsFit>,
 }
 
 /// Which of the pick's rules chose the file (design §3.2, D7).
@@ -325,7 +375,7 @@ pub const DEFAULT_LIST_COUNT: u32 = 10;
 /// releases it for this. lmgw-core's fit puts it on a fit's notes, and the
 /// finder's card shows it once from the live hold and leaves the note out.
 pub const HOLD_LINE: &str = "lmgw is paused on the graphics card right now. The model \
-     answers once you resume it: the HOLD button at the foot of the sidebar, or the tray menu's \
+     answers once you resume it: the On hold pill at the foot of the sidebar, or the tray menu's \
      GPU hold.";
 
 /// `model_find`'s arguments (§9.1).

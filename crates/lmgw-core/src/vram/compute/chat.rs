@@ -45,6 +45,19 @@
 //! A sparse-attention indexer (`qwen4exp`) adds a scoring phase of its own,
 //! [`super::qsa`].
 //!
+//! **A relative-position bias** (`attention.relative_length`, Inkling 2)
+//! changes the shape: llama.cpp gathers the bias for every head, cell and
+//! batch token (`kq_b`, f32) and keeps a permuted copy, beside an int32
+//! position index per cell and token for the full and the windowed
+//! cells. That is `(8 · heads + 4) · n_kv · ub` on top of the mask's
+//! `2 · n_kv · ub`: 198 bytes per cell and token at 24 heads, so the
+//! context times the ubatch sets the buffer. A unified cache's `n_kv` is
+//! the whole context; one stream per slot cuts it to the slot's share.
+//! Measured (b12648, Inkling 2 Mini Q8_0 with a q8_0 cache, five contexts
+//! from 64k × 512 to the 1M × 1280 that asked for 248 GiB): the buffer is
+//! the masks, the index, the bias, the attention and the FFN activations
+//! together, within 0.1 %, and no f16 copy of the cache shows.
+//!
 //! **Not here:** a projector's own buffer (13–248 MiB measured, sized by
 //! llama.cpp from per-projector image limits no header carries), the CUDA
 //! context (~450 MiB per process), allocator slack: the headroom's.
@@ -188,6 +201,19 @@ pub(crate) fn bytes(s: &ModelSummary, layout: &Layout, g: &Graph) -> Result<u64,
     };
     let ffn = mul(&[4, ub, dense.max(moe)]).saturating_add(mul(&[8, ub, ple]));
     let logits = mul(&[4, vocab, g.outputs.max(1)]);
+    if s.attention_relative_length.is_some_and(|n| n > 0) && !g.single_layer {
+        // The relative-position bias (module doc): every term held at once.
+        let heads = need(s.head_count, "attention.head_count")?;
+        let full = layout.full.as_ref().map_or(0, |_| g.full_cells());
+        let window = layout.swa.as_ref().map_or(0, |(_, w)| g.window_cells(*w));
+        let index = mul(&[4, full.saturating_add(window), ub]);
+        let bias = mul(&[8, heads, full.max(window), ub]);
+        return Ok(masks
+            .saturating_add(index)
+            .saturating_add(bias)
+            .saturating_add(attn)
+            .saturating_add(ffn.max(logits)));
+    }
     // A sparse-attention indexer's scoring ([`super::qsa`]), a phase of its
     // own before the attention.
     let scoring = if g.single_layer {

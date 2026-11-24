@@ -14,9 +14,11 @@
 //! - `.pop-list` is the scrolling part; on open, its `[aria-selected="true"]`
 //!   row is scrolled to the middle.
 //! - the element marked `data-autofocus` takes focus on open.
-//! - the pop closes when the window resizes, and when something that moves
-//!   the anchor scrolls (a chat transcript streaming beside the anchor does
-//!   not close it; the page body under it does).
+//! - the pop closes when the window resizes, and when a scroll moves the
+//!   anchor (a chat transcript streaming beside the anchor does not close
+//!   it; the page body under it does). Moved is measured, a whole pixel from
+//!   where the anchor was when the pop opened ([`anchor_moved`]): a scroll
+//!   event alone does not say so.
 
 use leptos::html::{self, ElementType};
 use leptos::prelude::*;
@@ -47,9 +49,11 @@ pub fn Popover<E>(
     #[prop(optional)]
     min_width: Option<u32>,
     /// Beside the anchor instead of below it: to its right, top edges level,
-    /// moved up as far as it must to fit the window. The rail's flyouts.
-    #[prop(optional)]
-    beside: bool,
+    /// moved up as far as it must to fit the window. The rail's flyouts. Read
+    /// each time it is placed, so a popover that is below the anchor in one
+    /// layout and beside it in another follows the layout.
+    #[prop(optional, into)]
+    beside: Signal<bool>,
     /// Rendered only while open.
     children: ChildrenFn,
 ) -> impl IntoView
@@ -64,7 +68,7 @@ where
             return;
         };
         let min_width = min_width.unwrap_or(0) as f64;
-        if beside {
+        if beside.get_untracked() {
             place_beside(a.unchecked_ref(), &p, min_width);
         } else {
             place_at(a.unchecked_ref(), &p, min_width);
@@ -100,7 +104,14 @@ where
 
         // A scroll that moves the anchor would leave the pop floating over
         // the wrong thing: close. Scrolls inside the pop (its own list), or
-        // in a pane beside the anchor, are none of its business.
+        // in a pane beside the anchor, are none of its business. Neither is
+        // one that leaves the anchor where it was: Firefox answers a layout
+        // change in a pane whose scroll position is between device pixels
+        // (display scaling of 125 %, say) with a scroll event that moves it
+        // by a sixtieth of a pixel, and the pop opening is such a change, so
+        // it closed itself at once and a click seemed to do nothing (Firefox
+        // 160, 2026-11-13). The pop is placed again for those.
+        let origin = anchor_at(&anchor);
         let on_scroll = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             let Some(target) = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()) else {
                 return;
@@ -112,7 +123,10 @@ where
                 .get_untracked()
                 .is_some_and(|a| target.contains(Some(a.unchecked_ref())));
             if !inside && moves_anchor {
-                open.set(false);
+                match (origin, anchor_at(&anchor)) {
+                    (Some(was), Some(now)) if !anchor_moved(was, now) => place(),
+                    _ => open.set(false),
+                }
             }
         });
         let on_resize = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| open.set(false));
@@ -164,6 +178,48 @@ where
     }
 }
 
+/// How far the anchor has to be from where it was when the pop opened for a
+/// scroll to count as having moved it, in CSS px on either axis.
+const MOVED_PX: f64 = 1.0;
+
+/// The anchor's top left corner in the viewport, where it is mounted.
+fn anchor_at<E>(anchor: &NodeRef<E>) -> Option<(f64, f64)>
+where
+    E: ElementType + 'static,
+    E::Output: JsCast + Clone + 'static,
+{
+    let a = anchor.get_untracked()?;
+    let r = a
+        .unchecked_ref::<web_sys::HtmlElement>()
+        .get_bounding_client_rect();
+    Some((r.left(), r.top()))
+}
+
+/// Whether the anchor, at `was` when the pop opened and at `now`, has moved
+/// ([`MOVED_PX`]).
+fn anchor_moved(was: (f64, f64), now: (f64, f64)) -> bool {
+    (now.0 - was.0).abs() >= MOVED_PX || (now.1 - was.1).abs() >= MOVED_PX
+}
+
+/// The room the window leaves, narrowed to the pop's own stylesheet
+/// `max-width` when that is a length in px (the inline value this module sets
+/// would otherwise beat it). Clears the inline value first so the stylesheet's
+/// shows.
+fn capped_room(pop: &web_sys::HtmlElement, room_w: f64) -> f64 {
+    let _ = pop.style().remove_property("max-width");
+    let css = window()
+        .get_computed_style(pop)
+        .ok()
+        .flatten()
+        .and_then(|cs| cs.get_property_value("max-width").ok())
+        .and_then(|v| {
+            v.trim()
+                .strip_suffix("px")
+                .and_then(|n| n.parse::<f64>().ok())
+        });
+    css.map_or(room_w, |n| room_w.min(n))
+}
+
 /// Position `pop` against `anchor`'s rectangle, in viewport coordinates (the
 /// top layer's containing block is the viewport).
 fn place_at(anchor: &web_sys::HtmlElement, pop: &web_sys::HtmlElement, min_width: f64) {
@@ -180,7 +236,7 @@ fn place_at(anchor: &web_sys::HtmlElement, pop: &web_sys::HtmlElement, min_width
         .and_then(|v| v.as_f64())
         .unwrap_or(768.0);
     let s = pop.style();
-    let room_w = (vw - 2.0 * EDGE).max(0.0);
+    let room_w = capped_room(pop, (vw - 2.0 * EDGE).max(0.0));
     let _ = s.set_property("max-width", &format!("{room_w}px"));
     let _ = s.set_property(
         "min-width",
@@ -233,7 +289,7 @@ fn place_beside(anchor: &web_sys::HtmlElement, pop: &web_sys::HtmlElement, min_w
         .unwrap_or(768.0);
     let s = pop.style();
     let left = r.right() + GAP;
-    let room_w = (vw - left - EDGE).max(0.0);
+    let room_w = capped_room(pop, (vw - left - EDGE).max(0.0));
     let _ = s.set_property("max-width", &format!("{room_w}px"));
     let _ = s.set_property("min-width", &format!("{}px", min_width.min(room_w)));
     let _ = s.set_property("left", &format!("{left}px"));
@@ -334,5 +390,25 @@ pub fn fire_change(el: &web_sys::HtmlElement) {
     init.set_bubbles(true);
     if let Ok(ev) = web_sys::Event::new_with_event_init_dict("change", &init) {
         let _ = el.dispatch_event(&ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scroll_that_leaves_the_anchor_within_a_pixel_has_not_moved_it() {
+        let was = (441.28, 400.4);
+        // Firefox's sub-pixel adjustment of a pane between device pixels:
+        // a sixtieth of a pixel per event, a few events per open.
+        assert!(!anchor_moved(was, (441.28, 400.4 - 1.0 / 60.0)));
+        assert!(!anchor_moved(was, (441.28, 400.4 + 0.2)));
+        // One device pixel at 125 % scaling.
+        assert!(!anchor_moved(was, (441.28, 400.4 - 0.8)));
+        // A wheel notch, a scrollbar drag, a sideways scroll.
+        assert!(anchor_moved(was, (441.28, 399.4)));
+        assert!(anchor_moved(was, (441.28, 460.0)));
+        assert!(anchor_moved(was, (440.0, 400.4)));
     }
 }

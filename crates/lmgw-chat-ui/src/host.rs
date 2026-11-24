@@ -57,6 +57,21 @@ pub struct ChatVoice {
     pub realtime_url: Arc<dyn Fn(i64) -> String + Send + Sync>,
 }
 
+/// The host's window controls in the Chat's header bars, where the host
+/// draws its window's frame itself (the dashboard's app window): the
+/// buttons for the start of the leftmost header and for the end of the
+/// rightmost one, as the desktop orders them. The Chat's heads are marked
+/// `data-window-header` either way; a host without a frame of its own hands
+/// none.
+#[derive(Clone)]
+pub struct ChatWindow {
+    /// Drawn first in the leftmost head: the thread list's while it is
+    /// open beside the conversation, else the conversation's.
+    pub start: ViewFn,
+    /// Drawn last in the conversation's head, the rightmost one.
+    pub end: ViewFn,
+}
+
 /// Where the user writes from, asked at every send and every edit of a user
 /// message: one sentence the host words ("Typed in Kai's sidebar in
 /// Firefox, beside the tab “Example” (https://example.org/)."), which goes
@@ -95,12 +110,15 @@ pub struct ChatHost {
     /// each edit; `None` (the default) sends none, and the messages show
     /// none.
     pub origin: Option<ChatOrigin>,
+    /// The window buttons in the Chat's heads ([`ChatWindow`]); `None` (the
+    /// default) draws none.
+    pub window: Option<ChatWindow>,
 }
 
 impl ChatHost {
     /// A host with the defaults: the Chat follows its own feed, previews in
-    /// a sandboxed `srcdoc` frame, has no voice, no machine check and no
-    /// origin, and finds its assets at the root.
+    /// a sandboxed `srcdoc` frame, has no voice, no machine check, no
+    /// origin and no window buttons, and finds its assets at the root.
     pub fn new(location: Arc<dyn ChatLocation>, locked: Signal<bool>) -> Self {
         Self {
             location,
@@ -111,6 +129,7 @@ impl ChatHost {
             assets: "/".into(),
             machine: None,
             origin: None,
+            window: None,
         }
     }
 }

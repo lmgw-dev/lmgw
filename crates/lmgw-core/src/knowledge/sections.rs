@@ -12,6 +12,11 @@
 //!
 //! Images and audio are not knowledge-base material and are refused at upload
 //! ([`accepts`]).
+//!
+//! A file the sniffer refuses (an old Word, PowerPoint or Excel file, an
+//! EPUB book) is read through the conversion's capability table
+//! (`extract::convert::own`, document-conversion WP7) as one part of
+//! markdown.
 
 use std::time::Duration;
 
@@ -71,9 +76,35 @@ pub async fn read(
     bytes: Bytes,
     canceled: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<FileText, Stop> {
-    let sniffed = extract::sniff_async(bytes.clone())
-        .await
-        .map_err(|e| Stop::Failed(e.to_string()))?;
+    let sniffed = match extract::sniff_async(bytes.clone()).await {
+        Ok(s) => s,
+        // What the sniffer refuses, read through the conversion's table
+        // where it has a reader (document-conversion WP7): one part.
+        Err(refused) => {
+            let read = crate::extract::convert::own::read(state, "", bytes, refused);
+            // A cancelled job does not wait for LibreOffice: the read is
+            // dropped, which stops its tool (review nit 6).
+            let stop = async {
+                while !canceled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            };
+            let c = tokio::select! {
+                c = read => c.map_err(Stop::Failed)?,
+                () = stop => return Err(Stop::Canceled),
+            };
+            return Ok(FileText {
+                parts: vec![Part {
+                    page: None,
+                    heading: None,
+                    body: c.markdown,
+                }],
+                pages: (c.parts > 1).then_some(i64::from(c.parts)),
+                notes: c.notes,
+                ..Default::default()
+            });
+        }
+    };
     if let Some(why) = accepts(&sniffed) {
         return Err(Stop::Failed(why));
     }
@@ -132,7 +163,8 @@ async fn read_pdf(
         .await
         .map_err(|e| Stop::Failed(e.to_string()))?;
     let mut pages: Vec<String> = text.pages.clone();
-    let mut notes = Vec::new();
+    // Its text run again under poppler's wide limit (`pdf::wide`).
+    let mut notes: Vec<String> = text.notes.iter().map(|n| n.said("for the file")).collect();
     let mut skipped: Vec<u32> = Vec::new();
 
     let wanted = vision_prompts::select(&text, false);
@@ -180,7 +212,11 @@ async fn read_pdf(
                 continue;
             };
             let png = match extract::pdf::render_page(bytes.clone(), *page).await {
-                Ok(png) => png,
+                Ok(r) => {
+                    let on = format!("on page {page}");
+                    notes.extend(r.notes.iter().map(|n| n.said(&on)));
+                    r.png
+                }
                 Err(e) => {
                     failed.push((*page, e.to_string()));
                     continue;
@@ -330,6 +366,7 @@ impl VisionReader {
                         source: ImageSource::Base64 {
                             data: base64::engine::general_purpose::STANDARD.encode(png),
                         },
+                        cache_control: None,
                     },
                     ContentPart::text(prompt),
                 ],
@@ -345,6 +382,7 @@ impl VisionReader {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         let deadline =
             Duration::from_secs(state.snapshot().settings.responses_timeout_seconds.max(1));

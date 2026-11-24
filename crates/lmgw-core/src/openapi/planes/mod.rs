@@ -26,6 +26,7 @@ pub(crate) mod dashboard;
 pub(crate) mod decision_lab;
 pub(crate) mod devices;
 pub(crate) mod docs;
+pub(crate) mod documents_lab;
 pub(crate) mod image_lab;
 pub(crate) mod inference;
 pub(crate) mod knowledge;

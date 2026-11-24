@@ -151,6 +151,7 @@ fn runtime(model_id: &str, args: &[&str]) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 

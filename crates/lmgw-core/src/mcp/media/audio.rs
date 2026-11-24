@@ -44,6 +44,8 @@ async fn before_admit(state: &SharedState, alias: &str, cx: &CallCx<'_>, phase: 
         phase,
         model: alias.to_string(),
         room: None,
+        on: None,
+        moves: false,
     });
 }
 

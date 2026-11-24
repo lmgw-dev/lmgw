@@ -1,0 +1,21 @@
+; lmgw-gpu: lets the lmgw server container reach the host's NVIDIA device nodes.
+;
+; The server image runs confined as container_engine_t (SecurityLabelType= in
+; lmgw.container). CDI injects /dev/nvidia* into the container with the label
+; xserver_misc_device_t. container-selinux lets container_t use those nodes
+; through the boolean container_use_xserver_devices, but not container_engine_t:
+; without this module even stat() on /dev/nvidiactl fails with EACCES, and CUDA
+; cannot start. Nested engine containers (the models lmgw starts inside) also run
+; as container_engine_t, so the same rule covers both levels.
+;
+; This rule gives container_engine_t exactly what container_use_xserver_devices
+; gives container_t: the character devices labelled xserver_misc_device_t, which
+; are /dev/nvidia* plus a few graphics nodes such as /dev/vga_arbiter and
+; /dev/drm_dp_aux*, and no disks. The alternative is the boolean
+; container_use_devices, which opens every device node (disks included) to every
+; container.
+;
+; Install on a host with an NVIDIA card (root):  semodule -i lmgw-gpu.cil
+; Remove again:                                  semodule -r lmgw-gpu
+; Then restart the lmgw service.
+(allow container_engine_t xserver_misc_device_t (chr_file (getattr open read write ioctl map lock append)))

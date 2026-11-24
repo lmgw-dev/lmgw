@@ -223,8 +223,8 @@ mod tests {
     use super::*;
 
     const MSG: &str = "'qwen-demo-8b' could not start on the graphics card of the computer lmgw \
-                       runs on. One piece is missing so models can use the graphics card. lmgw \
-                       can set it up. Open lmgw there to see what to do. (its start said: Error: \
+                       runs on. The NVIDIA Container Toolkit is missing: models can't use the \
+                       graphics card without it. lmgw can set it up. Open lmgw there to see what to do. (its start said: Error: \
                        setting up CDI devices: unresolvable CDI devices nvidia.com/gpu=all) \
                        (fallback 'cloud-demo' is disabled)";
 
@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn a_fallback_clause_after_the_sentence_folds_without_the_start_s_words() {
         let m = "'qwen-demo-8b' could not start on the graphics card of the computer lmgw runs \
-                 on. One piece is missing so models can use the graphics card. lmgw can set it \
-                 up. Open lmgw there to see what to do. (fallback 'cloud-demo' is disabled) \
+                 on. The NVIDIA Container Toolkit is missing: models can't use the graphics \
+                 card without it. lmgw can set it up. Open lmgw there to see what to do. (fallback 'cloud-demo' is disabled) \
                  (tried: qwen-demo-8b)";
         let p = Parts::of(m, Reading::FixBelow);
         assert!(

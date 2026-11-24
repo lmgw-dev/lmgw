@@ -302,7 +302,7 @@ mod tests {
     use super::*;
 
     /// What the server took is what the page holds after: only the patch's
-    /// keys, and a null clears a number back to "model default".
+    /// keys, and a null clears a number back to "Default".
     #[test]
     fn a_saved_patch_is_applied_to_the_thread_key_by_key() {
         let mut t = ChatThread {

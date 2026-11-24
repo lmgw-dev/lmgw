@@ -167,6 +167,11 @@ pub(super) fn frame(l: &Rc<Live>, rid: &str, event: &str, data: Value) {
                 c.push_str(&format!("⚠ {msg}"));
             });
         }
+        ChatEvent::Notice(n) => m.notices.update(|v| {
+            if !v.contains(&n) {
+                v.push(n);
+            }
+        }),
         ChatEvent::Superseded => {
             m.content.update(|c| {
                 if !c.is_empty() {

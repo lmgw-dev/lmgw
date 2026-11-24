@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- Static mockup for docs/design/2026-11-18-document-conversion-design.md §8: Settings › Documents
+     (with the picture-description model, the tool pool and the docling callers' summary, §5.3, §7.7, §7.8).
+     Palette: crates/lmgw-ui-kit/assets/kit.css dark tokens (Breeze-like graphite + blue).
+     All versions, paths and model names are fake on purpose. Open it in a browser; no scripts
+     beyond the expert-view toggle. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lmgw mockup: Settings › Documents</title>
+<style>
+  :root {
+    --bg0: #2a2d31; --bg1: #1e2023; --pane: #222428; --surface: #2c2f33; --surface-hi: #33363b;
+    --border: #35383d; --border-strong: #464a50;
+    --text: #e9ebee; --text-2: #a6acb3; --text-3: #737a82;
+    --accent: #3daee9; --accent-hi: #5cbdf2; --accent-ink: #08131c; --accent-bg: rgba(61,174,233,.18);
+    --amber: #e8a33d; --amber-bg: rgba(232,163,61,.14);
+    --ok: #4cc26b; --ok-bg: rgba(76,194,107,.14);
+    --err: #f0625a; --err-bg: rgba(240,98,90,.14);
+    --sans: "Adwaita Sans", system-ui, sans-serif; --mono: "Adwaita Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg1); color: var(--text); font: 14px/1.45 var(--sans); }
+  .app { display: grid; grid-template-columns: 232px 260px 1fr; min-height: 100vh; }
+  .side { background: var(--bg0); border-right: 1px solid var(--border); padding: 14px 10px; }
+  .side .nav { padding: 6px 10px; border-radius: 6px; color: var(--text-2); }
+  .side .nav.on { background: var(--accent-bg); color: var(--text); }
+  .cats { background: var(--bg1); border-right: 1px solid var(--border); padding: 14px 10px; }
+  .cats h2 { font-size: 15px; margin: 2px 8px 10px; }
+  .cat { padding: 8px 10px; border-radius: 6px; color: var(--text-2); }
+  .cat small { display: block; color: var(--text-3); font-size: 12px; }
+  .cat.on { background: var(--surface); color: var(--text); }
+  .pane { background: var(--pane); padding: 18px 28px 40px; max-width: 980px; }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .head h1 { font-size: 20px; font-weight: 650; margin: 0; flex: 1; }
+  .sub { color: var(--text-2); margin: 0 0 18px; }
+  .btn { background: var(--surface-hi); color: var(--text); border: 1px solid var(--border-strong);
+         border-radius: 6px; padding: 5px 12px; font: inherit; cursor: pointer; }
+  .btn.small { padding: 2px 8px; font-size: 12px; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); cursor: pointer; }
+  .switch input { accent-color: var(--accent); }
+  .group { margin: 0 0 22px; }
+  .group h3 { font-size: 13px; font-weight: 650; color: var(--text-2); margin: 0 0 8px; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .row { display: grid; grid-template-columns: 22px 1fr 1.2fr; gap: 10px; align-items: center;
+         padding: 10px 14px; border-top: 1px solid var(--border); }
+  .row:first-child { border-top: 0; }
+  .row.tool { grid-template-columns: 1fr 1.4fr auto; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.full { background: var(--ok); }
+  .dot.part { background: var(--amber); }
+  .dot.none { background: transparent; border: 2px solid var(--text-3); }
+  .what { color: var(--text-2); }
+  .what.warn { color: var(--amber); }
+  .ver { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
+  .cmd { font-family: var(--mono); font-size: 12.5px; background: var(--bg1); border: 1px solid var(--border);
+         border-radius: 5px; padding: 2px 7px; color: var(--text); white-space: nowrap; }
+  .gives { color: var(--text-2); }
+  .expert { display: none; font-family: var(--mono); font-size: 12px; color: var(--text-3); grid-column: 1 / -1; }
+  body.expert-on .expert { display: block; }
+  .pref.expert-only { display: none; }
+  body.expert-on .pref.expert-only { display: grid; }
+  .pref { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 12px 14px;
+          border-top: 1px solid var(--border); align-items: center; }
+  .pref:first-child { border-top: 0; }
+  .pref .hint { color: var(--text-3); font-size: 12.5px; }
+  select { background: var(--surface-hi); color: var(--text); border: 1px solid var(--border-strong);
+           border-radius: 6px; padding: 4px 8px; font: inherit; }
+  .note { background: var(--amber-bg); color: var(--text); border-radius: 6px; padding: 6px 10px;
+          font-size: 12.5px; margin-top: 6px; grid-column: 1 / -1; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="side">
+    <div class="nav">Overview</div><div class="nav">Models</div><div class="nav">Chat</div>
+    <div class="nav">Usage</div><div class="nav on">Settings</div>
+  </nav>
+  <aside class="cats">
+    <h2>Settings</h2>
+    <div class="cat">Network<small>where the gateway listens</small></div>
+    <div class="cat">Retention<small>how long things are kept</small></div>
+    <div class="cat">Graphics card<small>admission and the hold</small></div>
+    <div class="cat on">Documents<small>what files become text</small></div>
+  </aside>
+  <main class="pane">
+    <div class="head">
+      <h1>Documents</h1>
+      <label class="switch"><input type="checkbox" onchange="document.body.classList.toggle('expert-on', this.checked)"> Expert view</label>
+      <button class="btn">Check again</button>
+    </div>
+    <p class="sub">What lmgw can turn into text for a model on this computer, and what one install would add. Checked 2 minutes ago.</p>
+
+    <section class="group">
+      <h3>What you can convert</h3>
+      <div class="box">
+        <div class="row"><span class="dot full"></span><span>Text, Markdown, CSV, web pages</span><span class="what">always</span>
+          <span class="expert">handler text.native · html.native</span></div>
+        <div class="row"><span class="dot full"></span><span>Word, PowerPoint, Excel, OpenDocument</span><span class="what">always, with headings and tables</span>
+          <span class="expert">handler office.native · budget MAX_UNCOMPRESSED_BYTES 1 GiB</span></div>
+        <div class="row"><span class="dot full"></span><span>PDF</span><span class="what">text, headings and tables</span>
+          <span class="expert">handler pdf.poppler · pdftotext, pdftohtml, pdftoppm</span></div>
+        <div class="row"><span class="dot part"></span><span>Scanned PDF pages and photos</span><span class="what warn">not read yet: install text recognition or choose a model below</span>
+          <span class="expert">handler none · needs tesseract or a vision model</span></div>
+        <div class="row"><span class="dot full"></span><span>Old Word and PowerPoint files (.doc, .ppt)</span><span class="what">through LibreOffice</span>
+          <span class="expert">handler legacy.libreoffice · private profile per run, macros off</span></div>
+        <div class="row"><span class="dot full"></span><span>E-books (EPUB) and e-mails (.eml)</span><span class="what">always</span>
+          <span class="expert">handler epub.native · mail.native</span></div>
+        <div class="row"><span class="dot none"></span><span>RTF, LaTeX, Org and similar</span><span class="what warn">install Pandoc</span>
+          <span class="expert">handler none · needs pandoc</span></div>
+        <div class="row"><span class="dot part"></span><span>Pictures in documents</span><span class="what warn">kept in place, not described yet: choose a model below</span>
+          <span class="expert">pictures.export · PDF via poppler image positions · vector drawings need the layout model</span></div>
+        <div class="row"><span class="dot full"></span><span>Audio</span><span class="what">through example-asr</span>
+          <span class="expert">alias example-asr · CPU row, keeps working under the hold</span></div>
+        <div class="row"><span class="dot none"></span><span>Video</span><span class="what warn">install ffmpeg</span>
+          <span class="expert">handler none · needs ffmpeg + a speech model</span></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h3>Found on this computer</h3>
+      <div class="box">
+        <div class="row tool"><span>PDF tools (poppler)</span><span class="ver">0.0.0-example</span><span></span>
+          <span class="expert">/opt/example/bin/pdftotext · GPL-2.0 or GPL-3.0</span></div>
+        <div class="row tool"><span>LibreOffice</span><span class="ver">0.0.0-example · Writer, Impress</span><span></span>
+          <span class="expert">/opt/example/bin/soffice · MPL-2.0 · Calc not installed (not needed: old Excel files are read without it)</span></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h3>Not installed</h3>
+      <div class="box">
+        <div class="row tool"><span>Text recognition (tesseract)</span><span class="gives">Reads scanned pages and photos without a model</span>
+          <span><code class="cmd">sudo dnf install tesseract</code> <button class="btn small">Copy</button></span>
+          <span class="expert">Apache-2.0 · your language's pack is installed with it</span></div>
+        <div class="row tool"><span>Pandoc</span><span class="gives">Reads RTF, LaTeX, Org and similar; keeps equations in Word files</span>
+          <span><code class="cmd">sudo dnf install pandoc-cli</code> <button class="btn small">Copy</button></span>
+          <span class="expert">GPL-2.0-or-later · about 200 MiB</span></div>
+        <div class="row tool"><span>ffmpeg</span><span class="gives">Turns the sound of a video into text</span>
+          <span><code class="cmd">sudo dnf install ffmpeg-free</code> <button class="btn small">Copy</button></span>
+          <span class="expert">GPL-3.0-or-later · or the ffmpeg package from RPM Fusion</span></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <h3>Model help</h3>
+      <div class="box">
+        <div class="pref"><div>Read pages with a model<div class="hint">Pages without text, and pages that look like tables</div></div>
+          <select><option>Off</option><option>example-vision-small</option></select></div>
+        <div class="pref"><div>Describe pictures with<div class="hint">One short description next to each picture, when a caller asks for it</div></div>
+          <select><option>Off</option><option>example-vision-small</option></select></div>
+        <div class="pref"><div>Speech-to-text model<div class="hint">For audio files and videos</div></div>
+          <select><option>example-asr</option><option>Off</option></select></div>
+        <div class="pref"><div>Which pages<div class="hint">Only when a model is chosen</div></div>
+          <select disabled><option>Pages without text, and tables</option><option>Every page</option></select></div>
+        <div class="pref expert-only"><div>Parallel tool runs<div class="hint">How many files or pages are worked on at once</div></div>
+          <select><option>Automatic (8)</option><option>4</option><option>2</option></select>
+          <span class="expert">derived: 8 = min(16 cores, 32 GiB ÷ 4 GiB per run)</span></div>
+      </div>
+    </section>
+    <section class="group">
+      <h3>Web addresses</h3>
+      <div class="box">
+        <div class="pref"><div>Let callers send web addresses<div class="hint">Tools that used docling can name a page or file to fetch. While this is off they send the file itself, and lmgw says so.</div></div>
+          <select><option>Off</option><option>On</option></select></div>
+        <div class="pref expert-only"><div>Allowed sites<div class="hint">Only these sites are fetched. Private and local addresses stay refused unless listed here. Each download is limited to the request size limit.</div></div>
+          <span class="cmd">docs.example</span></div>
+      </div>
+    </section>
+    <section class="group">
+      <h3>Who calls the docling route</h3>
+      <div class="box">
+        <div class="row tool"><span>example-key-1</span><span class="gives">41 requests, last today</span>
+          <span class="what warn">asks for picture descriptions (no model chosen), OCR engine “easyocr”</span>
+          <span class="expert">/v1/convert/file 38 · /v1/convert/source/async 3 · do_picture_description=true: mapped, no model (41) · ocr_engine=easyocr: mapped (41) · to_formats=md (41)</span></div>
+        <div class="row tool"><span>example-key-2</span><span class="gives">7 requests, last 3 days ago</span>
+          <span class="what">nothing lmgw handles differently</span>
+          <span class="expert">/v1/convert/file 7 · to_formats=md (7) · do_ocr=true (7)</span></div>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

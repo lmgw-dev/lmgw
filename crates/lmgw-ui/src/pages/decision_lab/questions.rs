@@ -49,9 +49,10 @@ pub(super) fn Moves(
                 type="button"
                 class="btn ghost sm del"
                 title=format!("Remove this {what}")
+                aria-label=format!("Remove this {what}")
                 on:click=move |_| on_remove.run(())
             >
-                "✕"
+                <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
             </button>
         </span>
     }
@@ -69,22 +70,24 @@ pub(super) fn QuestionsCard(lab: Lab) -> impl IntoView {
         });
     };
     view! {
-        <div class="card dl-questions">
+        <section class="pref-group lab-card dl-questions">
             <div class="dl-card-head">
                 <h3 class="lab-h3">"Questions"</h3>
                 <span class="count">{move || n.get()}</span>
                 <span class="spacer"></span>
                 <span class="mini-note dim">"answers come back in this order"</span>
             </div>
-            <For each=move || f.questions.get() key=|q| q.uid let:q>
-                <QuestionCard lab=lab q=q/>
-            </For>
-            <div class="row">
-                <button type="button" class="btn ghost" on:click=add>
-                    "Add question"
-                </button>
+            <div class="boxed lab-box">
+                <For each=move || f.questions.get() key=|q| q.uid let:q>
+                    <QuestionCard lab=lab q=q/>
+                </For>
+                <div class="row">
+                    <button type="button" class="btn ghost" on:click=add>
+                        "Add question"
+                    </button>
+                </div>
             </div>
-        </div>
+        </section>
     }
 }
 

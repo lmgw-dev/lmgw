@@ -71,6 +71,7 @@ mod words;
 use words::in_use;
 
 use super::attribution::Fill;
+use super::place::Mode;
 use super::{classify, lifecycle_spec, LocalHold, Target, VramScheduler};
 
 /// How a hold's model may be brought back when its container is gone under
@@ -358,8 +359,6 @@ impl VramScheduler {
                     "nothing lmgw can start — no row describes {label}"
                 )));
             };
-            let headroom = self.start_headroom(snap, target.class, &target.model_id, &fp);
-            let margin = self.start_margin(snap, target.class, &target.model_id, &fp);
             // A model no card can hold is the configuration error it is
             // (§4.7's rule), not a deferral: wherever a busy card would
             // answer this start before it reads the card itself — the owner
@@ -377,16 +376,26 @@ impl VramScheduler {
             // the owner's start of this model would not be checked either —
             // and a total not known yet is judged nowhere before the gate:
             // both defer as before.
-            // Too large is judged without the learned growth, which only
+            // Too large is judged without the learned room, which only
             // decides whether there is room now (`headroom`).
-            let structural = self.card_headroom(snap, target.class, &target.model_id, &fp);
+            let structural = self.card_headroom(snap, &fp);
             let blocked = |why: String| match self.known_total(snap) {
                 Some(total)
                     if snap.settings.vram.enabled
                         && fp.total_bytes.saturating_add(structural) > total
                         && !super::partial::adapts(&fp) =>
                 {
-                    Err(too_large(snap, target, &fp, structural, total))
+                    Err(too_large(
+                        snap,
+                        target,
+                        &fp,
+                        super::place::TooLarge {
+                            bytes: fp.total_bytes,
+                            structural,
+                            capacity: total,
+                            holder: "the GPU holds".into(),
+                        },
+                    ))
                 }
                 _ => Ok(BackgroundStart::Blocked(why)),
             };
@@ -436,24 +445,38 @@ impl VramScheduler {
                 if let Some(block) = state.snapshot().gpu_block() {
                     return Err(block.refusal(target.model_id.clone(), ""));
                 }
-                let Some(cap) = l.capacity.as_ref() else {
+                if l.capacity.is_none() {
                     return Ok(BackgroundStart::Blocked(unmeasured(
                         l.inactive_reason
                             .as_deref()
                             .unwrap_or("no capacity to measure against"),
                     )));
+                }
+                if let Some(problem) = self.pin_gone(snap, target, &l.devices) {
+                    return Ok(BackgroundStart::Blocked(format!("{label} {problem}")));
+                }
+                // The card a guest's start goes on (device-ledger design
+                // §5.6): idle guests are its only victims, and it never
+                // waits.
+                let p = self.placement(snap, target, &fp, &l, Mode::Guest, None);
+                let Some(cap) = l.capacity_on(&p.cards, None) else {
+                    return Ok(BackgroundStart::Blocked(unmeasured(
+                        "no capacity to measure against",
+                    )));
                 };
+                let (headroom, margin, floor) = (p.headroom, p.margin, p.floor);
                 // A row llama.cpp's `--fit` would shrink, fitted to what
                 // this reading's card can give it (`partial::llama`).
-                let fp = self.fit_in(snap, target, fp.clone(), &l);
-                let needs = fp.total_bytes.saturating_add(headroom);
+                let fp = self.fit_in_on(target, fp.clone(), &l, &p, None);
+                let needs = fp
+                    .total_bytes
+                    .saturating_add(p.engine)
+                    .saturating_add(headroom);
                 // Again on this reading: a declared budget can shrink. A
                 // pipeline that can run with less on the card is never too
                 // large for it (`partial`).
-                if fp.total_bytes.saturating_add(structural) > cap.total
-                    && !super::partial::adapts(&fp)
-                {
-                    return Err(too_large(snap, target, &fp, structural, cap.total));
+                if let Some(t) = self.too_large(snap, target, &fp, &l) {
+                    return Err(too_large(snap, target, &fp, t));
                 }
                 // A start already decided for it (another admission's
                 // reservation) accounts for its memory; the `acquire` below
@@ -464,38 +487,64 @@ impl VramScheduler {
                 {
                     break Some(None);
                 }
-                if cap.free >= needs {
+                // A split (device-ledger design §4.3): each of its cards
+                // holds its part now, else an idle guest on the short card
+                // is its victim.
+                let short = self.split_short(&l, target, &p, None);
+                if let (Some(grant), None) = (super::place::split_grant(&p), &short) {
+                    break Some(Some(self.reserve_as(state, target, &p, grant)));
+                }
+                let evict_on = match &short {
+                    Some((card, _, _)) => vec![card.clone()],
+                    None => p.cards.clone(),
+                };
+                if p.split.is_none() && cap.free >= needs {
                     // A guest's deferral is how its fallback answers, so
                     // it always has one (`partial::llama::whole`).
                     let room = super::partial::Room {
                         free: cap.free,
-                        headroom,
-                        others_hold: super::queue::others_hold(&l, target),
+                        headroom: headroom.saturating_add(p.engine),
+                        floor: headroom.saturating_add(p.engine),
+                        others_hold: super::place::others_hold_on(&l, target, &p.cards),
                         fallback: true,
-                        cards: self.cards_for(snap, target),
+                        cards: p.count(),
                     };
                     let grant = super::partial::whole(target, &fp, room);
-                    break Some(Some(self.reserve_as(state, target, grant)));
+                    // A context lowered to one card of several, said as the
+                    // editor says it (device-ledger design §8.2).
+                    let grant = self.one_card_grant(snap, target, &fp, &p, &l, grant);
+                    break Some(Some(self.reserve_as(state, target, &p, grant)));
                 }
                 if !self
-                    .evict_one(state, target, &l, Victims::IdleBackground, None)
+                    .evict_one(state, target, &l, Victims::IdleBackground, None, &evict_on)
                     .await
                 {
                     // Nothing more a guest may evict: with nothing of lmgw's
                     // left on the card, a start that fits beside what other
                     // programs hold now with its margin goes ahead, warned
-                    // (`queue::room_now`); a pipeline that can run with less
+                    // (`queue::room_on`), and beside the floor alone where
+                    // nothing smaller fits beside the margin, its margin
+                    // given up last (`partial::decide`); a pipeline that can run with less
                     // on the card goes ahead with what `partial` gives it. A
                     // guest's deferral is how its fallback answers, so no
                     // fallback is counted here — except for a llama-server
                     // row, whose start with less than its target would stay
                     // so for the owner too: its guest defers instead
                     // (`partial::llama::decide`).
-                    let room =
-                        self.room_now(snap, &l, target, (headroom, margin), fp.llama.is_some());
-                    if let Some(grant) = super::partial::decide(target, &fp, room) {
-                        let grant = self.note_growth(target, grant, (headroom, margin), cap.free);
-                        break Some(Some(self.reserve_as(state, target, grant)));
+                    let room = self.room_on(&l, target, &p, &cap, fp.llama.is_some());
+                    // A split goes ahead only card by card (§4.3).
+                    let go = match p.split {
+                        Some(_) => None,
+                        None => super::partial::decide(target, &fp, room),
+                    };
+                    if let Some(grant) = go {
+                        let grant = self.note_growth(
+                            target,
+                            grant,
+                            (headroom + p.engine, margin + p.engine, floor + p.engine),
+                            cap.free,
+                        );
+                        break Some(Some(self.reserve_as(state, target, &p, grant)));
                     }
                     // The scheduler's per-process measurement, as admission's
                     // external shortfall reads it (waiting for a PID read in flight); none
@@ -503,8 +552,9 @@ impl VramScheduler {
                     let outside = self
                         .measure(state, snap, &l, Fill::Verdict)
                         .await
+                        .and_then(|m| m.shares())
                         .ok()
-                        .map(|m| m.shares.outside);
+                        .map(|s| s.outside);
                     let why = in_use(&l.residents, outside, &label, needs, cap.free);
                     return Ok(BackgroundStart::Blocked(
                         match super::partial::why_not(&fp, room) {
@@ -584,13 +634,12 @@ fn too_large(
     snap: &Snapshot,
     target: &Target,
     fp: &super::Footprint,
-    headroom: u64,
-    capacity: u64,
+    t: super::place::TooLarge,
 ) -> GatewayError {
     GatewayError::VramTooLarge {
         model: target.model_id.clone(),
-        need: GatewayError::vram_need(fp.total_bytes, headroom),
-        capacity: fmt_bytes(capacity),
+        need: GatewayError::vram_need(t.bytes, t.structural),
+        holds: GatewayError::vram_holds(&t.holder, t.capacity),
         hint: super::partial::too_large_hint(snap, target, fp),
     }
 }
@@ -833,7 +882,7 @@ pub(super) async fn climb_denied(
         }
     }
     let running = running_bytes(state, snap, &hold.target).await;
-    match free_for_climb(state, snap, running).await {
+    match free_for_climb(state, snap, &hold.target, running).await {
         Err(why) => Some(why),
         Ok(free) if free >= needs => None,
         Ok(free) => Some(too_small(rung, needs, free, running)),
@@ -879,7 +928,7 @@ pub(super) async fn admit_climb_background(
     if let Some(why) = state.vram.owner_waiting(state) {
         return GuestClimb::Denied(format!("the GPU is in use by {why}"));
     }
-    let free = match free_for_climb(state, snap, running).await {
+    let free = match free_for_climb(state, snap, target, running).await {
         Ok(free) => free,
         Err(why) => return GuestClimb::Denied(why),
     };
@@ -911,9 +960,16 @@ async fn running_bytes(state: &SharedState, snap: &Snapshot, target: &Target) ->
         .map_or(0, |f| f.total_bytes)
 }
 
-/// Free VRAM for a climb, the running rung's `running` bytes counted as
-/// freed — or why a guest cannot know it.
-async fn free_for_climb(state: &SharedState, snap: &Snapshot, running: u64) -> Result<u64, String> {
+/// Free VRAM for a climb on the cards its running rung is on, where the new
+/// rung goes (device-ledger design §5.6, as the owner's climb reads it),
+/// the running rung's `running` bytes counted as freed — or why a guest
+/// cannot know it.
+async fn free_for_climb(
+    state: &SharedState,
+    snap: &Snapshot,
+    target: &Target,
+    running: u64,
+) -> Result<u64, String> {
     if !snap.settings.vram.enabled {
         return Err(format!(
             "the GPU is in use by {}",
@@ -921,7 +977,8 @@ async fn free_for_climb(state: &SharedState, snap: &Snapshot, running: u64) -> R
         ));
     }
     let l = state.vram.ledger(state, snap).await;
-    match l.capacity.as_ref() {
+    let on = super::climb::rung_cards(&l, target);
+    match l.capacity_on(&on, None) {
         Some(cap) => Ok(cap.free.saturating_add(running)),
         None => Err(format!(
             "the GPU is in use by {}",

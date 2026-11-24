@@ -471,6 +471,10 @@ pub(super) fn chart_width(node: NodeRef<leptos::html::Div>) -> Memo<f64> {
 pub(crate) fn ChartHead(
     title: &'static str,
     #[prop(into)] note: TextProp,
+    /// What the note's tooltip says (and a click on the note reads whole):
+    /// the method behind the short words; the note's own text when absent.
+    #[prop(optional, into)]
+    explain: Option<TextProp>,
     /// `None` for a card that is its own table.
     #[prop(optional)]
     tv: Option<RwSignal<bool>>,
@@ -480,16 +484,23 @@ pub(crate) fn ChartHead(
 ) -> impl IntoView {
     let open = RwSignal::new(false);
     let tip = note.clone();
+    let said = explain.clone();
     view! {
         <div class="chart-head">
             <h3>{title}</h3>
             <span
                 class="note"
                 class:open=move || open.get()
-                title=move || tip.get().to_string()
+                title=move || match &explain {
+                    Some(e) => e.get().to_string(),
+                    None => tip.get().to_string(),
+                }
                 on:click=move |_| open.update(|o| *o = !*o)
             >
-                {move || note.get()}
+                {move || match &said {
+                    Some(e) if open.get() => e.get().to_string(),
+                    _ => note.get().to_string(),
+                }}
             </span>
             {extra.map(|e| e.run())}
             {tv.map(|tv| view! { <ViewToggle tv=tv/> })}

@@ -30,11 +30,22 @@
 
 use std::process::Command;
 
+pub mod beneath;
+pub mod group;
+
 /// A system tool lmgw runs — `podman`, `nvidia-smi`: it inherits no
 /// descriptor beyond stdin, stdout and stderr ([`stdio_only`]) and no
-/// `LD_LIBRARY_PATH`.
+/// `LD_LIBRARY_PATH`, and on Windows no console window of its own
+/// (`CREATE_NO_WINDOW`: the release app has no console, and a console child
+/// of it would otherwise open one per run).
 pub fn system_tool(cmd: &mut Command) -> &mut Command {
-    stdio_only(cmd).env_remove("LD_LIBRARY_PATH")
+    stdio_only(cmd).env_remove("LD_LIBRARY_PATH");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 /// [`system_tool`] on a tokio command, through the std command it wraps.

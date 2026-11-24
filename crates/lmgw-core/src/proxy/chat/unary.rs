@@ -448,9 +448,25 @@ pub(super) async fn unary_chat(
             )),
         };
     }
-    if let Read::Rerouted(r) = read? {
-        return Ok(Turn::Rerouted(r));
-    }
+    // The answering Anthropic upstream's request id: an error answer's
+    // (its body's, else its header's) or an answer's (`request_id`).
+    let (upstream_error, request_id) = match read? {
+        Read::Rerouted(r) => return Ok(Turn::Rerouted(r)),
+        Read::Answer {
+            status,
+            headers: answer_headers,
+            bytes,
+            ..
+        } => (
+            !status.is_success(),
+            super::request_id::of_answer(
+                proto,
+                route.upstream.protocol,
+                &answer_headers,
+                (!status.is_success()).then_some(&bytes[..]),
+            ),
+        ),
+    };
     let Some(Parsed {
         ttfb,
         completion,
@@ -460,7 +476,10 @@ pub(super) async fn unary_chat(
         unreachable!("an answer is parsed before it is handed over");
     };
     let completion = match completion {
-        Ok(c) => c,
+        Ok(c) => {
+            headers.set_request_id(request_id);
+            c
+        }
         // A failed whole Response: its row counts what it reported, or its
         // local floor (decision 22), and its client gets the error.
         Err(e) if e.failed_answer().is_some() => {
@@ -495,7 +514,14 @@ pub(super) async fn unary_chat(
             .await;
             return Ok(Turn::Answered(resp));
         }
-        Err(e) => return Err(e),
+        // The upstream's own error answer, with its id; an answer lmgw could
+        // not read is lmgw's error, with none.
+        Err(e) => {
+            if upstream_error {
+                headers.set_request_id(request_id);
+            }
+            return Err(e);
+        }
     };
     let body = proto.serialize_completion(&ir.model_alias, &completion);
     // A platform answer that reported no usage: what was sent and answered,

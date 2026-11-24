@@ -353,14 +353,14 @@ pub fn requirement_warnings(reqs: &[Requirement], surface: &ToolSurface) -> Vec<
     for r in reqs {
         if !r.registered {
             out.push(format!(
-                "no MCP server with label '{}' is registered on this gateway (available: {}). \
+                "No MCP server with label '{}' is registered on this gateway (available: {}). \
                  The agent is saved; Start stays disabled until it is.",
                 r.label,
                 surface.labels().join(", ")
             ));
         } else if !r.missing_tools.is_empty() {
             out.push(format!(
-                "the '{}' toolset does not currently list: {}",
+                "The '{}' toolset does not currently list: {}.",
                 r.label,
                 r.missing_tools.join(", ")
             ));
@@ -394,7 +394,7 @@ pub struct AgentWarning {
 /// every stored manifest that has one, including the shipped mail labeler an
 /// owner is upgrading from.
 pub const APPLY_TURN_MESSAGE: &str =
-    "apply may not run a model turn: the apply step writes, and a model deciding what to write \
+    "Apply may not run a model turn: the apply step writes, and a model deciding what to write \
      is neither deterministic nor reviewable. Use a direct tool call, a `script`, or \
      `run.kind: container`.";
 
@@ -427,7 +427,7 @@ pub fn manifest_warnings(m: &Manifest, source: &str) -> Vec<AgentWarning> {
         if step.is_script() && step.output.is_none() {
             out.push(AgentWarning::new(
                 "script_without_output",
-                "the apply script declares no 'output' schema, so whatever it returns is stored \
+                "The apply script declares no 'output' schema, so whatever it returns is stored \
                  unchecked. Declare run.apply.output and a script that answers with the wrong \
                  shape fails the run instead.",
                 false,
@@ -455,7 +455,7 @@ pub fn manifest_warnings(m: &Manifest, source: &str) -> Vec<AgentWarning> {
     match m.image() {
         None => out.push(AgentWarning::new(
             "container_without_image",
-            "this agent declares no run.image, so there is nothing for Start to run. Set one, or \
+            "This agent declares no run.image, so there is nothing for Start to run. Set one, or \
              point the App tab at a dev_url.",
             true,
         )),
@@ -463,8 +463,8 @@ pub fn manifest_warnings(m: &Manifest, source: &str) -> Vec<AgentWarning> {
             out.push(AgentWarning::new(
                 "local_image_on_import",
                 format!(
-                    "the image '{image}' is local to the machine that built it; this install has \
-                     to build or retag it before the agent can run"
+                    "The image '{image}' is local to the machine that built it; this install has \
+                     to build or retag it before the agent can run."
                 ),
                 false,
             ));
@@ -494,7 +494,7 @@ pub async fn runtime_warnings(
     if seed::update_available(&agent.row) {
         out.push(AgentWarning::new(
             "builtin_update_available",
-            "a newer built-in manifest ships with this version of lmgw. This row was edited (or \
+            "A newer built-in manifest ships with this version of lmgw. This row was edited (or \
              predates the hash lmgw records), so it is left exactly as it is — \"Reset to \
              shipped\" adopts the new one and keeps the config.",
             false,
@@ -512,7 +512,7 @@ pub async fn runtime_warnings(
             out.push(AgentWarning::new(
                 "install_image_mismatch",
                 format!(
-                    "this agent was installed from the image '{}', but its manifest names \
+                    "This agent was installed from the image '{}', but its manifest names \
                      '{image}' — the manifest wins, so that is what a run, an apply and the app \
                      start. Re-import from image reads the package again; editing run.image on \
                      the Definition tab is the other way round.",
@@ -530,13 +530,13 @@ pub async fn runtime_warnings(
             "dev_url_active",
             if service::service_of(agent).is_some() {
                 format!(
-                    "this agent's app is served from the dev server at {url}; no container is \
+                    "This agent's app is served from the dev server at {url}; no container is \
                      started for it. Runs and applies still use the image. Clear the dev_url to \
                      go back to the image."
                 )
             } else {
                 format!(
-                    "this agent has a dev_url ({url}) but declares no run.service, so nothing \
+                    "This agent has a dev_url ({url}) but declares no run.service, so nothing \
                      reads it: there is no app to proxy. Saving the manifest again clears \
                      it, or give the manifest a service block."
                 )
@@ -557,13 +557,13 @@ pub async fn runtime_warnings(
             "dev_url_cleared",
             if cleared.why.is_empty() {
                 format!(
-                    "the dev server override on this agent ({url}) was cleared: it is no longer \
+                    "The dev server override on this agent ({url}) was cleared: it is no longer \
                      a legal dev_url for this gateway. Set a new one to go back to the \
                      hot-reload loop; the app is served from the image until then."
                 )
             } else {
                 format!(
-                    "the dev server override on this agent ({url}) was cleared because it is no \
+                    "The dev server override on this agent ({url}) was cleared because it is no \
                      longer a legal dev_url for this gateway: {}. Set a new one to go back to \
                      the hot-reload loop; the app is served from the image until then.",
                     cleared.why
@@ -592,7 +592,7 @@ pub async fn runtime_warnings(
             out.push(AgentWarning::new(
                 "mount_unbound",
                 format!(
-                    "this agent needs a {} for '{}' and none is bound: bind '{}' on the Run tab",
+                    "This agent needs a {} for '{}' and none is bound: bind '{}' on the Run tab.",
                     f.kind.as_str(),
                     f.name,
                     f.name
@@ -611,12 +611,12 @@ pub async fn runtime_warnings(
             "podman_unavailable",
             if scripted && m.kind() != "container" {
                 format!(
-                    "the apply step is a script, which runs in a container, and podman could not \
+                    "The apply step is a script, which runs in a container, and podman could not \
                      be run on this box: {e}. Listing and classifying still work; Apply will fail."
                 )
             } else {
                 format!(
-                    "podman is required for container agents and could not be run on this box: {e}"
+                    "Podman is required for container agents and could not be run on this box: {e}."
                 )
             },
             m.kind() == "container",
@@ -629,7 +629,7 @@ pub async fn runtime_warnings(
                 out.push(AgentWarning::new(
                     "image_absent_pull_never",
                     format!(
-                        "the image '{image}' is not on this box and run.pull is 'never', so Start \
+                        "The image '{image}' is not on this box and run.pull is 'never', so Start \
                          would fail rather than download it. Pull it, or set run.pull."
                     ),
                     true,
@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(codes(&m, "builtin"), [("apply_turn", true)]);
         let w = &manifest_warnings(&m, "builtin")[0];
         assert!(
-            w.message.contains("apply may not run a model turn"),
+            w.message.contains("Apply may not run a model turn"),
             "{}",
             w.message
         );

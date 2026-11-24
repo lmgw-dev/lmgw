@@ -1,22 +1,21 @@
 <!DOCTYPE html>
 <!-- lmgw UI rebuild — design language sample. Local file, open directly.
-     Tokens + components here are the contract for crates/lmgw-ui/assets/app.css. -->
+     Tokens + components here are the contract for crates/lmgw-ui/assets/app.css.
+     Superseded in parts by modern-sample.html (the approved modern design). -->
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <title>lmgw — design sample</title>
 <style>
 /* ---------- fonts (bundled, no CDN) ---------- */
-@font-face { font-family: "Plex Sans"; font-weight: 400; font-display: swap;
-  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-Regular.woff2") format("woff2"); }
-@font-face { font-family: "Plex Sans"; font-weight: 500; font-display: swap;
-  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-Medium.woff2") format("woff2"); }
-@font-face { font-family: "Plex Sans"; font-weight: 600; font-display: swap;
-  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-SemiBold.woff2") format("woff2"); }
-@font-face { font-family: "Plex Mono"; font-weight: 400; font-display: swap;
-  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexMono-Regular.woff2") format("woff2"); }
-@font-face { font-family: "Plex Mono"; font-weight: 500; font-display: swap;
-  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexMono-Medium.woff2") format("woff2"); }
+@font-face { font-family: "Adwaita Sans"; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url("../../../crates/lmgw-ui/assets/fonts/AdwaitaSans-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Adwaita Sans"; font-style: italic; font-weight: 100 900; font-display: swap;
+  src: url("../../../crates/lmgw-ui/assets/fonts/AdwaitaSans-Italic.woff2") format("woff2"); }
+@font-face { font-family: "Adwaita Mono"; font-weight: 400; font-display: swap;
+  src: url("../../../crates/lmgw-ui/assets/fonts/AdwaitaMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Adwaita Mono"; font-weight: 700; font-display: swap;
+  src: url("../../../crates/lmgw-ui/assets/fonts/AdwaitaMono-Bold.woff2") format("woff2"); }
 
 /* ---------- tokens: dark (default) ---------- */
 :root {
@@ -43,8 +42,8 @@
   --err: #E5534B;
   --err-bg: rgba(229,83,75,.12);
   --shadow: 0 1px 2px rgba(0,0,0,.25), 0 4px 16px rgba(0,0,0,.18);
-  --sans: "Plex Sans", system-ui, sans-serif;
-  --mono: "Plex Mono", monospace;
+  --sans: "Adwaita Sans", system-ui, sans-serif;
+  --mono: "Adwaita Mono", monospace;
   /* chart tokens, as app.css has them (the Usage demos use them) */
   --c1: #0486D3; --c2: #D57700; --c3: #009D9E;
   --c4: #875CC6; --c5: #5B9D2C; --c6: #CF5291;
@@ -2477,7 +2476,7 @@ localhost/llama-server-cuda:official-latest
             <thead><tr><th>Name</th><th class="col-p3">Protocol</th><th>Base URL</th><th class="col-p2">Key</th><th>Catalog</th><th>State</th><th></th></tr></thead>
             <tbody>
             <tr><td><button class="link-btn row-link">kilo-gw</button></td><td class="col-p3"><span class="type-badge">openai</span></td><td class="clip dim mono-sm" title="https://api.kilo.ai/api/gateway">https://api.kilo.ai/api/gateway</td><td class="col-p2 dim">•••• set</td><td class="up-catalog"><a class="row-link" href="#">394 models · 0 hidden</a></td><td><span class="chip ok"><span class="dot"></span>enabled</span></td><td class="actions"><button class="btn sm">Test</button> <span class="row-menu"><button class="btn ghost sm row-menu-btn">⋯</button></span></td></tr>
-            <tr><td><button class="link-btn row-link">llama-server</button></td><td class="col-p3"><span class="type-badge">openai</span></td><td class="clip dim mono-sm">http://127.0.0.1:9292/v1</td><td class="col-p2 dim">none</td><td class="up-catalog"><span class="problem" title="error sending request for url (http://127.0.0.1:9292/v1/models)">error sending request for url (http://127.0.0.1:9292/v1/models)</span></td><td><span class="chip ok"><span class="dot"></span>enabled</span></td><td class="actions"><button class="btn sm">Test</button> <span class="row-menu"><button class="btn ghost sm row-menu-btn">⋯</button></span></td></tr>
+            <tr><td><button class="link-btn row-link">llama-server</button></td><td class="col-p3"><span class="type-badge">openai</span></td><td class="clip dim mono-sm">http://127.0.0.1:9393/v1</td><td class="col-p2 dim">none</td><td class="up-catalog"><span class="problem" title="error sending request for url (http://127.0.0.1:9393/v1/models)">error sending request for url (http://127.0.0.1:9393/v1/models)</span></td><td><span class="chip ok"><span class="dot"></span>enabled</span></td><td class="actions"><button class="btn sm">Test</button> <span class="row-menu"><button class="btn ghost sm row-menu-btn">⋯</button></span></td></tr>
             </tbody>
           </table>
         </div>

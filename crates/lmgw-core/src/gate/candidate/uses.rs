@@ -114,6 +114,7 @@ mod tests {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         }
     }
 
@@ -134,6 +135,7 @@ mod tests {
             source: ImageSource::Base64 {
                 data: "AAAA".into(),
             },
+            cache_control: None,
         });
         r.messages[0].content.push(ContentPart::Audio {
             mime: "audio/wav".into(),
@@ -144,6 +146,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            anthropic_fields: Default::default(),
         });
         assert_eq!(
             names(request_facets(&r, None)),

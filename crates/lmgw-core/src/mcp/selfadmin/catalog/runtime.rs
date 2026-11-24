@@ -103,7 +103,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                  what credential — auth_enabled, self_admin, bind_addr, agent_origin_suffix \
                  and devices (the device listener and how long a pairing token and a \
                  device's certificate live). They change on Settings in the dashboard; a call that \
-                 names one is refused, naming it, and changes nothing. Also left to the \
+                 names one is refused, naming it, and changes nothing. Refused the same \
+                 way: documents_fetch_sources and documents_source_hosts, which decide which \
+                 web addresses lmgw fetches for docling callers, documents_page_reader \
+                 and documents_page_reader_doctags, which decide which model callers' \
+                 document pages are sent to, documents_picture_alias, which decides \
+                 which model describes their pictures, and documents_asr_alias, which \
+                 decides which model their audio is sent to. Also left to the \
                  dashboard: the HF/update/forge tokens and the builds directory.",
             props: vec![
                 ("retention_days", int_p("Days of request logs to keep. 0 = forever.")),
@@ -396,21 +402,46 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "headroom_mode",
                     enum_p(
-                        "How VRAM admission's headroom is set (vram.headroom_mode): 'auto' \
-                         (default) learns it — the largest growth of other programs' GPU memory \
-                         seen in the last 7 days, plus a margin for each model still starting or \
-                         not measured yet — and uses headroom_mb until it has watched the card \
-                         for 24 hours; 'fixed' uses headroom_mb for everything. lmgw__settings \
-                         (vram.headroom) says what it is now and why.",
+                        "How VRAM admission keeps GPU memory free for other programs \
+                         (vram.headroom_mode), per graphics card: 'auto' (default) keeps a \
+                         floor of headroom_mb always free, but no more than the most other \
+                         programs held on that card in the last 7 days (a card nobody else \
+                         uses keeps nothing), and on top the learned room — the most they \
+                         held there less what they hold now — which lmgw gives up last: it \
+                         uses another card, evicts its own idle models or waits for them \
+                         first, and never refuses a model that fits beside the floor. \
+                         'fixed' keeps headroom_mb on every card. A model still starting \
+                         gets its margin on top in both, given up last like the learned \
+                         room, where nothing else fits beside the floor. keep_free sets a \
+                         card's amount of its own. lmgw__settings (vram.headroom) says what \
+                         it is now and why, per card.",
                         &["auto", "fixed"],
                     ),
                 ),
                 (
                     "headroom_mb",
                     int_p(
-                        "The fixed headroom in MiB (vram.headroom_mb, default 1024): GPU memory \
-                         VRAM admission keeps free beyond a model's estimate in 'fixed' mode, \
-                         and in 'auto' mode until it has learned enough.",
+                        "The headroom's floor in MiB (vram.headroom_mb, default 1024): GPU \
+                         memory kept free for other programs on each graphics card — in \
+                         'auto' mode no more than the most they held on the card in the last \
+                         7 days, with the learned room on top; in 'fixed' mode as written.",
+                    ),
+                ),
+                (
+                    "keep_free",
+                    str_p(
+                        "What is kept free for other programs on one graphics card, declared \
+                         by the owner (vram.keep_free), as a JSON-encoded object by the \
+                         card's id (lmgw__settings vram.headroom.cards[].id): \
+                         {\"<id>\": {\"mode\": \"always\", \"mb\": 4096}} keeps 4096 MiB \
+                         free there without exception — a model that would need it waits, \
+                         goes on another card or falls back; {\"mode\": \"nothing\"} keeps \
+                         nothing there (the card is lmgw's; a starting model keeps its \
+                         margin while something else fits); {\"mode\": \"automatic\"} puts \
+                         the card back on headroom_mode. Only the cards given change. vram.headroom.cards[] \
+                         .suggest is an amount suggested from what was seen on the card: \
+                         its floor and the learned room together, since always replaces the \
+                         floor.",
                     ),
                 ),
                 (

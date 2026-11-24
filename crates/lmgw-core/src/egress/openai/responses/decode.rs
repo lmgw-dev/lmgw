@@ -206,6 +206,7 @@ pub fn parse_response(v: &Value, scope: &SealScope) -> Result<Completion, Gatewa
                         .unwrap_or_default()
                         .to_string(),
                     args: arguments(raw),
+                    cache_control: None,
                 });
             }
             Some(item::REASONING) => {

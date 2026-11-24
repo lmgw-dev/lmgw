@@ -106,10 +106,13 @@ async fn the_rate_limit_is_asked_once() {
 #[tokio::test]
 async fn a_hub_that_cant_be_reached_is_asked_once() {
     let _env = common::process_env_lock().await;
-    // The CDN the hub sends to is a port nothing listens on.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let gone = format!("http://{}/cdn/x", closed.local_addr().unwrap());
-    drop(closed);
+    // The CDN the hub sends to is a port nothing listens on: bound and
+    // never listened on, so it stays this test's for its whole run and a
+    // connection to it is refused. A port bound and dropped again could be
+    // taken by another test's server meanwhile, which then answered the
+    // read (seen 2026-11-18 under the full suite: five reads, no refusal).
+    let (port, _held) = common::refusing_port();
+    let gone = format!("http://127.0.0.1:{port}/cdn/x");
     stops_at_once(
         ResponseTemplate::new(302).insert_header("location", gone.as_str()),
         "GET http://127.0.0.1",

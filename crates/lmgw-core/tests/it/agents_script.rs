@@ -326,7 +326,7 @@ async fn an_apply_turn_loads_and_warns_and_its_detail_is_not_a_400() {
         w["message"]
             .as_str()
             .unwrap()
-            .contains("apply may not run a model turn"),
+            .contains("Apply may not run a model turn"),
         "{d}"
     );
 

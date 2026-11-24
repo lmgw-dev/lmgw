@@ -213,8 +213,20 @@ fn op_names_match_the_dispatcher_arms() {
 
     let api_rs = std::fs::read_to_string(src.join("web/api.rs")).unwrap();
     let op_body = function_body(&api_rs, "fn op(");
+    // The match is split over `op_table_*` so that no one poll frame holds
+    // every arm (the stack-depth note on `op`); the arms are all of them.
     let mut main_found = arm_names(op_body);
     main_found.extend(matches_names(op_body));
+    for part in [
+        "fn op_table_a(",
+        "fn op_table_a2(",
+        "fn op_table_b(",
+        "fn op_table_c(",
+    ] {
+        let body = function_body(&api_rs, part);
+        main_found.extend(arm_names(body));
+        main_found.extend(matches_names(body));
+    }
     let settings_found = name_eq_names(op_body);
     assert_eq!(
         main_found,
@@ -366,8 +378,8 @@ fn every_listed_op_is_documented_and_vice_versa() {
     );
     assert_eq!(
         listed.len(),
-        110,
-        "web::op_names::all() should name 110 ops"
+        115,
+        "web::op_names::all() should name 115 ops"
     );
 }
 

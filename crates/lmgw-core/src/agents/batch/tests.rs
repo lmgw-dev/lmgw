@@ -249,6 +249,7 @@ fn tool_turn(calls: &[(&str, &str)]) -> Completion {
                 id: (*id).into(),
                 name: (*name).into(),
                 args: json!({ "ids": ["m1"] }),
+                cache_control: None,
             })
             .collect(),
         finish_reason: FinishReason::ToolUse,
@@ -348,6 +349,7 @@ fn tools_for(exec: &FakeExec) -> Vec<ResolvedTool> {
                     description: None,
                     parameters: json!({"type": "object"}),
                     strict: None,
+                    anthropic_fields: Default::default(),
                 },
             )
         })

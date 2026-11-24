@@ -44,7 +44,7 @@
 
 use std::collections::HashMap;
 
-use super::super::nvml::{GpuMemory, ProcessMemory};
+use super::super::nvml::{DeviceId, DeviceProcesses, GpuMemory};
 use super::super::VramScheduler;
 use super::read::own_share;
 
@@ -60,6 +60,10 @@ pub(in crate::vram) struct Ask {
 pub(in crate::vram) struct DeviceRead {
     pub(in crate::vram) devices: Result<Vec<GpuMemory>, String>,
     pub(in crate::vram) held: HashMap<u64, Result<u64, String>>,
+    /// The same per card (device-ledger design WP5): on each card the
+    /// smaller of the two readings, the cards none of its processes is
+    /// listed on left out.
+    pub(in crate::vram) cards: HashMap<u64, Result<Vec<(DeviceId, u64)>, String>>,
 }
 
 impl VramScheduler {
@@ -70,12 +74,18 @@ impl VramScheduler {
     /// about keeps why its PID is missing.
     pub(in crate::vram) async fn devices_and_held(&self, asked: Vec<Ask>) -> DeviceRead {
         if asked.iter().all(|a| a.root.is_err()) {
+            let held: HashMap<u64, Result<u64, String>> = asked
+                .into_iter()
+                .filter_map(|a| a.root.err().map(|why| (a.generation, Err(why))))
+                .collect();
+            let cards = held
+                .iter()
+                .map(|(g, r)| (*g, r.clone().map(|_| Vec::new())))
+                .collect();
             return DeviceRead {
                 devices: self.devices().await,
-                held: asked
-                    .into_iter()
-                    .filter_map(|a| a.root.err().map(|why| (a.generation, Err(why))))
-                    .collect(),
+                held,
+                cards,
             };
         }
         let probe = self.probe();
@@ -103,6 +113,16 @@ impl VramScheduler {
             let first = list();
             let devices = probe.devices();
             let second = list();
+            let cards = members
+                .iter()
+                .map(|(generation, pids)| {
+                    (
+                        *generation,
+                        pids.clone()
+                            .and_then(|pids| smaller_on_cards(&pids, &first, &second)),
+                    )
+                })
+                .collect();
             let held = members
                 .into_iter()
                 .map(|(generation, pids)| {
@@ -112,12 +132,17 @@ impl VramScheduler {
                     )
                 })
                 .collect();
-            DeviceRead { devices, held }
+            DeviceRead {
+                devices,
+                held,
+                cards,
+            }
         })
         .await
         .unwrap_or_else(|e| DeviceRead {
             devices: Err(format!("GPU probe thread failed: {e}")),
             held: HashMap::new(),
+            cards: HashMap::new(),
         })
     }
 }
@@ -128,12 +153,53 @@ impl VramScheduler {
 /// figure at all.
 pub(in crate::vram) fn smaller_held(
     pids: &[u32],
-    first: &Result<Vec<ProcessMemory>, String>,
-    second: &Result<Vec<ProcessMemory>, String>,
+    first: &Result<Vec<DeviceProcesses>, String>,
+    second: &Result<Vec<DeviceProcesses>, String>,
 ) -> Result<u64, String> {
-    let sum = |list: &Result<Vec<ProcessMemory>, String>| -> Result<u64, String> {
+    let sum = |list: &Result<Vec<DeviceProcesses>, String>| -> Result<u64, String> {
         let list = list.as_ref().map_err(Clone::clone)?;
         Ok(own_share(pids, list)?.unwrap_or(0))
     };
     Ok(sum(first)?.min(sum(second)?))
+}
+
+/// What `pids` hold on each card by two process lists taken around one
+/// device read: per card the smaller of the two, the cards neither lists
+/// one of them on left out; no figure where a list failed or names one of
+/// them without a figure.
+pub(in crate::vram) fn smaller_on_cards(
+    pids: &[u32],
+    first: &Result<Vec<DeviceProcesses>, String>,
+    second: &Result<Vec<DeviceProcesses>, String>,
+) -> Result<Vec<(DeviceId, u64)>, String> {
+    let per =
+        |list: &Result<Vec<DeviceProcesses>, String>| -> Result<Vec<(DeviceId, u64)>, String> {
+            let list = list.as_ref().map_err(Clone::clone)?;
+            let mut out = Vec::new();
+            for d in list {
+                let mut on: Option<u64> = None;
+                for p in d.processes.iter().filter(|p| pids.contains(&p.pid)) {
+                    let b = p.bytes.ok_or_else(|| {
+                        format!(
+                        "the driver lists its process {} without saying how much memory it holds",
+                        p.pid
+                    )
+                    })?;
+                    on = Some(on.unwrap_or(0).saturating_add(b));
+                }
+                if let Some(b) = on {
+                    out.push((d.device.clone(), b));
+                }
+            }
+            Ok(out)
+        };
+    let a = per(first)?;
+    let b = per(second)?;
+    Ok(a.into_iter()
+        .map(|(id, x)| {
+            let y = b.iter().find(|(i, _)| *i == id).map_or(0, |(_, y)| *y);
+            (id, x.min(y))
+        })
+        .filter(|(_, b)| *b > 0)
+        .collect())
 }

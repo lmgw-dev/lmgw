@@ -39,6 +39,8 @@ mod compare;
 mod confusion;
 /// The Examples menu.
 mod examples_menu;
+/// The header's Facts button for a narrow pane.
+mod facts_menu;
 /// The form as the page edits it.
 mod form_state;
 /// The token gauge.

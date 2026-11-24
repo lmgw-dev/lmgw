@@ -341,6 +341,7 @@ fn runtime(class: Class, model_id: &str) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 
@@ -2112,6 +2113,7 @@ fn image_runtime(model_id: &str, modes: &[&str], edit: bool) -> ModelRuntime {
         }),
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 
@@ -2399,4 +2401,83 @@ fn a_throwaway_takes_the_run_args_minus_what_contradicts_it() {
             "CUDA_VISIBLE_DEVICES="
         ])
     );
+}
+
+// ---------------------------------------------------------------------------
+// A drafter without a speculative type (device-ledger ruling 18, WP10)
+// ---------------------------------------------------------------------------
+
+/// A usable help whose `--spec-type` lists `values`.
+fn help_with_spec_types(values: &str) -> String {
+    format!(
+        "{}--spec-type {values}\n    types of speculative decoding\n",
+        help_body("H")
+    )
+}
+
+fn drafter_runtime(spec_type: Option<&str>) -> ModelRuntime {
+    let mut rt = runtime(Class::Chat, "drafted");
+    rt.llama = Some(LlamaArgs::Chat {
+        gguf_path: "drafted.gguf".into(),
+        params: Box::new(LlamaParams {
+            draft_gguf_path: Some("d.gguf".into()),
+            spec_type: spec_type.map(str::to_string),
+            ..LlamaParams::default()
+        }),
+        args: vec![],
+    });
+    rt
+}
+
+fn spec_type_of(rt: &ModelRuntime) -> Option<String> {
+    match rt.llama.as_ref()? {
+        LlamaArgs::Chat { params, .. } => params.spec_type.clone(),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn a_drafter_gets_draft_simple_where_the_image_lists_it() {
+    let fake = Arc::new(Fake::default());
+    let rt = drafter_runtime(None);
+    fake.set_image(&rt.image, vec![image_is(ID_A, "null")]);
+    *fake.run_replies.lock().unwrap() = VecDeque::from(vec![out(help_with_spec_types(
+        "none,draft-simple,draft-mtp",
+    ))]);
+    let reg = registry(fake.clone(), vec![]);
+
+    // Not read yet: the editor's read renders nothing rather than guess.
+    assert!(reg.with_draft_type_known(&rt).is_none());
+    let got = reg.with_draft_type("lmgw", &rt).await.expect("listed");
+    assert_eq!(spec_type_of(&got).as_deref(), Some("draft-simple"));
+    // Once read, the no-wait path knows it too.
+    assert!(reg.with_draft_type_known(&rt).is_some());
+
+    // A type the row has (the field) is left alone.
+    assert!(reg
+        .with_draft_type("lmgw", &drafter_runtime(Some("draft-mtp")))
+        .await
+        .is_none());
+    // No drafter, nothing to add.
+    assert!(reg
+        .with_draft_type("lmgw", &runtime(Class::Chat, "plain"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn an_image_without_draft_simple_or_with_no_help_renders_as_before() {
+    let fake = Arc::new(Fake::default());
+    let rt = drafter_runtime(None);
+    fake.set_image(&rt.image, vec![image_is(ID_A, "null")]);
+    *fake.run_replies.lock().unwrap() =
+        VecDeque::from(vec![out(help_with_spec_types("none,draft-mtp,ngram-mod"))]);
+    let reg = registry(fake.clone(), vec![]);
+    assert!(reg.with_draft_type("lmgw", &rt).await.is_none());
+    assert!(reg.with_draft_type_known(&rt).is_none());
+
+    // A help that cannot be read: the conservative answer, nothing rendered.
+    let fake = Arc::new(Fake::default());
+    let reg = registry(fake, vec![]);
+    assert!(reg.with_draft_type("lmgw", &rt).await.is_none());
 }

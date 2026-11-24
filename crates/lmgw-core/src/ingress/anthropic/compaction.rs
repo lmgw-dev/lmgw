@@ -28,6 +28,8 @@ pub(super) fn top_level(u: &Usage, iterations: Option<&UsageIterations>) -> Usag
             .filter(|_| it.top_cache_read),
         cache_write_tokens: less(u.cache_write_tokens, spent.cache_write_tokens)
             .filter(|_| it.top_cache_write),
+        cache_write_1h_tokens: less(u.cache_write_1h_tokens, spent.cache_write_1h_tokens)
+            .filter(|_| it.top_cache_write_1h),
         reasoning_tokens: u.reasoning_tokens,
     }
 }

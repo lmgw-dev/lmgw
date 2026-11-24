@@ -1,0 +1,64 @@
+[
+ {
+  "js": "'WebKit: a reader at the end of the transcript stays there while a reply with a code block streams (WebKitGTK dropped the pane back to where the reply began whenever the reply\\'s markdown was written afresh, chat/morph.rs). Samples the pane every 20 ms while the reply streams and fails on any jump up of more than 40 px. Run: scripts/webkit-check.py --backend broadway --drive scripts/drive/chat-stream-scroll.json --token <owner token> --base http://<addr> against the mock with a long answer (ECHO=0 STREAM_TOKENS=300 STREAM_DELAY=0.03 scripts/mock-openai.py PORT) and the fake-echo alias; scripts/chat-drives.sh --webkit runs it. Writes one thread and four messages.'"
+ },
+ {
+  "size": "1100x800"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.streamScroll.tid'); (async () => { const j = (u, b) => fetch(u, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(b)}); const t = await (await j('/chat/api/threads', {model_alias: 'fake-echo', kind: 'chat'})).json(); await (await j(`/chat/api/threads/${t.id}/send`, {content: 'a long answer first'})).text(); localStorage.setItem('lmgw.streamScroll.tid', String(t.id)); })(); return 'seeding a thread with a long answer'; })()"
+ },
+ {
+  "until": "localStorage.getItem('lmgw.streamScroll.tid')",
+  "timeout": 60,
+  "label": "a thread with one long answer"
+ },
+ {
+  "js": "(location.href = '/chat?t=' + localStorage.getItem('lmgw.streamScroll.tid'), 'opening it')"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "until": "!!document.getElementById('chat-scroll') && document.querySelectorAll('.chat-col .msg-assistant').length === 1",
+  "timeout": 20,
+  "label": "the thread is open"
+ },
+ {
+  "js": "(() => { const p = document.getElementById('chat-scroll'); window.__s = []; const t0 = performance.now(); window.__iv = setInterval(() => { const live = !!document.querySelector('.chat-col .msg-assistant .caret'); window.__s.push({t: Math.round(performance.now() - t0), live, top: p.scrollTop, gap: p.scrollHeight - p.scrollTop - p.clientHeight}); }, 20); return 'sampling'; })()"
+ },
+ {
+  "js": "(() => { const ta = document.querySelector('.composer-input'); ta.value = 'and another one'; ta.dispatchEvent(new Event('input', {bubbles: true})); return 'typed'; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { document.querySelector('.composer-send.primary').click(); return 'sent'; })()"
+ },
+ {
+  "until": "document.querySelectorAll('.chat-col .msg-assistant').length === 2 && !document.querySelector('.chat-col .msg-assistant .caret') && !!document.querySelector('.composer-send[aria-label=\"Send\"]')",
+  "timeout": 60,
+  "label": "the second answer streamed to its end"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "(() => { clearInterval(window.__iv); const s = window.__s; const d = []; for (let i = 1; i < s.length; i++) if (s[i].live && s[i-1].live && s[i].top < s[i-1].top - 40) d.push(`${s[i].t}ms ${s[i-1].top}->${s[i].top}`); window.__drops = d; return `${s.filter(x => x.live).length} samples while streaming, ${d.length} jumps up: ${d.slice(0, 6).join(', ')}`; })()"
+ },
+ {
+  "expect": "window.__s.filter(x => x.live).length > 100 && window.__drops.length === 0",
+  "label": "pinned to the end while the reply streams: no jump up"
+ },
+ {
+  "expect": "(() => { const p = document.getElementById('chat-scroll'); return p.scrollHeight - p.scrollTop - p.clientHeight <= 1; })()",
+  "label": "at the end of the transcript once the reply is done"
+ },
+ {
+  "shot": "chat-stream-scroll"
+ }
+]

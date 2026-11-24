@@ -184,6 +184,7 @@ fn request() -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -196,6 +197,7 @@ fn config() -> RunConfig {
                 description: None,
                 parameters: json!({"type": "object", "properties": {}}),
                 strict: None,
+                anthropic_fields: Default::default(),
             },
         )],
         Budget {
@@ -501,7 +503,7 @@ async fn a_turn_failing_after_tools_ran_keeps_their_record_in_the_error() {
     ));
     let results = last_results(&RunResult {
         reason: StopReason::Done(FinishReason::Stop),
-        usage: e.usage,
+        usage: *e.usage,
         messages: e.messages,
         pending: Vec::new(),
         aborted: false,

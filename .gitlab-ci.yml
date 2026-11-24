@@ -15,6 +15,13 @@
 # job needs a graphics card: the live engine tests run by hand, behind their
 # environment variables.
 #
+# `arch` builds the Arch Linux package beside the RPM, in an Arch container,
+# through ci/build-arch.sh (same version and update feed as the RPM's), and
+# `publish-arch` puts it into the same registry and into latest.json as its
+# `arch` entry, after `publish`, as publish-windows does for the installer. The in-app
+# updater installs RPMs only: it ignores the `arch` entry, and installing the package
+# is left to the user.
+#
 # REQUIRED CI/CD variable (Settings → CI/CD → Variables), set by the owner:
 #   LMGW_UPDATE_DEPLOY_TOKEN — masked; the token of a project deploy token
 #     (Settings → Repository → Deploy tokens) with ONLY the
@@ -107,6 +114,50 @@ build:
       - dist/
       # Trunk's UI bundle, for windows-installer: the Windows runner builds no wasm.
       - crates/lmgw-ui/dist/
+    expire_in: 1 week
+
+# The Arch Linux package of this pipeline's version (ci/build-arch.sh), apart from the RPM:
+# a failure here holds back nothing of the RPM or its publish. It runs after server-binary, in
+# the same stage and for the same reason (see there): the release builds never compile side by
+# side in one pipeline, and `publish` (which needs only `build`) is long done before this
+# multi-hour build starts, so it never waits behind it in the runner's queue.
+# `needs: server-binary` is for the order only (its artifacts are not downloaded), and
+# server-binary is allow_failure, so this runs when it fails too, and is skipped with it when
+# `build` fails (server-binary is then skipped).
+# The Arch build has not run in this pipeline yet, so the job is allow_failure for now: a
+# failure shows as a warning and holds back nothing. It becomes a required job once it has run
+# green; publish-arch is allowed to fail with it until then.
+# Its own cache: a target/ built against Fedora's libraries and toolchain would
+# be rebuilt here every time, and this one there. The build's RUSTFLAGS name only paths
+# that stay the same from one pipeline to the next, so that cache stays warm.
+arch:
+  stage: server
+  image: archlinux:base-devel
+  needs:
+    - job: server-binary
+      artifacts: false
+  interruptible: true
+  allow_failure: true
+  timeout: 2h
+  variables:
+    # The build job's test-build profile (see there).
+    CARGO_PROFILE_RELEASE_LTO: "thin"
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  cache:
+    key: cargo-lmgw-arch
+    paths:
+      - .cargo/registry/
+      # The git dependency's clone, which `cargo update` and `cargo fetch` would otherwise
+      # make again in every pipeline.
+      - .cargo/git/db/
+      - .cache/trunk/
+      - .cache/ort.pyke.io/
+      - target/
+  script:
+    - bash ci/build-arch.sh
+  artifacts:
+    paths:
+      - dist-arch/
     expire_in: 1 week
 
 # The Windows runner's jobs share this: tag `windows`, the shell executor with Windows
@@ -245,10 +296,11 @@ server-binary:
   artifacts:
     paths:
       - dist/lmgw-server
+      - dist/lmgw-doc-reader
       - dist/build.env
     expire_in: 1 week
 
-# server-image: ci/build-image.sh packs server-binary's dist/lmgw-server into
+# server-image: ci/build-image.sh packs server-binary's dist/lmgw-server and dist/lmgw-doc-reader into
 # dist/lmgw-server-<version>.oci.tar with buildah (its own vfs store, chroot isolation). The
 # archive is this job's artifact and nothing else: no registry, no push. An administrator loads
 # it with `podman load -i`. Not yet run on the runner (§10, "Unverified"): the Containerfile's RUN
@@ -307,3 +359,25 @@ publish-windows:
     - dnf -y install curl jq >/dev/null
   script:
     - bash ci/publish.sh windows
+
+# publish-arch: the Arch package into the same registry, under its version, and into
+# latest.json as its `arch` entry when the published manifest is this pipeline's
+# (ci/publish.sh arch). After `publish`, with the same caveat as publish-windows.
+# It needs `arch`, which is allow_failure: when `arch` failed this job still starts, finds no
+# dist-arch/arch.json and fails with that message in ci/publish.sh, so it never publishes
+# anything stale. It is allow_failure itself for as long as `arch` is, so that the failure
+# shows as a warning once and not as a red pipeline; it becomes required with `arch`.
+publish-arch:
+  stage: publish
+  image: fedora:latest
+  allow_failure: true
+  needs:
+    - job: publish
+      artifacts: false
+    - job: arch
+      artifacts: true
+  resource_group: registry-latest
+  before_script:
+    - dnf -y install curl jq >/dev/null
+  script:
+    - bash ci/publish.sh arch

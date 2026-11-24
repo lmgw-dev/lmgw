@@ -264,11 +264,10 @@ async fn a_model_the_router_has_not_loaded_is_asked_again() {
 /// A probe that reaches nothing is never kept either.
 #[tokio::test]
 async fn a_server_that_does_not_answer_is_asked_again() {
-    // A port that was just closed (not a dropped MockServer, which wiremock
-    // pools and hands to the next test).
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}/v1", closed.local_addr().unwrap());
-    drop(closed);
+    // A port that refuses and stays ours (not a dropped MockServer, which
+    // wiremock pools and hands to the next test).
+    let (port, _held) = crate::refusing_port::refusing_port();
+    let base = format!("http://127.0.0.1:{port}/v1");
     let (cache, http, up) = (
         ExternalFacts::default(),
         reqwest::Client::new(),

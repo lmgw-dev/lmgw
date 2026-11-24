@@ -1,19 +1,25 @@
-//! App chrome: the grouped sidebar navigation, which folds to an icon rail,
-//! with the gateway's state at its foot: the traffic pulse and the GPU pill.
-//! There is no title bar of the app's own: in the shell the desktop frames
-//! the window (KWin's title bar), and a browser has its tab.
+//! App chrome: the full-height sidebar with its own header bar (the app's
+//! name, the sidebar toggle, the main menu), the grouped navigation, which
+//! folds to an icon rail, and the gateway's state at its foot: the traffic
+//! pulse and the GPU pill. Each content page brings its own header bar
+//! (widgets/page.rs); with the shell's own frame (`LMGW_WINDOW=csd`,
+//! crate::frame) the headers hold the window buttons and move the window,
+//! and in KWin's frame or a browser they are just the page's heads.
 
 use leptos::html;
 use leptos::prelude::*;
 use leptos_router::components::A;
 
 use crate::fmt::{age, fmt_bytes};
-use crate::widgets::{use_toasts, Popover};
+use crate::frame::{use_frame, End, WindowButtons};
+use crate::widgets::{use_toasts, Ico, Icon, Popover};
 
 /// The desktop shell's moves: the tray sends the window to a page without
 /// a reload.
+mod menu;
 mod moves;
 mod nav;
+use menu::MainMenu;
 pub use moves::{provide_shell_moves, ShellMoves, ShellNavigate};
 use nav::{Badge, Branch, Leaf, NavBranch, NavItem};
 
@@ -79,24 +85,31 @@ pub fn provide_sidebar() -> SidebarState {
 #[component]
 fn Pulse() -> impl IntoView {
     let live = crate::live::use_live();
+    let locked = crate::session::locked_signal();
     let active = Memo::new(move |_| {
+        if locked.get() {
+            return 0;
+        }
         live.stats
             .get()
             .map(|s| s.active_requests)
             .unwrap_or_default()
     });
-    let pulse_class = move || {
-        if active.get() > 0 {
-            "pulse"
-        } else {
-            "pulse idle"
-        }
+    let pulse_class = move || match (locked.get(), active.get() > 0) {
+        (true, _) => "pulse idle locked",
+        (false, true) => "pulse",
+        (false, false) => "pulse idle",
     };
     let label = move || format!("{} active", active.get());
     // Live generation speed across every in-flight stream (telemetry's `tok_s`,
     // refreshed twice a second while active). Approximate — one SSE chunk is
     // one token only for llama.cpp — hence the "~".
-    let tok_s = Memo::new(move |_| live.stats.get().map(|s| s.tok_s).unwrap_or_default());
+    let tok_s = Memo::new(move |_| {
+        if locked.get() {
+            return 0.0;
+        }
+        live.stats.get().map(|s| s.tok_s).unwrap_or_default()
+    });
     // Below 1 tok/s nothing is being generated that the gateway can measure:
     // no stream, a stream that just opened, or a non-streaming request, which
     // never reports a rate. That reads 0, in grey; a measured rate is amber.
@@ -110,6 +123,9 @@ fn Pulse() -> impl IntoView {
         }
     };
     let title = move || {
+        if locked.get() {
+            return String::new();
+        }
         let rate = if streaming.get() {
             format!(
                 ", ~{} output tokens/s (approximate)",
@@ -121,7 +137,7 @@ fn Pulse() -> impl IntoView {
         format!("Gateway traffic: {}{rate}", label())
     };
     view! {
-        <div class=pulse_class title=title>
+        <div class=pulse_class title=title inert=move || locked.get().then_some("")>
             <svg width="48" height="12" viewBox="0 0 64 16">
                 <path
                     class="wave"
@@ -140,25 +156,35 @@ fn Pulse() -> impl IntoView {
 /// The GPU at a glance (UX plan N3): an always-present quiet "GPU" pill —
 /// with how many local models are up — that opens what is on the card, what
 /// held chat requests fall back to, and the hold switch. While the hold is
-/// engaged it is the amber HOLD pill (gpu-hold design §6), fed by the same
+/// engaged it is the amber On hold pill (gpu-hold design §6), fed by the same
 /// `vram` frame as the settings page and the tray.
 #[component]
 fn GpuPill(open: RwSignal<bool>, anchor: NodeRef<html::Button>) -> impl IntoView {
     let live = crate::live::use_live();
+    // Signed out the pill knows nothing: no hold, no models, no run.
+    let locked = crate::session::locked_signal();
     let held = Memo::new(move |_| {
-        live.vram
-            .with(|v| v.as_ref().is_some_and(|v| v.hold_active))
+        !locked.get()
+            && live
+                .vram
+                .with(|v| v.as_ref().is_some_and(|v| v.hold_active))
     });
     let draining = Memo::new(move |_| {
         live.vram
             .with(|v| v.as_ref().map(|v| v.draining.len()).unwrap_or(0))
     });
     let running = Memo::new(move |_| {
+        if locked.get() {
+            return 0;
+        }
         live.runtime
             .with(|r| r.as_ref().map(|r| r.len()).unwrap_or(0))
     });
     // A benchmark run holds the card (benchmark design §3.2).
     let bench = Memo::new(move |_| {
+        if locked.get() {
+            return None;
+        }
         live.vram.with(|v| {
             v.as_ref()
                 .and_then(|v| v.benchmark.as_ref().map(|b| b.run_id))
@@ -167,11 +193,11 @@ fn GpuPill(open: RwSignal<bool>, anchor: NodeRef<html::Button>) -> impl IntoView
     let label = move || {
         if held.get() {
             match draining.get() {
-                0 => "HOLD".to_string(),
-                n => format!("HOLD · {n} draining"),
+                0 => "On hold".to_string(),
+                n => format!("On hold · {n} draining"),
             }
         } else if let Some(run) = bench.get() {
-            format!("BENCH · run {run}")
+            format!("Benchmark · run {run}")
         } else {
             match running.get() {
                 0 => "GPU".to_string(),
@@ -180,7 +206,9 @@ fn GpuPill(open: RwSignal<bool>, anchor: NodeRef<html::Button>) -> impl IntoView
         }
     };
     let title = move || {
-        if held.get() {
+        if locked.get() {
+            String::new()
+        } else if held.get() {
             "GPU hold: local models are paused and new loads are refused or re-routed. Click for details and Release."
                 .to_string()
         } else if let Some(run) = bench.get() {
@@ -201,6 +229,7 @@ fn GpuPill(open: RwSignal<bool>, anchor: NodeRef<html::Button>) -> impl IntoView
             type="button"
             node_ref=anchor
             class=move || match (held.get(), bench.get().is_some(), running.get() > 0) {
+                _ if locked.get() => "gpu-pill locked",
                 (true, _, _) => "hold-pill",
                 (false, true, _) => "gpu-pill bench",
                 (false, false, true) => "gpu-pill busy",
@@ -208,6 +237,7 @@ fn GpuPill(open: RwSignal<bool>, anchor: NodeRef<html::Button>) -> impl IntoView
             }
             aria-expanded=move || open.get().to_string()
             title=title
+            inert=move || locked.get().then_some("")
             on:click=move |_| open.update(|o| *o = !*o)
         >
             // The hold pill shows no dot beside its word; on the rail, where
@@ -228,11 +258,13 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
     let held = move || vram().is_some_and(|v| v.hold_active);
     let device = move || {
         vram().map(|v| {
-            let name = v
-                .devices
-                .first()
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| "GPU".to_string());
+            // Several cards: the machine's figures are their sums, and each
+            // card has its own lines below (`GpuCards`).
+            let name = match v.devices.len() {
+                0 => "GPU".to_string(),
+                1 => v.devices[0].name.clone(),
+                n => format!("{n} graphics cards"),
+            };
             let free = match (v.free_bytes, v.capacity_bytes) {
                 (Some(f), c) if c > 0 => format!("{} free of {}", fmt_bytes(f), fmt_bytes(c)),
                 (Some(f), _) => format!("{} free", fmt_bytes(f)),
@@ -244,7 +276,16 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
     // What the free figure leaves out on top of the memory in use: the
     // ledger keeps it free for memory the driver cannot show yet. Without
     // this line the panel's figures do not add up to the card.
-    let kept = move || vram().as_ref().and_then(crate::gpu_figures::kept_free_line);
+    // With several cards it is one figure for all of them: which card a
+    // start in flight lands on is not known per card yet.
+    let kept = move || {
+        vram().as_ref().and_then(|v| {
+            crate::gpu_figures::kept_free_line(v).map(|k| match crate::gpu_figures::per_card(v) {
+                true => format!("{k} (all cards together)"),
+                false => k,
+            })
+        })
+    };
     // Every local container, whatever its class: they all share the card.
     // The ledger's estimate is added where it has one, with what of it is
     // not loaded yet and the ledger's note on how it got there.
@@ -288,7 +329,7 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
     let trigger_label = move || match vram() {
         Some(v) if v.external_trigger_active => "External fallback: armed".to_string(),
         Some(v) => format!(
-            "External fallback: off — {}",
+            "External fallback is off: {}",
             v.external_trigger_reason
                 .unwrap_or_else(|| "not reported".to_string())
         ),
@@ -309,8 +350,9 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
             </div>
             {move || kept().map(|k| view! { <div class="gpu-row dim">{k}</div> })}
             <div class="gpu-row dim">{shares}</div>
+            <GpuCards/>
             <div class="gpu-row">
-                <span class="chip" class:ok=trigger_armed class:off=move || !trigger_armed()>
+                <span class="chip chip-line" class:ok=trigger_armed class:off=move || !trigger_armed()>
                     <span class="dot"></span>
                     {trigger_label}
                 </span>
@@ -336,7 +378,7 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                     let rows = rows();
                     if rows.is_empty() {
                         return view! {
-                            <div class="dim">"None — each model starts with its first request."</div>
+                            <div class="dim">"None. Each model starts with its first request."</div>
                         }
                             .into_any();
                     }
@@ -435,7 +477,7 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
             <div class="gpu-row">
                 <span class="chip" class:warn=held class:off=move || !held()>
                     <span class="dot"></span>
-                    {move || if held() { "engaged — local models are paused" } else { "off — local models start on demand" }}
+                    {move || if held() { "Engaged: local models are paused" } else { "Off: local models start on demand" }}
                 </span>
             </div>
             {move || {
@@ -449,12 +491,12 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
                         }
                     })
             }}
-            <div class="gpu-row dim">
-                "Held models answer with their own fallback, where one is set"
-                " · "
+            <div class="gpu-row gpu-note dim">
+                "Held models answer with their own fallback, where one is set in "
                 <span on:click=close>
                     <A href="/models">"Models"</A>
                 </span>
+                "."
             </div>
             <div class="gpu-row gpu-act">
                 <button
@@ -482,11 +524,90 @@ fn GpuPanel(open: RwSignal<bool>) -> impl IntoView {
     }
 }
 
+/// The cards one by one, on a machine with several (device-ledger design
+/// §10): each card's name and index with its free memory, a bar of lmgw's
+/// models on it with their bytes there, the outside use and the free part,
+/// and the same in words. A model split over cards is on each of them. The
+/// card's id is its name's tooltip. Nothing on a machine of one card, whose
+/// figures are the machine's above.
+#[component]
+fn GpuCards() -> impl IntoView {
+    let live = crate::live::use_live();
+    let cards = move || {
+        live.vram.with(|v| {
+            v.as_ref()
+                .filter(|v| crate::gpu_figures::per_card(v))
+                .map(|v| {
+                    v.devices
+                        .iter()
+                        .map(|d| {
+                            (
+                                d.clone(),
+                                crate::gpu_figures::card_bar(v, d),
+                                crate::gpu_figures::card_holders_line(v, d),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
+    view! {
+        {move || {
+            let cards = cards();
+            (!cards.is_empty())
+                .then(|| {
+                    view! {
+                        <div class="gpu-cards">
+                            {cards
+                                .into_iter()
+                                .map(|(d, bar, line)| {
+                                    let words_title = d.share_unknown.clone().unwrap_or_default();
+                                    view! {
+                                        <div class="gpu-card-one">
+                                            <div class="gpu-row">
+                                                <b title=d.id.to_string()>{crate::gpu_figures::card_label(&d)}</b>
+                                                <span class="dim">{crate::gpu_figures::card_free(&d)}</span>
+                                            </div>
+                                            <div class="progress split gpu-card-bar">
+                                                {bar
+                                                    .into_iter()
+                                                    .map(|seg| {
+                                                        let (class, hue) = match &seg.part {
+                                                            crate::gpu_figures::Part::Model(m) => ("m", crate::fmt::hue_for(m)),
+                                                            crate::gpu_figures::Part::LmgwOther => ("lmgw", 0),
+                                                            crate::gpu_figures::Part::Outside => ("outside", 0),
+                                                            crate::gpu_figures::Part::InUse => ("in-use", 0),
+                                                            crate::gpu_figures::Part::Unavailable => ("reserve", 0),
+                                                        };
+                                                        view! {
+                                                            <i
+                                                                class=class
+                                                                style=format!("width:{:.2}%;--hue:{hue}", seg.pct)
+                                                                title=seg.title
+                                                            ></i>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </div>
+                                            <div class="gpu-row dim" title=words_title>{line}</div>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })
+        }}
+    }
+}
+
 #[component]
 pub fn Sidebar() -> impl IntoView {
     // The sidebar lives as long as the app, inside the router: the place to
     // keep the query every view was last shown with, for its tabs.
     crate::url_state::remember_queries();
+    let locked = crate::session::locked_signal();
     let pending = crate::pages::docs::use_docs_pending();
     let docs_badge = Signal::derive(move || pending.0.get());
     let docs_title = Signal::derive(move || format!("{} pending doc requests", pending.0.get()));
@@ -607,6 +728,21 @@ pub fn Sidebar() -> impl IntoView {
                 badge: None,
             },
             Leaf {
+                href: "/documents-lab",
+                label: "Documents",
+                name: "Documents lab",
+                // A page with its corner folded and lines of text.
+                icon: || {
+                    view! {
+                        <path d="M4 2.5h5.5L12.5 5.5v8a1 1 0 01-1 1h-7.5a1 1 0 01-1-1v-10a1 1 0 011-1z"/>
+                        <path d="M9.5 2.5v3h3"/>
+                        <path d="M5.5 8.5h5M5.5 11h5"/>
+                    }
+                    .into_any()
+                },
+                badge: None,
+            },
+            Leaf {
                 href: "/voice-lab",
                 label: "Voices",
                 name: "Voices lab",
@@ -667,24 +803,66 @@ pub fn Sidebar() -> impl IntoView {
     let state = expect_context::<SidebarState>();
     let toggle_title = move || {
         if state.narrow.get() {
-            "window too narrow to expand"
+            "The window is too narrow to expand the sidebar"
         } else if state.rail.get() {
             "Expand the sidebar"
         } else {
             "Collapse the sidebar to icons"
         }
     };
+    // Read so the header's buttons follow the frame; WindowButtons reads it.
+    let _ = use_frame();
     let gpu_open = RwSignal::new(false);
+    // A session that ends closes what the foot opened.
+    Effect::new(move |_| {
+        if locked.get() {
+            gpu_open.set(false);
+        }
+    });
     let gpu_anchor: NodeRef<html::Button> = NodeRef::new();
+    let menu_open = RwSignal::new(false);
+    let menu_anchor: NodeRef<html::Button> = NodeRef::new();
     // Overview first and alone: it is where a session starts, and the groups
     // under it are the places it links out to. The gateway's state sits at
     // the foot, where a desktop app keeps its status bar, in what is
     // otherwise the empty end of the column.
     view! {
         <nav class="sidebar">
+            // The sidebar's own header bar: on the rail only the toggle.
+            <header class="sidebar-head" data-window-header>
+                <Show when=move || !state.rail.get()>
+                    <WindowButtons end=End::Start/>
+                </Show>
+                <button
+                    type="button"
+                    class="icon-btn sidebar-toggle"
+                    title=toggle_title
+                    aria-label=toggle_title
+                    disabled=move || state.narrow.get()
+                    on:click=move |_| state.toggle()
+                >
+                    <Icon ico=Ico::Panel/>
+                </button>
+                <span class="sidebar-title">"lmgw"</span>
+                <button
+                    type="button"
+                    class="icon-btn sidebar-menu"
+                    node_ref=menu_anchor
+                    title="Main menu"
+                    aria-label="Main menu"
+                    aria-expanded=move || menu_open.get().to_string()
+                    on:click=move |_| menu_open.update(|o| *o = !*o)
+                >
+                    <Icon ico=Ico::Menu/>
+                </button>
+            </header>
             // The groups scroll on a short window; the foot below them does
             // not, so the gateway's state is always on screen.
-            <div class="nav-scroll">
+            <div
+                class="nav-scroll"
+                class:locked=move || locked.get()
+                inert=move || locked.get().then_some("")
+            >
                 <div class="nav-group">
                     <NavItem
                         href="/"
@@ -824,21 +1002,20 @@ pub fn Sidebar() -> impl IntoView {
                 <crate::session_cards::AccountFoot/>
                 <div class="foot-row">
                     <GpuPill open=gpu_open anchor=gpu_anchor/>
-                    <button
-                        type="button"
-                        class="nav-toggle"
-                        title=toggle_title
-                        aria-label=toggle_title
-                        disabled=move || state.narrow.get()
-                        on:click=move |_| state.toggle()
-                    >
-                        {move || if state.rail.get() { "»" } else { "«" }}
-                    </button>
                 </div>
             </div>
         </nav>
-        <Popover open=gpu_open anchor=gpu_anchor class="gpu-pop" min_width=340>
+        <Popover
+            open=gpu_open
+            anchor=gpu_anchor
+            class="gpu-pop"
+            min_width=340
+            beside=Signal::derive(move || state.rail.get())
+        >
             <GpuPanel open=gpu_open/>
+        </Popover>
+        <Popover open=menu_open anchor=menu_anchor class="menu-pop" min_width=240>
+            <MainMenu open=menu_open/>
         </Popover>
     }
 }

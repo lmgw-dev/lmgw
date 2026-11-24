@@ -61,7 +61,9 @@ async fn outside_use_that_leaves_too_little_room_answers_external_at_once() {
         waits,
         "it must not wait in the queue first"
     );
-    // needed 6.5 GiB; free 8 - 3 (embedder) - 3 (game) = 2; + lmgw's 3 = 5.
+    // needed 6.5 GiB: its footprint and the floor; the start's margin is
+    // given up last, so the verdict does not ask it (WP13, owner
+    // 2026-11-17); free 8 - 3 (embedder) - 3 (game) = 2; + lmgw's 3 = 5.
     assert_eq!(short.model, "chat-model");
     assert_eq!(short.needed_bytes, 6 * GIB + 512 * MIB);
     assert_eq!(short.free_bytes, 2 * GIB);

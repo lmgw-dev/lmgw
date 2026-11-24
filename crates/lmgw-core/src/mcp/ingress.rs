@@ -750,7 +750,11 @@ pub(crate) const ADMIN_INSTRUCTIONS: &str =
     3. `lmgw__model_get` with that repo and file — it downloads the weights \
     with their companions and, in the background, plans the file on disk, \
     fits its context to the card (the largest conversation that fits) and \
-    creates the row, without starting it.\n\
+    creates the row, without starting it. Where no single card holds the \
+    file at its full context but a split over several cards (or its experts \
+    in RAM) would, it answers `choices` instead and downloads nothing: show \
+    the person the choices with their numbers, and call again with the \
+    chosen `layout`.\n\
     4. `lmgw__model_get_status` with the answer's `get_id` until its state \
     isn't 'running': it says the stage, the bytes so far and, at the end, the \
     row it made (`row_id`, `model_id`) or why it stopped and what to do. An \

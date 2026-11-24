@@ -179,7 +179,7 @@ pub(super) fn SettingsFields(
                 <label>"Temperature"</label>
                 <input
                     class="input mono"
-                    placeholder="model default"
+                    placeholder="Default"
                     prop:value=move || temp.get()
                     on:input=move |ev| temp.set(event_target_value(&ev))
                 />
@@ -188,7 +188,7 @@ pub(super) fn SettingsFields(
                 <label>"Max tokens"</label>
                 <input
                     class="input mono"
-                    placeholder="model default"
+                    placeholder="Default"
                     prop:value=move || max_tok.get()
                     on:input=move |ev| max_tok.set(event_target_value(&ev))
                 />

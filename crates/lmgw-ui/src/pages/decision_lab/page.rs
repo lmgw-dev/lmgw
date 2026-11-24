@@ -20,7 +20,7 @@ use super::examples_menu::ExamplesMenu;
 use super::form_state::FormState;
 use super::gauge::{self, Gauge, GaugeCard};
 use super::group_card::GroupCard;
-use super::head::{first_pick, Head};
+use super::head::{first_pick, Actions, Head, ModelSub};
 use super::images::ImagesCard;
 use super::questions::QuestionsCard;
 use super::reference::Reference;
@@ -31,7 +31,7 @@ use super::state_editor::StateCard;
 use crate::api;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
-use crate::widgets::{use_toasts, Toasts};
+use crate::widgets::{use_toasts, Ico, Toasts};
 
 /// A cell's own note beside its run, or in place of one: "not kept: …" when
 /// the store failed, the lab's refusal when it was not dispatched.
@@ -299,6 +299,9 @@ pub fn DecisionLab() -> impl IntoView {
 
     view! {
         <LabFrame
+            title="Decision lab"
+            glyph=Ico::Split
+            empty="Every ask lands here, newest first, and stays on the server until you delete it: one group from its card, or all with Clear."
             persist="decision-lab.reference"
             side_label="Reference"
             side_badge=Signal::derive(move || match lab.runs.running() {
@@ -306,7 +309,9 @@ pub fn DecisionLab() -> impl IntoView {
                 n => format!("{n} running"),
             })
             side=move || view! { <Reference lab=lab/> }
+            model=move || view! { <ModelSub lab=lab/> }
             head=move || view! { <Head lab=lab/> }
+            actions=move || view! { <Actions lab=lab/> }
             form=move || {
                 view! {
                     <ExamplesMenu lab=lab/>

@@ -15,7 +15,7 @@ use crate::ir::Usage;
 use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
-use super::audio::{multipart_call, multipart_send, AudioUpload};
+use super::audio::{multipart_send, AudioUpload};
 use super::stop::{canceled, is_canceled, row_status, stopped};
 use super::*;
 
@@ -59,6 +59,7 @@ pub async fn transcribe_as(
         stop: None,
         language: None,
         clip: false,
+        document: false,
     };
     transcribe_labelled(state, ctx, ClientProto::OpenaiChat, upload)
         .await
@@ -89,6 +90,7 @@ pub(crate) async fn transcribe_for(
         stop: None,
         language: None,
         clip: false,
+        document: false,
     };
     transcribe_labelled(state, ctx, proto, upload)
         .await
@@ -157,6 +159,7 @@ pub(crate) async fn transcribe_dictation(
         stop: Some(stop),
         language,
         clip: false,
+        document: false,
     };
     transcribe_labelled(state, ctx, proto, upload).await
 }
@@ -192,10 +195,37 @@ pub(crate) async fn transcribe_turn(
         stop: Some(stop),
         language,
         clip: false,
+        document: false,
     };
     transcribe_labelled(state, ctx, ClientProto::Realtime, upload)
         .await
         .map_err(|u| u.error)
+}
+
+/// A document conversion's transcription (document-conversion design §4.2,
+/// WP7): [`transcribe_as`] for the conversion's key, its row labelled
+/// `documents-asr` ([`ClientProto::DocumentsAsr`]). The key's policy is the
+/// caller's to check first (`extract::convert::key_check`). Dropped before
+/// its row (the client gone, the file's `document_timeout`, a cancelled
+/// job), it writes a `499` row under the key; the wait for the gate is not
+/// counted against the file's clock.
+pub(crate) async fn transcribe_document(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    alias: &str,
+    (bytes, filename, mime): (Bytes, &str, &str),
+) -> Result<Transcript, Untranscribed> {
+    let upload = Upload {
+        alias,
+        bytes,
+        filename,
+        mime,
+        stop: None,
+        language: None,
+        clip: false,
+        document: true,
+    };
+    transcribe_labelled(state, ctx, ClientProto::DocumentsAsr, upload).await
 }
 
 /// What goes up, to which alias, and the caller's stop.
@@ -210,6 +240,10 @@ struct Upload<'a> {
     /// A voice-library clip: its answering model must transcribe
     /// ([`clip`]).
     clip: bool,
+    /// A document conversion's transcription ([`transcribe_document`]): a
+    /// drop leaves a `499` row ([`dropped`]), and the wait for the gate is
+    /// not the file's conversion time.
+    document: bool,
 }
 
 async fn transcribe_labelled(
@@ -226,11 +260,13 @@ async fn transcribe_labelled(
         stop,
         language,
         clip,
+        document,
     } = upload;
     let started = Instant::now();
     // Dropped unfinished (the caller went away mid-call), the guard abandons the
-    // request instead of leaking the active gauge.
-    let in_flight = super::count::InFlight::start(&state.telemetry);
+    // request instead of leaking the active gauge, or writes the dropped
+    // call's row for a caller that asks for one ([`dropped`]).
+    let mut in_flight = dropped::Unrecorded::running(state, ctx, proto, alias, started, document);
     let mut fields = vec![
         MultipartField::Text("model".into(), alias.to_string()),
         MultipartField::File(
@@ -249,35 +285,71 @@ async fn transcribe_labelled(
     // The stop is raced inside, so a call stopped once the gate opened keeps
     // its route on the row (`multipart_call`).
     let called = if clip {
-        match clip::open(state, alias, ctx.origin()).await {
+        match Box::pin(clip::open(state, alias, ctx.origin())).await {
             Ok(opened) => {
-                multipart_send(
+                Box::pin(multipart_send(
                     state,
                     opened,
                     &fields,
                     AudioUpload::Transcription,
                     started,
                     stop,
-                )
+                ))
                 .await
             }
             Err(f) => Err((f.route, f.headers, f.error)),
         }
     } else {
-        multipart_call(
-            state,
-            alias,
-            &fields,
-            AudioUpload::Transcription,
-            started,
-            ctx.origin(),
-            stop,
-        )
-        .await
+        // The gate, as `multipart_call` opens it, with the stop raced. A
+        // conversion's file does not count the wait for its model's turn
+        // (`extract::convert::pool::clock`; a no-op for every other caller,
+        // which has no file clock).
+        let waiting = document.then(crate::extract::convert::pool::clock::paused);
+        let opened = tokio::select! {
+            biased;
+            () = stopped(stop) => Err((
+                None,
+                GateHeaders::default(),
+                canceled("stopped by the caller before the upstream answered"),
+            )),
+            o = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio, ctx.origin()) => {
+                o.map_err(|f| (f.route, f.headers, f.error))
+            }
+        };
+        drop(waiting);
+        match opened {
+            Ok(opened) => {
+                in_flight.routed(&opened.route, opened.headers.fallback_reason());
+                // A conversion's call counts itself now, as it is sent,
+                // under the model that answers (`convert::sent`; the review
+                // of security round B, N3): a refusal before this was no
+                // call, and a part cut off from here on keeps it.
+                if document {
+                    let fallback = opened.headers.fallback();
+                    crate::extract::convert::sent::record(
+                        crate::extract::convert::media::asr::one_call(
+                            fallback.unwrap_or(alias),
+                            fallback.map(|_| alias),
+                        ),
+                    );
+                }
+                Box::pin(multipart_send(
+                    state,
+                    opened,
+                    &fields,
+                    AudioUpload::Transcription,
+                    started,
+                    stop,
+                ))
+                .await
+            }
+            Err(e) => Err(e),
+        }
     };
     let outcome = match called {
         Ok(o) => o,
         Err((route, headers, e)) => {
+            in_flight.recording();
             record(
                 log(
                     state,
@@ -294,7 +366,7 @@ async fn transcribe_labelled(
                 Some((e.kind(), e.log_text())),
             )
             .await;
-            in_flight.finished();
+            in_flight.recorded();
             return Err(Untranscribed { error: e, headers });
         }
     };
@@ -321,6 +393,7 @@ async fn transcribe_labelled(
         _ => status,
     };
     let error = result.as_ref().err().map(|e| (e.kind(), e.log_text()));
+    in_flight.recording();
     record(
         LogParams {
             quantities,
@@ -340,7 +413,7 @@ async fn transcribe_labelled(
         error,
     )
     .await;
-    in_flight.finished();
+    in_flight.recorded();
     // The model stops counting as in use once the transcript is in hand.
     drop(outcome.admission);
     result.map_err(|error| Untranscribed {
@@ -351,6 +424,7 @@ async fn transcribe_labelled(
 
 mod clip;
 pub(crate) use clip::ASR_REQUIRED;
+mod dropped;
 pub use clip::{answered_line, transcribe_voice_clip, ClipTranscript};
 pub(crate) mod warm;
 

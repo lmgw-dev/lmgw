@@ -465,7 +465,7 @@ fn FamilyBlock(
                 </span>
                 {move || {
                     let c = now(fam, |f| f.category.clone());
-                    (!c.is_empty()).then(|| view! { <span class="type-badge">{c}</span> })
+                    (!c.is_empty()).then(|| view! { <span class="type-badge">{crate::labels::category_label(&c)}</span> })
                 }}
                 // Upstream's own word for how finished this family is —
                 // worth knowing before a multi-GiB download.
@@ -791,7 +791,7 @@ fn PackageRow(
                 <span class="spacer" style="flex:1"></span>
                 {move || match live() {
                     Live::Running(_) => {
-                        view! { <span class="chip live"><span class="dot"></span>"downloading"</span> }
+                        view! { <span class="chip info"><span class="dot"></span>"downloading"</span> }
                             .into_any()
                     }
                     Live::Failed => {
@@ -799,7 +799,7 @@ fn PackageRow(
                             .into_any()
                     }
                     Live::Finishing => {
-                        view! { <span class="chip live"><span class="dot"></span>"finishing"</span> }
+                        view! { <span class="chip info"><span class="dot"></span>"finishing"</span> }
                             .into_any()
                     }
                     Live::Idle if served() && incomplete() => {

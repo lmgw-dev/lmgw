@@ -23,7 +23,7 @@ The files this page refers to are in `packaging/server/`: the unit
 | Need | Notes |
 | --- | --- |
 | Linux with systemd and cgroups v2, Podman with Quadlet | Tested with Podman 6.1.3. Older versions are not verified yet. `podman info --format '{{.Host.CgroupsVersion}}'` must print `v2` |
-| SELinux policy with the `container_engine_t` type | Tested with container-selinux 2.251.0. The container runs confined as `container_engine_t`, without `--privileged` |
+| SELinux policy with the `container_engine_t` type | Tested with container-selinux 2.251.0. The container runs confined as `container_engine_t`, without `--privileged`. With an NVIDIA card the host also needs lmgw's `lmgw-gpu` module (section 5, "The SELinux module for the card"): stock container-selinux keeps `container_engine_t` away from the card's device nodes |
 | NVIDIA driver and `nvidia-container-toolkit` on the host, with a current CDI spec in `/etc/cdi` or `/var/run/cdi` | The container gets the card from the host's CDI spec (`nvidia-ctk cdi list` must show `nvidia.com/gpu=all`). The spec goes stale after a driver update: refresh it (`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`, or the toolkit's `nvidia-cdi-refresh` units) and then restart lmgw |
 | `/dev/net/tun` | The nested Podman's networking needs it |
 | A service account with subuid and subgid ranges, and linger | Section 2 |
@@ -150,10 +150,10 @@ openssl rand -hex 32 | podman secret create lmgw-wrap-key -
 systemctl --user start lmgw          # the device CA is unreadable now, which is expected
 ```
 
-Then rotate the device CA on the dashboard: **Usage → Keys & budgets**, the
-Devices card, **Rotate the device CA…**. It seals a new key under the new
-secret. Every paired device has to be paired again (**New token…** on its
-row). Back up the new secret. The leaked volume also held everything in
+Then rotate the device CA on the dashboard: **Usage → Keys & budgets** with no
+key selected, the Device link row under Devices, **Rotate the device CA…**. It
+seals a new key under the new secret. Every paired device has to be paired
+again (**New token…** in its detail). Back up the new secret. The leaked volume also held everything in
 section 6's warning, so revoke those keys too.
 
 ## 5. Installing the unit
@@ -176,7 +176,49 @@ Edit `~/.config/containers/systemd/lmgw.container`:
   it.
 - **`AddDevice=nvidia.com/gpu=all`**: the card by its CDI name. On a server
   without an NVIDIA card, remove the line; lmgw then has no local models, and
-  the machine check says what is missing.
+  the machine check says what is missing. On a server with several cards it
+  passes all of them, and lmgw puts each model on the card or cards it
+  chooses, by the card's UUID (the README's "Several graphics cards"). The
+  machine check says whether lmgw's own CDI description names every card by
+  UUID: a model placed on one card cannot start where it does not. On a host
+  with SELinux enforcing, the card also needs the module below.
+
+**The SELinux module for the card.** CDI gives the container `/dev/nvidia*`
+labelled `xserver_misc_device_t`. container-selinux lets `container_t` use
+those nodes (the boolean `container_use_xserver_devices`) but not
+`container_engine_t`, the type this image runs as: even `stat` on
+`/dev/nvidiactl` fails with `Permission denied`, and the machine check says
+SELinux keeps the container from the card. The nested model containers also run
+as `container_engine_t`, so the same rule covers both levels (the end-to-end
+start of a model inside the image on such a host is not verified yet). Install
+this module on the host once, as root (`packaging/server/lmgw-gpu.cil` in the
+repository; the same text):
+
+```
+; lmgw-gpu: lets the lmgw server container reach the host's NVIDIA device nodes.
+(allow container_engine_t xserver_misc_device_t (chr_file (getattr open read write ioctl map lock append)))
+```
+
+```sh
+sudo semodule -i lmgw-gpu.cil     # install; then restart the lmgw service
+sudo semodule -r lmgw-gpu         # remove again
+```
+
+It grants `container_engine_t` what `container_use_xserver_devices` grants
+`container_t`: the character devices labelled `xserver_misc_device_t`, which
+are `/dev/nvidia*` plus a few graphics nodes such as `/dev/vga_arbiter` and
+`/dev/drm_dp_aux*`, and no disks. `sudo setsebool -P
+container_use_devices on` would also work, but it opens every device node
+(disks included) to every container, so prefer the module. Measured
+2026-11-17 on a Fedora 45 host (kernel 7.3.4-300.fc45, selinux-policy 45.23,
+container-selinux 2.251.0, Podman 6.1.3, NVIDIA driver 580.196.07, a GTX 970)
+with the module installed and `container_use_devices` off: a rootless
+`podman run --security-opt label=type:container_engine_t --device
+nvidia.com/gpu=all` listed `/dev/nvidia0` and `/dev/nvidiactl`, and
+`ghcr.io/ggml-org/llama.cpp:server-cuda` (build b12464, CUDA 12.8.1, digest
+`sha256:6b1c681b535a15d406c7270fd2730f5bd36d3598fbb0ca894bfa47857a700fe3`)
+printed `CUDA0: NVIDIA GeForce GTX 970 (4030 MiB, 3966 MiB free)`, with no AVC
+denial. Without the module the same container could not even stat the nodes.
 
 Put the certificate pair into `~/lmgw-tls/` (section 7), then start it:
 
@@ -613,6 +655,60 @@ Settings that apply at a start on the desktop (the WebRTC calls switch, for
 example) say "applies at the next start of lmgw" here; there is no in-process
 restart in the image yet.
 
+### Document tools in the image
+
+The image ships lmgw's own document reader (`/usr/local/bin/lmgw-doc-reader`,
+beside `lmgw-server`: the program the server starts for each web page,
+e-book, e-mail, old Excel file and picture it converts, so that such a file
+is never read inside the server itself) and the optional document tools lmgw
+uses or detects:
+`poppler-utils` (PDF text), `tesseract` with the English and German language
+packs and its orientation data (`tesseract-osd`), and `ffmpeg-free` (the sound of
+videos, for a chosen speech-to-text model). `TESSERACT_LANGS` at build time picks other
+languages (`TESSERACT_LANGS="eng fra" bash ci/build-image.sh`). Pandoc (RTF,
+LaTeX and the other text markups, Word equations as LaTeX) and LibreOffice
+(old Word and PowerPoint files) aren't in the image yet (about 500 MiB
+together); **Settings → Documents** shows the derived image that adds one,
+and [docs/documents.md](documents.md#server-image) covers building it. A
+derived image with both:
+
+```dockerfile
+FROM localhost/lmgw-server:current
+RUN dnf -y install --setopt=install_weak_deps=False pandoc-cli \
+      libreoffice-writer libreoffice-impress && dnf clean all
+```
+
+LibreOffice runs only inside a confinement the kernel enforces (Landlock,
+applied by lmgw's document reader, which is in the image) with its network
+denied, which needs Landlock ABI 4 (Linux 6.7) or newer; it works in a
+default rootless Podman container (checked 2026-11-19 in `fedora:45` on
+Linux 7.3: Landlock ABI 11). The image uses the host's kernel. Where the
+host kernel has no Landlock (older than 5.13, or not among its security
+modules) or an older ABI (Linux 5.13 to 6.6: RHEL, Alma and Rocky 9,
+Debian 12, Ubuntu 22.04), LibreOffice is not used and **Settings →
+Documents** says why; pandoc, ffmpeg, poppler and tesseract then run with
+their limits alone (no Landlock) or confined with what that kernel's ABI
+enforces. Each protection the host's kernel lacks (truncating files below
+ABI 3, where a program running hostile code could empty any file lmgw's
+user may write, its database included; TCP below 4; `ioctl` on devices
+below 5; abstract Unix sockets and signals below 6; Unix sockets by path
+below 9; UDP below 10) is named with the ABI found under **Programs run
+confined** and once in the log.
+
+Two figures the conversions derive come from the container: the memory the
+answers in flight may hold together is the container's memory limit
+(`MemoryMax=` in the unit, else the host's memory), and **Storage for
+conversion jobs** is half of what the jobs store and what is free on the data
+volume's file system together, read again at each new job. Both are on
+**Settings → Documents → How much conversions may hold**; the storage can be
+set there by hand ([docs/documents.md](documents.md#background-conversions)).
+Below 2 GiB of memory a request's output is bounded by half the limit
+instead of `MAX_UNCOMPRESSED_BYTES`, so a small container still converts; only
+a request whose upload and output can never fit is refused with
+`answer_memory`. A server with several keys keeps room for a second caller in
+the tool pool and the answers (**Parallel tool runs**); a server with one key
+lets that key use all of both.
+
 ## 13. Not yet
 
 - An image registry, and with it `podman auto-update` and automatic rollback.
@@ -633,3 +729,101 @@ Not yet verified in the image under a real Quadlet unit: WebRTC calls through
 the published UDP ports, a model start with the card, engine builds and
 agent runs inside the container, host mounts for agents, and a browser on
 another machine.
+
+## 14. On a Docker host
+
+Where the host has Docker and no Podman that can run the unit, the same image
+runs under Docker Compose with `packaging/server/docker/docker-compose.yml`.
+This is not a supported layout and not the one the image was built and tested
+for; sections 1 to 12 describe that one. Read "What the container may do"
+below before using it. Podman 4.9, which Ubuntu 24.04 ships, is not enough for
+the unit: it reads CDI specs up to version 0.6.0, and nvidia-container-toolkit
+1.20 writes 0.7.0 (Podman 5.1 is the first that reads it).
+
+**What the host needs**: Docker 28.3 or newer (`docker info` lists
+`nvidia.com/gpu=all` under "Discovered Devices"), cgroups v2, the NVIDIA
+driver and toolkit with a current CDI spec, `/dev/net/tun`. First run on
+Ubuntu 24.04 (AppArmor, kernel 6.8) with Docker 29.9 and Compose 5.6.
+
+**The image** in Docker's own archive format, since `docker load` with
+Docker's classic image store does not read the OCI archive:
+
+```sh
+LMGW_DOCKER_ARCHIVE=1 bash ci/build-image.sh   # also dist/lmgw-server-<version>.docker.tar
+docker load -i lmgw-server-0.7.0.docker.tar
+docker tag localhost/lmgw-server:0.7.0 localhost/lmgw-server:current
+```
+
+**The directory** with the compose file holds what the unit takes from the
+service account's home and from Podman's secrets:
+
+```sh
+mkdir -p tls secrets && chmod 750 tls && chmod 700 secrets
+cp /path/to/fullchain.pem tls/tls.crt && cp /path/to/privkey.pem tls/tls.key && chmod 600 tls/tls.key
+(umask 077; openssl rand -hex 32 > secrets/lmgw-wrap-key)     # section 4; back it up on its own
+# set LMGW_PUBLIC_URL in docker-compose.yml, then:
+docker compose up -d
+docker logs lmgw 2>&1 | grep 'set a password'                  # section 10
+```
+
+Sections 6 to 12 apply as written, with `docker exec -it lmgw lmgw-server …`
+for the command line, `docker logs lmgw` for the journal, `docker compose up
+-d` after loading a new image, and the compose file's `environment:` for the
+unit's `Environment=` lines.
+
+**What the container may do: treat it as root on the host.** Under Docker the
+container's root is the host's root. The compose file adds `SYS_ADMIN` and
+switches Docker's seccomp and AppArmor profiles off for this container; each
+option is there because the start failed without it, and the compose file
+names the failure beside each.
+
+The entrypoint moves lmgw and its nested Podman into a user namespace of
+their own (ids 0 to 65535 mapped to themselves), because the nested Podman
+works only there. **That namespace is not a security boundary.** lmgw has no
+capabilities over the host's namespaces in it, but it is still the host's
+uid 0 for every check that goes by the user id, and the kernel's `/proc/sys`
+is one: from lmgw's namespace a write to the host's `kernel.core_pattern`
+is permitted (seen 2026-11-13, through the `/proc` the entrypoint mounts for
+the nested containers; a nested container started with `--privileged` gets
+such a `/proc` too). So whoever can make lmgw start a container with run
+arguments of their choosing can become root on the host, and every lmgw
+account can: give accounts on a Docker host only to people who may be root
+there. Under a rootless Podman (sections 1 to 12) the same person gets the
+service account's rights and no more.
+
+Docker is not a supported way to run lmgw: the supported one is the rootless
+Podman unit of sections 1 to 12. Mapping lmgw's root to an unprivileged id
+range under Docker is not planned (the owner, 2026-11-13). The compose file
+is for a host where only its administrators have lmgw accounts and lmgw is a
+gateway and model host for other services, not something users open.
+
+**The nested Podman by hand** goes through lmgw's namespaces, never plain
+`docker exec lmgw podman …`: Podman caches what it finds about its storage,
+and a call from outside the user namespace leaves findings that are wrong
+inside it (every later start then fails with "conflicting options:
+userxattr,metacopy=on" until the container is recreated).
+
+```sh
+docker exec lmgw sh -c 'nsenter -t "$(pgrep -x lmgw-server)" --user --mount -- podman ps'
+```
+
+**willfarrell/autoheal**, where a host runs it for every container, stops an
+unhealthy one after 10 s by default; the compose file's
+`autoheal.stop.timeout` label gives lmgw its 95 s.
+
+Ran under Docker so far: the start with TLS and the wrapping key, the machine
+check, four NVIDIA cards passed in, a chat model across all four and one
+pinned to a single card (`extra_run_args` `--device nvidia.com/gpu=1`), a
+chat completion from another machine. With the device ledger (2026-11-16):
+an unpinned model placed on one card by its UUID, the tightest that held it;
+a model pinned to a card through its GPU pin, started there alone; the
+engine's cost learned per card; Settings → GPU and the GPU panel per card.
+Not yet run there: a chat model split over several cards, an idle model
+started again on another card after it made room, and adoption of a
+container lmgw handed its cards (restarting the `lmgw` container ends the
+model containers inside it, so there is nothing to adopt). Not yet run under Docker: agents,
+engine builds, WebRTC calls, audio and image models, the command line with
+the service stopped (`docker run --rm -it -v lmgw-data:/data
+localhost/lmgw-server:current lmgw-server account …`; without the compose
+file's options it runs as the container's plain root, which the account
+commands do not mind).

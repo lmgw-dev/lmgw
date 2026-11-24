@@ -18,7 +18,9 @@ use crate::telemetry::RequestClass;
 
 use super::*;
 
+mod request_id;
 mod unary;
+pub(super) use request_id::of_answer as answer_request_id;
 use unary::unary_chat;
 
 /// Entry point for `POST /v1/chat/completions` and `POST /v1/messages`.
@@ -46,13 +48,14 @@ pub async fn handle_chat(
     );
 
     let parsed = match proto {
-        // `Realtime`, `Chat`, `AdminChat` and `SystemOne` never reach this
+        // `Realtime`, `Chat`, `AdminChat`, `SystemOne` and `DocumentsAsr` never reach this
         // handler (their labels are for rows).
         ClientProto::OpenaiChat
         | ClientProto::Realtime
         | ClientProto::Chat
         | ClientProto::AdminChat
-        | ClientProto::SystemOne => openai::parse_chat_request(&body),
+        | ClientProto::SystemOne
+        | ClientProto::DocumentsAsr => openai::parse_chat_request(&body),
         ClientProto::AnthropicMessages => anthropic::parse_messages_request(&body),
     };
     let mut ir = match parsed {
@@ -269,7 +272,10 @@ async fn serve_opened(
         ),
         // The samplers the route leaves out; the request's own
         // protocol-only fields follow the fit, below.
-        params_ignored: params_ignored(route.upstream.protocol, &params),
+        params_ignored: params_ignored(route.upstream.protocol, &params)
+            .into_iter()
+            .map(String::from)
+            .collect(),
         // The send says (`reasoning_fit::send_chat`), below.
         params_refused: Vec::new(),
         max_tokens_defaulted,
@@ -437,7 +443,9 @@ async fn serve_opened(
     let resp = match result {
         Ok(resp) => resp,
         Err(e) => {
-            let resp = error_response(proto, &e);
+            // The upstream's own error answer carries its request id
+            // (recorded by the send, `request_id`); every other error none.
+            let resp = error_response_with(proto, &e, headers.request_id());
             unanswered.logging();
             record(
                 LogParams {

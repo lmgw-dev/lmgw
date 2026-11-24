@@ -84,7 +84,7 @@ pub(super) fn words(phase: &WaitPhase) -> Option<String> {
         } => Some(super::download::words(image, *done_bytes, *total_bytes)),
         WaitPhase::Gate => Some("waiting for the admission gate".into()),
         WaitPhase::Measuring => Some("measuring GPU memory".into()),
-        WaitPhase::Evicting { victim } => Some(format!("evicting {victim}")),
+        WaitPhase::Evicting { victim, .. } => Some(format!("evicting {victim}")),
         WaitPhase::Starting => Some("starting the container".into()),
         WaitPhase::WaitingForRoom { .. } => None,
     }
@@ -101,6 +101,7 @@ mod tests {
         let room = WaitPhase::WaitingForRoom {
             needs_bytes: 7,
             free_bytes: 2,
+            cards: Vec::new(),
         };
         w.send(&room);
         w.send(&room);

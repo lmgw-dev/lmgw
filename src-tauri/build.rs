@@ -9,6 +9,9 @@ fn main() {
             "audio_output_set",
             // The machine check's fix (machine-check design §4.3).
             "machine_apply",
+            // The page's window controls under the shell's own frame
+            // (window_chrome.rs).
+            "window_chrome",
         ]),
     ))
     .expect("tauri build script");

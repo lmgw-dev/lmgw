@@ -56,9 +56,9 @@ pub fn ConfirmButton(
         "btn danger"
     };
     let cancel_class = if !has("btn") || has("sm") {
-        "btn ghost sm"
+        "btn ghost sm confirm-cancel"
     } else {
-        "btn ghost"
+        "btn ghost confirm-cancel"
     };
 
     let armed = RwSignal::new(false);
@@ -201,7 +201,7 @@ pub fn ConfirmButton(
                     type="button"
                     class=armed_class
                     node_ref=armed_btn
-                    title="Esc or ✕ cancels"
+                    title="Esc or the close button cancels"
                     disabled=move || disabled.get()
                     on:click=move |ev| {
                         pressing.set_value(false);
@@ -226,7 +226,7 @@ pub fn ConfirmButton(
                         disarm(true);
                     }
                 >
-                    "✕"
+                    <super::icon::Icon ico=super::icon::Ico::Close/>
                 </button>
             </Show>
         </span>

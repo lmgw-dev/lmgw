@@ -70,7 +70,7 @@ fn the_version_must_be_2_and_a_v1_link_is_told_why() {
     assert_eq!(e, LinkError::PairedBeforeTls);
     assert_eq!(
         e.to_string(),
-        "this link is from a pairing before TLS; make a new one on lmgw's Devices card"
+        "this link is from a pairing before TLS; make a new one in lmgw under Usage → Keys & budgets"
     );
 }
 

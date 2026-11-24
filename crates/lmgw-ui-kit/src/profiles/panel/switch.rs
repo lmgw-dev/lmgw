@@ -16,7 +16,7 @@ pub(super) enum Pick {
 /// The list with `p` in place of the row with its id, or added: in the
 /// gateway's order (the name, ASCII case folded as SQLite's `NOCASE`, then
 /// the id), so the list reads as the next fetch will answer it.
-pub(super) fn upsert(list: &mut ProfileList, p: Profile) {
+pub fn upsert(list: &mut ProfileList, p: Profile) {
     list.profiles.retain(|x| x.id != p.id);
     let key = |x: &Profile| (x.name.to_ascii_lowercase(), x.id);
     let at = list.profiles.partition_point(|x| key(x) < key(&p));

@@ -217,6 +217,7 @@ mod tests {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         let http = reqwest::Client::new();
         for p in [

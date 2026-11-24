@@ -44,8 +44,9 @@ pub(super) const OPS: &[OpDoc] = &[
         description: Some(
             "One get by the `get_id` `model_get` answered (find-a-model design §6.2): its state \
              (running, done, failed, canceled), a running get's stage (downloading, paused, \
-             setting up, ready) with each file that waits and why (`waiting`: `metered`, \
-             `not_started`, or `other` with the download's note) and its bytes so far, every \
+             waiting for the engine, setting up, ready) with each file that waits and why \
+             (`waiting`: `metered`, `not_started`, or `other` with the download's note) and \
+             its bytes so far, every \
              file's download row, why a failed get stopped and what to do, and a finished get's result: the \
              row it created or found, its context, the fit that context comes from and the \
              note the row keeps. Reads only.",

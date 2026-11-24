@@ -114,6 +114,9 @@ pub(super) struct Turn {
     /// a capability — attachments as notes or transcripts, a heard turn as
     /// its transcript — for its request rows (`request_logs.degraded`).
     degraded: Option<String>,
+    /// The attached labels that offered the turn no tools, as its `error`
+    /// frames said them ([`Self::notice`]): saved with its reply.
+    notices: Vec<frames::LabelNotice>,
     /// Who the turn runs as ([`TurnOpts::caller`]): every model call it
     /// makes is checked against and charged to a device's key, and its
     /// tools resolve under that key's scope (client-apps design L4).
@@ -260,6 +263,14 @@ impl Turn {
             degraded: crate::degraded::join([self.degraded.clone(), lacked]),
             ..self
         }
+    }
+
+    /// Keep `notice` (an attached label that offered no tools, which the
+    /// turn's `error` frame just said) with the reply the turn saves: once
+    /// per label and code (`LabelNotice::merge_into`), as the reply's page
+    /// lists them by those.
+    pub(super) fn notice(&mut self, notice: frames::LabelNotice) {
+        frames::LabelNotice::merge_into(&mut self.notices, notice);
     }
 
     /// What the turn's content lost to the thread's own model before any
@@ -459,6 +470,8 @@ impl Turn {
             // What a fallback that cannot see was sent in the images' place,
             // when one answered (`blind`).
             images_note: self.blind.note(),
+            // The labels that offered no tools, as the stream said them.
+            notices: self.notices.clone(),
             voice: None,
             pending_approvals: r.pending.clone(),
             tool_files: r.tool_files,
@@ -1010,6 +1023,7 @@ async fn start_turn_inner(
         user_row,
         blind: Default::default(),
         degraded,
+        notices: Vec::new(),
         caller,
         feed,
         _slot: slot,
@@ -1180,6 +1194,7 @@ fn request(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     (ir, text_form)
 }
@@ -1603,7 +1618,13 @@ pub(in crate::web) fn build_messages(
         }
         // Two user messages in a row (a send that saved no reply, then
         // another) go out as one: strict templates refuse the pair.
-        msgs.push(Message { role, content }, context_at);
+        // A system message's parts (attachments' texts, its own) are one
+        // text, joined as they were before the system role's own rule
+        // (`Message::joined_text`).
+        msgs.push(
+            Message { role, content }.with_system_text_joined(),
+            context_at,
+        );
     }
     if let Some(parts) = spoken {
         msgs.push(

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::config::{Protocol, UpstreamKind};
-use crate::ir::{AnthropicBlock, ImageSource, Message, Params, Role};
+use crate::ir::{AnthropicBlock, CacheControl, ImageSource, Message, Params, Role};
 
 /// A fallback row of `protocol`.
 fn row(protocol: Protocol) -> Upstream {
@@ -43,6 +43,7 @@ fn request(messages: Vec<Message>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -57,6 +58,7 @@ fn inline(data: &str) -> ContentPart {
     ContentPart::Image {
         mime: "image/png".into(),
         source: ImageSource::Base64 { data: data.into() },
+        cache_control: None,
     }
 }
 
@@ -68,6 +70,7 @@ fn tool_result(blocks: Vec<ToolResultBlock>) -> Message {
             name: Some("screenshot".into()),
             content: blocks,
             is_error: false,
+            cache_control: None,
         }],
     }
 }
@@ -118,6 +121,7 @@ fn an_image_by_url_says_so_without_the_url() {
             source: ImageSource::Url {
                 url: "https://example.com/cat.jpg?sig=secret".into(),
             },
+            cache_control: None,
         }],
     }]);
     let (out, dropped) = without_images(&ir, &openai());
@@ -139,6 +143,7 @@ fn a_tool_results_image_becomes_its_placeholder_and_its_text_stays() {
         ToolResultBlock::Image {
             mime: "image/png".into(),
             data: "iVBORw0KGgo=".into(),
+            cache_control: None,
         },
     ])]);
     let (out, dropped) = without_images(&ir, &openai());
@@ -213,6 +218,41 @@ fn a_files_api_image_is_an_image_where_it_is_sent() {
     assert!(!carries_images(&out, &anthropic));
 }
 
+/// The placeholder of a marked Files API image keeps the block's mark, a
+/// message's and a tool result's.
+#[test]
+fn a_files_api_images_placeholder_keeps_its_mark() {
+    let five = serde_json::json!({"type": "ephemeral"});
+    let marked = || {
+        AnthropicBlock::from_client(serde_json::json!({
+            "type": "image", "source": {"type": "file", "file_id": "file_secret1"},
+            "cache_control": five,
+        }))
+    };
+    let ir = request(vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentPart::AnthropicBlock(marked())],
+        },
+        tool_result(vec![ToolResultBlock::AnthropicBlock(marked())]),
+    ]);
+    let (out, _) = without_images(&ir, &row(Protocol::Anthropic));
+    let text = "[image by Files API reference — omitted: the answering model cannot see images]";
+    let mark = Some(CacheControl(five));
+    let mut expected = ContentPart::text(text);
+    if let ContentPart::Text { cache_control, .. } = &mut expected {
+        *cache_control = mark.clone();
+    }
+    assert_eq!(out.messages[0].content, [expected]);
+    assert_eq!(
+        out.messages[1],
+        tool_result(vec![ToolResultBlock::Text {
+            text: text.into(),
+            cache_control: mark,
+        }])
+    );
+}
+
 /// Every other row is sent none of a Files API image (the egress names it
 /// `content.image`), so to it the block is no image: nothing counts it, no
 /// vision is asked of it and it gets no placeholder (changed 2026-11-06).
@@ -274,6 +314,7 @@ fn a_turn_names_each_image_once() {
         .push(tool_result(vec![ToolResultBlock::Image {
             mime: "image/png".into(),
             data: "CCCC".into(),
+            cache_control: None,
         }]));
     let turn = Announced::default();
     let (out, n) = turn.without_images(&first, &openai(), &unseen());

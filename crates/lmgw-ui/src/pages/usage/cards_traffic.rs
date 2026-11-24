@@ -5,12 +5,39 @@ use lmgw_api_types::{SeriesMeta, UsageCell, UsageSeriesResponse, UsageTopRespons
 
 use crate::charts::{
     self, band_path, bot_round, chart_height, crosshair, hit_bands, legend, line_path, path_len,
-    top_round, x_labels, y_grid, LegendItem, Plot, Tip, TipRow, Tips,
+    top_round, x_labels, LegendItem, Plot, Tip, TipRow, Tips,
 };
 use crate::fmt::{compact, grouped};
 use crate::widgets::ShowMore;
 
 use super::*;
+
+/// A duration on the latency chart, its axis and its table: "850 ms" under a
+/// second, "1.2 s" under ten, whole seconds above ("200 s").
+pub(super) fn latency_text(ms: f64) -> String {
+    if ms.round() < 1000.0 {
+        format!("{} ms", ms.round())
+    } else if ms < 9_950.0 {
+        format!("{:.1} s", ms / 1000.0)
+    } else {
+        format!("{} s", grouped((ms / 1000.0).round() as u64))
+    }
+}
+
+/// A tick on the latency axis: one unit for the whole axis, chosen from its
+/// maximum (`ms` while the axis stays under a second, `s` above), so the ticks
+/// never read "0 ms, 100 s, 200 s".
+pub(super) fn latency_axis_text(ms: f64, axis_max_ms: f64) -> String {
+    if axis_max_ms < 1000.0 {
+        return format!("{} ms", ms.round());
+    }
+    let s = ms / 1000.0;
+    if s >= 100.0 {
+        return format!("{} s", grouped(s.round() as u64));
+    }
+    let text = format!("{s:.2}");
+    format!("{} s", text.trim_end_matches('0').trim_end_matches('.'))
+}
 
 /// A chart point `(x, y)`, and the pair of points a latency band is drawn between.
 type Band = ((f64, f64), (f64, f64));
@@ -31,7 +58,7 @@ pub(super) fn TokensCard(
     let tv = RwSignal::new(false);
     view! {
         <div class="card chart-card u-tokens">
-            <ChartHead title="Tokens in / out" note="diverging from one zero rule · the ratio is the shape of the workload" tv=tv/>
+            <ChartHead title="Tokens in / out" note="Input above, output below" explain="Both sides share one zero line, so the ratio of input to output is the shape of the workload." tv=tv/>
             <CardErr err=series.err/>
             <div class="chart-box" node_ref=node class:stale=move || series.stale()>
                 {move || {
@@ -43,7 +70,8 @@ pub(super) fn TokensCard(
                     let g = Grid::build(&r);
                     let n = g.nb();
                     if n == 0 {
-                        return view! { <div class="chart-empty">"No buckets."</div> }.into_any();
+                        return view! { <div class="card-empty-line">"No requests in this window"</div> }
+                            .into_any();
                     }
                     let anim = entry.get_untracked();
                     let p = Plot::new(w, chart_height(w), 56.0, 16.0, 12.0, 30.0);
@@ -232,7 +260,7 @@ pub(super) fn LatencyCard(
     let tv = RwSignal::new(false);
     view! {
         <div class="card chart-card u-latency">
-            <ChartHead title="Latency" note="p50 with the p95 band, per bucket, from the stored histograms — a mean would be dragged four times over by one 30-second outlier" tv=tv/>
+            <ChartHead title="Latency" note="Median, with the 95th percentile as a band" explain="Per bucket, from the stored histograms. A mean would be pulled up by a single slow request." tv=tv/>
             <CardErr err=series.err/>
             <div class="chart-box" node_ref=node class:stale=move || series.stale()>
                 {move || {
@@ -244,7 +272,8 @@ pub(super) fn LatencyCard(
                     let g = Grid::build(&r);
                     let n = g.nb();
                     if n == 0 {
-                        return view! { <div class="chart-empty">"No buckets."</div> }.into_any();
+                        return view! { <div class="card-empty-line">"No requests in this window"</div> }
+                            .into_any();
                     }
                     // `latency` is aligned with `buckets`; index defensively all
                     // the same, because a shorter list must gap rather than shift.
@@ -252,21 +281,30 @@ pub(super) fn LatencyCard(
                     let has = r.latency.iter().any(|p| p.p50_total_ms.is_some());
                     if !has {
                         return view! {
-                            <div class="chart-empty">
-                                "No successful request in this window, so there is no percentile to draw."
+                            <div
+                                class="card-empty-line"
+                                title="With no successful request there is no percentile to draw."
+                            >
+                                "No successful requests in this window"
                             </div>
                         }
                             .into_any();
                     }
                     let anim = entry.get_untracked();
-                    let p = Plot::new(w, chart_height(w), 56.0, 64.0, 12.0, 30.0);
                     let max = r
                         .latency
                         .iter()
                         .filter_map(|q| q.p95_total_ms)
                         .fold(0.0, f64::max)
                         .max(1.0) * 1.15;
-                    let grid = y_grid(&p, max, 4, &|v| format!("{} ms", v.round()));
+                    let ticks = charts::nice_ticks(max, 4);
+                    let widest = ticks
+                        .iter()
+                        .map(|t| latency_axis_text(*t, max).chars().count())
+                        .max()
+                        .unwrap_or(0);
+                    let p = Plot::new(w, chart_height(w), widest as f64 * 7.0 + 8.0, 64.0, 12.0, 30.0);
+                    let grid = charts::y_grid_ticks(&p, max, ticks, &|t| latency_axis_text(t, max));
                     // An empty bucket has no percentile: a gap, never a zero that
                     // would draw a gateway which got infinitely fast.
                     let pts = |f: fn(&lmgw_api_types::LatencyPoint) -> Option<f64>| {
@@ -366,7 +404,7 @@ pub(super) fn LatencyCard(
                                         stroke-width="2"
                                     ></circle>
                                     <text x=x + 9.0 y=y + 4.0 class="mark-label">
-                                        {format!("{} ms", v.round())}
+                                        {latency_text(v)}
                                     </text>
                                 }
                                     .into_any(),
@@ -374,7 +412,7 @@ pub(super) fn LatencyCard(
                         })
                         .collect();
                     let ms = |v: Option<f64>| {
-                        v.map(|v| format!("{} ms", v.round()))
+                        v.map(latency_text)
                             .unwrap_or_else(|| "—".to_string())
                     };
                     let tip_data: Vec<Tip> = (0..n)
@@ -435,7 +473,7 @@ pub(super) fn LatencyCard(
                                 " "
                                 <b>
                                     {v
-                                        .map(|v| format!("{} ms", v.round()))
+                                        .map(latency_text)
                                         .unwrap_or_else(|| "—".into())}
                                 </b>
                             </span>
@@ -502,25 +540,25 @@ pub(super) fn ShareCard(
     let total = Signal::derive(move || top.data.with(|r| r.as_ref().map_or(0, |r| r.rows.len())));
     let note = Signal::derive(move || {
         let by = if group_by.get() == "alias" {
-            "coloured as in the charts; grey rows are what they fold into Other"
+            "Coloured as in the charts; grey rows are what they fold into Other."
         } else {
-            "coloured as the per-alias charts; grey rows are past their six colours"
+            "Coloured as the per-alias charts; grey rows are past their six colours."
         };
         let measured = match since.get() {
-            Some(s) => format!(" · quantities measured {s}"),
+            Some(s) => format!(" Quantities measured {s}."),
             None => String::new(),
         };
-        format!("cost and tokens per alias, in the server's rank order · {by}{measured}")
+        format!("Cost and tokens per alias, in the server's rank order. {by}{measured}")
     });
     view! {
         <div class="card chart-card u-share">
-            <ChartHead title="Where it went" note=move || note.get()/>
+            <ChartHead title="Where it went" note="Cost and tokens per alias" explain=move || note.get()/>
             <CardErr err=top.err/>
             <div class="chart-box" class:stale=move || top.stale()>
                 {move || {
                     let Some(r) = top.data.get() else { return ().into_any() };
                     if r.rows.is_empty() {
-                        return view! { <div class="chart-empty">"Nothing in this window."</div> }
+                        return view! { <div class="card-empty-line">"No requests in this window"</div> }
                             .into_any();
                     }
                     let meta: HashMap<&str, &SeriesMeta> = r
@@ -535,9 +573,13 @@ pub(super) fn ShareCard(
                     let max_cost = r.rows.iter().map(|c| c.cost_micro as f64).fold(0.0, f64::max).max(1.0);
                     let max_tok = r.rows.iter().map(toks).fold(0.0, f64::max).max(1.0);
                     // What each alias processed besides tokens (billable units
-                    // §8.3): a column only when anything in the window measured
-                    // something — a chat-only gateway has none to show.
-                    let any_measured = r.rows.iter().any(|c| measured_of(c).is_some());
+                    // §8.3): a column only when a row shown measured something —
+                    // a chat-only gateway has none to show.
+                    let any_measured = r
+                        .rows
+                        .iter()
+                        .take(shown.get())
+                        .any(|c| measured_of(c).is_some());
                     // Follows the window, as the card note does.
                     let measured_tip = move || {
                         let what = "measured input audio, input characters and generated images";
@@ -620,7 +662,7 @@ pub(super) fn ShareCard(
                             let measured_cell = any_measured.then(|| {
                                 let text = measured.clone().unwrap_or_else(|| "—".into());
                                 let title = measured.clone().unwrap_or_else(|| "nothing measured".into());
-                                view! { <td class="dim share-measured" title=title>{text}</td> }
+                                view! { <td class="num share-measured" title=title>{text}</td> }
                             });
                             let href = TrafficLink::scoped(&class.get_untracked(), &key_id.get_untracked())
                                 .alias(c.series.clone())
@@ -657,7 +699,7 @@ pub(super) fn ShareCard(
                                         <th>"Tokens"</th>
                                         {any_measured
                                             .then(|| {
-                                                view! { <th title=measured_tip>"Measured"</th> }
+                                                view! { <th class="num-h" title=measured_tip>"Measured"</th> }
                                             })}
                                         <th class="num-h col-p3">"Requests"</th>
                                         <th class="num-h col-p2">"Per Mtok"</th>
@@ -706,5 +748,39 @@ pub(super) fn ShareCard(
                 }}
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duration_reads_in_the_unit_its_size_asks_for() {
+        assert_eq!(latency_text(850.0), "850 ms");
+        assert_eq!(latency_text(999.6), "1.0 s");
+        assert_eq!(latency_text(1722.0), "1.7 s");
+        assert_eq!(latency_text(9_960.0), "10 s");
+        assert_eq!(latency_text(200_000.0), "200 s");
+    }
+
+    #[test]
+    fn one_axis_has_one_unit() {
+        let ticks = [0.0, 100_000.0, 200_000.0];
+        let all: Vec<String> = ticks
+            .iter()
+            .map(|t| latency_axis_text(*t, 230_000.0))
+            .collect();
+        assert_eq!(all, ["0 s", "100 s", "200 s"]);
+        let small: Vec<String> = [0.0, 250.0, 500.0]
+            .iter()
+            .map(|t| latency_axis_text(*t, 575.0))
+            .collect();
+        assert_eq!(small, ["0 ms", "250 ms", "500 ms"]);
+        let mid: Vec<String> = [0.0, 500.0, 1000.0, 1500.0]
+            .iter()
+            .map(|t| latency_axis_text(*t, 1700.0))
+            .collect();
+        assert_eq!(mid, ["0 s", "0.5 s", "1 s", "1.5 s"]);
     }
 }

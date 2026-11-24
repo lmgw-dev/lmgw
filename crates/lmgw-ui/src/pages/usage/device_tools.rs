@@ -202,6 +202,9 @@ pub(super) fn DeviceToolsEditor(
     /// The key's tool scope as the form holds it: mode and patterns.
     #[prop(into)]
     scope: Signal<(String, String)>,
+    /// The grant differs from what is stored: the row's accent dot.
+    #[prop(optional, into)]
+    dirty: Option<Signal<bool>>,
 ) -> impl IntoView {
     let unmet = Memo::new(move |_| {
         let (mode, patterns) = scope.get();
@@ -217,9 +220,17 @@ pub(super) fn DeviceToolsEditor(
     });
     let waiting = Memo::new(move |_| unhosted(&state.labels(), &hosted.get()));
     view! {
-        <div class="row device-tools-row">
-            <span class="lbl">"device tools"</span>
-            <div class="device-tools">
+        <div
+            class="prow stack block device-tools-row"
+            class:dirty=move || dirty.is_some_and(|d| d.get())
+        >
+            <div class="prow-text">
+                <span class="prow-title">"Other devices' tools"</span>
+                <span class="prow-sub">
+                    "The paired devices' own tools this key may use — Kai desktop's, say — whatever its tool scope's mode; the tool scope then picks which of them it sees. Without one here, no key reaches another device's tools."
+                </span>
+            </div>
+            <div class="prow-block device-tools">
                 <Show
                     when=move || !offered.get().is_empty()
                     fallback=|| view! {
@@ -263,11 +274,6 @@ pub(super) fn DeviceToolsEditor(
                     prop:value=move || state.other.get()
                     on:input=move |ev| state.other.set(event_target_value(&ev))
                 />
-            </div>
-        </div>
-        <div class="mini-note dim">
-            "The paired devices' own tools this key may use — Kai desktop's, say — whatever its tool scope's mode; the tool scope then picks which of them it sees. Without one here, no key reaches another device's tools."
-        </div>
         <Show when=move || !unmet.get().is_empty()>
             <div class="mini-note notice warn">
                 {move || {
@@ -289,6 +295,8 @@ pub(super) fn DeviceToolsEditor(
                 }}
             </div>
         </Show>
+            </div>
+        </div>
     }
 }
 

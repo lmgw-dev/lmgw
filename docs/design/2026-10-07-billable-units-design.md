@@ -120,7 +120,7 @@ token-billed models report `{"type": "tokens", …}`
 
 | `unit` | What is counted | Price is per | Row quantity | v1 |
 |---|---|---|---|---|
-| `per_mtok` | tokens, with four rates: in, out, cache read, cache write | 1M tokens | `prompt_tokens` and friends | yes, unchanged |
+| `per_mtok` | tokens, with four rates: in, out, cache read, cache write (an Anthropic 1-hour cache write is 2x the in rate, which has no column yet, and the catalog's own 1-hour price is not read yet: usage-analytics design §2.3, *2026-11-12*) | 1M tokens | `prompt_tokens` and friends | yes, unchanged |
 | `per_audio_minute` | duration of **input** audio | 1 minute | `audio_in_ms` | yes |
 | `per_mchar` | characters of **input** text | 1M characters | `chars_in` | yes |
 | `per_image` | **generated** images | 1 image | `images_out` | yes |

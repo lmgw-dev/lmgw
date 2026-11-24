@@ -3,7 +3,10 @@
   "nav": "/chat/profiles"
  },
  {
-  "until": "[...document.querySelectorAll('.pf-item')].some(b => b.textContent.includes('Concise'))",
+  "js": "document.documentElement.classList.add('tauri'), true"
+ },
+ {
+  "until": "!!([...document.querySelectorAll('.mlist .lrow')].find(r => r.textContent.includes('Concise')))",
   "timeout": 20,
   "label": "the list holds the built-in Concise"
  },
@@ -12,56 +15,62 @@
  },
  {
   "expect": "!document.querySelector('.pf-editor')",
-  "label": "nothing picked: no editor"
+  "label": "nothing picked: the status page, no editor"
  },
  {
-  "click": ".pf-list-head button.btn.sm"
+  "expect": "document.querySelector('.detail-hero h1')?.textContent === 'Chat profiles' && !document.querySelector('.save-toast.show')",
+  "label": "the status page names the list"
+ },
+ {
+  "click": ".mlist-head .actions button"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-item')].find(b => b.textContent.includes('New profile')); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "location.pathname === '/chat/profiles/new' && document.querySelector('.pf-editor .prow.entry input.prow-entry')?.value === ''",
+  "label": "New profile opens an empty draft on /chat/profiles/new"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show')",
+  "label": "an untouched draft shows no save toast"
+ },
+ {
+  "js": "(() => { [...document.querySelectorAll('.mlist .lrow')].find(r => r.textContent.includes('Concise')).click(); return true; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]') && /^\\/chat\\/profiles\\/\\d+$/.test(location.pathname) && document.querySelector('.pf-editor .prow.entry input.prow-entry')?.value === 'Concise'",
+  "label": "leaving an untouched draft for Concise asks nothing"
+ },
+ {
+  "click": ".mlist-head .actions button"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-item')].find(b => b.textContent.includes('New profile')); i.click(); return !!i; })()"
  },
  {
   "wait": 0.4
  },
  {
-  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === ''",
-  "label": "New profile opens an empty draft"
- },
- {
-  "expect": "[...document.querySelectorAll('.save-bar button')].find(b => b.textContent.trim() === 'Discard').disabled === false",
-  "label": "an untouched draft's Discard is pressable (its way out)"
- },
- {
-  "click": ".save-bar button.btn.ghost"
- },
- {
-  "wait": 0.4
- },
- {
-  "expect": "!document.querySelector('.pf-editor') && !document.querySelector('.pf-item.active')",
-  "label": "Discard on a draft opened from nothing: the pane is empty again"
- },
- {
-  "js": "(() => { const b = [...document.querySelectorAll('.pf-item')].find(b => b.textContent.includes('Concise')); b.click(); return !!b; })()"
- },
- {
-  "wait": 0.4
- },
- {
-  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === 'Concise'",
-  "label": "Concise opens"
- },
- {
-  "click": ".pf-list-head button.btn.sm"
- },
- {
-  "wait": 0.4
- },
- {
-  "click": ".pf-editor .pf-head input.input"
+  "click": ".pf-editor .prow.entry input.prow-entry"
  },
  {
   "type": "Butler"
  },
  {
-  "click": ".pf-fields textarea.ta",
+  "click": ".pf-editor textarea.prow-area",
   "nth": 0
  },
  {
@@ -71,29 +80,33 @@
   "wait": 0.3
  },
  {
-  "expect": "document.querySelector('.save-bar').textContent.includes('2 unsaved')",
-  "label": "the draft has edits"
+  "expect": "document.querySelector('.save-toast.show')?.textContent.includes('2 unsaved changes')",
+  "label": "the draft has two unsaved changes in the save toast"
  },
  {
-  "click": ".save-bar button.btn.ghost"
+  "expect": "document.querySelectorAll('.pf-editor .prow.dirty').length >= 2",
+  "label": "its changed rows carry the dirty dot"
+ },
+ {
+  "click": ".save-toast button:not(.suggested)"
  },
  {
   "wait": 0.5
  },
  {
-  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === 'Concise' && document.querySelector('.pf-item.active')?.textContent.includes('Concise')",
+  "expect": "/^\\/chat\\/profiles\\/\\d+$/.test(location.pathname) && document.querySelector('.pf-editor .prow.entry input.prow-entry')?.value === 'Concise' && !!([...document.querySelectorAll('.mlist .lrow')].find(r => r.textContent.includes('Concise')))?.classList.contains('sel')",
   "label": "Discard on a draft with edits drops it and goes back to Concise"
  },
  {
-  "expect": "document.querySelector('.save-bar').textContent.includes('No unsaved changes')",
-  "label": "with nothing unsaved"
+  "expect": "!document.querySelector('.save-toast.show')",
+  "label": "with nothing unsaved the toast is gone"
  },
  {
-  "expect": "![...document.querySelectorAll('.pf-item')].some(b => b.textContent.includes('Butler'))",
+  "expect": "![...document.querySelectorAll('.mlist .lrow')].some(r => r.textContent.includes('Butler'))",
   "label": "and no Butler in the list"
  },
  {
-  "click": ".pf-editor .pf-head input.input"
+  "click": ".pf-editor .prow.entry input.prow-entry"
  },
  {
   "key": "End"
@@ -105,26 +118,144 @@
   "wait": 0.3
  },
  {
-  "expect": "document.querySelector('.pf-editor .pf-head input.input').value === 'ConciseX' && document.querySelector('.save-bar').textContent.includes('1 unsaved')",
+  "expect": "document.querySelector('.pf-editor .prow.entry input.prow-entry').value === 'ConciseX' && document.querySelector('.save-toast.show')?.textContent.includes('1 unsaved change')",
   "label": "an edit to the stored Concise"
  },
  {
-  "click": ".save-bar button.btn.ghost"
+  "click": ".save-toast button:not(.suggested)"
  },
  {
   "wait": 0.4
  },
  {
-  "expect": "document.querySelector('.pf-editor .pf-head input.input').value === 'Concise' && document.querySelector('.save-bar').textContent.includes('No unsaved changes')",
+  "expect": "document.querySelector('.pf-editor .prow.entry input.prow-entry').value === 'Concise' && !document.querySelector('.save-toast.show')",
   "label": "Discard on a stored row restores what was stored, the editor stays on it"
- },
- {
-  "expect": "[...document.querySelectorAll('.save-bar button')].find(b => b.textContent.trim() === 'Discard').disabled === true",
-  "label": "and a clean stored row's Discard is off"
  },
  {
   "expect": "window.__writes.length === 0",
   "label": "no Discard wrote anything"
+ },
+ {
+  "click": ".pf-editor .prow.entry input.prow-entry"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "type": "X"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".mlist-head a.icon-btn"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelector('dialog[open]')?.textContent.includes('Unsaved changes on this profile') && location.pathname.startsWith('/chat/profiles/')",
+  "label": "leaving for the Chat with unsaved edits asks first"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('dialog[open] button')].find(b => b.textContent.trim() === 'Stay'); b.click(); return !!b; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]') && location.pathname.startsWith('/chat/profiles/') && document.querySelector('.pf-editor .prow.entry input.prow-entry').value === 'ConciseX'",
+  "label": "Stay keeps the page and the edit"
+ },
+ {
+  "click": ".mlist-head .actions button"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-item')].find(b => b.textContent.includes('New profile')); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open]') && !location.pathname.endsWith('/new')",
+  "label": "opening New with unsaved edits asks first"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('dialog[open] button')].find(b => b.textContent.trim() === 'Leave and discard'); b.click(); return !!b; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]') && location.pathname === '/chat/profiles/new' && document.querySelector('.pf-editor .prow.entry input.prow-entry').value === ''",
+  "label": "Leave and discard opens the draft"
+ },
+ {
+  "js": "(() => { [...document.querySelectorAll('.mlist .lrow')].find(r => r.textContent.includes('Concise')).click(); return true; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .prow.entry input.prow-entry')?.value === 'Concise' && !document.querySelector('.save-toast.show') && !document.querySelector('dialog[open]')",
+  "label": "back on Concise: the discarded edit is gone, nothing asked"
+ },
+ {
+  "click": ".pf-editor .prow.entry input.prow-entry"
+ },
+ {
+  "keydown": "ControlRight"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlRight"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "window.__writes.length === 0",
+  "label": "Ctrl+S on a clean editor writes nothing"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "type": "X"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "keydown": "ControlRight"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlRight"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "window.__writes.length === 1 && !!document.querySelector('.save-toast.show .save-toast-err')",
+  "label": "Ctrl+S on an edit sends the save (blocked here) and the toast says it was not saved"
+ },
+ {
+  "click": ".save-toast button:not(.suggested)"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .prow.entry input.prow-entry').value === 'Concise' && !document.querySelector('.save-toast.show')",
+  "label": "Discard clears the refused save"
  },
  {
   "js": "window.__writes"

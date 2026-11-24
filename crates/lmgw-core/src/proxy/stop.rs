@@ -332,6 +332,7 @@ mod tests {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         }
     }
 
@@ -402,6 +403,7 @@ mod tests {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         let row = Signer::new("https://api.anthropic.com");
         let anthropic = Some(&row);

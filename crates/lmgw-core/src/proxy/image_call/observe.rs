@@ -49,6 +49,13 @@ pub(crate) enum MediaProgress {
         phase: MediaPhase,
         model: String,
         room: Option<(u64, u64)>,
+        /// On a computer with several graphics cards, the card or cards an
+        /// unloading or a wait for room is on, in words (device-ledger
+        /// design §10); `None` on one card.
+        on: Option<String>,
+        /// Unloading: the model goes on another card that has room
+        /// (device-ledger design §6.2).
+        moves: bool,
     },
     /// The image server holds the job at `position` of its queue.
     Queued {
@@ -115,6 +122,11 @@ pub(crate) fn of_wait(phase: &WaitPhase, model: &str) -> MediaProgress {
         phase,
         model: model.to_string(),
         room: None,
+        on: None,
+        moves: false,
+    };
+    let on = |cards: &[lmgw_api_types::WaitCard]| {
+        (!cards.is_empty()).then(|| lmgw_api_types::WaitCard::list(cards))
     };
     match phase {
         WaitPhase::Downloading {
@@ -132,14 +144,27 @@ pub(crate) fn of_wait(phase: &WaitPhase, model: &str) -> MediaProgress {
         WaitPhase::Gate | WaitPhase::Measuring | WaitPhase::Starting => {
             stage(MediaPhase::Loading, model)
         }
-        WaitPhase::Evicting { victim } => stage(MediaPhase::Unloading, victim),
+        WaitPhase::Evicting {
+            victim,
+            cards,
+            moves,
+        } => MediaProgress::Stage {
+            phase: MediaPhase::Unloading,
+            model: victim.clone(),
+            room: None,
+            on: on(cards),
+            moves: *moves,
+        },
         WaitPhase::WaitingForRoom {
             needs_bytes,
             free_bytes,
+            cards,
         } => MediaProgress::Stage {
             phase: MediaPhase::WaitingForRoom,
             model: model.to_string(),
             room: Some((*needs_bytes, *free_bytes)),
+            on: on(cards),
+            moves: false,
         },
     }
 }
@@ -161,6 +186,8 @@ pub(super) async fn admit_followed<F: std::future::Future>(
                 phase: MediaPhase::Loading,
                 model: alias.to_string(),
                 room: None,
+                on: None,
+                moves: false,
             });
         }
     }
@@ -266,6 +293,8 @@ mod tests {
         let p = of_wait(
             &WaitPhase::Evicting {
                 victim: "chat/qwen".into(),
+                cards: Vec::new(),
+                moves: false,
             },
             "image/z",
         );
@@ -275,6 +304,8 @@ mod tests {
                 phase: MediaPhase::Unloading,
                 model: "chat/qwen".into(),
                 room: None,
+                on: None,
+                moves: false,
             }
         );
     }

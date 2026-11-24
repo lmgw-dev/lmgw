@@ -225,6 +225,7 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -323,6 +324,7 @@ fn tool_def(t: &Tool) -> Option<ToolDef> {
         description: description.clone(),
         parameters,
         strict: None,
+        anthropic_fields: Default::default(),
     })
 }
 
@@ -432,6 +434,7 @@ impl<'a> Builder<'a> {
             id: call_id.to_string(),
             name: name.to_string(),
             args: arguments(raw_args),
+            cache_control: None,
         };
         // Calls join the assistant message before them: the text the same
         // response spoke first, or the calls made beside them.
@@ -465,6 +468,7 @@ impl<'a> Builder<'a> {
                         id: call_id,
                         content,
                         is_error,
+                        cache_control: None,
                     }],
                 });
                 continue;
@@ -495,6 +499,7 @@ impl<'a> Builder<'a> {
                     id: call_id,
                     content: ToolResultBlock::one(output),
                     is_error: false,
+                    cache_control: None,
                 }],
             });
         }

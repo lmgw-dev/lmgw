@@ -20,6 +20,7 @@ fn files(s: ModelSummary, draft: Option<ModelSummary>) -> ChatFiles {
             missing: Vec::new(),
         },
         draft: draft.map(Ok),
+        projector: false,
     }
 }
 
@@ -344,4 +345,127 @@ fn an_ngram_row_reserves_its_own_window_of_outputs() {
     let none = footprint(&files(e4b(), None), "e.gguf", &Shape::of(&p("none"), &[]));
     assert!(ngram.compute_bytes >= 4 * 262_144 * 260, "{ngram:?}");
     assert!(none.compute_bytes < 4 * 262_144 * 260, "{none:?}");
+}
+
+/// A split's parts (device-ledger design §4.3, WP6) add up to the one-card
+/// footprint: each layer its weights and its share of the cache, the
+/// companions (a projector) on the first card, the output layer on the
+/// last; a `--n-gpu-layers` short of all splits the layers on the cards.
+#[test]
+fn a_split_s_parts_add_up_to_the_footprint() {
+    let s = super::fit::tests::dense();
+    let main_bytes = s.tensor_list.tensors.iter().map(|(_, b)| b).sum();
+    let f = ChatFiles {
+        files: GgufFiles {
+            main_bytes,
+            companion_bytes: 800 * MIB,
+            summary: Ok(s),
+            missing: Vec::new(),
+        },
+        draft: None,
+        projector: true,
+    };
+    let p = LlamaParams {
+        ctx_size: Some(16384),
+        ..Default::default()
+    };
+    let fp = footprint(&f, "m.gguf", &Shape::of(&p, &[]));
+    let b = fp
+        .by_layer
+        .clone()
+        .expect("the header says what each layer holds");
+    assert_eq!(b.layers.len(), 36);
+    assert_eq!(b.on_cards(&[36]), Some(vec![fp.total_bytes]));
+    let kv_layer = fp.kv_cache_bytes / 36;
+    assert!(b.layers.iter().all(|l| *l == 60 * MIB + kv_layer), "{b:?}");
+    assert_eq!(b.first, 800 * MIB, "the projector");
+    assert!(b.last >= 300 * MIB, "the output layer: {b:?}");
+    assert_eq!(b.each, fp.compute_bytes);
+    let two = b.on_cards(&[15, 21]).unwrap();
+    assert_eq!(
+        two[0] + two[1],
+        fp.total_bytes - b.each + b.computes(2),
+        "a split's compute buffer each, the projector's on the first"
+    );
+    assert!(b.compute_on(0, 2) > crate::vram::plan::chat::by_layer::PROJECTOR_COMPUTE);
+
+    let p = LlamaParams {
+        n_gpu_layers: Some(20),
+        ..p
+    };
+    let fp = footprint(&f, "m.gguf", &Shape::of(&p, &[]));
+    let b = fp.by_layer.clone().unwrap();
+    assert_eq!(b.first_gpu, 17);
+    assert_eq!(b.layers.len(), 19, "the layers on the cards");
+    assert_eq!(b.on_cards(&[19]), Some(vec![fp.total_bytes]));
+}
+
+/// A header written as the integration tests write it is taken apart by
+/// layer, at the row's context and fitted to fewer layers on the card.
+#[test]
+fn a_written_header_is_taken_apart_by_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = crate::gguf::synth::chat("llama", 32768);
+    h.u32("llama.block_count", 8)
+        .u32("llama.embedding_length", 256)
+        .u32("llama.feed_forward_length", 512)
+        .u32("llama.attention.head_count", 4)
+        .u32("llama.attention.head_count_kv", 2)
+        .u32("llama.vocab_size", 1024);
+    for i in 0..8 {
+        h.tensor_sized(&format!("blk.{i}.attn_q.weight"), MIB);
+        h.tensor_sized(&format!("blk.{i}.ffn_up.weight"), 3 * MIB);
+    }
+    h.tensor_sized("output.weight", 2 * MIB);
+    h.tensor_sized("token_embd.weight", 2 * MIB);
+    h.write_to(&dir.path().join("m.gguf"));
+    let f = ChatFiles::read(&dir.path().display().to_string(), "m.gguf", &[], None);
+    let p = LlamaParams {
+        ctx_size: Some(4096),
+        ..Default::default()
+    };
+    let fp = footprint(&f, "m.gguf", &Shape::of(&p, &[]));
+    let b = fp.by_layer.clone().unwrap_or_else(|| panic!("{fp:?}"));
+    assert_eq!(b.layers.len(), 8);
+    assert_eq!(b.on_cards(&[8]), Some(vec![fp.total_bytes]));
+}
+
+/// A split runs as a pipeline where llama.cpp's condition holds as far as
+/// the row decides it (`src/llama-context.cpp` at ggml-org/llama.cpp
+/// 97069ff6, lines 584–590): every layer on the cards, the KV cache
+/// offloaded, no tensor override, no MoE cache. Each of those the row can
+/// turn off turns the pipeline's factors off; the default keeps them.
+#[test]
+fn a_split_runs_as_a_pipeline_where_llama_cpp_would() {
+    let f = super::fit::tests::files(super::fit::tests::dense());
+    let p = LlamaParams {
+        ctx_size: Some(16384),
+        ..Default::default()
+    };
+    let pipeline = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let fp = footprint(&f, "m.gguf", &Shape::of(&p, &args));
+        fp.by_layer
+            .expect("the header says what each layer holds")
+            .pipeline
+    };
+    assert!(pipeline(&[]), "nothing in the row turns it off");
+    assert!(pipeline(&["-ngl", "999"]), "every layer on the cards");
+    assert!(pipeline(&["-ngl", "37"]), "36 layers and the output layer");
+    assert!(!pipeline(&["-ngl", "36"]), "the first layer on the CPU");
+    assert!(!pipeline(&["--no-kv-offload"]));
+    assert!(!pipeline(&["-ot", "blk\\.0\\.ffn_up=CPU"]));
+    assert!(!pipeline(&["--moe-cache-mib", "256"]));
+}
+
+/// Inkling 2 Mini, looped (b12648, 64k, one slot, q8_0): llama.cpp keeps 8
+/// full-attention layers of cache, 1,088 MiB, and 40 windowed ones of 1,536
+/// cells, 127.5 MiB, from 24 stored layers: the loop core counts per pass.
+#[test]
+fn a_looped_models_cache_counts_its_core_once_per_pass() {
+    let s = crate::vram::compute::chat::tests::inkling2_mini();
+    assert_eq!(
+        one_slot_kv(&s, 65536, "q8_0").map(mib),
+        Some(1088.0 + 127.5)
+    );
 }

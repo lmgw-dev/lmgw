@@ -6,13 +6,19 @@ use crate::error::GatewayError;
 use crate::ingress::{rand_id, ClientStreamEncoder};
 use crate::ir::structured::DEFAULT_SCHEMA_NAME;
 use crate::ir::{
-    AnthropicBlock, BlockEvent, ChatRequest, Compaction, CompactionEvent, Completion, ContentPart,
-    ImageSource, JsonSchemaFormat, Message, Params, ReasoningControl, ResponseFormat, Role, Seal,
-    StreamDelta, ToolChoice, ToolDef, ToolResultBlock, Usage,
+    AnthropicBlock, BlockEvent, CacheControl, ChatRequest, Compaction, CompactionEvent, Completion,
+    ContentPart, ImageSource, JsonSchemaFormat, Message, Params, ReasoningControl, ResponseFormat,
+    Role, Seal, StreamDelta, ToolChoice, ToolDef, ToolResultBlock, Usage,
 };
 use crate::sse::frame;
 
 mod compaction;
+mod marks;
+mod start;
+mod usage;
+use marks::marked;
+use start::{First, Start};
+use usage::anthropic_usage;
 
 /// Parse an Anthropic `/v1/messages` request body into the IR.
 pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError> {
@@ -28,23 +34,9 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
 
     let mut messages = Vec::new();
 
-    // System prompt: top-level string or text blocks → one System message.
-    match body.get("system") {
-        Some(Value::String(s)) if !s.is_empty() => {
-            messages.push(Message::text(Role::System, s.clone()));
-        }
-        Some(Value::Array(blocks)) => {
-            let text = blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if !text.is_empty() {
-                messages.push(Message::text(Role::System, text));
-            }
-        }
-        _ => {}
-    }
+    // System prompt: top-level string or text blocks → one System message,
+    // a part per block with its cache mark.
+    messages.extend(marks::system(body.get("system")));
 
     for m in raw_messages {
         let role = match m.get("role").and_then(Value::as_str) {
@@ -104,6 +96,9 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
                 // The client's own, else Anthropic's default: not strict
                 // (ToolDef::strict).
                 strict: Some(t.get("strict").and_then(Value::as_bool).unwrap_or(false)),
+                // Its cache mark and every other Anthropic field, for an
+                // Anthropic upstream as written.
+                anthropic_fields: marks::tool_fields(t),
             });
         }
     }
@@ -188,6 +183,9 @@ pub fn parse_messages_request(body: &Value) -> Result<ChatRequest, GatewayError>
             .pointer("/thinking/display")
             .filter(|v| !v.is_null())
             .cloned(),
+        // Automatic prompt caching: sent only to Anthropic, which places
+        // the breakpoint itself (`ir::cache`).
+        cache_control: body.get("cache_control").filter(|v| !v.is_null()).cloned(),
     })
 }
 
@@ -298,13 +296,16 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                     // A cited text block of an earlier answer keeps its
                     // citations, for an Anthropic upstream to read again:
                     // the client's own, with no scope.
-                    Some("text") => parts.push(ContentPart::cited(
-                        b.get("text").and_then(Value::as_str).unwrap_or_default(),
-                        b.get("citations")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default(),
-                        None,
+                    Some("text") => parts.push(marked(
+                        ContentPart::cited(
+                            b.get("text").and_then(Value::as_str).unwrap_or_default(),
+                            b.get("citations")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default(),
+                            None,
+                        ),
+                        b,
                     )),
                     Some("image") => {
                         let src = b.get("source").cloned().unwrap_or_default();
@@ -322,6 +323,7 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                                         .unwrap_or_default()
                                         .to_string(),
                                 },
+                                cache_control: CacheControl::of(b),
                             }),
                             Some("url") => {
                                 let url = src
@@ -329,7 +331,8 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                                     .and_then(Value::as_str)
                                     .unwrap_or_default()
                                     .to_string();
-                                parts.push(crate::ingress::openai::parse_image_url(&url));
+                                parts
+                                    .push(marked(crate::ingress::openai::parse_image_url(&url), b));
                             }
                             // Any other source (a Files API `file`, a type
                             // lmgw does not know) names what only Anthropic
@@ -360,6 +363,7 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                             .unwrap_or_default()
                             .to_string(),
                         args: b.get("input").cloned().unwrap_or(json!({})),
+                        cache_control: CacheControl::of(b),
                     }),
                     Some("tool_result") => {
                         let content = parse_tool_result_content(b.get("content"));
@@ -372,6 +376,7 @@ fn parse_content(v: Option<&Value>) -> Result<Vec<ContentPart>, GatewayError> {
                             name: None,
                             content,
                             is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                            cache_control: CacheControl::of(b),
                         });
                     }
                     Some("thinking") => {
@@ -461,9 +466,14 @@ fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
         Some(Value::Array(blocks)) => blocks
             .iter()
             .map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    ToolResultBlock::text(b.get("text").and_then(Value::as_str).unwrap_or_default())
-                }
+                Some("text") => ToolResultBlock::Text {
+                    text: b
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    cache_control: CacheControl::of(b),
+                },
                 Some("image") => tool_result_image(b),
                 _ => ToolResultBlock::AnthropicBlock(AnthropicBlock::from_client(b.clone())),
             })
@@ -493,6 +503,7 @@ fn tool_result_image(b: &Value) -> ToolResultBlock {
         Some("base64") | None => ToolResultBlock::Image {
             mime: field("media_type").unwrap_or("image/png").to_string(),
             data: field("data").unwrap_or_default().to_string(),
+            cache_control: CacheControl::of(b),
         },
         Some("url") => match field("url").filter(|u| !u.is_empty()) {
             Some(url) => crate::ingress::responses::url_image_resource(url),
@@ -525,7 +536,7 @@ fn content_json(content: &[ContentPart]) -> Vec<Value> {
                     out.push(crate::egress::anthropic::text_block(text, citations));
                 }
             }
-            ContentPart::ToolUse { id, name, args } => {
+            ContentPart::ToolUse { id, name, args, .. } => {
                 out.push(json!({"type": "tool_use", "id": id, "name": name, "input": args}));
             }
             // A reasoning item in place (an answer whose reasoning came
@@ -592,46 +603,6 @@ pub fn serialize_completion(alias: &str, c: &Completion) -> Value {
     out
 }
 
-/// The IR's usage, back in Anthropic's three-disjoint-counters shape.
-///
-/// `ir::Usage::prompt_tokens` is the **total** input with cache included (the
-/// egress adapter sums Anthropic's three counters into it, so the same
-/// conversation reports the same size in either dialect). Emitting that total
-/// as `input_tokens` would inflate what an Anthropic client sees by the cache
-/// counts and drop the cache fields entirely — so the sum is undone here, and
-/// the round trip is exact.
-///
-/// `iterations` is an Anthropic answer's `usage.iterations`
-/// ([`Completion::usage_iterations`]): relayed verbatim, and its compaction
-/// entries, which the IR's usage counts in, taken out of the top-level
-/// counts again ([`compaction::top_level`]).
-fn anthropic_usage(u: &crate::ir::Usage, iterations: Option<&crate::ir::UsageIterations>) -> Value {
-    let u = &compaction::top_level(u, iterations);
-    let cached = u.cached_input_tokens;
-    let written = u.cache_write_tokens;
-    let plain = u
-        .prompt_tokens
-        .unwrap_or(0)
-        .saturating_sub(cached.unwrap_or(0))
-        .saturating_sub(written.unwrap_or(0));
-    let mut usage = json!({
-        "input_tokens": plain,
-        "output_tokens": u.completion_tokens.unwrap_or(0),
-    });
-    // Only when the upstream reported them: an absent counter and a zero one
-    // are different statements, and a client that caches reads the difference.
-    if let Some(v) = cached {
-        usage["cache_read_input_tokens"] = json!(v);
-    }
-    if let Some(v) = written {
-        usage["cache_creation_input_tokens"] = json!(v);
-    }
-    if let Some(it) = iterations {
-        usage["iterations"] = it.list.clone();
-    }
-    usage
-}
-
 #[derive(PartialEq)]
 enum OpenBlock {
     None,
@@ -671,9 +642,14 @@ pub struct AnthropicStreamEncoder {
     /// ([`StreamDelta::ReasoningDelta`]'s arm); Anthropic's thinking is never
     /// joined, and its text passes as it came, which its signature covers.
     last_signed: Option<bool>,
+    /// When `message_start` goes out: at once, or held for an
+    /// Anthropic-protocol upstream's own input counts ([`start`]).
+    opening: Start,
 }
 
 impl AnthropicStreamEncoder {
+    /// An encoder whose `message_start` goes out at `start()`, with zeros:
+    /// for an answer whose upstream reports its usage only at the end.
     pub fn new(alias: &str) -> Self {
         Self {
             id: format!("msg_{}", rand_id()),
@@ -688,7 +664,20 @@ impl AnthropicStreamEncoder {
             usage_iterations: None,
             errored: false,
             last_signed: None,
+            opening: Start::Now,
         }
+    }
+
+    /// The encoder for an answer from an upstream of `upstream`'s protocol:
+    /// an Anthropic-protocol upstream's own `message_start` reports the
+    /// input counts first, so this one's waits for them ([`start`]); every
+    /// other upstream's goes out at once, as [`Self::new`]'s.
+    pub fn for_upstream(alias: &str, upstream: crate::config::Protocol) -> Self {
+        let mut enc = Self::new(alias);
+        if upstream == crate::config::Protocol::Anthropic {
+            enc.opening = Start::Held;
+        }
+        enc
     }
 
     /// A verbatim block's event, as the Anthropic upstream sent it: its
@@ -839,29 +828,67 @@ impl AnthropicStreamEncoder {
 }
 
 impl ClientStreamEncoder for AnthropicStreamEncoder {
+    /// `message_start` and a `ping`, unless the encoder holds them for the
+    /// upstream's input counts: then nothing yet ([`start`]).
     fn start(&mut self) -> String {
-        let mut out = frame(
-            Some("message_start"),
-            &json!({
-                "type": "message_start",
-                "message": {
-                    "id": self.id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": self.alias,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {"input_tokens": 0, "output_tokens": 0},
-                },
-            })
-            .to_string(),
-        );
-        out.push_str(&frame(Some("ping"), &json!({"type": "ping"}).to_string()));
-        out
+        match self.opening {
+            Start::Now => {
+                self.opening = Start::Sent;
+                start::frames(&self.id, &self.alias, None)
+            }
+            Start::Held | Start::Sent | Start::Skipped => String::new(),
+        }
     }
 
+    /// A held `message_start` goes out with the first delta: carrying it
+    /// when it is the upstream's input usage, with zeros ahead of anything
+    /// else, and not at all ahead of an error, which then goes out alone and
+    /// ends the stream, as an Anthropic stream that opens with one does.
     fn delta(&mut self, d: &StreamDelta) -> String {
+        match self.opening {
+            Start::Skipped => return String::new(),
+            Start::Now | Start::Sent => return self.encode(d),
+            Start::Held => {}
+        }
+        match First::of(d) {
+            First::Usage(u) => {
+                self.opening = Start::Sent;
+                self.usage.merge(u);
+                start::frames(&self.id, &self.alias, Some(u))
+            }
+            First::Error => {
+                self.opening = Start::Skipped;
+                self.encode(d)
+            }
+            First::Other => {
+                self.opening = Start::Sent;
+                let mut out = start::frames(&self.id, &self.alias, None);
+                out.push_str(&self.encode(d));
+                out
+            }
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        if self.errored {
+            return String::new();
+        }
+        // A stream that ended before any delta still opens its message.
+        let mut out = match self.opening {
+            Start::Held => {
+                self.opening = Start::Sent;
+                start::frames(&self.id, &self.alias, None)
+            }
+            Start::Now | Start::Sent | Start::Skipped => String::new(),
+        };
+        out.push_str(&self.close_open_block());
+        self.closing(out)
+    }
+}
+
+impl AnthropicStreamEncoder {
+    /// One delta's frames, the message opened.
+    fn encode(&mut self, d: &StreamDelta) -> String {
         match d {
             // Anthropic's wire has no refusal of its own: the model's words
             // are its text.
@@ -1038,11 +1065,8 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
         }
     }
 
-    fn finish(&mut self) -> String {
-        if self.errored {
-            return String::new();
-        }
-        let mut out = self.close_open_block();
+    /// The closing `message_delta` and `message_stop`, after `out`.
+    fn closing(&mut self, mut out: String) -> String {
         let stop_reason = self
             .stop_reason
             .clone()
@@ -1051,11 +1075,7 @@ impl ClientStreamEncoder for AnthropicStreamEncoder {
         let full = anthropic_usage(&self.usage, iterations.as_ref());
         let mut usage = json!({"output_tokens": full["output_tokens"]});
         if self.usage.prompt_tokens.is_some() {
-            for k in [
-                "input_tokens",
-                "cache_read_input_tokens",
-                "cache_creation_input_tokens",
-            ] {
+            for k in usage::INPUT_KEYS {
                 if let Some(v) = full.get(k) {
                     usage[k] = v.clone();
                 }

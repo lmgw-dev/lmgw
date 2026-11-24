@@ -15,7 +15,7 @@ use lmgw_api_types::builds::{
 use super::{ago, local_ts, sha7, short_repo, use_bk};
 use crate::backends_api as api;
 use crate::scope::Scope;
-use crate::widgets::ShowMore;
+use crate::widgets::{Ico, Icon, ShowMore};
 
 /// `(host, path)` of a git URL, lowercased and without `.git`, so two
 /// spellings of one repository compare equal: `https://github.com/o/r`,
@@ -488,7 +488,7 @@ pub fn ExtrasPicker(
                                     title="Take it off the list"
                                     on:click=move |_| remove(i)
                                 >
-                                    "✕"
+                                    <Icon ico=Ico::Close/>
                                 </button>
                             </div>
                         }

@@ -32,6 +32,7 @@ pub(super) fn carried(
         list,
         top_cache_read: had(|u| u.cached_input_tokens),
         top_cache_write: had(|u| u.cache_write_tokens),
+        top_cache_write_1h: had(|u| u.cache_write_1h_tokens),
     })
 }
 
@@ -48,6 +49,7 @@ pub(super) fn billed(mut top: Usage, usage: Option<&Value>, start: Option<&Usage
             top.prompt_tokens = start.prompt_tokens;
             top.cached_input_tokens = start.cached_input_tokens;
             top.cache_write_tokens = start.cache_write_tokens;
+            top.cache_write_1h_tokens = start.cache_write_1h_tokens;
         }
     }
     top.add(&spent);

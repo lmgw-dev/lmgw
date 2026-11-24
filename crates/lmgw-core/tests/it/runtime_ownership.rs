@@ -166,6 +166,7 @@ fn runtime(model_id: &str) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 

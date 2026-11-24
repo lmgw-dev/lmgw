@@ -10,8 +10,8 @@ use lmgw_api_types::realtime::speech_hint_text;
 use serde_json::Value;
 
 use super::super::{Def, Page};
+use crate::pages::settings::prow::SetField as Field;
 use crate::scope::{Latest, Scope};
-use crate::widgets::Field;
 
 /// What the drafted TTS model does with speech instructions and inline tags.
 #[derive(Clone, Debug, PartialEq)]
@@ -101,18 +101,18 @@ fn drafted_speech(
 /// What the drafted TTS does with the style, in a line.
 fn style_note(s: &Speech) -> String {
     match s {
-        Speech::NoModel => "pick a text-to-speech model first".into(),
-        Speech::Loading => "reading what the model does with it…".into(),
-        Speech::Failed(e) => format!("what the model does with it could not be read: {e}"),
+        Speech::NoModel => "Pick a text-to-speech model first".into(),
+        Speech::Loading => "Reading what the model does with it…".into(),
+        Speech::Failed(e) => format!("What the model does with it could not be read: {e}"),
         Speech::Known { instructions, .. } => match instructions.as_deref() {
-            Some("style") => "the model speaks in this style".into(),
-            Some("voice_design") => "the model designs its voice from this description — \
+            Some("style") => "The model speaks in this style".into(),
+            Some("voice_design") => "The model designs its voice from this description — \
                                      required, unless its row has a default description of its \
                                      own (which then wins over this)"
                 .into(),
-            Some("none") => "this model reads no instructions: it is not sent".into(),
-            Some(_) => "sent with every clause; the model decides what it does with it".into(),
-            None => "a provider's model: sent as its instructions with every clause".into(),
+            Some("none") => "This model reads no instructions: it is not sent".into(),
+            Some(_) => "Sent with every clause; the model decides what it does with it".into(),
+            None => "A provider's model: sent as its instructions with every clause".into(),
         },
     }
 }
@@ -122,7 +122,7 @@ fn style_note(s: &Speech) -> String {
 /// none.
 fn hint_preview(s: &Speech) -> Result<String, String> {
     match s {
-        Speech::NoModel => Err("pick a text-to-speech model first".into()),
+        Speech::NoModel => Err("Pick a text-to-speech model first".into()),
         Speech::Loading => Err("reading what the model does with square brackets…".into()),
         Speech::Failed(e) => Err(format!(
             "what the model does with square brackets could not be read: {e}"
@@ -222,17 +222,19 @@ pub(in crate::pages::settings) fn TagHintField(
         }
         hint_preview(&speech.get())
     };
+    let value = crate::pages::settings::prow::bridge_flag(form, k);
     view! {
-        <div class="set-tag-hint" id=id hidden=move || hidden.get()>
-            <label class="check check-line" class:dirty=move || dirty.get()>
-                <input
-                    type="checkbox"
-                    prop:checked=move || form.flag(k)
-                    on:change=move |ev| form.set_flag(k, event_target_checked(&ev))
-                />
-                <span>{d.label}</span>
-                {(!d.hint.is_empty()).then(|| view! { <span class="check-hint">{d.hint}</span> })}
-            </label>
+        <Field
+            label=d.label
+            hint=d.hint
+            dirty=dirty
+            id=id
+            hidden=hidden
+            class="set-tag-hint"
+        >
+            <div class="set-tag-switch">
+                <crate::widgets::Switch value=value label=d.label/>
+            </div>
             {move || match preview() {
                 Ok(text) => view! {
                     <blockquote class="set-hint-preview">{text}</blockquote>
@@ -240,7 +242,7 @@ pub(in crate::pages::settings) fn TagHintField(
                 .into_any(),
                 Err(why) => view! { <div class="field-hint">{why}</div> }.into_any(),
             }}
-        </div>
+        </Field>
     }
 }
 
@@ -260,7 +262,7 @@ mod tests {
         assert!(style_note(&known(Some("none"))).contains("not sent"));
         assert!(style_note(&known(Some("passthrough"))).contains("decides"));
         assert!(style_note(&known(None)).contains("provider"));
-        assert!(style_note(&Speech::NoModel).contains("pick"));
+        assert!(style_note(&Speech::NoModel).contains("Pick"));
     }
 
     #[test]
@@ -285,6 +287,6 @@ mod tests {
         assert_eq!(hint_preview(&known(Some("style"), None, &[])), Ok(custom));
         let design = hint_preview(&known(Some("voice_design"), Some("none"), &[]));
         assert!(design.unwrap_err().contains("takes no delivery cues"));
-        assert!(hint_preview(&Speech::NoModel).unwrap_err().contains("pick"));
+        assert!(hint_preview(&Speech::NoModel).unwrap_err().contains("Pick"));
     }
 }

@@ -24,7 +24,7 @@ fn location_origin() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Action bar (§6.2 `div.action-bar.api-op-bar`)
+// The operation's controls, in the detail's header bar
 // ---------------------------------------------------------------------------
 
 #[component]
@@ -100,10 +100,12 @@ pub fn ActionBar(
         set_timeout(move || copied.set(false), std::time::Duration::from_secs(2));
     };
 
+    // Why Send is off, or what it is expected to answer, is the button's
+    // tooltip: the head bar has no room for a sentence.
+    let send_title =
+        Signal::derive(move || blocked.get().or_else(|| cap_warn.get()).unwrap_or_default());
     view! {
-        <div class="action-bar api-op-bar">
-            <span class=format!("method m-{}", method.to_ascii_lowercase())>{method.clone()}</span>
-            <code class="mono-sm api-op-path">{path.clone()}</code>
+        <span class="api-op-chips">
             <span class="chip">{capability.clone()}</span>
             {writes.then(|| view! { <span class="chip warn">"writes"</span> })}
             {reveals.then(|| view! { <span class="chip warn">"reveals a secret"</span> })}
@@ -113,42 +115,41 @@ pub fn ActionBar(
                 view! { <span class="chip off" title=title>"same as MCP tool " {t}</span> }
             })}
             {untyped.clone().map(|w| view! { <span class="chip off" title=w>"untyped"</span> })}
-            {move || cap_warn.get().map(|w| view! { <span class="chip warn cap-warn" title=w.clone()>{w.clone()}</span> })}
-            {move || blocked.get().map(|b| view! { <span class="chip off api-blocked" title=b.clone()>{b.clone()}</span> })}
-            <span class="spacer"></span>
-            <button type="button" class="btn ghost sm" on:click=copy_curl>
-                {move || if copied.get() { "Copied ✓" } else { "Copy as curl" }}
+        </span>
+        <button type="button" class="btn ghost sm" on:click=copy_curl>
+            {move || if copied.get() { "Copied ✓" } else { "Copy as curl" }}
+        </button>
+        <Show when=move || draft.in_flight.get()>
+            <button type="button" class="btn ghost sm" on:click=move |_| draft.abort()>
+                "Stop"
             </button>
-            <Show when=move || draft.in_flight.get()>
-                <button type="button" class="btn ghost sm" on:click=move |_| draft.abort()>
-                    "Stop"
+        </Show>
+        {if writes || reveals {
+            view! {
+                <ConfirmButton
+                    label="Send"
+                    confirm=confirm_text.clone()
+                    class="btn primary"
+                    disabled=cannot_send
+                    title=send_title
+                    on_confirm=Callback::new(move |()| do_send())
+                />
+            }
+                .into_any()
+        } else {
+            view! {
+                <button
+                    type="button"
+                    class="btn primary tester-send"
+                    disabled=move || cannot_send.get()
+                    title=move || send_title.get()
+                    on:click=move |_| do_send()
+                >
+                    {move || if draft.in_flight.get() { "Sending…" } else { "Send" }}
                 </button>
-            </Show>
-            {if writes || reveals {
-                view! {
-                    <ConfirmButton
-                        label="Send"
-                        confirm=confirm_text.clone()
-                        class="btn primary"
-                        disabled=cannot_send
-                        on_confirm=Callback::new(move |()| do_send())
-                    />
-                }
-                    .into_any()
-            } else {
-                view! {
-                    <button
-                        type="button"
-                        class="btn primary tester-send"
-                        disabled=move || cannot_send.get()
-                        on:click=move |_| do_send()
-                    >
-                        {move || if draft.in_flight.get() { "Sending…" } else { "Send" }}
-                    </button>
-                }
-                    .into_any()
-            }}
-        </div>
+            }
+                .into_any()
+        }}
     }
 }
 

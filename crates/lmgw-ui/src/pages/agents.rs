@@ -1,33 +1,41 @@
-//! Agents — the catalog (agent-catalog design §6.1).
+//! Agents (agent-catalog design §6): the catalog as a list beside the
+//! selected agent (modern-sample.html, on the shared split view
+//! [`crate::widgets::nav_split`]), one route for both, `agents/:id?/:tab?`.
 //!
-//! One card per installed agent: what it is, what model it will ask for, which
-//! tool labels it attaches, whether those labels resolve on this gateway right
-//! now, and how much it has been used. An agent is a manifest, so the two ways
-//! to get one are Import (a file or a paste, both the same endpoint) and New (a
-//! starter manifest you then edit on the Definition tab).
+//! The list ([`list`]) has a row per installed agent under its run kind's
+//! heading: the name, its state (a dot and a word: ready, running, disabled,
+//! what keeps it from running) and a line of facts (the model it will ask
+//! for, the tool labels it attaches, what it has done). The add menu holds
+//! the three ways to get one ([`modals`]): New (a starter manifest, edited on
+//! its Definition tab), Import (a file or a paste, one endpoint) and Install
+//! from an image; and Restore shipped. With nothing selected the detail is
+//! a status page ([`status`]); a selected agent's detail is
+//! [`super::agent_detail`], its tabs paths under `/agents/<id>`.
 //!
-//! Dense, like every tool surface (UX plan §4): the cards are read all day,
-//! and a description folds to three lines with a "more" beside it rather than
-//! stretching its card.
-//!
-//! The rule the card exists to show: **a missing MCP server is a warning, not a
+//! The rule the row exists to show: **a missing MCP server is a warning, not a
 //! refusal** (§5). An agent imports before its server is wired, the way a
-//! server is registered before its image is pulled; the card says what is
-//! missing and links the MCP page instead of hiding the agent.
+//! server is registered before its image is pulled; the row says what is
+//! missing and the detail links the MCP page instead of hiding the agent.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::components::A;
-use leptos_router::hooks::use_navigate;
-use lmgw_api_types::{AgentCard, AgentEnabled, AgentImportReport, AgentInstalled, AgentsRestored};
+use leptos_router::hooks::{use_navigate, use_params_map};
+use lmgw_api_types::{AgentCard, AgentsRestored};
 use serde_json::{json, Value};
-use wasm_bindgen::JsValue;
 
-use super::agent_detail::unbound_line;
 use crate::scope::Scope;
-use crate::widgets::{
-    use_slash_focus, use_toasts, ClampText, Density, Modal, ModalFooter, PageFrame, Select,
-};
+use crate::widgets::list_pane::{query_keeping, ListRefs, Nav};
+use crate::widgets::nav_split::{provide_save_key, NavSplit, SplitConf, SplitState};
+use crate::widgets::{use_toasts, Density, PageFrame};
+
+/// The list pane: the header, the search, the rows by run kind.
+mod list;
+/// Import, Install from an image, New.
+mod modals;
+/// Nothing selected: what the catalog holds and the ways to add.
+mod status;
+
+pub(crate) use list::kind_icon;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested; there is no DOM harness in this crate)
@@ -146,457 +154,14 @@ pub fn starter_manifest(id: &str, name: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// The catalog
-// ---------------------------------------------------------------------------
-
-#[component]
-pub fn Agents() -> impl IntoView {
-    let toasts = use_toasts();
-    let cards = RwSignal::new(None::<Vec<AgentCard>>);
-    let error = RwSignal::new(None::<String>);
-    let query = RwSignal::new(String::new());
-    let import_open = RwSignal::new(false);
-    let install_open = RwSignal::new(false);
-    let new_open = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-
-    let scope = Scope::new();
-    let reload = move || {
-        scope.spawn(async move {
-            match crate::api::get::<Vec<AgentCard>>("/api/agents").await {
-                Ok(list) => {
-                    error.set(None);
-                    cards.set(Some(list));
-                }
-                Err(e) => error.set(Some(e.to_string())),
-            }
-        });
-    };
-    reload();
-
-    let restore = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        spawn_local(async move {
-            let res =
-                crate::api::post::<AgentsRestored, _>("/api/op/agents_restore", &json!({})).await;
-            busy.set(false);
-            match res {
-                Ok(v) => {
-                    toasts.ok(v.message);
-                    reload();
-                }
-                Err(e) => toasts.err(e.to_string()),
-            }
-        });
-    };
-
-    let shown = move || {
-        let q = query.get();
-        cards
-            .get()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|c| matches_query(c, &q))
-            .collect::<Vec<_>>()
-    };
-    let loaded_empty = move || cards.get().is_some_and(|c| c.is_empty());
-    let searching = move || !query.with(|q| q.trim().is_empty());
-    let shown_count = move || {
-        let total = cards.with(|c| c.as_ref().map_or(0, Vec::len));
-        format!(
-            "{} of {}",
-            shown().len(),
-            crate::fmt::count_of(total, "agents")
-        )
-    };
-    let q_box: NodeRef<leptos::html::Input> = NodeRef::new();
-    use_slash_focus(q_box);
-
-    view! {
-        <PageFrame
-            title="Agents"
-            sub="A manifest each — model, prompts, tools, a config form"
-            density=Density::Dense
-            actions=move || {
-                view! {
-                    <input
-                        class="input w-sm"
-                        type="search"
-                        node_ref=q_box
-                        data-slash
-                        placeholder="Search…"
-                        title="Filter · / focuses, Esc clears"
-                        prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
-                        on:keydown=move |ev| {
-                            if ev.key() == "Escape" {
-                                query.set(String::new());
-                            }
-                        }
-                    />
-                    // What the search holds back is said (the hard rule):
-                    // "1 of 3 agents".
-                    <Show when=searching>
-                        <span class="filter-count">{shown_count}</span>
-                    </Show>
-                    <button class="btn ghost" disabled=move || busy.get() on:click=restore>
-                        "Restore shipped"
-                    </button>
-                    <button class="btn ghost" on:click=move |_| install_open.set(true)>
-                        "Install from image…"
-                    </button>
-                    <button class="btn ghost" on:click=move |_| import_open.set(true)>
-                        "Import…"
-                    </button>
-                    <button class="btn primary" on:click=move |_| new_open.set(true)>
-                        "New"
-                    </button>
-                }
-            }
-        >
-
-            <Show when=move || error.get().is_some()>
-                <div class="notice err" style="margin-bottom:14px">
-                    {move || error.get().unwrap_or_default()}
-                </div>
-            </Show>
-
-            <Show when=loaded_empty>
-                <div class="card empty">
-                    "No agents yet. " <b>"Install from image"</b>
-                    " an agent package, " <b>"Import"</b>
-                    " a manifest someone exported, press " <b>"New"</b>
-                    " to write one, or " <b>"Restore shipped"</b>
-                    " to put the ones lmgw ships with back. An agent reaches its tools through "
-                    <a href="/mcp-servers">"MCP servers"</a> "."
-                </div>
-            </Show>
-            <Show when=move || cards.get().is_none() && error.get().is_none()>
-                <div class="card dim">"Loading…"</div>
-            </Show>
-
-            <div class="auto-grid agent-grid">
-                <For each=shown key=|c| (c.id.clone(), c.updated_key()) let:c>
-                    <Card c=c on_change=Callback::new(move |()| reload())/>
-                </For>
-            </div>
-            <Show when=move || {
-                !query.get().trim().is_empty() && shown().is_empty() && !loaded_empty()
-            }>
-                <div class="card empty">"Nothing matches that."</div>
-            </Show>
-
-            <ImportModal open=import_open on_change=Callback::new(move |()| reload())/>
-            <InstallModal open=install_open on_change=Callback::new(move |()| reload())/>
-            <NewAgentModal open=new_open/>
-        </PageFrame>
-    }
-}
-
-/// The key a card is re-rendered on: everything the card draws that an op can
-/// change, so a toggle redraws its own row and nothing else.
-trait CardKey {
-    fn updated_key(&self) -> String;
-}
-
-impl CardKey for AgentCard {
-    fn updated_key(&self) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            self.enabled,
-            self.requires_ok,
-            self.threads,
-            self.last_run.as_ref().map(|r| r.job_id).unwrap_or(0)
-        )
-    }
-}
-
-#[component]
-fn Card(c: AgentCard, on_change: Callback<()>) -> impl IntoView {
-    let toasts = use_toasts();
-    let id = StoredValue::new(c.id.clone());
-    let enabled = RwSignal::new(c.enabled);
-    let busy = RwSignal::new(false);
-    let warning = requires_warning(&c);
-    let extra_warnings = card_warnings(&c);
-    let labels = c.labels.join(" · ");
-    let activity = activity_line(&c);
-    let href = format!("/agents/{}", c.id);
-
-    let toggle = move |ev| {
-        let want = event_target_checked(&ev);
-        if busy.get_untracked() {
-            return;
-        }
-        busy.set(true);
-        enabled.set(want);
-        spawn_local(async move {
-            let res = crate::api::post::<AgentEnabled, _>(
-                "/api/op/agent_enable",
-                &json!({ "id": id.get_value(), "enabled": want }),
-            )
-            .await;
-            busy.set(false);
-            match res {
-                Ok(v) => {
-                    toasts.ok(v.message);
-                    on_change.try_run(());
-                }
-                Err(e) => {
-                    enabled.set(!want);
-                    toasts.err(e.to_string());
-                }
-            }
-        });
-    };
-
-    view! {
-        <article class="card agent-card" class:off=move || !enabled.get()>
-            <Show when={
-                let err = c.error.clone();
-                move || err.is_some()
-            }>
-                <div class="notice err">{c.error.clone().unwrap_or_default()}</div>
-            </Show>
-            <div class="row">
-                <A href=href.clone() attr:class="agent-name">
-                    {if c.name.is_empty() { c.id.clone() } else { c.name.clone() }}
-                </A>
-                <span class="spacer" style="flex:1"></span>
-                // A service-mode agent serves a UI of its own
-                // (container-runtime §3.3): the chip is the link to it.
-                {c
-                    .app
-                    .then(|| {
-                        view! {
-                            <A
-                                href=format!("{}/ui", href.clone())
-                                attr:class="chip"
-                                attr:title="this agent serves its own app, on demand"
-                            >
-                                "app"
-                            </A>
-                        }
-                    })}
-                <span class="type-badge">{c.kind.clone()}</span>
-            </div>
-            <ClampText text=c.description.clone() lines=3 class="agent-desc dim"/>
-            <div class="row mono-sm dim">
-                <span title="the alias this agent asks for, config already applied">
-                    {if c.effective_model.is_empty() {
-                        "no model".to_string()
-                    } else {
-                        c.effective_model.clone()
-                    }}
-                </span>
-                {(!labels.is_empty()).then(|| view! { <span>"·"</span> <span>{labels}</span> })}
-                {(!c.version.is_empty())
-                    .then(|| {
-                        view! { <span>"·"</span> <span>{format!("v{}", c.version)}</span> }
-                    })}
-            </div>
-            {warning
-                .map(|w| {
-                    view! {
-                        <div class="notice warn agent-warn">
-                            <b>{w}</b>
-                            <span class="detail">
-                                "The agent is installed; it cannot run until the server is "
-                                <a href="/mcp-servers">"registered"</a> "."
-                            </span>
-                        </div>
-                    }
-                })}
-            <For each=move || extra_warnings.clone() key=|w| w.clone() let:w>
-                <div class="notice warn agent-warn">
-                    <b>{w}</b>
-                </div>
-            </For>
-            <div class="row agent-foot">
-                <span class="dim mono-sm">{activity}</span>
-                <span class="spacer" style="flex:1"></span>
-                {(c.source == "builtin").then(|| view! { <span class="type-badge">"shipped"</span> })}
-                <label class="check" title="A disabled agent stays in the catalog and refuses to run.">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || enabled.get()
-                        disabled=move || busy.get()
-                        on:change=toggle
-                    />
-                    {move || if enabled.get() { "on" } else { "off" }}
-                </label>
-            </div>
-        </article>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Import (§5) — file or paste, one endpoint
-// ---------------------------------------------------------------------------
-
-#[component]
-fn ImportModal(open: RwSignal<bool>, on_change: Callback<()>) -> impl IntoView {
-    let toasts = use_toasts();
-    let file = RwSignal::new(None::<web_sys::File>);
-    let pasted = RwSignal::new(String::new());
-    let replace = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let report = RwSignal::new(None::<AgentImportReport>);
-    let error = RwSignal::new(None::<String>);
-
-    let send = move |validate_only: bool| {
-        if busy.get_untracked() {
-            return;
-        }
-        let picked = file.get_untracked();
-        let text = pasted.get_untracked();
-        if picked.is_none() && text.trim().is_empty() {
-            toasts.err("pick a file or paste a manifest first");
-            return;
-        }
-        busy.set(true);
-        report.set(None);
-        error.set(None);
-        let url = format!(
-            "/api/agents/import?replace={}&validate_only={validate_only}",
-            replace.get_untracked()
-        );
-        spawn_local(async move {
-            // A file and a paste are the same body; the endpoint has one path
-            // for both, so there is nothing to keep in step here either.
-            let res = match picked {
-                Some(f) => crate::api::post_raw::<AgentImportReport>(url, f).await,
-                None => {
-                    crate::api::post_raw::<AgentImportReport>(url, JsValue::from_str(&text)).await
-                }
-            };
-            busy.set(false);
-            match res {
-                Ok(r) => {
-                    let committed = !r.validate_only;
-                    let id = r.id.clone();
-                    report.set(Some(r));
-                    if committed {
-                        toasts.ok(format!("imported '{id}'"));
-                        on_change.try_run(());
-                    }
-                }
-                // Verbatim: an invalid manifest names the field, which is the
-                // whole reason to validate before writing.
-                Err(e) => error.set(Some(e.to_string())),
-            }
-        });
-    };
-
-    let pick = move |ev: web_sys::Event| {
-        let el: web_sys::HtmlInputElement = event_target(&ev);
-        file.set(el.files().and_then(|l| l.get(0)));
-        report.set(None);
-        error.set(None);
-        if file.get_untracked().is_some() {
-            send(true);
-        }
-    };
-
-    view! {
-        <Modal open=open title="Import an agent" guard=true>
-            <div class="wiz">
-                <p class="dim mini-note">
-                    "An agent file is the manifest someone exported from this or another gateway. "
-                    "It is checked first — schema version, templates, and whether the MCP servers "
-                    "it names are registered here — and a missing server is a warning, not a "
-                    "refusal."
-                </p>
-                <div class="field" style="margin-top:10px">
-                    <label>"Agent file (.agent.json)"</label>
-                    <input class="input file" type="file" accept=".json" on:change=pick/>
-                </div>
-                <div class="field wide" style="margin-top:10px">
-                    <label>"…or paste the manifest"</label>
-                    <textarea
-                        class="input ta mono"
-                        placeholder="{ \"schema_version\": 1, … }"
-                        prop:value=move || pasted.get()
-                        on:input=move |ev| {
-                            pasted.set(event_target_value(&ev));
-                            report.set(None);
-                            error.set(None);
-                        }
-                    ></textarea>
-                </div>
-                <div class="row" style="margin-top:8px">
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            prop:checked=move || replace.get()
-                            on:change=move |ev| replace.set(event_target_checked(&ev))
-                        />
-                        "replace an agent that already has this id (its config is kept)"
-                    </label>
-                </div>
-
-                {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
-                {move || {
-                    report
-                        .get()
-                        .map(|r| {
-                            let head = if r.validate_only {
-                                format!("'{}' checks out — nothing written yet", r.id)
-                            } else if r.replaced {
-                                format!("replaced '{}', keeping its config", r.id)
-                            } else {
-                                format!("imported '{}'", r.id)
-                            };
-                            // mounts §5.2: a file names its slots and never a
-                            // host path, so this is what is left to do — read
-                            // before the For, which takes the report with it.
-                            let unbound = unbound_line(&r.config_unbound);
-                            view! {
-                                <div class="wiz-ok" style="margin-top:12px">{head}</div>
-                                <For each=move || r.warnings.clone() key=|w| w.clone() let:w>
-                                    <div class="notice warn" style="margin-top:8px">{w}</div>
-                                </For>
-                                {unbound
-                                    .map(|line| {
-                                        view! {
-                                            <div class="notice warn" style="margin-top:8px">
-                                                {line}
-                                            </div>
-                                        }
-                                    })}
-                            }
-                        })
-                }}
-
-                <ModalFooter>
-                    <button class="btn ghost" disabled=move || busy.get() on:click=move |_| send(true)>
-                        {move || if busy.get() { "Checking…" } else { "Check" }}
-                    </button>
-                    <button class="btn primary" disabled=move || busy.get() on:click=move |_| send(false)>
-                        "Import"
-                    </button>
-                </ModalFooter>
-            </div>
-        </Modal>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Install from an image (container-runtime §3.4)
-// ---------------------------------------------------------------------------
-
 /// The pull policy picker's three words, with what each one does spelled out —
 /// the choice is never implicit (§4.1), and "never" is the default because a
 /// multi-gigabyte download is not something an install should start on its own.
 pub fn pull_note(pull: &str) -> &'static str {
     match pull {
-        "missing" => "download it if it is not on this box",
-        "always" => "download it every time, even if it is already here",
-        _ => "never download: if the image is not on this box, say so and stop",
+        "missing" => "Download it if it is not on this box",
+        "always" => "Download it every time, even if it is already here",
+        _ => "Never download: if the image is not on this box, say so and stop",
     }
 }
 
@@ -612,257 +177,171 @@ fn pull_options() -> Vec<(String, String)> {
     .collect()
 }
 
-/// Install-from-image: an image reference, a visible pull policy, and the same
-/// report an import produces.
-///
-/// No manifest is pasted anywhere — that is the whole point of a package. The
-/// image carries its manifest at `/lmgw/agent.json`, lmgw reads it without
-/// starting the image, and the install goes through the ordinary import path,
-/// so every warning here is one the import would have raised too.
-#[component]
-fn InstallModal(open: RwSignal<bool>, on_change: Callback<()>) -> impl IntoView {
-    let toasts = use_toasts();
-    let image = RwSignal::new(String::new());
-    let pull = RwSignal::new("never".to_string());
-    let replace = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let report = RwSignal::new(None::<AgentImportReport>);
-    let error = RwSignal::new(None::<String>);
+// ---------------------------------------------------------------------------
+// The page: the list beside the detail
+// ---------------------------------------------------------------------------
 
-    let send = move |validate_only: bool| {
-        if busy.get_untracked() {
-            return;
-        }
-        let ref_ = image.get_untracked().trim().to_string();
-        if ref_.is_empty() {
-            toasts.err("type an image reference first");
-            return;
-        }
-        busy.set(true);
-        report.set(None);
-        error.set(None);
-        spawn_local(async move {
-            let body = json!({
-                "image": ref_,
-                "pull": pull.get_untracked(),
-                "replace": replace.get_untracked(),
-                "validate_only": validate_only,
-            });
-            // The answer carries more than the import report (image, digest,
-            // whether anything was downloaded); the dialog shows the report,
-            // and the Run tab prints the rest from the row's provenance.
-            let res = crate::api::post::<AgentInstalled, _>("/api/op/agent_install", &body).await;
-            busy.set(false);
-            match res {
-                Ok(installed) => {
-                    let r = installed.report;
-                    let committed = !r.validate_only;
-                    let id = r.id.clone();
-                    report.set(Some(r));
-                    if committed {
-                        toasts.ok(format!("installed '{id}'"));
-                        on_change.try_run(());
-                    }
-                }
-                // Verbatim: "the image carries no /lmgw/agent.json" and "the
-                // image is not on this box and pull is never" are the two
-                // answers this dialog exists to give.
-                Err(e) => error.set(Some(e.to_string())),
-            }
-        });
-    };
+/// Below this pane width the view is one pane at a time (a 1024 px window at
+/// 125 % leaves the pane about 770 px), as Models'.
+const NARROW_BELOW: f64 = 800.0;
 
-    view! {
-        <Modal open=open title="Install an agent from an image" guard=true>
-            <div class="wiz">
-                <p class="dim mini-note">
-                    "An agent package is an OCI image carrying its manifest at "
-                    <code>"/lmgw/agent.json"</code>
-                    ". lmgw reads it without starting the image (podman create, cp, rm) and "
-                    "installs it through the same path an imported file takes — so the same "
-                    "checks, and the same warnings for MCP servers this gateway does not have."
-                </p>
-                // A grid, so the image box and the policy take the dialog's
-                // width (ux:U-17: a 170px box clipped its own placeholder), and
-                // the app's Select rather than the one native <select> left,
-                // which WebKitGTK draws light on the dark theme.
-                <div class="field-grid" style="margin-top:10px">
-                    <div class="field wide">
-                        <label>"Image"</label>
-                        <input
-                            class="input mono-sm"
-                            placeholder="localhost/mail-labeler:1"
-                            prop:value=move || image.get()
-                            on:input=move |ev| {
-                                image.set(event_target_value(&ev));
-                                report.set(None);
-                                error.set(None);
-                            }
-                        />
-                    </div>
-                    <div class="field wide">
-                        <label>"If the image is not on this box"</label>
-                        <Select value=pull options=Signal::derive(pull_options)/>
-                        <p class="dim mini-note" style="margin-top:6px">
-                            {move || pull_note(&pull.get())}
-                        </p>
-                    </div>
-                </div>
-                <div class="row" style="margin-top:8px">
-                    <label class="check">
-                        <input
-                            type="checkbox"
-                            prop:checked=move || replace.get()
-                            on:change=move |ev| replace.set(event_target_checked(&ev))
-                        />
-                        "replace an agent that already has the id inside the image (its config \
-                         is kept)"
-                    </label>
-                </div>
+const CONF: SplitConf = SplitConf {
+    // Dense: the agent pages' forms and tables are the older controls, which
+    // take their height from the page's density.
+    class: "agents-split density-dense",
+    width_key: "agents.list.width",
+    list_width: (260, 32, 380),
+    detail_min: 440,
+    narrow_below: NARROW_BELOW,
+    handle_label: "Resize the list",
+};
 
-                {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
-                {move || {
-                    report
-                        .get()
-                        .map(|r| {
-                            let head = if r.validate_only {
-                                format!("'{}' checks out — nothing written yet", r.id)
-                            } else if r.replaced {
-                                format!("re-installed '{}', keeping its config", r.id)
-                            } else {
-                                format!("installed '{}'", r.id)
-                            };
-                            let unbound = unbound_line(&r.config_unbound);
-                            view! {
-                                <div class="wiz-ok" style="margin-top:12px">{head}</div>
-                                <For each=move || r.warnings.clone() key=|w| w.clone() let:w>
-                                    <div class="notice warn" style="margin-top:8px">{w}</div>
-                                </For>
-                                {unbound
-                                    .map(|line| {
-                                        view! {
-                                            <div class="notice warn" style="margin-top:8px">
-                                                {line}
-                                            </div>
-                                        }
-                                    })}
-                            }
-                        })
-                }}
+/// What the list, the status page, the add dialogs and the detail share: the
+/// catalog as last read, the way to read it again, the dialogs' switches and
+/// the page's navigation (asking the unsaved-edits guard first).
+#[derive(Clone, Copy)]
+pub(crate) struct AgentsCtx {
+    pub cards: RwSignal<Option<Vec<AgentCard>>>,
+    pub error: RwSignal<Option<String>>,
+    /// Read `/api/agents` again (after anything that changes a row).
+    pub reload: Callback<()>,
+    pub import_open: RwSignal<bool>,
+    pub install_open: RwSignal<bool>,
+    pub new_open: RwSignal<bool>,
+    /// Put the shipped agents back (`agents_restore`).
+    pub restore: Callback<()>,
+    pub restoring: RwSignal<bool>,
+    nav: Nav,
+}
 
-                <ModalFooter>
-                    <button
-                        class="btn ghost"
-                        disabled=move || busy.get()
-                        on:click=move |_| send(true)
-                    >
-                        {move || if busy.get() { "Reading…" } else { "Check" }}
-                    </button>
-                    <button
-                        class="btn primary"
-                        disabled=move || busy.get()
-                        on:click=move |_| send(false)
-                    >
-                        "Install"
-                    </button>
-                </ModalFooter>
-            </div>
-        </Modal>
+impl AgentsCtx {
+    /// Go to `to`, unless unsaved edits it would lose put the question up
+    /// first (whose "Leave and discard" then goes there); `false` then.
+    pub fn go(self, to: &str, replace: bool) -> bool {
+        self.nav.go(to, replace)
+    }
+
+    /// Go without asking: what would be asked about is gone already (the
+    /// edits of an agent that was deleted).
+    pub fn go_unasked(self, to: &str, replace: bool) {
+        self.nav.go_unasked(to, replace);
     }
 }
 
-// ---------------------------------------------------------------------------
-// New
-// ---------------------------------------------------------------------------
+/// The list's own query keys, carried from one selection to the next.
+const LIST_KEYS: &[&str] = &["q"];
+
+/// The list's own query (`q`) out of a search string.
+pub fn list_query(search: &str) -> String {
+    query_keeping(search, LIST_KEYS)
+}
+
+/// Where a row of another agent opens from the tab being shown: Runs and
+/// Definition every agent has, so the tab is kept; the App tab only some.
+pub fn row_href(id: &str, tab: Option<&str>) -> String {
+    match tab {
+        Some(t @ ("runs" | "definition")) => format!("/agents/{id}/{t}"),
+        _ => format!("/agents/{id}"),
+    }
+}
 
 #[component]
-fn NewAgentModal(open: RwSignal<bool>) -> impl IntoView {
+pub fn Agents() -> impl IntoView {
     let toasts = use_toasts();
-    // `StoredValue`, not a local: a `<Modal>`'s children are re-rendered, so a
-    // handler that moved a cloned navigator out of its environment would be
-    // `FnOnce` and the whole child tree with it.
-    let navigate = StoredValue::new(use_navigate());
-    let id = RwSignal::new(String::new());
-    let name = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
+    let params = use_params_map();
+    let sel = Memo::new(move |_| {
+        params
+            .with(|p| p.get("id"))
+            .filter(|s| !s.trim().is_empty())
+    });
+    let has_sel = Memo::new(move |_| sel.with(Option::is_some));
+    let cards = RwSignal::new(None::<Vec<AgentCard>>);
     let error = RwSignal::new(None::<String>);
-
-    let create = move |_| {
-        if busy.get_untracked() {
-            return;
-        }
-        let id_v = id.get_untracked().trim().to_string();
-        let name_v = name.get_untracked().trim().to_string();
-        if id_v.is_empty() || name_v.is_empty() {
-            error.set(Some("an agent needs an id and a name".into()));
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        spawn_local(async move {
-            let body = json!({
-                // As a string, never an object: an object is parsed into a
-                // sorted map on the way in and the config form comes back
-                // alphabetized (see `AgentDetail::manifest`).
-                "manifest": starter_manifest(&id_v, &name_v),
-                "replace": false,
-            });
-            let res = crate::api::post::<Value, _>("/api/op/agent_set", &body).await;
-            busy.set(false);
-            match res {
-                Ok(_) => {
-                    open.set(false);
-                    toasts.ok(format!("created '{id_v}' — edit its manifest here"));
-                    if let Some(go) = navigate.try_get_value() {
-                        go(&format!("/agents/{id_v}"), Default::default());
-                    }
+    let scope = Scope::new();
+    let reload = Callback::new(move |()| {
+        scope.spawn(async move {
+            match crate::api::get::<Vec<AgentCard>>("/api/agents").await {
+                Ok(list) => {
+                    error.set(None);
+                    cards.set(Some(list));
                 }
                 Err(e) => error.set(Some(e.to_string())),
             }
         });
+    });
+    reload.run(());
+    let restoring = RwSignal::new(false);
+    let restore = Callback::new(move |()| {
+        if restoring.get_untracked() {
+            return;
+        }
+        restoring.set(true);
+        spawn_local(async move {
+            let res =
+                crate::api::post::<AgentsRestored, _>("/api/op/agents_restore", &json!({})).await;
+            restoring.set(false);
+            match res {
+                Ok(v) => {
+                    toasts.ok(v.message);
+                    reload.try_run(());
+                }
+                Err(e) => toasts.err(e.to_string()),
+            }
+        });
+    });
+    let page = AgentsCtx {
+        cards,
+        error,
+        reload,
+        import_open: RwSignal::new(false),
+        install_open: RwSignal::new(false),
+        new_open: RwSignal::new(false),
+        restore,
+        restoring,
+        nav: Nav::new(),
     };
+    provide_context(page);
+
+    let split = SplitState::new(CONF);
+    let narrow = split.narrow;
+    let save_key = provide_save_key();
+    let refs = ListRefs::new();
+    let open_row = Callback::new(move |(id, replace): (String, bool)| {
+        // Another agent's row opens on the tab being shown, where it has it.
+        if sel.get_untracked().as_deref() != Some(id.as_str()) {
+            let tab = params.with_untracked(|p| p.get("tab"));
+            page.nav
+                .open(&row_href(&id, tab.as_deref()), LIST_KEYS, replace);
+        }
+    });
+    let back = Callback::new(move |()| page.nav.back("/agents", LIST_KEYS, refs));
 
     view! {
-        <Modal open=open title="New agent" guard=true>
-            <div class="wiz">
-                <p class="dim mini-note">
-                    "This writes the smallest valid manifest — a chat agent with a model picker — "
-                    "and opens the new agent. Everything else, including turning it into a batch "
-                    "agent, is an edit to that document on its Definition tab."
-                </p>
-                <div class="field" style="margin-top:10px">
-                    <label>
-                        "Id " <span class="fname">"a-z, 0-9 and dashes; the catalog key"</span>
-                    </label>
-                    <input
-                        class="input mono"
-                        style="width:100%"
-                        placeholder="receipt-filer"
-                        prop:value=move || id.get()
-                        on:input=move |ev| id.set(event_target_value(&ev))
-                    />
-                </div>
-                <div class="field" style="margin-top:10px">
-                    <label>"Name"</label>
-                    <input
-                        class="input"
-                        style="width:100%"
-                        placeholder="Receipt filer"
-                        prop:value=move || name.get()
-                        on:input=move |ev| name.set(event_target_value(&ev))
-                    />
-                </div>
-                {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
-                <ModalFooter>
-                    <button class="btn ghost" on:click=move |_| open.set(false)>
-                        "Cancel"
-                    </button>
-                    <button class="btn primary" disabled=move || busy.get() on:click=create>
-                        {move || if busy.get() { "Creating…" } else { "Create" }}
-                    </button>
-                </ModalFooter>
-            </div>
-        </Modal>
+        <NavSplit
+            split=split
+            has_sel=has_sel
+            save_key=save_key
+            search=refs.search
+            search_off=Signal::derive(move || narrow.get() && has_sel.get())
+            list=ViewFn::from(move || {
+                view! { <list::ListPane page=page sel=sel narrow=narrow refs=refs open_row=open_row/> }
+            })
+            detail=ViewFn::from(move || {
+                view! {
+                    <Show
+                        when=move || has_sel.get()
+                        fallback=move || view! { <status::StatusPage page=page narrow=narrow back=back/> }
+                    >
+                        <super::agent_detail::AgentDetailPage narrow=narrow back=back/>
+                    </Show>
+                }
+            })
+        />
+        <div class="density-dense agents-modals">
+            <modals::ImportModal open=page.import_open on_change=reload/>
+            <modals::InstallModal open=page.install_open on_change=reload/>
+            <modals::NewAgentModal open=page.new_open page=page/>
+        </div>
     }
 }
 
@@ -972,6 +451,17 @@ mod tests {
             requires_warning(&c).as_deref(),
             Some("'gws' is missing gws__gmail_batchModify"),
         );
+    }
+
+    #[test]
+    fn a_row_keeps_the_tab_every_agent_has_and_the_search() {
+        assert_eq!(row_href("a", None), "/agents/a");
+        assert_eq!(row_href("a", Some("runs")), "/agents/a/runs");
+        assert_eq!(row_href("a", Some("definition")), "/agents/a/definition");
+        // Not every agent has an app.
+        assert_eq!(row_href("a", Some("ui")), "/agents/a");
+        assert_eq!(list_query("?q=mail&tab=runs"), "?q=mail");
+        assert_eq!(list_query(""), "");
     }
 
     /// What New writes has to be a manifest the server accepts, with the two

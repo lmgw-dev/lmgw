@@ -104,7 +104,7 @@ fn UpscalerCard(
     let status = if e.present {
         view! { <span class="chip ok"><span class="dot"></span>"on disk"</span> }.into_any()
     } else if e.downloading {
-        view! { <span class="chip live"><span class="dot"></span>"downloading"</span> }.into_any()
+        view! { <span class="chip info"><span class="dot"></span>"downloading"</span> }.into_any()
     } else {
         view! { <span class="chip off"><span class="dot"></span>"missing"</span> }.into_any()
     };

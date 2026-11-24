@@ -25,6 +25,8 @@ pub mod delete;
 pub mod export;
 /// The Decision lab's flat CSV table.
 pub mod export_csv;
+/// The Documents lab's flat CSV table.
+pub mod export_csv_documents;
 /// The Image and Audio labs' flat CSV tables.
 pub mod export_csv_media;
 /// A set run's input: CSV and JSONL, the mapping and the label checks.

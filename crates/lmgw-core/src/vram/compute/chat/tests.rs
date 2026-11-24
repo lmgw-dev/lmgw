@@ -768,3 +768,112 @@ fn a_missing_header_value_is_named() {
         .unwrap_err()
         .contains("expert_feed_forward_length"));
 }
+
+/// Inkling 2 Mini (ggml-org Q8_0, `inkling2_loop`): 24 stored layers, the
+/// core 6..18 run 3 times, every 6th layer full attention, a 1024-token
+/// window, 24 query heads, a relative-position bias.
+pub(crate) fn inkling2_mini() -> ModelSummary {
+    ModelSummary {
+        block_count: Some(24),
+        layer_loop: Some(crate::gguf::LayerLoop {
+            start: 6,
+            end: 18,
+            count: 3,
+        }),
+        embedding_length: Some(2304),
+        feed_forward_length: Some(1152),
+        head_count: Some(24),
+        head_count_kv_per_layer: Some(vec![8; 24]),
+        key_length: Some(128),
+        value_length: Some(128),
+        key_length_swa: Some(128),
+        value_length_swa: Some(128),
+        sliding_window: Some(1024),
+        sliding_window_layers: Some(gemma4_windows(24)),
+        sliding_window_pattern: Some(24),
+        sliding_window_pattern_is_array: true,
+        has_recurrent_keys: true,
+        expert_used_count: Some(8),
+        expert_feed_forward_length: Some(1152),
+        attention_relative_length: Some(16),
+        vocab_size: Some(200_058),
+        ..Default::default()
+    }
+}
+
+/// Inkling 2 Mini against llama.cpp's own lines (b12648, `-lv 4`,
+/// 2026-11-23): the relative-position bias scales with a stream's cells
+/// times the ubatch, one stream per slot cuts it to the slot's share, and
+/// the 1M unified context that failed asked for 253,938.81 MiB.
+#[test]
+fn a_relative_position_bias_is_sized_by_cells_times_ubatch() {
+    let tight = (-0.2, 0.2);
+    let s = inkling2_mini;
+    let cases = vec![
+        case(
+            "inkling 64k",
+            s(),
+            Ctx::Main,
+            (65536, 512, 2048),
+            (1, false),
+            true,
+            1,
+            6524.22,
+            tight,
+        ),
+        case(
+            "inkling 128k",
+            s(),
+            Ctx::Main,
+            (131072, 512, 2048),
+            (1, false),
+            true,
+            1,
+            12860.22,
+            tight,
+        ),
+        case(
+            "inkling 128k ub256",
+            s(),
+            Ctx::Main,
+            (131072, 256, 2048),
+            (1, false),
+            true,
+            1,
+            6429.79,
+            tight,
+        ),
+        case(
+            "inkling 4x64k",
+            s(),
+            Ctx::Main,
+            (262144, 512, 2048),
+            (4, false),
+            true,
+            4,
+            6524.52,
+            tight,
+        ),
+        case(
+            "inkling 1M unified",
+            s(),
+            Ctx::Main,
+            (1048576, 1280, 2048),
+            (4, true),
+            true,
+            4,
+            253938.81,
+            tight,
+        ),
+    ];
+    for c in &cases {
+        let est = estimate(c);
+        let err = (est - c.measured) / c.measured * 100.0;
+        assert!(
+            err >= c.band.0 && err <= c.band.1,
+            "{}: estimated {est:.2} MiB, measured {:.2} MiB ({err:+.2} %)",
+            c.name,
+            c.measured
+        );
+    }
+}

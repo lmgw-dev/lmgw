@@ -304,11 +304,11 @@
   "go": "/mcp-servers"
  },
  {
-  "until": "!!document.querySelector('.open-tasks')",
+  "until": "[...document.querySelectorAll('.mlist .lrow-meta')].some(m => m.textContent.includes('open task'))",
   "timeout": 20
  },
  {
-  "expect": "document.querySelector('.open-tasks').textContent.trim() === '1 open task'",
+  "expect": "[...document.querySelectorAll('.mlist .lrow-meta')].some(m => m.textContent.split(' · ').includes('1 open task'))",
   "label": "the server's open job is counted"
  },
  {

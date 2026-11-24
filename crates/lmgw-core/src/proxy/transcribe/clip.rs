@@ -92,13 +92,16 @@ pub async fn transcribe_voice_clip(
         stop: None,
         language: None,
         clip: true,
+        document: false,
     };
-    transcribe_labelled(
+    // Boxed like the awaits below it down to the ledger: the clip's chain is
+    // deep in a debug build, and a test thread's 2 MiB is what it shares.
+    Box::pin(transcribe_labelled(
         state,
         &RequestCtx::default(),
         ClientProto::OpenaiChat,
         upload,
-    )
+    ))
     .await
     .map(|t| ClipTranscript {
         answered_by: t
@@ -143,7 +146,7 @@ pub(super) async fn open(
             error,
         });
     }
-    let opened = routed.admit(state).await?;
+    let opened = Box::pin(routed.admit(state)).await?;
     // And the fallback admission handed the clip to, when it did.
     let handed = opened
         .headers

@@ -54,6 +54,12 @@ pub enum ClientProto {
     /// in llama.cpp's error shape (`proxy::systemone`). The shared `/v1`
     /// layers' refusals, which reach it before its handler, are OpenAI's.
     SystemOne,
+    /// A document conversion's speech-to-text call (document-conversion
+    /// design §4.2, WP7): its own `request_logs` label, `documents-asr`,
+    /// beside the page-reading model's `documents-page`, so a conversion's
+    /// transcriptions are told from `openai` clients and from its own
+    /// `documents` row. Never a chat body of its own: OpenAI's shapes.
+    DocumentsAsr,
 }
 
 impl ClientProto {
@@ -65,15 +71,19 @@ impl ClientProto {
             Self::Chat => "chat",
             Self::AdminChat => crate::telemetry::ADMIN_PROTO,
             Self::SystemOne => "systemone",
+            Self::DocumentsAsr => "documents-asr",
         }
     }
 
     /// Non-streaming response body for a completed request.
     pub fn serialize_completion(&self, alias: &str, c: &Completion) -> serde_json::Value {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
-                openai::serialize_completion(alias, c)
-            }
+            Self::OpenaiChat
+            | Self::Realtime
+            | Self::Chat
+            | Self::AdminChat
+            | Self::SystemOne
+            | Self::DocumentsAsr => openai::serialize_completion(alias, c),
             Self::AnthropicMessages => anthropic::serialize_completion(alias, c),
         }
     }
@@ -85,19 +95,36 @@ impl ClientProto {
     pub fn error_status(&self, e: &GatewayError) -> axum::http::StatusCode {
         match self {
             Self::AnthropicMessages => e.anthropic_status(),
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
-                e.http_status()
-            }
+            Self::OpenaiChat
+            | Self::Realtime
+            | Self::Chat
+            | Self::AdminChat
+            | Self::SystemOne
+            | Self::DocumentsAsr => e.http_status(),
         }
     }
 
     /// Error body in the client's protocol shape (§14).
     pub fn serialize_error(&self, e: &GatewayError) -> serde_json::Value {
+        self.serialize_error_with(e, None)
+    }
+
+    /// [`Self::serialize_error`], with the answering upstream's request id
+    /// in Anthropic's envelope (`request_id`, gateway design §6.2); the
+    /// OpenAI-shaped envelopes have no place for one.
+    pub fn serialize_error_with(
+        &self,
+        e: &GatewayError,
+        request_id: Option<&str>,
+    ) -> serde_json::Value {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
-                e.to_openai_json()
-            }
-            Self::AnthropicMessages => e.to_anthropic_json(),
+            Self::OpenaiChat
+            | Self::Realtime
+            | Self::Chat
+            | Self::AdminChat
+            | Self::SystemOne
+            | Self::DocumentsAsr => e.to_openai_json(),
+            Self::AnthropicMessages => e.to_anthropic_json_with(request_id),
         }
     }
 
@@ -105,23 +132,36 @@ impl ClientProto {
     /// wire framing. `include_usage` is OpenAI's
     /// `stream_options.include_usage` ([`openai::stream_include_usage`]); an
     /// Anthropic stream carries its usage in `message_delta` either way.
+    /// `upstream` is the protocol of the upstream whose answer is encoded:
+    /// an Anthropic-protocol upstream reports its input counts first, which
+    /// the Messages wire's `message_start` waits for
+    /// ([`anthropic::AnthropicStreamEncoder::for_upstream`]).
     pub fn new_stream_encoder(
         &self,
         alias: &str,
         include_usage: bool,
+        upstream: crate::config::Protocol,
     ) -> Box<dyn ClientStreamEncoder> {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
+            Self::OpenaiChat
+            | Self::Realtime
+            | Self::Chat
+            | Self::AdminChat
+            | Self::SystemOne
+            | Self::DocumentsAsr => {
                 Box::new(openai::OpenaiStreamEncoder::new(alias, include_usage))
             }
-            Self::AnthropicMessages => Box::new(anthropic::AnthropicStreamEncoder::new(alias)),
+            Self::AnthropicMessages => Box::new(anthropic::AnthropicStreamEncoder::for_upstream(
+                alias, upstream,
+            )),
         }
     }
 }
 
 /// Translates IR stream deltas into pre-framed SSE text for the client.
 pub trait ClientStreamEncoder: Send {
-    /// Frames to emit before any delta (e.g. Anthropic `message_start`).
+    /// Frames to emit before any delta (e.g. Anthropic `message_start`);
+    /// empty when the encoder waits for the first delta to write them.
     fn start(&mut self) -> String;
     fn delta(&mut self, d: &StreamDelta) -> String;
     /// Closing frames (OpenAI `[DONE]`, Anthropic `message_stop`).

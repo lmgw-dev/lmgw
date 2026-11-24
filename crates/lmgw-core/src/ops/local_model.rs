@@ -148,6 +148,12 @@ pub struct LocalModelPatch {
 
     /// Field names to reset to unset, comma- or space-separated.
     pub clear: Option<String>,
+    /// The cards this model may run on (device-ledger design §8), by their
+    /// ids as `GET /api/vram` lists them (`devices[].id`, `GPU-<uuid>` for an
+    /// NVIDIA card): one card, it runs there or not at all; several, lmgw
+    /// chooses among them. Omitted: as it is. `clear: "gpu_pin"` (or an
+    /// empty list): lmgw chooses the card.
+    pub gpu_pin: Option<Vec<String>>,
 }
 
 /// Apply the sparse overlay onto a [`crate::config::LlamaParams`], then honour
@@ -287,6 +293,7 @@ fn overlay_params(
             "fallback" => {}   // handled by the caller, same reason
             "capabilities_override" => {} // handled by the caller, same reason
             "ladder" => {}     // handled by the caller, same reason
+            "gpu_pin" => {}    // the op's own (`ops::gpu_pin`)
             other => return Err(format!("clear: '{other}' is not a clearable field name")),
         }
     }
@@ -517,6 +524,21 @@ pub async fn local_model_get(
         // The note of a context fitted to the card (find-a-model D26), so
         // the editor reads it with the row.
         fit_note: crate::modelinfo::refit::note_of(state, Class::Chat, m.id).await,
+        // Its pin and what lmgw does with an unset context on several cards
+        // (device-ledger design §8, §8.2), and the card it would pick now.
+        gpu_pin: state
+            .snapshot()
+            .gpu_pins
+            .get(&(Class::Chat, m.model_id.clone()))
+            .cloned(),
+        context_notice: state
+            .vram
+            .context_notice(&state.snapshot(), &m.model_id)
+            .await,
+        command_line_note: state
+            .vram
+            .card_note(state, &state.snapshot(), Class::Chat, &m.model_id)
+            .await,
     }))
 }
 
@@ -564,6 +586,11 @@ fn command_line_preview_at(
     // Rendered as if enabled, so a disabled entry still shows what enabling
     // it would produce.
     rt.enabled = true;
+    // The speculative type a drafter without one is started with, where the
+    // image was read to have it (ruling 18): the line shows what a start runs.
+    if let Some(drafted) = state.runtime().with_draft_type_known(&rt) {
+        rt = drafted;
+    }
     let models_dir = match class {
         Class::Chat => &snap.settings.router.models_dir,
         Class::Aux => &snap.settings.aux_router.models_dir,
@@ -878,7 +905,10 @@ pub async fn local_model_set(
 ) -> Result<dto::LocalModelSaved, String> {
     // From the rows the checks read to the commit (§14.2).
     let routing = state.routing_write().await;
-    local_model_set_holding(state, routing, p).await
+    let pin = super::gpu_pin::patched(&p.action, &p.gpu_pin, p.clear.as_deref());
+    let saved = local_model_set_holding(state, routing, p).await?;
+    super::gpu_pin::write(state, Class::Chat, saved.id, pin).await?;
+    Ok(saved)
 }
 
 /// [`local_model_set`] for a caller that already holds the routing-write

@@ -230,6 +230,8 @@ async fn a_token_is_minted_on_demand_scoped_to_any_model_and_rotates_both_column
     let detail = get_json(&base, "/api/agents/labeler").await;
     assert_eq!(detail["token"]["has_value"], json!(false));
     assert_eq!(detail["token"]["name"], json!("agent:labeler"));
+    // An agent that may use any model lists none: the note says "any model".
+    assert_eq!(detail["token"]["scope_models"], json!([]));
 
     let (status, got) = op(&base, "agent_token_get", json!({ "id": "labeler" })).await;
     assert_eq!(status, 200, "{got}");
@@ -240,7 +242,7 @@ async fn a_token_is_minted_on_demand_scoped_to_any_model_and_rotates_both_column
     // and a templated `model.alias`. An allow-list derived from that would be
     // empty, and an empty allow-list refuses every call the agent makes.
     assert_eq!(got["scope_mode"], json!("all"));
-    assert_eq!(got["scope_note"], json!("token: any model"));
+    assert_eq!(got["scope_note"], json!("Its token reaches any model"));
 
     // A read, not a reveal-once: asking twice gives the same value.
     let (_, again) = op(&base, "agent_token_get", json!({ "id": "labeler" })).await;
@@ -391,7 +393,7 @@ async fn the_scope_follows_the_model_field_and_is_recomputed_on_save() {
     )
     .await;
     assert_eq!(status, 200, "{saved}");
-    assert_eq!(saved["token_scope"], json!("token: qwen3.8"));
+    assert_eq!(saved["token_scope"], json!("Its token reaches: qwen3.8"));
 
     let snap = state.snapshot();
     let key = snap

@@ -487,7 +487,7 @@ pub(super) fn ItemsCard(page: RunPage) -> impl IntoView {
                 };
                 view! {
                     <div class="notice err dl-items-failed">
-                        {format!("⚠ {what}: {e}")}
+                        {format!("{what}: {e}")}
                         " "
                         <button class="btn ghost sm" on:click=move |_| items.refresh()>"Retry"</button>
                     </div>

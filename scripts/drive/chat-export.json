@@ -70,16 +70,7 @@
  {
   "wait": 0.3
  },
- {
-  "click": ".thread-tools .export-all .row-menu-btn"
- },
- {
-  "wait": 0.3
- },
- {
-  "click": ".menu-pop .menu-item",
-  "nth": 0
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='Download every chat']"},
  {
   "wait": 0.5
  },
@@ -107,9 +98,7 @@
   "expect": "window.__exp[0].includes(\"filename*=UTF-8''lmgw-chat-\") && window.__exp[0].includes('gr%C3%BC%C3%9Fe')",
   "label": "a non-ASCII title is in the RFC 5987 filename*"
  },
- {
-  "click": ".thread-tools button[title^='New temporary chat']"
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='New temporary chat']"},
  {
   "wait": 1
  },

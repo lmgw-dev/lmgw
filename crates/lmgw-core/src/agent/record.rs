@@ -61,6 +61,7 @@ impl Closed {
             name: Some(self.name.clone()),
             content: ToolOutcome::error(self.says.as_str()).blocks,
             is_error: true,
+            cache_control: None,
         }
     }
 
@@ -114,6 +115,7 @@ pub(crate) fn close_trailing_calls(
                     name: Some(name.clone()),
                     content: crate::ir::ToolResultBlock::one(text),
                     is_error: true,
+                    cache_control: None,
                 })
             }
             _ => None,
@@ -139,8 +141,9 @@ pub struct RunError {
     /// failed turn is not in it.
     pub messages: Vec<Message>,
     /// What the finished turns spent (the failed turn's own row carries what
-    /// it spent).
-    pub usage: Usage,
+    /// it spent). Boxed: the error stays under `clippy.toml`'s
+    /// `large-error-threshold`.
+    pub usage: Box<Usage>,
 }
 
 impl std::fmt::Display for RunError {
@@ -164,6 +167,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             args: serde_json::json!({}),
+            cache_control: None,
         }
     }
 

@@ -59,10 +59,12 @@ pub enum LabKind {
     Decision,
     Image,
     Audio,
+    /// The Documents lab: `/v1/documents/convert` and the docling route.
+    Documents,
 }
 
 impl LabKind {
-    pub const ALL: [Self; 3] = [Self::Decision, Self::Image, Self::Audio];
+    pub const ALL: [Self; 4] = [Self::Decision, Self::Image, Self::Audio, Self::Documents];
 
     /// The stored and routed spelling.
     pub fn as_str(self) -> &'static str {
@@ -70,6 +72,7 @@ impl LabKind {
             Self::Decision => "decision",
             Self::Image => "image",
             Self::Audio => "audio",
+            Self::Documents => "documents",
         }
     }
 

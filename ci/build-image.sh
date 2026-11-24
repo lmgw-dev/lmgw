@@ -21,6 +21,7 @@
 # archive is written. To drop the whole store: buildah unshare rm -rf target/image-build
 #
 # Usage: bash ci/build-image.sh [path/to/lmgw-server]
+#        LMGW_DOCKER_ARCHIVE=1 bash ci/build-image.sh   (also dist/lmgw-server-<version>.docker.tar)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 umask 022
@@ -103,6 +104,13 @@ done < <(jq -r '.bundle.linux.rpm.files | to_entries[]
 [[ -n "$(find "$CTX/licenses" -mindepth 2 -type f -print -quit)" ]] \
   || die "no licence notices found in src-tauri/tauri.conf.json's rpm files"
 install -m 0755 "$BIN" "$CTX/lmgw-server"
+# The document reader lmgw-server starts as a child (document-conversion design §6.2), from
+# beside the binary: ci/build.sh puts both in dist/. lmgw looks for it next to its own
+# executable, so it goes to /usr/local/bin too.
+READER="$(dirname "$BIN")/lmgw-doc-reader"
+[[ -f "$READER" && ! -L "$READER" && -x "$READER" ]] \
+  || die "no executable lmgw-doc-reader at ${READER} (LMGW_BUILD_SERVER=only bash ci/build.sh puts it in dist/)"
+install -m 0755 "$READER" "$CTX/lmgw-doc-reader"
 
 B=(buildah --root "$WORK/storage" --runroot "$WORK/run" --storage-driver vfs)
 # buildah's own scratch (the build context's overlay, the archive's staging) beside its store: a
@@ -116,9 +124,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The text recognition languages (document-conversion design §6.2): the Containerfile's default
+# (eng deu) unless TESSERACT_LANGS names others, as tesseract codes separated by spaces.
+LANG_ARG=()
+if [[ -n "${TESSERACT_LANGS:-}" ]]; then
+  [[ "$TESSERACT_LANGS" =~ ^[a-z_\ ]+$ ]] \
+    || die "TESSERACT_LANGS '${TESSERACT_LANGS}' is not tesseract language codes separated by spaces"
+  LANG_ARG=(--build-arg "TESSERACT_LANGS=${TESSERACT_LANGS}")
+fi
+
 echo "Building ${REF} on fedora:${RELEASE} (${COMMIT})"
 "${B[@]}" bud --isolation chroot --pull=always --layers=false --force-rm \
   --build-arg "FEDORA_RELEASE=${RELEASE}" \
+  "${LANG_ARG[@]}" \
   --label "org.opencontainers.image.title=lmgw-server" \
   --label "org.opencontainers.image.version=${VERSION}" \
   --label "org.opencontainers.image.revision=${COMMIT}" \
@@ -135,6 +153,9 @@ CTR="$("${B[@]}" from --pull=never "$IID")"
 inside() { "${B[@]}" run --isolation chroot "$CTR" -- "$@"; }
 INSIDE="$(inside /usr/local/bin/lmgw-server --version)"
 [[ "$INSIDE" == "$LINE" ]] || die "inside the image lmgw-server --version printed '${INSIDE}', not '${LINE}'"
+READER_INSIDE="$(inside /usr/local/bin/lmgw-doc-reader --version)"
+[[ "$READER_INSIDE" == "lmgw-doc-reader ${VERSION} "* ]] \
+  || die "inside the image lmgw-doc-reader --version printed '${READER_INSIDE}', not 'lmgw-doc-reader ${VERSION} …'"
 inside test -x /usr/libexec/catatonit/catatonit || die "the image has no executable /usr/libexec/catatonit/catatonit"
 inside bash -n /usr/local/bin/entrypoint.sh || die "the image's entrypoint.sh does not parse"
 PODMAN="$(inside podman --version)" || die "podman --version fails inside the image"
@@ -145,6 +166,17 @@ echo "In the image: ${INSIDE}, ${PODMAN}, catatonit, the entrypoint parses"
 rm -f "$ARCHIVE" "$ARCHIVE.sha256"
 "${B[@]}" push "$IID" "oci-archive:${ARCHIVE}:${REF}"
 (cd dist && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256")
+# For a Docker host (packaging/server/docker/): `docker load` with Docker's classic image store
+# does not read an OCI archive ("invalid archive: does not contain a manifest.json", Docker 29.9
+# with overlay2, 2026-11-13), so LMGW_DOCKER_ARCHIVE=1 writes the same image in Docker's own
+# archive format beside it. Its layers are not compressed: about 2.5 times the OCI archive.
+if [[ "${LMGW_DOCKER_ARCHIVE:-}" == 1 ]]; then
+  DOCKER_ARCHIVE="dist/lmgw-server-${VERSION}.docker.tar"
+  rm -f "$DOCKER_ARCHIVE" "$DOCKER_ARCHIVE.sha256"
+  "${B[@]}" push "$IID" "docker-archive:${DOCKER_ARCHIVE}:${REF}"
+  (cd dist && sha256sum "$(basename "$DOCKER_ARCHIVE")" > "$(basename "$DOCKER_ARCHIVE").sha256")
+  echo "Wrote ${DOCKER_ARCHIVE} ($(du -m "$DOCKER_ARCHIVE" | cut -f1) MiB) for docker load"
+fi
 # The archive is complete; a store that keeps the image is only disk, so a failed removal warns.
 "${B[@]}" rmi "$IID" >/dev/null || echo "WARNING: could not remove ${IID} from ${WORK}/storage" >&2
 

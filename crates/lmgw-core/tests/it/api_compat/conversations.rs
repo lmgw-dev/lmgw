@@ -3,6 +3,8 @@
 //! several arguments, stored arguments as `""`, `null` or unparseable text,
 //! tool results with errors, JSON, resources and images, reasoning with and
 //! without a signature, refusals, and turns that go on after the tools.
+//! Some of its parts, tools and the request itself carry an Anthropic
+//! prompt-caching mark, a 5-minute or a 1-hour one ([`mark`]).
 //!
 //! A conversation is built the way an ingress leaves one: it starts with an
 //! optional system message, alternates user and assistant turns, and every
@@ -12,8 +14,8 @@
 //! egresses must take both.
 
 use lmgw_core::ir::{
-    ChatRequest, ContentPart, ImageSource, Message, Params, Role, ToolChoice, ToolDef,
-    ToolResultBlock,
+    CacheControl, ChatRequest, ContentPart, ImageSource, Message, Params, Role, ToolChoice,
+    ToolDef, ToolResultBlock,
 };
 use proptest::prelude::*;
 use serde_json::{json, Value};
@@ -57,10 +59,12 @@ fn user_part() -> impl Strategy<Value = ContentPart> {
         1 => Just(ContentPart::Image {
             mime: "image/png".into(),
             source: ImageSource::Base64 { data: PNG.into() },
+            cache_control: None,
         }),
         1 => Just(ContentPart::Image {
             mime: "image/jpeg".into(),
             source: ImageSource::Url { url: "https://example.com/cat.jpg".into() },
+            cache_control: None,
         }),
     ]
 }
@@ -69,7 +73,11 @@ fn result_block() -> impl Strategy<Value = ToolResultBlock> {
     prop_oneof![
         4 => text().prop_map(ToolResultBlock::text),
         1 => Just(ToolResultBlock::Json { value: json!({"temp": 21, "unit": "C"}) }),
-        1 => Just(ToolResultBlock::Image { mime: "image/png".into(), data: PNG.into() }),
+        1 => Just(ToolResultBlock::Image {
+            mime: "image/png".into(),
+            data: PNG.into(),
+            cache_control: None,
+        }),
         1 => Just(ToolResultBlock::Resource {
             uri: "file:///notes.txt".into(),
             mime: Some("text/plain".into()),
@@ -153,9 +161,63 @@ pub fn conversation() -> impl Strategy<Value = ChatRequest> {
     )
         .prop_map(
             |(system, exchanges, last, choice, max_tokens, temperature)| {
-                build(system, exchanges, last, choice, max_tokens, temperature)
+                let mut ir = build(system, exchanges, last, choice, max_tokens, temperature);
+                mark(&mut ir);
+                ir
             },
         )
+}
+
+/// Puts a prompt-caching mark on about one in four of the places that take
+/// one (the request, its tools, its text, image, tool-use and tool-result
+/// parts and a result's text and image blocks): two bits a place of a hash
+/// of the conversation, the next bit of a marked place choosing a 1-hour
+/// mark. Past 32 places nothing more is marked. The bits come from the
+/// conversation rather than from the runner, so a seed still generates the
+/// conversations it generated before marks existed, now with marks.
+fn mark(ir: &mut ChatRequest) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{ir:?}").hash(&mut h);
+    let mut bits = h.finish();
+    let mut next = || {
+        let pick = bits & 0b11;
+        bits >>= 2;
+        (pick == 0b11).then(|| match bits & 1 {
+            0 => json!({"type": "ephemeral"}),
+            _ => json!({"type": "ephemeral", "ttl": "1h"}),
+        })
+    };
+    ir.cache_control = next();
+    for t in &mut ir.tools {
+        if let Some(m) = next() {
+            t.anthropic_fields.insert("cache_control".into(), m);
+        }
+    }
+    for p in ir.messages.iter_mut().flat_map(|m| &mut m.content) {
+        match p {
+            ContentPart::Text { cache_control, .. }
+            | ContentPart::Image { cache_control, .. }
+            | ContentPart::ToolUse { cache_control, .. } => {
+                *cache_control = next().map(CacheControl)
+            }
+            ContentPart::ToolResult {
+                cache_control,
+                content,
+                ..
+            } => {
+                *cache_control = next().map(CacheControl);
+                for b in content {
+                    if let ToolResultBlock::Text { cache_control, .. }
+                    | ToolResultBlock::Image { cache_control, .. } = b
+                    {
+                        *cache_control = next().map(CacheControl);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn build(
@@ -192,12 +254,14 @@ fn build(
                 id: id.clone(),
                 name: TOOLS[tool].into(),
                 args,
+                cache_control: None,
             });
             results.push(ContentPart::ToolResult {
                 id,
                 name: Some(TOOLS[tool].into()),
                 content: blocks,
                 is_error,
+                cache_control: None,
             });
         }
         if assistant.is_empty() {
@@ -240,6 +304,7 @@ fn build(
                 "properties": {"city": {"type": "string"}},
             }),
             strict: Some(false),
+            anthropic_fields: Default::default(),
         })
         .collect();
     let tool_choice = choice.map(|c| match c {
@@ -268,5 +333,6 @@ fn build(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }

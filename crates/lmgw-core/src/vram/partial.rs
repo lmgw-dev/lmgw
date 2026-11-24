@@ -12,8 +12,8 @@
 //! charges them in full.
 //!
 //! **What it is given** ([`decide`]), in this order — less than the whole
-//! only where its engine sees exactly one card ([`cards_seen`]; partial
-//! fitting on several cards is not done yet, see below), and for a row whose
+//! only where its engine sees exactly one card ([`cards_seen`]; on a
+//! computer with several lmgw places it on one, see below), and for a row whose
 //! args set their own `max_vram` only that budget and its context, which
 //! wins at render (one of 0 or less bounds nothing and needs the whole):
 //! 1. The whole — its files, as every pipeline is charged — wherever that
@@ -33,6 +33,9 @@
 //!    evicts, and a configured fallback answers, as for any model that does
 //!    not fit. A budget of nothing at all beside a measured context never
 //!    starts. Its warning says which of these it is.
+//! 5. Else, with nothing of lmgw's left to wait for, the whole beside the
+//!    floor alone: its margin is given up last (`vram::headroom`, WP13), as
+//!    for any model, and the start is warned.
 //!
 //! **Held to it.** sd.cpp's auto-fit and its weight streaming size themselves
 //! to the driver's live free memory, which includes the headroom, the peaks
@@ -63,9 +66,10 @@
 //!
 //! **Not yet.** The grant is the entry's for its whole life: a pipeline
 //! squeezed once stays squeezed, and warned, after the card frees up, until
-//! its container stops. `--max-vram` is per device while the ledger pools
-//! devices, so a row whose engine sees several cards takes the
-//! whole-pipeline path; per-device budgets are not done yet. The working
+//! its container stops. `--max-vram` is per device: lmgw places an image
+//! model on one card (device-ledger design ruling 12) and its engine sees
+//! that card alone; one placed on its cards as a group (§5.7: an engine
+//! lmgw cannot hand a card) takes the whole-pipeline path. The working
 //! budget is the row's, not per size ([`work`]).
 //!
 //! **Said.** Where the whole does not fit, the start logs the warning and
@@ -106,21 +110,41 @@ pub(super) enum Grant {
 pub(super) struct Room {
     /// The ledger's free figure.
     pub free: u64,
+    /// What the start keeps free beside it here: the floor, the learned
+    /// room and its margin while something of lmgw's is there a wait could
+    /// free, else the floor and its margin (`queue::room_on`).
     pub headroom: u64,
+    /// What it keeps once its margin is given up too: the floor alone
+    /// (`vram::headroom`, "given up last"). Read only where nothing of
+    /// lmgw's is left to wait for and nothing smaller than the whole fits
+    /// beside the margin ([`decide`]'s last step); `headroom` where nothing
+    /// is given up.
+    pub floor: u64,
     /// Something else of lmgw's is on the card or reserved for it, which a
     /// wait could free.
     pub others_hold: bool,
     /// A fallback would answer in this model's place.
     pub fallback: bool,
-    /// How many GPUs the model's engine would see ([`cards_seen`]); `None`
-    /// where that is not known. A partial grant needs exactly one: sd.cpp's
-    /// `--max-vram` is a per-device budget and the ledger pools the cards.
+    /// How many GPUs the model's engine would see: the cards it is placed
+    /// on (device-ledger design D14); `None` where that is not known. A
+    /// partial grant needs exactly one: sd.cpp's `--max-vram` is a
+    /// per-device budget.
     pub cards: Option<usize>,
 }
 
 impl Room {
-    fn beyond_headroom(&self) -> u64 {
-        self.free.saturating_sub(self.headroom)
+    /// What is free beyond the headroom for a pipeline `p` given part of
+    /// itself: the headroom carries the image class's margin — the stand-in
+    /// for a context not measured yet (`vram::headroom`, in every mode since
+    /// the device ledger's WP13) — and a partial grant sets that context
+    /// aside itself, so the margin is not kept twice.
+    fn beyond_headroom_for(&self, p: &super::plan::image::PartialFit) -> u64 {
+        let set_aside = match p.context_bytes {
+            None => super::plan::image::CONTEXT_STAND_IN,
+            Some(_) => 0,
+        };
+        self.free
+            .saturating_sub(self.headroom.saturating_sub(set_aside))
     }
 }
 
@@ -166,20 +190,51 @@ pub(super) fn least(fp: &Footprint, cards: Option<usize>) -> u64 {
 /// What `target` with footprint `fp` is given in `room` (module doc), or
 /// `None` when it must take the normal path — wait, evict, fall back, or be
 /// refused.
+///
+/// **The margin given up last** (device-ledger design WP13, owner
+/// 2026-11-17): where neither the whole nor anything smaller fits beside
+/// the margin, and nothing of lmgw's is left to wait for, the whole goes
+/// ahead beside the floor alone ([`last`]) — a fallback or not, as the
+/// learned room is given up — so a model that fits beside the floor always
+/// starts, and one never measured gets its first request.
 pub(super) fn decide(target: &Target, fp: &Footprint, room: Room) -> Option<Grant> {
     if room.free >= fp.total_bytes.saturating_add(room.headroom) {
         return Some(whole(target, fp, room));
     }
-    if fp.llama.is_some() {
-        return llama::decide(target, fp, room);
-    }
+    let smaller = match fp.llama.is_some() {
+        true => llama::decide(target, fp, room),
+        false => smaller(target, fp, room),
+    };
+    smaller.or_else(|| last(target, fp, room))
+}
+
+/// [`decide`]'s last step: the whole beside the floor alone, its margin
+/// given up, where nothing of lmgw's is left to wait for. `None` where
+/// nothing is given up (`floor` is `headroom`) or it does not fit even so.
+fn last(target: &Target, fp: &Footprint, room: Room) -> Option<Grant> {
+    let fits = room.free >= fp.total_bytes.saturating_add(room.floor);
+    (!room.others_hold && room.floor < room.headroom && fits).then(|| {
+        whole(
+            target,
+            fp,
+            Room {
+                headroom: room.floor,
+                ..room
+            },
+        )
+    })
+}
+
+/// [`decide`] for a pipeline that can run with less than all of it on the
+/// card, beside its margin (module doc, steps 2 to 4).
+fn smaller(target: &Target, fp: &Footprint, room: Room) -> Option<Grant> {
     let p = fp.partial.as_ref()?;
-    // `--max-vram` is per device while the ledger pools them: on several
-    // cards sd-server could draw its budget on each (not done yet).
+    // `--max-vram` is per device: placed on several cards as a group,
+    // sd-server could draw its budget on each.
     if room.cards != Some(1) {
         return None;
     }
-    let avail = room.beyond_headroom();
+    let avail = room.beyond_headroom_for(p);
     if avail == 0 {
         return None;
     }
@@ -325,7 +380,7 @@ pub(super) fn why_not(fp: &Footprint, room: Room) -> Option<String> {
         return llama::why_not(fp, room);
     }
     let p = fp.partial.as_ref()?;
-    let avail = room.beyond_headroom();
+    let avail = room.beyond_headroom_for(p);
     let who = if room.fallback {
         "a fallback answers in its place"
     } else {
@@ -335,8 +390,8 @@ pub(super) fn why_not(fp: &Footprint, room: Room) -> Option<String> {
     Some(match (p.context_bytes, p.work_bytes) {
         _ if room.cards != Some(1) => format!(
             "{setting} could run with less of it on the card, but {}: sd.cpp's --max-vram is a \
-             per-device budget and VRAM admission pools the cards, so fitting it partially on \
-             several cards is not done yet and it needs all of it free",
+             per-device budget and lmgw cannot hand its engine one card of them, so fitting it \
+             partially there is not done and it needs all of it free",
             match room.cards {
                 Some(0) => "its run args give its engine no card".to_string(),
                 Some(n) => format!("its engine would see {n} cards"),
@@ -436,6 +491,7 @@ pub fn on_card(
     let room = Room {
         free: total,
         headroom,
+        floor: headroom,
         others_hold: false,
         fallback: false,
         cards,
@@ -562,6 +618,21 @@ impl super::VramScheduler {
             class,
             model_id: model_id.to_string(),
         };
+        // On a machine of several cards lmgw places it on one (device-ledger
+        // design §5): the largest card it may use is what it is judged by.
+        let last = self.last_devices.lock().unwrap().clone();
+        if last.len() > 1 && snap.settings.vram.budget_mb == 0 {
+            let cand = self.candidates(snap, &target, &last);
+            if cand.hand_out {
+                let heads = self.cards_headroom(snap);
+                let card = last
+                    .iter()
+                    .filter(|d| cand.cards.contains(&d.id))
+                    .max_by_key(|d| (d.total_bytes, std::cmp::Reverse(d.index)))?;
+                let headroom = self.rules_on(snap, &target, &fp, &heads, &card.id).headroom;
+                return on_card(&target, &fp, card.total_bytes, headroom, Some(1));
+            }
+        }
         let cards = cards_seen(snap, &target, devices, self.engine_build(class).as_deref());
         let headroom = self.start_headroom(snap, class, model_id, &fp);
         on_card(&target, &fp, total, headroom, cards)
@@ -610,9 +681,20 @@ mod tests {
         Room {
             free,
             headroom: GIB / 2,
+            floor: GIB / 2,
             others_hold,
             fallback,
             cards: Some(1),
+        }
+    }
+
+    /// `r` as admission passes it for a pipeline whose context is not
+    /// measured: its headroom carries the image margin, the context's
+    /// stand-in (`vram::headroom`, in every mode).
+    fn unmeasured(r: Room) -> Room {
+        Room {
+            headroom: r.headroom + CONTEXT_STAND_IN,
+            ..r
         }
     }
 
@@ -658,7 +740,7 @@ mod tests {
     #[test]
     fn an_unmeasured_context_is_set_aside_inside_the_grant() {
         let f = fp(6 * GIB, 3 * GIB + CONTEXT_STAND_IN, None, None);
-        let g = partial(decide(&target(), &f, room(5 * GIB, true, true)));
+        let g = partial(decide(&target(), &f, unmeasured(room(5 * GIB, true, true))));
         assert_eq!(g.bytes, 4 * GIB);
         assert_eq!(g.max_vram_bytes, 3 * GIB);
         assert!(
@@ -670,7 +752,11 @@ mod tests {
         // A grant the stand-in would empty holds sd-server to all of it, and
         // says the context comes on top.
         let f = fp(6 * GIB, 3 * GIB + CONTEXT_STAND_IN, None, None);
-        let g = partial(decide(&target(), &f, room(GIB + GIB / 4, false, false)));
+        let g = partial(decide(
+            &target(),
+            &f,
+            unmeasured(room(GIB + GIB / 4, false, false)),
+        ));
         assert_eq!((g.bytes, g.max_vram_bytes), (3 * GIB / 4, 3 * GIB / 4));
         assert!(
             g.warning.contains("left no room to set aside"),
@@ -765,5 +851,74 @@ mod tests {
             6 * GIB
         );
         assert_eq!(least(&fp(6 * GIB, 3 * GIB, Some(GIB), None), None), 6 * GIB);
+    }
+
+    /// The margin is given up last (device-ledger design WP13, owner
+    /// 2026-11-17): a model that cannot run with less — a voice model
+    /// whose margin is as much as its files — starts whole beside the floor
+    /// alone once nothing of lmgw's is left to wait for, a fallback or not;
+    /// never while something could be waited for, and never into the floor.
+    #[test]
+    fn a_model_that_cannot_adapt_gives_its_margin_up_last() {
+        let voice = Target {
+            class: Class::Audio,
+            model_id: "voice".into(),
+        };
+        let f = Footprint::new(5 * GIB, 0, None, None);
+        // Kept: the 1 GiB floor and a margin as much as its files.
+        let room = |free: u64, others_hold: bool| Room {
+            free,
+            headroom: GIB + 5 * GIB,
+            floor: GIB,
+            others_hold,
+            fallback: true,
+            cards: Some(1),
+        };
+        assert!(matches!(
+            decide(&voice, &f, room(6 * GIB, false)),
+            Some(Grant::Whole(b)) if b == 5 * GIB
+        ));
+        assert!(
+            decide(&voice, &f, room(6 * GIB, true)).is_none(),
+            "something of lmgw's to wait for: the margin is kept"
+        );
+        assert!(
+            decide(&voice, &f, room(6 * GIB - 1, false)).is_none(),
+            "the floor is never given up"
+        );
+        // A card that keeps an amount of its own ("always" 4 GiB): the
+        // amount is never given up.
+        let always = Room {
+            headroom: 4 * GIB + 5 * GIB,
+            floor: 4 * GIB,
+            ..room(8 * GIB, false)
+        };
+        assert!(decide(&voice, &f, always).is_none());
+        // Nothing to give up: `floor` is `headroom`.
+        let kept = Room {
+            floor: GIB + 5 * GIB,
+            ..room(6 * GIB, false)
+        };
+        assert!(decide(&voice, &f, kept).is_none());
+    }
+
+    /// A pipeline that can run with less gets its on-card part beside its
+    /// margin — the context set aside inside the grant — before the whole
+    /// goes ahead without it; where no partial grant is possible (placed on
+    /// its cards as a group) the whole goes ahead beside the floor.
+    #[test]
+    fn a_partial_grant_comes_before_the_margin_is_given_up() {
+        let f = fp(6 * GIB, 3 * GIB + CONTEXT_STAND_IN, None, None);
+        let r = Room {
+            floor: GIB / 2,
+            ..unmeasured(room(6 * GIB + GIB / 2 + 100 * 1024 * 1024, false, false))
+        };
+        let g = partial(decide(&target(), &f, r));
+        assert_eq!(g.bytes, 3 * GIB + CONTEXT_STAND_IN, "its on-card part");
+        let group = Room { cards: None, ..r };
+        assert!(matches!(
+            decide(&target(), &f, group),
+            Some(Grant::Whole(b)) if b == 6 * GIB
+        ));
     }
 }

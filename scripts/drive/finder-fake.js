@@ -5,7 +5,9 @@
 // POST /chat/api/threads ("Say hello"). Nothing reaches Hugging Face, nothing downloads, and no
 // model is created or started: every write the finder makes is answered here.
 //
-// Loaded with `scripts/ui-drive.py --init-script scripts/drive/finder-fake.js`, before the
+// Loaded with `scripts/ui-drive.py --init-script scripts/drive/finder-fake.js --init-script
+// scripts/drive/machine-fake.js` (the drive's machine-check step needs the second one; the flag
+// repeats), before the
 // page's own scripts, in every document. It is on while sessionStorage's "lmgw.fake.finder" is
 // set; the query decides the scene:
 //   "demo 8b"      a card by size, then the header's marks: the beside pick (Q4_K_M) and the
@@ -77,7 +79,7 @@
 
   // --- the cards ----------------------------------------------------------------------------
   const HOLD = "lmgw is paused on the graphics card right now. The model answers once you " +
-    "resume it: the HOLD button at the foot of the sidebar, or the tray menu's GPU hold.";
+    "resume it: the On hold pill at the foot of the sidebar, or the tray menu's GPU hold.";
   const choice = (i, o = {}) => ({ origin: `demo-org/Demo-${i}B-Variant`, name: `Demo ${i}B Variant`,
     author: "demo-org", likes: 400 - i * 7, downloads: 9000 - i * 100, pipeline: "text-generation",
     parameters: i * 1e9, matched_words: 2, gated: false, private: false, note: null, ...o });

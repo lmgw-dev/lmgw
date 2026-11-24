@@ -185,7 +185,7 @@ pub fn is_live(r: &AgentRunSummary) -> bool {
 /// A property of the **manifest**, not of the form: it holds whether the slots
 /// are bound or not, so one image always runs one way.
 pub const KEEP_ID_NOTE: &str =
-    "this manifest declares mounts: the container runs as your uid (--userns=keep-id)";
+    "This manifest declares mounts: the container runs as your uid (--userns=keep-id)";
 
 /// The mount fields a manifest declares, in the author's order (mounts §5.1).
 pub fn mount_fields(fields: &[AgentField]) -> Vec<AgentField> {
@@ -210,7 +210,7 @@ pub fn mount_line(f: &AgentField, host: &str) -> String {
 pub fn unbound_line(names: &[String]) -> Option<String> {
     (!names.is_empty()).then(|| {
         format!(
-            "slots to bind after import: {} — an export never carries a host path, so the \
+            "Slots to bind after import: {} — an export never carries a host path, so the \
              receiver says which folder fills each one.",
             names.join(", "),
         )
@@ -236,11 +236,11 @@ pub fn service_mounts(detail: &AgentDetail) -> Vec<AgentServiceMount> {
 pub fn report_lines(r: &AgentImportReport) -> Vec<String> {
     let mut out = Vec::new();
     if r.validate_only {
-        out.push(format!("'{}' checks out — nothing written.", r.id));
+        out.push(format!("Checks out: '{}' — nothing written.", r.id));
     } else if r.replaced {
-        out.push(format!("saved '{}'.", r.id));
+        out.push(format!("Saved '{}'.", r.id));
     } else {
-        out.push(format!("created '{}'.", r.id));
+        out.push(format!("Created '{}'.", r.id));
     }
     out.extend(r.warnings.iter().cloned());
     // The slots this row now has and nothing has bound (mounts §5.2). Not a

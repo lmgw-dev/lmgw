@@ -115,6 +115,25 @@ IR**, not the schema — `cached_input_tokens`, `cache_write_tokens`,
 `None` cache split is priced at the plain input rate and the row says so via
 `price_source`; it is not guessed.
 
+**Cache writes by TTL** *(2026-11-12)*. Anthropic's published
+prompt-caching prices make a 5-minute cache write 1.25x the base input
+price, a 1-hour write 2x and a read about 0.1x, and its `usage` says which
+writes were which (`cache_creation: {ephemeral_5m_input_tokens,
+ephemeral_1h_input_tokens}`). The IR keeps the 1-hour part
+(`Usage::cache_write_1h_tokens`, `None` when the upstream reported no
+split), and `price_tokens` charges it at 2x the input rate of the row the
+request is priced at (its service tier's, as every other rate), the rest of
+the writes at `price_cache_write` as before. The price table has no 1-hour
+column yet, so that multiplier (`pricing::ONE_HOUR_WRITE_FACTOR`) stands in
+for one, and the row's snapshot shows `price_cache_write` alone. A row with
+no input price has no base for the factor: its 1-hour part is charged at the
+cache-write rate like the other writes. Not yet: the price catalog's own
+1-hour cache-write price (`input_cache_write_1h`, among the fields the
+catalog sync does not read) is not read, so the factor applies whatever the
+catalog says. The request
+log does not record the split yet: `cache_write_tokens` is the total, and
+the row's `cost_in_micro` is the only place the dearer hour shows.
+
 ### 2.4 Local models cost time, not money
 
 Local rows are `free_local`, cost `0` — and that is exactly the number that

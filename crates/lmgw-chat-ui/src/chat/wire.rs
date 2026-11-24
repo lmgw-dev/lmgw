@@ -158,12 +158,14 @@ impl From<ThreadList> for ThreadsResponse {
         let ThreadList {
             threads,
             archived_count,
+            active_count,
             temporary,
             folders,
         } = list;
         Self {
             threads: threads.into_iter().map(ChatThread::from).collect(),
             archived_count,
+            active_count,
             temporary: temporary.into_iter().map(ChatThread::from).collect(),
             folders: folders.into_iter().map(FolderInfo::from).collect(),
         }
@@ -300,6 +302,7 @@ mod tests {
         let list: ThreadList = serde_json::from_value(json!({
             "threads": [{"id": 2, "title": "a", "kb_mode": "auto"}],
             "archived_count": 4,
+            "active_count": 3,
             "temporary": [{"id": -1, "temporary": true}],
             "folders": [{
                 "id": 3, "name": "F", "sort": 1, "threads_active": 2, "threads_archived": 1,
@@ -311,7 +314,10 @@ mod tests {
         .unwrap();
         let r = ThreadsResponse::from(list);
         assert_eq!(r.threads.len(), 1);
-        assert_eq!((r.threads[0].id, r.archived_count), (2, 4));
+        assert_eq!(
+            (r.threads[0].id, r.archived_count, r.active_count),
+            (2, 4, 3)
+        );
         assert!(r.temporary[0].temporary && r.temporary[0].id == -1);
         let f = &r.folders[0];
         assert_eq!((f.id, f.name.as_str(), f.sort), (3, "F", 1));

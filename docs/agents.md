@@ -101,7 +101,7 @@ manifest does not carry. `lmgw__agent_get` returns the same document.
 | `service` | For a `run.service` agent: the manifest's four fields, `provides_mcp`, `origin`, `origin_resolves`, `mounts[]` (`field`, `host` — **`Admin` view only** — `inside`, `kind`, `access`), and what is running right now — `starting`, `running`, `host_port`, `container`, `started_at`, `idle_seconds_now`, `in_flight`, `log_tail` (+ `log_tail_lines`). `null` otherwise. |
 | `provenance` | Which image this row was installed from: `image`, `digest`, `manifest_path`, `installed_at`, `pulled_at`. **Absent** for a row that came from a pasted manifest, rather than a record full of empty strings. |
 | `dev_url` | The row's dev-server override, `""` when there is none. |
-| `token` | `{ name, has_value, scope_note }` — never the token itself. |
+| `token` | `{ name, has_value, scope_note, scope_models }` — never the token itself; `scope_models` lists the model names and patterns it reaches, empty for any model. |
 | `portability` | `{ portable, notes }`, the same verdict the export carries, but with the `dev_url` named. |
 | `batch` | The review surface: columns, editable fields with their options, `has_classify`, `has_apply`, and the `apply_tools` ceiling. |
 | `budget` | Settings → Agents & tools: `max_tool_calls` and `timeout_seconds`, which bound a `turn`. |
@@ -563,7 +563,7 @@ anywhere else is refused.
 than a parse error so that an existing stored manifest is still editable. The
 message is:
 
-> apply may not run a model turn: the apply step writes, and a model deciding
+> Apply may not run a model turn: the apply step writes, and a model deciding
 > what to write is neither deterministic nor reviewable. Use a direct tool call,
 > a `script`, or `run.kind: container`.
 
@@ -2587,11 +2587,11 @@ shipped manifest forward.
 
 If that set is empty — no model-alias field, or all of them blank, which is the
 shipped mail labeler's state out of the box — the policy is **`all`** and the
-Definition tab prints **"token: any model"**. A derived allow-list that silently
+Definition tab prints **"Its token reaches any model"**. A derived allow-list that silently
 came out empty would refuse every call the agent makes.
 
 Otherwise the policy is `allow` with those aliases, and the page prints
-`token: <alias>, <alias>`. Asking for a different alias with that token is
+"Its token reaches: <alias>, <alias>" (the UI shows one chip per alias). Asking for a different alias with that token is
 refused by name.
 
 On `/mcp` the token sees only the tools the manifest's `tools[]` resolve to
@@ -2884,9 +2884,9 @@ names them). A copy must not silently inherit a credential.
 | `run.output names the phase 'classify', which run.phases does not declare (run, apply)` | `output` is keyed per phase. | Use `run` and/or `apply`. |
 | `run.provides.mcp needs run.service` | The MCP route proxies the same container the App tab does. | Add `service`. |
 | `tools[0].allowed[0] is 'board__pin', one of this agent's own tools…` | The agent would call itself through the gateway. | Remove it from the allow list. |
-| `no MCP server with label 'gws' is registered on this gateway (available: lmgw, docs, …)` | A tool gap — a warning, not a refusal. | Register the server; Start is disabled until you do. |
-| `the image 'localhost/board:1' is not on this box and run.pull is 'never', so Start would fail rather than download it` | `image_absent_pull_never`. | `podman build`/`podman pull` it, or change `run.pull`. |
-| `podman is required for container agents and could not be run: …` | `podman_unavailable`. | Fix podman for lmgw's user; for a scripted batch agent, list and classify still work. |
+| `No MCP server with label 'gws' is registered on this gateway (available: lmgw, docs, …)` | A tool gap — a warning, not a refusal. | Register the server; Start is disabled until you do. |
+| `The image 'localhost/board:1' is not on this box and run.pull is 'never', so Start would fail rather than download it` | `image_absent_pull_never`. | `podman build`/`podman pull` it, or change `run.pull`. |
+| `Podman is required for container agents and could not be run on this box: …` | `podman_unavailable`. | Fix podman for lmgw's user; for a scripted batch agent, list and classify still work. |
 | `the container exited successfully but emitted no output; run.output.run declares a schema` | Exit 0 with no `output` event. | Emit one, or remove the schema. |
 | `the run's output does not match run.output.apply: 'applied' is missing` | The output failed the structural check. | Match the declared shape. |
 | `the run exceeded its deadline of 600s (run.limits.deadline_seconds)` | Wall clock, from the container's start. | Raise it, or `0` for none. |
@@ -2911,7 +2911,7 @@ names them). A copy must not silently inherit a credential.
 | `<id>.localhost` does not resolve | Nothing answers that host name on this machine. | Add `127.0.0.1 <id>.localhost` to `/etc/hosts`, or set an agent origin suffix under Settings → Agents & tools that your DNS answers for. |
 | `the image 'localhost/board:1' carries no /lmgw/agent.json` (`package_no_manifest`) | Not an agent package. | `COPY agent.json /lmgw/agent.json`. |
 | `an agent with id 'board' already exists; pass replace=1 to overwrite it (its stored config is kept)` | Id collision on import. | `replace=1`, or change the id to fork. |
-| `the stored config values x, y are not declared by the new manifest and were removed with the old one` | A replace pruned orphaned config. | Expected; the report names them. |
+| `The stored config values x, y are not declared by the new manifest and were removed with the old one` | A replace pruned orphaned config. | Expected; the report names them. |
 | `agent '<id>' has an unreadable manifest: …` (`manifest_unreadable`) | The row was written by a newer build, or hand-edited badly. | The detail page still opens; fix it in the Definition editor. |
 | `mount_path_refused` | A stored or submitted path fails a path rule (§2) — not absolute, does not exist, wrong kind, or a refused location. | Pick a different path; the message names the rule. |
 | `mount_path_nested` | The path lies inside, or contains, another bound mount where either side is `rw`; the message names the other agent, field and access. | Choose a path outside that tree — or bind the *same* path, which is allowed whatever the access. |

@@ -147,6 +147,17 @@ pub struct PickedFile {
     pub quant: Option<String>,
 }
 
+/// A class as the "Serve as" switch words it (the value sent stays the key).
+fn class_label(class: &str) -> &str {
+    match class {
+        "chat" => "Chat",
+        "aux" => "Embeddings, rerank and decisions",
+        "audio" => "Audio",
+        "image" => "Image",
+        other => other,
+    }
+}
+
 /// The classes the "Serve as" switch offers: in the pick-only mode the two
 /// Get it sets up (`model_get` takes chat and aux, find-a-model design
 /// D29), else every class.
@@ -195,6 +206,9 @@ pub fn HfWizard(
     // A host other than the Models page (the finder's pick-only mode) has
     // no list to reload.
     let reload = use_context::<super::models::ModelsReload>();
+    // The modal it sits in, if any: "Open in editor" closes it, since on
+    // the Models page the row it opens is under it, on the same page.
+    let modal = crate::widgets::use_modal();
 
     let step = RwSignal::new(Step::Pick);
     let repo = RwSignal::new(initial_repo.clone().unwrap_or_default());
@@ -733,7 +747,7 @@ pub fn HfWizard(
                                                 }
                                             }
                                         >
-                                            {t}
+                                            {class_label(t)}
                                         </button>
                                     }
                                 })
@@ -758,9 +772,9 @@ pub fn HfWizard(
                                 />
                                 {move || {
                                     if target.get() == "aux" {
-                                        "fetch the projector companion"
+                                        "Fetch the projector companion"
                                     } else {
-                                        "fetch projector / drafter companions"
+                                        "Fetch projector / drafter companions"
                                     }
                                 }}
                             </label>
@@ -834,6 +848,7 @@ pub fn HfWizard(
                                                 let file3 = f.file.clone();
                                                 let is_weights = f.role == "weights";
                                                 let file4 = f.file.clone();
+                                                let file5 = f.file.clone();
                                                 let mark = Signal::derive(move || {
                                                     // The whole card's pick, recommended because
                                                     // nothing qualifies beside what runs now, leads
@@ -850,6 +865,19 @@ pub fn HfWizard(
                                                     let lead = if lead { marks::Lead::WholeCard } else { marks::Lead::Beside };
                                                     shown_fit(&file)
                                                         .and_then(|(fit, from)| marks::mark(&fit, from.as_deref(), lead))
+                                                });
+                                                // WP12: the same fit's signals over the cards.
+                                                let signals = Signal::derive(move || {
+                                                    let lead = fit_answer.with(|a| {
+                                                        a.as_ref().is_some_and(|a| {
+                                                            a.recommended.as_deref() == Some(file5.as_str())
+                                                                && a.picks.as_ref().is_some_and(|p| {
+                                                                    p.beside.file.as_deref() != Some(file5.as_str())
+                                                                })
+                                                        })
+                                                    });
+                                                    let lead = if lead { marks::Lead::WholeCard } else { marks::Lead::Beside };
+                                                    shown_fit(&file5).and_then(|(fit, _)| marks::shown_cards(&fit, lead))
                                                 });
                                                 let recommended = Signal::derive(move || {
                                                     fit_answer
@@ -871,6 +899,7 @@ pub fn HfWizard(
                                                         selected=selected
                                                         tracked=tracked
                                                         mark=mark
+                                                        signals=signals
                                                         recommended=recommended
                                                         checking=checking
                                                         on_select=Callback::new(move |f: String| select(f))
@@ -974,7 +1003,15 @@ pub fn HfWizard(
                             .map(|id| {
                                 let href = format!("/models/local/{id}");
                                 view! {
-                                    <a class="btn primary" href=href>
+                                    <a
+                                        class="btn primary"
+                                        href=href
+                                        on:click=move |_| {
+                                            if let Some(m) = modal {
+                                                m.request_close();
+                                            }
+                                        }
+                                    >
                                         "Open in editor"
                                     </a>
                                 }
@@ -1105,6 +1142,8 @@ fn FileRow(
     tracked: RwSignal<Vec<(String, String)>>,
     /// Its mark on the card, when it has one (find-a-model design §3.3).
     mark: Signal<Option<marks::Mark>>,
+    /// Its fit over the cards (device-ledger design WP12), when it has one.
+    signals: Signal<Option<lmgw_api_types::model_find::CardsFit>>,
     /// The list's recommended file (§3.2).
     recommended: Signal<bool>,
     /// Its fit is being read.
@@ -1167,7 +1206,7 @@ fn FileRow(
                                 .into_any()
                         } else {
                             view! {
-                                <span class="chip live" title="Tracked on the Downloads page">
+                                <span class="chip info" title="Tracked on the Downloads page">
                                     <span class="dot"></span>
                                     {status}
                                 </span>
@@ -1185,13 +1224,16 @@ fn FileRow(
             {move || {
                 if checking.get() {
                     return Some(
-                        view! { <span class="chip live wiz-mark"><span class="dot"></span>"checking…"</span> }
+                        view! { <span class="chip info wiz-mark"><span class="dot"></span>"checking…"</span> }
                             .into_any(),
                     );
                 }
                 mark.get()
                     .map(|m| {
                         view! {
+                            {signals.get().map(|c| view! {
+                                <crate::widgets::fit_signals::FitSignals c=c compact=true/>
+                            })}
                             <span class=format!("chip {} wiz-mark", m.tone) title=m.tip>
                                 {m.text}
                             </span>

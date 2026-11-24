@@ -565,7 +565,7 @@ fn RefCombo(
                 aria-expanded=move || open.get().to_string()
                 on:click=move |_| open.update(|o| *o = !*o)
             >
-                "▾"
+                <span class="select-arrow">"▾"</span>
             </button>
         </div>
         <Popover open=open anchor=anchor class="select-pop" min_width=380>
@@ -891,12 +891,18 @@ fn BuildForm(seed: EditorSeed, open: RwSignal<bool>) -> impl IntoView {
         ])
     });
     let backend_opts = Signal::derive(|| {
-        opts(&[
-            ("cuda", "CUDA"),
-            ("vulkan", "Vulkan (untested)"),
-            ("rocm", "ROCm (untested)"),
-            ("cpu", "CPU only (untested)"),
-        ])
+        let untested = |key: &str, suffix: &str| {
+            (
+                key.to_string(),
+                format!("{}{suffix}", crate::labels::backend_label(key)),
+            )
+        };
+        vec![
+            untested("cuda", ""),
+            untested("vulkan", " (untested)"),
+            untested("rocm", " (untested)"),
+            untested("cpu", " only (untested)"),
+        ]
     });
     let role_opts = Signal::derive(|| {
         ROLES

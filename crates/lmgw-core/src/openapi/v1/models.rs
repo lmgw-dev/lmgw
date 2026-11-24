@@ -198,9 +198,9 @@ pub(crate) fn model_list(g: &mut SchemaGenerator) -> Schema {
                     "required": ["data", "has_more", "lmgw"],
                     "properties": {
                         "data": {"type": "array", "items": anthropic_item},
-                        "has_more": {"type": "boolean", "enum": [false]},
-                        "first_id": {"type": "null"},
-                        "last_id": {"type": "null"},
+                        "has_more": {"type": "boolean"},
+                        "first_id": {"type": ["string", "null"]},
+                        "last_id": {"type": ["string", "null"]},
                         "lmgw": block
                     }
                 }

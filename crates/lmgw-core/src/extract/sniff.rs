@@ -31,6 +31,11 @@ use bytes::Bytes;
 
 use super::office::{read_entry_if_present, Budget, OfficeError, OfficeFormat};
 
+mod more;
+mod tools;
+
+pub use more::{sniff_convert, sniff_convert_async};
+
 /// What is accepted, as the tail of every refusal message.
 pub const ACCEPTED: &str = "images (PNG, JPEG, GIF, WebP), PDF, Word/Excel/PowerPoint files \
     (docx, xlsx, pptx), OpenDocument files (odt, ods, odp), audio (WAV, MP3, Ogg, FLAC, \
@@ -95,6 +100,13 @@ pub enum SniffError {
     ManifestTooLarge(String),
     /// A video container (MP4/QuickTime/Matroska), named.
     Video(&'static str),
+    /// An Outlook `.msg` message (an OLE2 file with its property streams):
+    /// only document conversion tells it apart ([`sniff_convert`]).
+    OutlookMessage,
+    /// An Office file protected by a password (an encrypted OOXML package,
+    /// or a `.doc`/`.ppt` that says it is encrypted): only document
+    /// conversion tells it apart ([`sniff_convert`]).
+    Encrypted,
 }
 
 impl fmt::Display for SniffError {
@@ -123,6 +135,16 @@ impl fmt::Display for SniffError {
                 "unsupported file — this is a {what} video container, not an audio file; \
                  extract its audio track (for example to M4A or MP3) and upload that. This \
                  gateway accepts {ACCEPTED}"
+            ),
+            Self::OutlookMessage => write!(
+                f,
+                "an Outlook .msg message is not read yet; save the message as .eml in the \
+                 mail program and send that"
+            ),
+            Self::Encrypted => write!(
+                f,
+                "this Office file is protected by a password, and lmgw does not open \
+                 password-protected files: save it without its password and send that"
             ),
         }
     }
@@ -385,26 +407,46 @@ fn image_brand(brand: &[u8]) -> bool {
     )
 }
 
-/// Which office format a ZIP archive is, from its own manifest. The two
-/// identification entries are read against one [`Budget`].
+/// How much of a ZIP's `mimetype` entry is unpacked to tell what the
+/// archive is: 64 bytes. The entry is a media type and nothing else (the
+/// longest lmgw knows, an OpenDocument presentation's, is 47 bytes; an
+/// EPUB's is 20); one that unpacks to more than this is none of them,
+/// whatever follows, so a `mimetype` that deflates a gigabyte costs 65
+/// bytes to refuse.
+pub const ZIP_MIMETYPE_BYTES: u64 = 64;
+
+/// A ZIP's `mimetype` entry, when it has one of at most
+/// [`ZIP_MIMETYPE_BYTES`]: `Some(None)` for a longer or unreadable one,
+/// `None` without the entry.
+pub(crate) fn zip_mimetype<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+) -> Option<Option<String>> {
+    use std::io::Read as _;
+    let entry = zip.by_name("mimetype").ok()?;
+    let mut head = Vec::with_capacity(ZIP_MIMETYPE_BYTES as usize + 1);
+    // One byte past the bound tells a longer entry from one that fits.
+    let read = entry.take(ZIP_MIMETYPE_BYTES + 1).read_to_end(&mut head);
+    if read.is_err() || head.len() as u64 > ZIP_MIMETYPE_BYTES {
+        return Some(None);
+    }
+    Some(Some(String::from_utf8_lossy(&head).trim().to_string()))
+}
+
+/// Which office format a ZIP archive is, from its own manifest:
+/// `[Content_Types].xml` is read against a [`Budget`], `mimetype` up to
+/// [`ZIP_MIMETYPE_BYTES`].
 fn sniff_zip(bytes: &[u8]) -> Result<Sniffed, SniffError> {
     sniff_zip_within(bytes, &mut Budget::new())
 }
 
 fn sniff_zip_within(bytes: &[u8], budget: &mut Budget) -> Result<Sniffed, SniffError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| SniffError::UnknownZip)?;
-    let mut small = |name: &str| match read_entry_if_present(&mut zip, name, budget) {
-        Ok(v) => Ok(v),
-        Err(OfficeError::TooLarge { .. }) => Err(SniffError::ManifestTooLarge(name.to_string())),
-        Err(_) => Ok(None),
-    };
     // OpenDocument: the `mimetype` entry is the whole answer.
-    if let Some(m) = small("mimetype")? {
-        let m = String::from_utf8_lossy(&m);
-        let sub = match m.trim() {
-            "application/vnd.oasis.opendocument.text" => Some("odt"),
-            "application/vnd.oasis.opendocument.spreadsheet" => Some("ods"),
-            "application/vnd.oasis.opendocument.presentation" => Some("odp"),
+    if let Some(m) = zip_mimetype(&mut zip) {
+        let sub = match m.as_deref() {
+            Some("application/vnd.oasis.opendocument.text") => Some("odt"),
+            Some("application/vnd.oasis.opendocument.spreadsheet") => Some("ods"),
+            Some("application/vnd.oasis.opendocument.presentation") => Some("odp"),
             _ => None,
         };
         return match sub.and_then(office_sub) {
@@ -412,6 +454,11 @@ fn sniff_zip_within(bytes: &[u8], budget: &mut Budget) -> Result<Sniffed, SniffE
             None => Err(SniffError::UnknownZip),
         };
     }
+    let mut small = |name: &str| match read_entry_if_present(&mut zip, name, budget) {
+        Ok(v) => Ok(v),
+        Err(OfficeError::TooLarge { .. }) => Err(SniffError::ManifestTooLarge(name.to_string())),
+        Err(_) => Ok(None),
+    };
     // OOXML: the content types name the main part, and the part must exist.
     let types = small("[Content_Types].xml")?
         .map(|b| String::from_utf8_lossy(&b).into_owned())

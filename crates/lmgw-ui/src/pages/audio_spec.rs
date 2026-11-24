@@ -69,12 +69,12 @@ macro_rules! field {
 
 /// `/v1/tasks/run` request fields (audio-lab.js:45-89).
 pub const FIELDS: &[FieldSpec] = &[
-    field!("text", "Text / prompt", Textarea),
+    field!("text", "Text or prompt", Textarea),
     field!("lyrics", "Lyrics", Textarea),
     field!("target_text", "Target text", Textarea),
     field!("style_ref_text", "Style reference text", Text),
     field!("reference_text", "Reference text", Text),
-    field!("instruct", "Instruction / style", Text),
+    field!("instruct", "Instruction or style", Text),
     field!("audio", "Input audio", Clip),
     field!("source_audio", "Source audio", Clip),
     field!("target_voice", "Target voice", Clip),
@@ -85,24 +85,14 @@ pub const FIELDS: &[FieldSpec] = &[
     field!("speaker", "Speaker", Text),
     field!("track_name", "Track name", Text),
     field!("language", "Language", Text),
-    field!(
-        "route",
-        "Route",
-        Text,
-        "task_route; blank = the task default"
-    ),
+    field!("route", "Route", Text, "Blank: the task's own route"),
     field!("emotion", "Emotion", Text),
-    field!(
-        "seed",
-        "Seed",
-        Text,
-        "uint64; sent as a string when past 2^53"
-    ),
+    field!("seed", "Seed", Text, "Any whole number"),
     field!("max_tokens", "Max tokens", Int),
     field!("max_steps", "Max steps", Int),
     field!("num_inference_steps", "Inference steps", Int),
     field!("num_beams", "Beams", Int),
-    field!("top_k", "top_k", Int),
+    field!("top_k", "Top k", Int),
     field!("duration_seconds", "Duration (s)", Float, "-1 = auto"),
     field!("target_duration_seconds", "Target duration (s)", Float),
     field!(
@@ -112,7 +102,7 @@ pub const FIELDS: &[FieldSpec] = &[
     ),
     field!("guidance_scale", "Guidance scale", Float),
     field!("temperature", "Temperature", Float),
-    field!("top_p", "top_p", Float),
+    field!("top_p", "Top p", Float),
     field!("repetition_penalty", "Repetition penalty", Float),
     field!("speaking_rate", "Speaking rate", Float),
     field!("style_language", "Style language", Text),
@@ -148,10 +138,22 @@ pub const FIELDS: &[FieldSpec] = &[
         Text,
         "midi | abc (muscriptor); blank = the model default"
     ),
-    field!("do_sample", "do_sample", Bool),
+    field!("do_sample", "Sample", Bool),
     field!("use_pitch_shift", "Pitch shift on", Bool),
     field!("return_timestamps", "Return timestamps", Bool),
 ];
+
+/// A field's label and hint as one task words it: the voice-design
+/// description is the voice itself, not a style hint.
+pub fn field_words(task: &str, spec: &'static FieldSpec) -> (&'static str, &'static str) {
+    match (task, spec.name) {
+        ("vdes", "instruct") => (
+            "Voice description",
+            "The voice to speak the text in, in plain words: for example a calm, warm woman's voice.",
+        ),
+        _ => (spec.label, spec.hint),
+    }
+}
 
 pub fn field_spec(name: &str) -> Option<&'static FieldSpec> {
     FIELDS.iter().find(|f| f.name == name)
@@ -329,9 +331,9 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: "vdes",
-        label: "Voice description",
-        group: "Analysis",
-        fields: &["audio", "language"],
+        label: "Voice design",
+        group: "Speech",
+        fields: &["text", "instruct", "language", "seed"],
     },
     TaskSpec {
         id: "spk",
@@ -370,7 +372,7 @@ pub fn task_spec(id: &str) -> Option<&'static TaskSpec> {
 pub fn task_label(id: &str) -> String {
     task_spec(id)
         .map(|t| t.label.to_string())
-        .unwrap_or_else(|| id.to_string())
+        .unwrap_or_else(|| crate::labels::category_label(id))
 }
 
 pub fn task_fields(id: &str) -> &'static [&'static str] {
@@ -578,6 +580,14 @@ mod tests {
         for t in TASKS {
             assert!(GROUPS.contains(&t.group), "{} has a stray group", t.id);
         }
+    }
+
+    #[test]
+    fn voice_design_words_its_description_and_offers_a_seed() {
+        let spec = field_spec("instruct").unwrap();
+        assert_eq!(field_words("vdes", spec).0, "Voice description");
+        assert_eq!(field_words("tts", spec).0, "Instruction or style");
+        assert!(task_fields("vdes").contains(&"seed"));
     }
 
     #[test]

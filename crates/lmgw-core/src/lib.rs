@@ -11,6 +11,7 @@ pub mod agent;
 /// and the built-ins that ship embedded. Distinct from [`agent`], which is the
 /// server-side *tool loop* one of these manifests eventually drives.
 pub mod agents;
+pub mod alloc_tune;
 pub mod audio;
 pub mod audit;
 /// Container builds from git — the Backends page (container-builds design):
@@ -105,6 +106,8 @@ pub mod quickdoc;
 /// protocol, answered by a cascade of the gateway's own aliases (realtime
 /// design).
 pub mod realtime;
+#[cfg(test)]
+pub(crate) mod refusing_port;
 pub mod responses;
 pub mod runtime;
 pub mod sdcpp_caps;

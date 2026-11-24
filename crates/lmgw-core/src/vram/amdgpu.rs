@@ -46,7 +46,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::nvml::{GpuMemory, GpuProbe, ProcessMemory};
+use super::nvml::{DeviceId, DeviceProcesses, GpuMemory, GpuProbe, ProcessMemory};
 use crate::hf::fmt_bytes;
 
 /// Where the kernel publishes one directory per DRM device.
@@ -213,6 +213,12 @@ impl GpuProbe for AmdSysfsProbe {
             };
 
             out.push(GpuMemory {
+                // The PCI address (device-ledger design D1), what `drm-pdev`
+                // names the card by in [`Self::processes`]. A card whose
+                // address cannot be read keeps the kernel's name for it
+                // (`card1`): an id still, if not one that survives a card
+                // being added, and no process is ever attributed to it.
+                id: DeviceId(pci_address(dir).unwrap_or_else(|| format!("card{card}"))),
                 // Enumeration order, not the card number: the index is a
                 // position in this list, and `card1` being the only card on a
                 // box is normal (card0 is often a display-only device).
@@ -234,22 +240,27 @@ impl GpuProbe for AmdSysfsProbe {
         Ok(())
     }
 
-    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    fn processes(&self, own: &[u32], retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         // Which PCI device each probed card is, and whether its capacity
         // counts GTT (the APU case in `devices`). A card whose address cannot
         // be read is left out: its memory then cannot be attributed, which
         // reads as "not attributed" — the conservative direction.
         let mut counted: HashMap<String, bool> = HashMap::new();
+        let mut out: Vec<DeviceProcesses> = Vec::new();
         for (_, dir) in self.cards()? {
             let Some(pdev) = pci_address(&dir) else {
                 continue;
             };
             let apu =
                 read_str(dir.join("mem_info_vram_type")).is_some_and(|t| is_system_memory(&t));
-            counted.insert(pdev, apu);
+            if counted.insert(pdev.clone(), apu).is_none() {
+                out.push(DeviceProcesses {
+                    device: DeviceId(pdev),
+                    processes: Vec::new(),
+                });
+            }
         }
         let mut clients_seen: HashSet<(String, u64)> = HashSet::new();
-        let mut out = Vec::new();
         // lmgw's own processes first, so a client a tombstone shares with one
         // of them (an inherited fd) is counted for the live container.
         let asked = own.iter().map(|&p| (p, true)).chain(
@@ -270,8 +281,10 @@ impl GpuProbe for AmdSysfsProbe {
                 Err(_) if !is_own => continue,
                 Err(e) => return Err(format!("{}/{pid}/fdinfo: {e}", self.proc_root.display())),
             };
-            if let Some(bytes) = attribute_clients(&clients, &counted, &mut clients_seen) {
-                out.push(ProcessMemory { pid, bytes });
+            for (pdev, bytes) in attribute_clients(&clients, &counted, &mut clients_seen) {
+                if let Some(d) = out.iter_mut().find(|d| d.device.as_str() == pdev) {
+                    d.processes.push(ProcessMemory { pid, bytes });
+                }
             }
         }
         Ok(out)
@@ -361,25 +374,26 @@ fn drm_clients(proc_root: &Path, pid: u32) -> std::io::Result<Vec<DrmClient>> {
     Ok(out)
 }
 
-/// One process's memory on the probed cards, from its DRM clients.
+/// One process's memory on each probed card, from its DRM clients: per card
+/// it has a client on, by PCI address.
 ///
-/// `None` = the process holds no client on any probed card, i.e. the driver
-/// lists nothing for it. `Some(None)` = it does, but a client carries no
-/// memory keys, so how much it holds is unknown. A client already counted for
-/// another process (an inherited fd) adds nothing a second time; `seen` is
-/// shared across the PIDs of one answer for that reason.
+/// A card absent from the answer is one the process holds no client on,
+/// i.e. the driver lists nothing for it there. `None` = it does, but a
+/// client there carries no memory keys, so how much it holds on that card is
+/// unknown. A client already counted for another process (an inherited fd)
+/// adds nothing a second time; `seen` is shared across the PIDs of one
+/// answer for that reason.
 pub(crate) fn attribute_clients(
     clients: &[DrmClient],
     counted: &HashMap<String, bool>,
     seen: &mut HashSet<(String, u64)>,
-) -> Option<Option<u64>> {
-    let mut listed = false;
-    let mut total: Option<u64> = Some(0);
+) -> std::collections::BTreeMap<String, Option<u64>> {
+    let mut out: std::collections::BTreeMap<String, Option<u64>> = Default::default();
     for c in clients {
         let Some(&counts_gtt) = counted.get(&c.pdev) else {
             continue;
         };
-        listed = true;
+        let total = out.entry(c.pdev.clone()).or_insert(Some(0));
         if !seen.insert((c.pdev.clone(), c.client_id)) {
             continue;
         }
@@ -388,12 +402,12 @@ pub(crate) fn attribute_clients(
             (Some(v), true) => c.gtt.map(|g| v.saturating_add(g)),
             (None, _) => None,
         };
-        total = match (total, bytes) {
+        *total = match (*total, bytes) {
             (Some(t), Some(b)) => Some(t.saturating_add(b)),
             _ => None,
         };
     }
-    listed.then_some(total)
+    out
 }
 
 /// The PCI address of a card's `device` directory: `PCI_SLOT_NAME` from its
@@ -471,6 +485,11 @@ mod tests {
         assert_eq!(devices[0].free_bytes, 17_163_091_968 - 1_073_741_824);
         assert!(devices[0].name.contains("GDDR6"), "{}", devices[0].name);
         assert!(!devices[0].name.contains("APU"), "{}", devices[0].name);
+        assert_eq!(
+            devices[0].id,
+            DeviceId("card1".into()),
+            "no PCI address to read: the kernel's name for the card is its id"
+        );
     }
 
     #[test]
@@ -637,11 +656,16 @@ mod tests {
     }
 
     /// One client, however many fds point at it, and wherever it was
-    /// inherited to; GTT only on a card whose capacity counts it.
+    /// inherited to; GTT only on a card whose capacity counts it; each card
+    /// on its own (device-ledger design §2.3).
     #[test]
     fn clients_dedupe_by_id_per_device_and_count_gtt_only_on_an_apu() {
         let counted: HashMap<String, bool> =
             [("dgpu".to_string(), false), ("apu".to_string(), true)].into();
+        let per =
+            |cards: &[(&str, Option<u64>)]| -> std::collections::BTreeMap<String, Option<u64>> {
+                cards.iter().map(|(c, b)| (c.to_string(), *b)).collect()
+            };
         let mut seen = HashSet::new();
         let a = [
             client("dgpu", 1, Some(100), Some(7)),
@@ -653,14 +677,14 @@ mod tests {
         ];
         assert_eq!(
             attribute_clients(&a, &counted, &mut seen),
-            Some(Some(100 + 10 + 5)),
+            per(&[("apu", Some(10 + 5)), ("dgpu", Some(100))]),
             "discrete: VRAM only; APU: VRAM + GTT; one count per client"
         );
         // A child that inherited the discrete card's fd adds nothing, but is
-        // still listed.
+        // still listed there.
         assert_eq!(
             attribute_clients(&[client("dgpu", 1, Some(100), None)], &counted, &mut seen),
-            Some(Some(0))
+            per(&[("dgpu", Some(0))])
         );
         // Only on uncounted devices: not listed at all.
         assert_eq!(
@@ -669,12 +693,20 @@ mod tests {
                 &counted,
                 &mut seen
             ),
-            None
+            per(&[])
         );
-        // A client with no memory keys: listed, amount unknown.
+        // A client with no memory keys: listed, amount unknown — on that
+        // card only; the other card's figure stays known.
         assert_eq!(
-            attribute_clients(&[client("dgpu", 3, None, None)], &counted, &mut seen),
-            Some(None)
+            attribute_clients(
+                &[
+                    client("dgpu", 3, None, None),
+                    client("apu", 4, Some(8), Some(2))
+                ],
+                &counted,
+                &mut seen
+            ),
+            per(&[("apu", Some(10)), ("dgpu", None)])
         );
     }
 
@@ -717,10 +749,16 @@ mod tests {
             .unwrap()
             .with_proc_root(&proc_dir);
         assert!(probe.process_support().is_ok());
+        let on_card = |processes: Vec<ProcessMemory>| {
+            vec![DeviceProcesses {
+                device: DeviceId("0000:03:00.0".into()),
+                processes,
+            }]
+        };
         let got = probe.processes(&[100, 200, 400, 500], &[]).unwrap();
         assert_eq!(
             got,
-            vec![
+            on_card(vec![
                 ProcessMemory {
                     pid: 100,
                     bytes: Some(2048 * 1024)
@@ -729,8 +767,13 @@ mod tests {
                     pid: 200,
                     bytes: Some(1024 * 1024)
                 },
-            ],
+            ]),
             "discrete card: GTT not counted; 400 has no GPU fd; 500 is gone"
+        );
+        assert_eq!(
+            probe.devices().unwrap()[0].id,
+            DeviceId("0000:03:00.0".into()),
+            "the card's id is the address its clients name"
         );
 
         // A PID whose fdinfo cannot be read for any reason but "gone" (here
@@ -742,7 +785,7 @@ mod tests {
         let got = probe.processes(&[200], &[600, 500, 100]).unwrap();
         assert_eq!(
             got,
-            vec![
+            on_card(vec![
                 ProcessMemory {
                     pid: 200,
                     bytes: Some(1024 * 1024)
@@ -751,11 +794,77 @@ mod tests {
                     pid: 100,
                     bytes: Some(2048 * 1024)
                 },
-            ],
+            ]),
             "the unreadable tombstone is simply not listed"
         );
         let err = probe.processes(&[200, 600], &[]).unwrap_err();
         assert!(err.contains("600"), "{err}");
+    }
+
+    /// Two cards: a process with clients on both is listed on each with what
+    /// it holds there, and a client without memory keys makes that card's
+    /// figure unknown and leaves the other card's known (device-ledger design
+    /// §2.3).
+    #[test]
+    fn processes_are_listed_per_card() {
+        let tree = sysfs(&[
+            (
+                "card0",
+                &[
+                    ("mem_info_vram_total", "17163091968"),
+                    ("mem_info_vram_type", "GDDR6"),
+                    ("uevent", "PCI_SLOT_NAME=0000:03:00.0\n"),
+                ],
+            ),
+            (
+                "card1",
+                &[
+                    ("mem_info_vram_total", "17163091968"),
+                    ("mem_info_vram_type", "GDDR6"),
+                    ("uevent", "PCI_SLOT_NAME=0000:04:00.0\n"),
+                ],
+            ),
+        ]);
+        let proc_dir = tree.path().join("proc");
+        let fd = |pid: u32, fd: u32, pdev: &str, id: u64, vram: Option<u64>| {
+            let dir = proc_dir.join(pid.to_string()).join("fdinfo");
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut text =
+                format!("drm-driver:\tamdgpu\ndrm-pdev:\t{pdev}\ndrm-client-id:\t{id}\n");
+            if let Some(kib) = vram {
+                text.push_str(&format!("drm-memory-vram:\t{kib} KiB\n"));
+            }
+            std::fs::write(dir.join(fd.to_string()), text).unwrap();
+        };
+        fd(100, 5, "0000:03:00.0", 1, Some(1024));
+        fd(100, 6, "0000:04:00.0", 2, Some(2048));
+        fd(200, 5, "0000:04:00.0", 3, None);
+        let mem = meminfo(tree.path(), 16_000_000);
+        let probe = AmdSysfsProbe::at(tree.path(), mem)
+            .unwrap()
+            .with_proc_root(&proc_dir);
+        let ids: Vec<DeviceId> = probe.devices().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                DeviceId("0000:03:00.0".into()),
+                DeviceId("0000:04:00.0".into())
+            ]
+        );
+        let pm = |pid, bytes| ProcessMemory { pid, bytes };
+        assert_eq!(
+            probe.processes(&[100, 200], &[]).unwrap(),
+            vec![
+                DeviceProcesses {
+                    device: ids[0].clone(),
+                    processes: vec![pm(100, Some(1024 * 1024))],
+                },
+                DeviceProcesses {
+                    device: ids[1].clone(),
+                    processes: vec![pm(100, Some(2048 * 1024)), pm(200, None)],
+                },
+            ]
+        );
     }
 
     #[test]

@@ -36,4 +36,6 @@ web-sys = { version = "0.3", features = [
   "File", "FilePropertyBag",
   # `/` focuses the first visible search box (widgets/slash.rs).
   "NodeList", "HtmlInputElement",
+  # The audio player row (widgets/audio_player.rs).
+  "HtmlAudioElement", "HtmlMediaElement",
 ] }

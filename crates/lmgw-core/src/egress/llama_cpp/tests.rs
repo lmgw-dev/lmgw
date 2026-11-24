@@ -58,6 +58,7 @@ fn build_chat_posts_the_counted_body() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let params: Params = serde_json::from_value(json!({"reasoning": {"enabled": false}})).unwrap();
     let req = LlamaCppEgress
@@ -187,6 +188,7 @@ fn the_budget_goes_under_both_names() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let control = |c: Value| -> Params { serde_json::from_value(json!({"reasoning": c})).unwrap() };
 

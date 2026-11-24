@@ -209,7 +209,7 @@ fn PullBody(reference: String, job: Option<i64>, open: RwSignal<bool>) -> impl I
         // Pulling. The footer stays put while the line under it moves.
         <Show when=move || live.with(Option::is_some)>
             <div class="bk-facts">
-                <span class="chip live"><span class="dot"></span>"pulling"</span>
+                <span class="chip info"><span class="dot"></span>"pulling"</span>
                 {move || {
                     live.with(|l| l.as_ref().and_then(|l| l.detail.old_id.clone()))
                         .map(|o| view! { <span class="dim">"replacing " <code class="mono-sm">{sha7(&o)}</code></span> })

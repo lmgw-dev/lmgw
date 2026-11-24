@@ -2,7 +2,7 @@
 # Screenshot a page in headless Chrome, waiting for JS/WASM to settle first.
 # Exists because `--screenshot --virtual-time-budget` never fires on pages
 # holding an open SSE/EventSource connection (the Leptos UI always does).
-# Usage: scripts/screenshot.py <url> <out.png> [wait_seconds=3] [WxH=1280x900] [js]
+# Usage: [SCREENSHOT_DSF=1.25] scripts/screenshot.py <url> <out.png> [wait_seconds=3] [WxH=1280x900] [js]
 #   js: JavaScript evaluated 1.5s after navigation (e.g. to click a button);
 #       the wait_seconds delay runs after it, then the screenshot is taken.
 import asyncio
@@ -79,8 +79,10 @@ async def main() -> None:
                     if reply.get("id") == msg_id:
                         return reply.get("result", {})
 
+            # SCREENSHOT_DSF=1.25 shows the page at the 125 % interface scale.
+            dsf = float(os.environ.get("SCREENSHOT_DSF", "1"))
             await call("Emulation.setDeviceMetricsOverride",
-                       width=width, height=height, deviceScaleFactor=1, mobile=False)
+                       width=width, height=height, deviceScaleFactor=dsf, mobile=False)
             await call("Page.enable")
             await call("Page.navigate", url=url)
             if js:

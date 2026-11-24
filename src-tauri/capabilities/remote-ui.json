@@ -1,6 +1,6 @@
 {
   "identifier": "remote-ui",
-  "description": "Allow the gateway web UI (served from localhost into the webview) to report that it has mounted (the shell shows the window then), set its own zoom level (the interface-scale setting), open the system file picker an agent's directory/file config field uses to bind a host mount, choose the voice output: list the PipeWire sinks and route lmgw's own playback streams to one (chat-voice §12.3), and start the machine check's fix, which the shell confirms in its own dialog before the password prompt (machine-check §4.3). KWin draws the window frame, so the page drives no window controls.",
+  "description": "Allow the gateway web UI (served from localhost into the webview) to report that it has mounted (the shell shows the window then), set its own zoom level (the interface-scale setting), open the system file picker an agent's directory/file config field uses to bind a host mount, choose the voice output: list the PipeWire sinks and route lmgw's own playback streams to one (chat-voice §12.3), and start the machine check's fix, which the shell confirms in its own dialog before the password prompt (machine-check §4.3). While the shell draws the window frame itself (the default on Linux; LMGW_WINDOW=kwin turns it off, src-tauri/src/window_chrome.rs) the page drives its window controls: minimize, maximize, close, the header's drag and window menu; with KWin's frame that command refuses all but the state.",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
@@ -11,6 +11,7 @@
     "dialog:allow-open",
     "allow-audio-outputs",
     "allow-audio-output-set",
-    "allow-machine-apply"
+    "allow-machine-apply",
+    "allow-window-chrome"
   ]
 }

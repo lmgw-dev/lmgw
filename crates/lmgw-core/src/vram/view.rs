@@ -7,7 +7,8 @@ use crate::runtime::Class;
 use crate::state::SharedState;
 
 use super::attribution::Fill;
-use super::nvml::GpuMemory;
+use super::ledger::{CardCapacity, Measured};
+use super::nvml::{DeviceId, GpuMemory};
 use super::{trigger_off, VramScheduler};
 
 /// One model lmgw believes is holding GPU memory.
@@ -22,7 +23,14 @@ pub struct ResidentView {
     /// `starting` | `ready` from the registry, or `reserved` for a start this
     /// scheduler has admitted and whose registry entry does not exist yet.
     pub state: String,
+    /// What it is charged: [`Self::charge`]'s total, the figure the
+    /// decisions read.
     pub estimated_bytes: u64,
+    /// What it is charged on the cards (device-ledger design §4.1, WP4): a
+    /// part per card where that is known, else one part for the cards it
+    /// sees together ([`crate::vram::charge`]); empty where it is charged
+    /// nowhere.
+    pub charge: super::CardCharge,
     /// Requests lmgw currently has in flight against this model.
     pub in_flight: usize,
     /// Seconds since the registry's `last_used` — the LRU key eviction uses.
@@ -51,6 +59,111 @@ pub struct ResidentView {
     pub pending_bytes: Option<u64>,
     /// Why the estimate is partial, when it is.
     pub note: Option<String>,
+    /// The cards its processes are on, with what they hold on each, as
+    /// lmgw's measured share reads them (device-ledger design §10, WP2):
+    /// a model split over two cards has both. Empty where the share is not
+    /// measured, and for a reservation.
+    pub cards: Vec<ResidentCardView>,
+    /// The registry generation it was built from, which the measurement's
+    /// containers are keyed by; `None` for a reservation. Not published.
+    #[serde(skip)]
+    pub(crate) generation: Option<u64>,
+    /// What the ledger keeps free for it beside its charge, on the cards it
+    /// is charged on: a llama-server's first-prompt margin until it has
+    /// served a request (`headroom::LLAMA_MARGIN`). Freed with it, so
+    /// counted in what stopping it frees ([`super::Ledger::held_on`];
+    /// owner, 2026-11-18). Not published.
+    #[serde(skip)]
+    pub(crate) kept_bytes: u64,
+}
+
+/// One card a resident's processes are on ([`ResidentView::cards`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResidentCardView {
+    /// The card's id, as [`GpuMemory::id`].
+    pub id: DeviceId,
+    /// What its processes hold on that card; `None` where the driver lists
+    /// one of them there without a figure.
+    pub bytes: Option<u64>,
+}
+
+/// One card, as the status surfaces show it (device-ledger design §10,
+/// WP2): the driver's figures, lmgw's share there, the outside use there,
+/// what is kept free there where that is known per card, and lmgw's models
+/// on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceView {
+    #[serde(flatten)]
+    pub memory: GpuMemory,
+    /// lmgw's share of this card's used memory, measured per process.
+    /// `None` when it cannot be measured: [`VramView::external_trigger_reason`]
+    /// says why, or [`Self::share_unknown`] where it is this card alone.
+    pub lmgw_share_bytes: Option<u64>,
+    /// This card's used memory less lmgw's share, never below zero. `None`
+    /// exactly when the share is.
+    pub outside_share_bytes: Option<u64>,
+    /// Why lmgw's share here is not known while a measurement was taken:
+    /// the driver lists one of lmgw's processes here without a figure. The
+    /// other cards' shares stay known; the sums are unknown with it.
+    pub share_unknown: Option<String>,
+    /// What admission keeps free here on top of the memory in use: what
+    /// the models charged on this card alone keep free
+    /// ([`CardCapacity::kept_free`]). `None` where a model charged on
+    /// several cards together keeps something free; [`VramView::kept_free`]
+    /// is all cards' together, and on a machine of one card this is all of
+    /// it.
+    pub kept_free: Option<KeptFree>,
+    /// lmgw's models on this card, with what each holds here, as the
+    /// measurement reads them ([`ResidentView::cards`]). Empty where the
+    /// share is not measured.
+    pub resident: Vec<DeviceResidentView>,
+}
+
+/// One of lmgw's models on a card ([`DeviceView::resident`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceResidentView {
+    pub container: Class,
+    pub model: String,
+    /// What its processes hold on this card; `None` where the driver lists
+    /// one of them here without a figure.
+    pub bytes: Option<u64>,
+}
+
+impl DeviceView {
+    /// The status surfaces' cards: the ledger's ([`CardCapacity`]), each
+    /// with the residents whose processes are on it.
+    pub(super) fn of(cards: Vec<CardCapacity>, residents: &[ResidentView]) -> Vec<Self> {
+        cards
+            .into_iter()
+            .map(|c| {
+                let resident = residents
+                    .iter()
+                    .flat_map(|r| {
+                        r.cards.iter().filter(|on| on.id == c.memory.id).map(|on| {
+                            DeviceResidentView {
+                                container: r.container,
+                                model: r.model.clone(),
+                                bytes: on.bytes,
+                            }
+                        })
+                    })
+                    .collect();
+                let (lmgw_share_bytes, share_unknown) = match c.lmgw {
+                    Some(Ok(b)) => (Some(b), None),
+                    Some(Err(why)) => (None, Some(why)),
+                    None => (None, None),
+                };
+                DeviceView {
+                    memory: c.memory,
+                    lmgw_share_bytes,
+                    outside_share_bytes: c.outside,
+                    share_unknown,
+                    kept_free: c.kept_free,
+                    resident,
+                }
+            })
+            .collect()
+    }
 }
 
 /// What the ledger keeps free on top of the memory in use, by reason — what
@@ -128,7 +241,10 @@ pub struct VramView {
     /// What the ledger believes is resident — the reconciliation counterpart to
     /// the devices' `used_bytes`.
     pub estimated_resident_bytes: u64,
-    pub devices: Vec<GpuMemory>,
+    /// Every card, in the driver's order, with its own figures and lmgw's
+    /// models on it (device-ledger design §10). The fields above are the
+    /// cards' sums.
+    pub devices: Vec<DeviceView>,
     pub resident: Vec<ResidentView>,
     pub queue: Vec<WaiterView>,
     /// Starts whose model's engine image is still downloading, before
@@ -159,11 +275,13 @@ pub struct VramView {
     /// cells is invisible otherwise: the model is resident and "busy", and
     /// nothing else on this frame says why a request is not moving.
     pub kv_pools: Vec<crate::gate::pool::KvPoolView>,
-    /// lmgw's own share of the pooled devices' used memory, **measured per
-    /// process** (candidate-aliases design §4.7): every process of every lmgw
-    /// container, plus those of just-stopped containers the driver still
+    /// lmgw's own share of the used memory of all cards together, **measured
+    /// per process** (candidate-aliases design §4.7): every process of every
+    /// lmgw container, plus those of just-stopped containers the driver still
     /// lists. Everything lmgw could free by evicting and waiting. `None` when
-    /// it cannot be measured; [`Self::external_trigger_reason`] says why.
+    /// it cannot be measured, [`Self::external_trigger_reason`] says why; a
+    /// card whose share is unknown makes the sum unknown
+    /// ([`DeviceView::share_unknown`]).
     pub lmgw_share_bytes: Option<u64>,
     /// Used memory that is not lmgw's: the pooled devices' used bytes minus
     /// [`Self::lmgw_share_bytes`] — games, the desktop, other apps, and what
@@ -224,10 +342,34 @@ const ESTIMATE_NOTE: &str = "Estimates are weights + KV cache + compute buffers,
                              context too) from its ubatch, batch and context, fitted to \
                              llama.cpp's own figures (within a few percent where the masks and \
                              a quantized cache's copy dominate; a chat context's activations \
-                             -5 % to +42 %, at most 80 MiB; an encoder's up to 30 % high). Not \
-                             derived, and so not in them: the \
-                             CUDA context, allocator slack and a projector's compute buffer. \
-                             That remainder is the headroom setting.";
+                             -5 % to +42 %, at most 80 MiB; an encoder's up to 30 % high). A \
+                             llama.cpp model is charged the engine's own cost on each card it \
+                             is on beside them (its CUDA context and what else it keeps there: \
+                             learned per card, else the backend's stated default). Not derived, \
+                             and so not in them: allocator slack and a projector's compute \
+                             buffer. That remainder is the headroom setting.";
+
+/// Each resident's cards, from what the measurement read of its container's
+/// processes (device-ledger design §10, WP2): a container the measurement
+/// did not read, or a reservation, keeps none.
+fn on_cards(residents: &mut [ResidentView], m: &Measured) {
+    for r in residents.iter_mut() {
+        let Some(member) = r
+            .generation
+            .and_then(|g| m.members.iter().find(|c| c.generation == g))
+        else {
+            continue;
+        };
+        r.cards = member
+            .cards
+            .iter()
+            .map(|(id, bytes)| ResidentCardView {
+                id: id.clone(),
+                bytes: *bytes,
+            })
+            .collect();
+    }
+}
 
 impl VramScheduler {
     /// The whole plane, for the status surfaces.
@@ -246,14 +388,25 @@ impl VramScheduler {
         // §4.7's figures, measured only while the trigger is armed: with the
         // switch off (or admission off, or the hold on) the answer is the
         // reason, and nothing is probed for it.
-        let (lmgw_share_bytes, outside_share_bytes, external_trigger_reason) =
+        //
+        // A measurement with one card unknown still says the other cards'
+        // shares, and who is on them; the sums are unknown with it.
+        let (measured, lmgw_share_bytes, outside_share_bytes, external_trigger_reason) =
             match trigger_off(&snap).or_else(|| self.boot_unsettled()) {
-                Some(why) => (None, None, Some(why)),
+                Some(why) => (None, None, None, Some(why)),
                 None => match self.measure(state, &snap, &l, Fill::View).await {
-                    Ok(m) => (Some(m.shares.lmgw), Some(m.shares.outside), None),
-                    Err(why) => (None, None, Some(why)),
+                    Ok(m) => match m.shares() {
+                        Ok(s) => (Some(m), Some(s.lmgw), Some(s.outside), None),
+                        Err(why) => (Some(m), None, None, Some(why)),
+                    },
+                    Err(why) => (None, None, None, Some(why)),
                 },
             };
+        let mut residents = l.residents.clone();
+        if let Some(m) = &measured {
+            on_cards(&mut residents, m);
+        }
+        let devices = DeviceView::of(l.cards(measured.as_ref()), &residents);
         // Reporting only — the hold itself is enforced at resolve time
         // (`Snapshot::resolve_for_request`) and in `admit_local`, and the
         // stopping is `lifecycle::hold_sweep`'s job. "Draining" while hold is
@@ -288,8 +441,8 @@ impl VramScheduler {
             free_measured: l.capacity.as_ref().is_some_and(|c| c.measured),
             kept_free: l.capacity.as_ref().map(|c| c.kept_free).unwrap_or_default(),
             estimated_resident_bytes: l.estimated_resident,
-            devices: l.devices,
-            resident: l.residents,
+            devices,
+            resident: residents,
             queue: self.queue_view(),
             downloading: self.downloads_view(),
             note: ESTIMATE_NOTE.to_string(),

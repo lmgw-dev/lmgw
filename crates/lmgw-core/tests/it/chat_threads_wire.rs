@@ -156,6 +156,11 @@ async fn a_thread_reads_into_its_type_whole() {
             model: Some("m".into()),
             answered_by: Some("other".into()),
             images_note: Some("blind".into()),
+            notices: vec![lmgw_api_types::chat_frames::LabelNotice {
+                server_label: "kai".into(),
+                code: lmgw_api_types::chat_frames::LabelCode::Offline,
+                message: "MCP server 'kai': device 'desk' is offline".into(),
+            }],
             voice: Some(full_voice()),
             pending_approvals: Some(PendingApprovals {
                 calls: vec![PendingCall {
@@ -181,6 +186,13 @@ async fn a_thread_reads_into_its_type_whole() {
     let pending = reply.pending_approvals.as_ref().expect("the call waits");
     assert_eq!(pending[0].approval_request_id, "mcpr_1");
     assert!(reply.voice.as_ref().unwrap().timing.is_some());
+    // The turn's notices are the reply's, on the wire as it saved them.
+    assert_eq!(reply.notices.len(), 1);
+    assert_eq!(reply.notices[0].server_label, "kai");
+    assert!(
+        detail.messages[0].notices.is_empty() && live["messages"][0].get("notices").is_none(),
+        "a message without notices leaves the field out"
+    );
     assert_eq!(detail.messages[0].attachments.len(), 1);
     assert_eq!(
         detail.messages[0].context.as_ref().unwrap().excerpts.len(),

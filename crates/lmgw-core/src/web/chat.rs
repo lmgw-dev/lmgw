@@ -72,7 +72,8 @@ pub struct ListThreadsQuery {
 /// recently-archived first. `GET /chat/api/threads?archived=all` — both
 /// together, in the active list's own order (pinned first, then
 /// `updated_at DESC`). Every mode carries the same per-thread fields and
-/// `archived_count`, so the sidebar's toggle (and the Agent Runs tab) can
+/// `archived_count` and `active_count` (the stored threads in each state,
+/// temporary chats not counted), so the sidebar's toggle (and the Agent Runs tab) can
 /// label itself without a second round trip. Agent- and admin-kind threads
 /// are not special-cased here or in the sweep — they archive and purge like
 /// any other thread. A listed thread carries its `voice` but not
@@ -99,6 +100,7 @@ pub async fn list_threads(
         .await
         .unwrap_or_default();
     let archived_count = ChatRepo::archived_count(&state, &caller).await.unwrap_or(0);
+    let active_count = ChatRepo::active_count(&state, &caller).await.unwrap_or(0);
     let purge = PurgeDays::load(&state).await;
     let snap = state.snapshot();
     let temporary: Vec<_> = ChatRepo::temporary_threads(&state)
@@ -117,6 +119,7 @@ pub async fn list_threads(
     Json(chat_wire::wire(&ThreadList {
         threads: threads.iter().map(row).collect(),
         archived_count,
+        active_count,
         temporary,
         folders: folders.iter().map(chat_wire::folder).collect(),
     }))

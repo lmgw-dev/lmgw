@@ -13,7 +13,7 @@
 use leptos::prelude::*;
 
 use super::chat_bytes::Saver;
-use lmgw_ui_kit::widgets::{MenuItem, Modal, ModalFooter, RowMenu, Select};
+use lmgw_ui_kit::widgets::{Ico, MenuItem, Modal, ModalFooter, RowMenu, Select};
 
 /// The route of one thread's export. `format` is `md` or `json`.
 pub(super) fn thread_href(id: i64, format: &str) -> String {
@@ -75,10 +75,14 @@ pub(super) fn folder_items(saver: Saver, id: i64) -> Vec<MenuItem> {
         .collect()
 }
 
-/// An "Export" menu for the open thread: in the chat head, and in the
-/// temporary chat's banner (its only way out besides Keep).
+/// An "Export" menu for the open thread: in the chat head (`icon`: the
+/// header bar's download button), and in the temporary chat's banner (its
+/// only way out besides Keep, in words).
 #[component]
-pub(super) fn ExportMenu(#[prop(into)] thread: Signal<Option<i64>>) -> impl IntoView {
+pub(super) fn ExportMenu(
+    #[prop(into)] thread: Signal<Option<i64>>,
+    #[prop(optional)] icon: bool,
+) -> impl IntoView {
     let saver = Saver::new();
     let items = Signal::derive(move || {
         thread
@@ -88,26 +92,31 @@ pub(super) fn ExportMenu(#[prop(into)] thread: Signal<Option<i64>>) -> impl Into
     });
     view! {
         <span class="export-menu">
-            <RowMenu
-                items=items
-                title="Download this chat"
-                label=Signal::derive(|| "Export".to_string())
-            />
+            {if icon {
+                view! { <RowMenu items=items title="Download this chat" icon=Ico::Download/> }
+                    .into_any()
+            } else {
+                view! {
+                    <RowMenu
+                        items=items
+                        title="Download this chat"
+                        label=Signal::derive(|| "Export".to_string())
+                        chevron=true
+                    />
+                }
+                    .into_any()
+            }}
         </span>
     }
 }
 
-/// "Export all chats…" in the sidebar: a ⋯ menu at the end of the filter's
-/// line whose one entry opens the choice of format and which chats (active,
-/// archived, both).
+/// "Export all chats…", an entry of the thread list's menu: the choice of
+/// format and which chats (active, archived, both), open while `open` is.
 #[component]
-pub(super) fn ExportAll() -> impl IntoView {
+pub(super) fn ExportAll(open: RwSignal<bool>) -> impl IntoView {
     let saver = Saver::new();
-    let open = RwSignal::new(false);
     let format = RwSignal::new("md".to_string());
     let archived = RwSignal::new("all".to_string());
-    let items =
-        Signal::derive(move || vec![MenuItem::new("Export all chats…", move || open.set(true))]);
     let go = move |_| {
         let f = format.get_untracked();
         saver.save(
@@ -117,9 +126,6 @@ pub(super) fn ExportAll() -> impl IntoView {
         open.set(false);
     };
     view! {
-        <span class="export-all">
-            <RowMenu items=items title="More: export every chat"/>
-        </span>
         <Modal open=open title="Export all chats">
             <div class="field">
                 <label>"Format"</label>

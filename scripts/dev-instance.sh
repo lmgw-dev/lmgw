@@ -39,4 +39,11 @@ fi
 echo "LMGW_DATA_DIR=$LMGW_DATA_DIR"
 export LMGW_DEV=1
 
+# lmgw's document reader (crates/lmgw-doc-reader): the gateway starts it as a child for web
+# pages, e-books, e-mail, old Excel files and pictures, and looks for it one directory above
+# target/<profile>/examples/. `cargo run --example` builds only the example, so it is built
+# here first; a no-op once it is built (build it through scripts/build-slot.sh beforehand,
+# with the example, when the build slots matter).
+cargo build -p lmgw-doc-reader
+
 exec cargo run -p lmgw-core --example headless -- "$ADDR"

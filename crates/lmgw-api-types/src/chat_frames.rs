@@ -186,6 +186,48 @@ impl ErrorFrame {
     pub fn label_code(&self) -> Option<LabelCode> {
         self.code.as_deref().and_then(LabelCode::parse)
     }
+
+    /// The frame as the notice it is, when it is about an attached label (a
+    /// [`LabelCode`] and its `server_label`): the turn goes on, and the
+    /// notice is not a failure of it. `None` for every other frame.
+    pub fn label_notice(&self) -> Option<LabelNotice> {
+        Some(LabelNotice {
+            server_label: self.server_label.clone()?,
+            code: self.label_code()?,
+            message: self.message.clone(),
+        })
+    }
+}
+
+/// An MCP label the thread or its folder attached that offered a turn no
+/// tools: its `error` frame ([`ErrorFrame::label_notice`]), kept with the
+/// reply the turn saved (`chat_threads::Message::notices`), so it is still
+/// said beside that reply after the stream, in every later read of the
+/// thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LabelNotice {
+    /// The label, as the thread or folder attached it.
+    pub server_label: String,
+    pub code: LabelCode,
+    /// The sentence the frame said.
+    pub message: String,
+}
+
+impl LabelNotice {
+    /// Add `notice` to a reply's notices: one per label and code, in the
+    /// order they first came, each with the latest sentence said about it (a
+    /// continue or a resumed turn that says a label's failure in other words
+    /// replaces the older wording, it does not stack a second notice).
+    pub fn merge_into(notices: &mut Vec<Self>, notice: Self) {
+        match notices
+            .iter_mut()
+            .find(|n| n.server_label == notice.server_label && n.code == notice.code)
+        {
+            Some(n) => *n = notice,
+            None => notices.push(notice),
+        }
+    }
 }
 
 /// Why an MCP label a thread or its folder attached offers a turn no tools:
@@ -194,8 +236,13 @@ impl ErrorFrame {
 /// label failed only because its device is offline or is a device the
 /// caller is not granted, a turn left with no tool runs as a plain chat
 /// turn; after any other failure it is refused.
+///
+/// A stored reply's notices carry it too ([`LabelNotice`]): a code this build
+/// does not know (a newer gateway's) reads as [`Self::Unrecognized`], so the
+/// notice, its label and its sentence still read, and so does the reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub enum LabelCode {
     /// `tool_unreachable`: the caller may not use it — a paired device's
     /// hosted tools its key is not granted (Device tools in its policy), or
@@ -218,6 +265,12 @@ pub enum LabelCode {
     /// `allowed_tools`, or tools for its app views only.
     #[serde(rename = "tool_failed")]
     Failed,
+    /// A code this build does not know (a newer gateway's), read from a
+    /// stored notice; its sentence says it in words. No frame is read as one
+    /// ([`Self::parse`]), and this gateway never says it.
+    #[serde(other, rename = "unrecognized")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    Unrecognized,
 }
 
 impl LabelCode {
@@ -238,10 +291,12 @@ impl LabelCode {
             Self::Disabled => "tool_disabled",
             Self::Unknown => "tool_unknown",
             Self::Failed => "tool_failed",
+            Self::Unrecognized => "unrecognized",
         }
     }
 
-    /// The code a frame carries, if it is one of these.
+    /// The code a frame carries, if it is one of these ([`Self::ALL`]:
+    /// never [`Self::Unrecognized`]).
     pub fn parse(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.as_str() == code)
     }
@@ -612,6 +667,15 @@ mod tests {
         };
         assert_eq!(e.label_code(), Some(LabelCode::Offline));
         assert_eq!(e.server_label.as_deref(), Some("kai"));
+        let notice = e.label_notice().expect("a notice");
+        assert_eq!(
+            (notice.server_label.as_str(), notice.code),
+            ("kai", LabelCode::Offline)
+        );
+        assert_eq!(
+            serde_json::to_value(&notice).unwrap(),
+            json!({"server_label": "kai", "code": "tool_offline", "message": e.message}),
+        );
         for code in LabelCode::ALL {
             assert_eq!(LabelCode::parse(code.as_str()), Some(code));
             let wire = serde_json::to_value(code).unwrap();
@@ -623,10 +687,61 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(held.label_code(), None);
+        assert_eq!(held.label_notice(), None, "a failure is no notice");
         assert_eq!(
             serde_json::to_value(&held).unwrap(),
             json!({"message": "held", "code": "gpu_hold"}),
             "no label on a frame about none"
+        );
+    }
+
+    /// A stored notice whose code this build does not know still reads,
+    /// its label and sentence kept, and so does a list holding it.
+    #[test]
+    fn a_notice_with_a_code_this_build_does_not_know_still_reads() {
+        let read: Vec<LabelNotice> = serde_json::from_value(json!([
+            {"server_label": "kai", "code": "tool_offline", "message": "offline"},
+            {"server_label": "mail", "code": "tool_quota_spent", "message": "spent"},
+        ]))
+        .unwrap();
+        assert_eq!(read[0].code, LabelCode::Offline);
+        assert_eq!(
+            (
+                read[1].server_label.as_str(),
+                read[1].code,
+                read[1].message.as_str()
+            ),
+            ("mail", LabelCode::Unrecognized, "spent")
+        );
+        assert_eq!(LabelCode::parse("tool_quota_spent"), None);
+        assert_eq!(
+            LabelCode::parse("unrecognized"),
+            None,
+            "no frame reads as one"
+        );
+    }
+
+    /// One notice per label and code, in the order they first came, with the
+    /// latest sentence.
+    #[test]
+    fn notices_merge_by_label_and_code_keeping_the_latest_sentence() {
+        let n = |label: &str, code, message: &str| LabelNotice {
+            server_label: label.into(),
+            code,
+            message: message.into(),
+        };
+        let mut v = Vec::new();
+        LabelNotice::merge_into(&mut v, n("kai", LabelCode::Offline, "old"));
+        LabelNotice::merge_into(&mut v, n("mail", LabelCode::Failed, "down"));
+        LabelNotice::merge_into(&mut v, n("kai", LabelCode::Offline, "new"));
+        LabelNotice::merge_into(&mut v, n("kai", LabelCode::Disabled, "off"));
+        assert_eq!(
+            v,
+            vec![
+                n("kai", LabelCode::Offline, "new"),
+                n("mail", LabelCode::Failed, "down"),
+                n("kai", LabelCode::Disabled, "off"),
+            ]
         );
     }
 

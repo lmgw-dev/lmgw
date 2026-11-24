@@ -55,7 +55,7 @@ pub(super) fn VoiceListNote(lab: Lab) -> impl IntoView {
         VoiceList::Loading => view! { <p class="dim mini-note">"Loading voices…"</p> }.into_any(),
         VoiceList::Failed(e) => view! {
             <div class="notice err" style="margin-top:8px">
-                {format!("⚠ voice list: {e}")}
+                {format!("Voice list: {e}")}
                 <button class="btn ghost sm" on:click=move |_| lab.load_voices()>
                     "Retry"
                 </button>

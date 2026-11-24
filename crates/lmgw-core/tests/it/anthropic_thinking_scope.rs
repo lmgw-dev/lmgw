@@ -61,6 +61,7 @@ fn request(assistant: Vec<ContentPart>) -> ChatRequest {
                     name: Some("lookup".into()),
                     content: ToolResultBlock::one("KIWI"),
                     is_error: false,
+                    cache_control: None,
                 }],
             },
         ],
@@ -75,6 +76,7 @@ fn request(assistant: Vec<ContentPart>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -83,6 +85,7 @@ fn call() -> ContentPart {
         id: "toolu_1".into(),
         name: "lookup".into(),
         args: json!({"q": "kiwi"}),
+        cache_control: None,
     }
 }
 

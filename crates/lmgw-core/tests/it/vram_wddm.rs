@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use lmgw_core::vram::nvml::{DeviceId, DeviceProcesses};
 use lmgw_core::vram::wddm::tree::{self, ProcRecord};
 use lmgw_core::vram::wddm::{
     self, Adapter, Adapters, FailedAdapter, Kernel, Opened, PciAddress, Read, Segment,
@@ -77,6 +78,19 @@ fn pm(pid: u32, bytes: u64) -> ProcessMemory {
         pid,
         bytes: Some(bytes),
     }
+}
+
+/// NVML's device on bus `bus`: its id and where it is.
+fn dev(bus: u32) -> (DeviceId, PciAddress) {
+    (DeviceId(format!("GPU-{bus}")), pci(bus))
+}
+
+/// The answer for one device, on bus `bus`, listing `processes`.
+fn on(bus: u32, processes: Vec<ProcessMemory>) -> Vec<DeviceProcesses> {
+    vec![DeviceProcesses {
+        device: dev(bus).0,
+        processes,
+    }]
 }
 
 #[test]
@@ -278,19 +292,36 @@ fn processes_follow_the_probe_contract() {
         ]),
     };
     // 500 is gone: not listed.
-    let got = wddm::processes(&kernel, &[pci(1)], &[100, 200, 500], &[300, 400]).unwrap();
-    assert_eq!(got, vec![pm(100, 700 << 20), pm(400, 1 << 20)]);
+    let got = wddm::processes(&kernel, &[dev(1)], &[100, 200, 500], &[300, 400]).unwrap();
+    assert_eq!(got, on(1, vec![pm(100, 700 << 20), pm(400, 1 << 20)]));
 
     // One of lmgw's own that cannot be read is an error.
-    let err = wddm::processes(&kernel, &[pci(1)], &[100, 300], &[]).unwrap_err();
+    let err = wddm::processes(&kernel, &[dev(1)], &[100, 300], &[]).unwrap_err();
     assert!(
         err.contains("process 300") && err.contains("error 5"),
         "{err}"
     );
 
     // Asked as own and retired at once: read once, listed once.
-    let got = wddm::processes(&kernel, &[pci(1)], &[100], &[100]).unwrap();
-    assert_eq!(got, vec![pm(100, 700 << 20)]);
+    let got = wddm::processes(&kernel, &[dev(1)], &[100], &[100]).unwrap();
+    assert_eq!(got, on(1, vec![pm(100, 700 << 20)]));
+
+    // Both cards counted (device-ledger design §2.3): each process per
+    // card, with what it committed on that card's adapter, in NVML's order.
+    let got = wddm::processes(&kernel, &[dev(5), dev(1)], &[100, 200], &[400]).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            DeviceProcesses {
+                device: dev(5).0,
+                processes: vec![pm(100, 50 << 20)],
+            },
+            DeviceProcesses {
+                device: dev(1).0,
+                processes: vec![pm(100, 700 << 20), pm(400, 1 << 20)],
+            },
+        ]
+    );
 }
 
 /// An opened process the test states: what its statistics queries answer,
@@ -369,10 +400,10 @@ fn a_failing_query_is_gone_only_for_an_exited_process() {
     // Through the probe contract: the exited one of lmgw's own is not
     // listed, the running one fails the answer.
     assert_eq!(
-        wddm::processes(&kernel, &[pci(1)], &[100, 300], &[]),
-        Ok(vec![pm(300, 5 << 20)])
+        wddm::processes(&kernel, &[dev(1)], &[100, 300], &[]),
+        Ok(on(1, vec![pm(300, 5 << 20)]))
     );
-    let err = wddm::processes(&kernel, &[pci(1)], &[100, 200], &[]).unwrap_err();
+    let err = wddm::processes(&kernel, &[dev(1)], &[100, 200], &[]).unwrap_err();
     assert!(err.contains("process 200"), "{err}");
 }
 
@@ -546,6 +577,7 @@ async fn wddm_live_engine_bytes_match_nvmls_used_delta() {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     };
     let spec = AcquireSpec {
         runtime: &rt,
@@ -581,7 +613,11 @@ async fn wddm_live_engine_bytes_match_nvmls_used_delta() {
     let names = descendant_names(&tree);
     let pids: Vec<u32> = std::iter::once(pid).chain(tree.iter().copied()).collect();
     let delta = used().saturating_sub(before);
-    let listed = probe.processes(&pids, &[]).unwrap();
+    // Every card's list as one: the engine is on the one card.
+    let flat = |d: Vec<DeviceProcesses>| -> Vec<ProcessMemory> {
+        d.into_iter().flat_map(|d| d.processes).collect()
+    };
+    let listed = flat(probe.processes(&pids, &[]).unwrap());
     // A handle of this test's own keeps the engine's process object after
     // it exits, as the native supervisor's does until the log readers are
     // drained: the engine reads as gone then, as one of lmgw's own too.
@@ -590,14 +626,14 @@ async fn wddm_live_engine_bytes_match_nvmls_used_delta() {
         .expect("open the engine");
     drop(guard);
     reg.stop(Class::Chat, "live-wddm", false).await.unwrap();
-    let after_stop = probe.processes(&[], &pids).unwrap();
+    let after_stop = flat(probe.processes(&[], &pids).unwrap());
     assert!(held.exited(), "the engine has not exited after its stop");
     let exited_read = {
         let adapters = wddm::d3dkmt::adapters().unwrap();
         let all: Vec<&Adapter> = adapters.listed.iter().collect();
         wddm::d3dkmt::Real.local_committed(pid, &all)
     };
-    let exited_own = probe.processes(&[pid], &[]);
+    let exited_own = probe.processes(&[pid], &[]).map(flat);
     drop(held);
     eprintln!(
         "wddm live: the exited engine with a handle held: {exited_read:?}, as own {exited_own:?}"

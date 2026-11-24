@@ -256,7 +256,7 @@ async fn a_config_save_answers_the_masked_config_and_the_scope_its_token_now_has
             "message",
         ],
     );
-    assert_eq!(saved.token_scope, "token: m1");
+    assert_eq!(saved.token_scope, "Its token reaches: m1");
     // The secret is never echoed; whether it is set is.
     assert_eq!(saved.config["api_token"], json!({ "has_value": true }));
     assert_eq!(saved.config["label"], json!("hi"));
@@ -441,7 +441,7 @@ async fn a_token_answer_carries_the_token_and_the_scope_and_never_prints_it() {
         (got.scope_mode.as_str(), got.scope_patterns.as_str()),
         ("all", "")
     );
-    assert_eq!(got.scope_note, "token: any model");
+    assert_eq!(got.scope_note, "Its token reaches any model");
     // Only a rotation has a stopped app container or a scope warning to report.
     assert!(
         live.get("service_stopped").is_none() && live.get("warning").is_none(),
@@ -458,7 +458,11 @@ async fn a_token_answer_carries_the_token_and_the_scope_and_never_prints_it() {
         json!({ "id": "cfg", "values": { "model": "m1" } }),
     )
     .await;
-    assert_eq!(saved["token_scope"], json!("token: m1"), "{saved}");
+    assert_eq!(
+        saved["token_scope"],
+        json!("Its token reaches: m1"),
+        "{saved}"
+    );
     let (_, again) = op(&gw, "agent_token_get", json!({ "id": "cfg" })).await;
     let again = common::round_trips::<dto::AgentTokenRead>("token_get, scoped", &again);
     assert_eq!(again.token, got.token);
@@ -466,7 +470,18 @@ async fn a_token_answer_carries_the_token_and_the_scope_and_never_prints_it() {
         (again.scope_mode.as_str(), again.scope_patterns.as_str()),
         ("allow", "m1")
     );
-    assert_eq!(again.scope_note, "token: m1");
+    assert_eq!(again.scope_note, "Its token reaches: m1");
+    // The detail lists the models the token reaches, one entry each.
+    let detail: serde_json::Value = gw
+        .client()
+        .get(format!("{gw}/api/agents/cfg"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["token"]["scope_models"], json!(["m1"]), "{detail}");
 
     // Rotating replaces it, and says the old one stopped working.
     let (status, live) = op(&gw, "agent_token_rotate", json!({ "id": "cfg" })).await;

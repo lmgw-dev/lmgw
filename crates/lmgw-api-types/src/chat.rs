@@ -411,6 +411,10 @@ pub struct ThreadList {
     pub threads: Vec<ThreadRow>,
     /// How many threads are archived, whichever list was asked for.
     pub archived_count: i64,
+    /// How many stored threads are active (not archived), whichever list was
+    /// asked for; temporary threads are not counted. An older gateway sends
+    /// none, which reads as 0.
+    pub active_count: i64,
     /// Temporary threads, the most recently active first.
     pub temporary: Vec<ThreadRow>,
     /// Every folder, as `GET /chat/api/folders` lists them.

@@ -37,11 +37,21 @@ async fn rows_until(
     what: &str,
     cond: impl Fn(&[store::RequestLogRow]) -> bool,
 ) -> Vec<store::RequestLogRow> {
+    alias_rows_until(f, "chat-model", what, cond).await
+}
+
+/// [`rows_until`] for the rows of `alias`.
+async fn alias_rows_until(
+    f: &Fixture,
+    alias: &str,
+    what: &str,
+    cond: impl Fn(&[store::RequestLogRow]) -> bool,
+) -> Vec<store::RequestLogRow> {
     for _ in 0..500 {
         let rows = store::query_logs(
             &f.state.db,
             &store::LogFilter {
-                alias: Some("chat-model".into()),
+                alias: Some(alias.into()),
                 limit: 1000,
                 ..Default::default()
             },
@@ -85,7 +95,12 @@ async fn a_count_given_up_on_mid_load_leaves_its_model_ready_and_idle() {
     // future, and with it the connection.
     counting.abort();
     let _ = counting.await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The count's own row says it went away — written once hyper dropped
+    // the handler, naming where the count was.
+    let rows = rows_until(&f, "the count's 499 row", |rows| {
+        rows.iter().any(|r| r.status == 499)
+    })
+    .await;
 
     // The model finishes loading with nobody waiting for it.
     f.world().health_held = false;
@@ -94,12 +109,6 @@ async fn a_count_given_up_on_mid_load_leaves_its_model_ready_and_idle() {
     })
     .await;
 
-    // The count's own row says it went away — written once hyper dropped
-    // the handler, naming where the count was.
-    let rows = rows_until(&f, "the count's 499 row", |rows| {
-        rows.iter().any(|r| r.status == 499)
-    })
-    .await;
     let row = rows.iter().find(|r| r.status == 499).unwrap();
     assert_eq!(row.error_kind.as_deref(), Some("client_disconnected"));
     assert!(
@@ -201,7 +210,11 @@ async fn a_request_given_up_on_mid_eviction_leaves_no_entry_stopping() {
     .await;
     embedding.abort();
     let _ = embedding.await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Its 499 row: hyper has dropped the handler.
+    alias_rows_until(&f, "embed/embed-model", "the embed's 499 row", |rows| {
+        rows.iter().any(|r| r.status == 499)
+    })
+    .await;
     go.send_replace(true);
 
     until("the stopped entry to go", || {
@@ -231,7 +244,11 @@ async fn a_start_given_up_on_still_has_its_pid_learned() {
     .await;
     chatting.abort();
     let _ = chatting.await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Its 499 row: hyper has dropped the handler.
+    rows_until(&f, "the chat's 499 row", |rows| {
+        rows.iter().any(|r| r.status == 499)
+    })
+    .await;
     let before = f.pid_inspects().len();
 
     f.world().health_held = false;

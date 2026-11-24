@@ -182,6 +182,9 @@ pub mod dialect {
     pub const DASHBOARD: &str = "dashboard";
     /// The Audio lab's own routes: the dashboard's, but a failure is `{error, code?}`.
     pub const LAB: &str = "lab";
+    /// The docling-serve-compatible routes: docling-serve's own shapes, a
+    /// failure is FastAPI's `{detail}`.
+    pub const DOCLING: &str = "docling-serve";
 }
 
 /// [`MODEL_TASK`] values.

@@ -183,8 +183,14 @@ pub async fn update(
         (LabPresetBody::QuestionSet(after), _) => {
             after.unmeasure_changed(&Default::default());
         }
-        // An image prompt and audio settings measure nothing.
-        (LabPresetBody::ImagePrompt(_) | LabPresetBody::AudioSettings(_), _) => {}
+        // An image prompt, audio settings and document options measure
+        // nothing.
+        (
+            LabPresetBody::ImagePrompt(_)
+            | LabPresetBody::AudioSettings(_)
+            | LabPresetBody::DocumentOptions(_),
+            _,
+        ) => {}
     }
     let body = match checked(lab, &w.name, &preset) {
         Ok(b) => b,

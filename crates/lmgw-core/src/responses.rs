@@ -294,6 +294,18 @@ pub(crate) fn no_stored_response(id: &str) -> GatewayError {
     ))
 }
 
+/// A stored history's messages. A System message of several text parts that
+/// was stored before the system role joined its parts by a blank line
+/// ([`Message::joined_text`]) is joined by a line break here, as the
+/// ingress did when it was stored, so it renders as it did then.
+fn stored_history(raw: &str) -> Result<Vec<Message>, serde_json::Error> {
+    let history: Vec<Message> = serde_json::from_str(raw)?;
+    Ok(history
+        .into_iter()
+        .map(Message::with_system_text_joined)
+        .collect())
+}
+
 /// Load the response a request continues from, splice its conversation in front
 /// of the new turn, and pair its pending calls with the client's verdicts
 /// (`by`: who decides them; `None` for a count, which decides nothing).
@@ -320,7 +332,7 @@ async fn load_chain(
         return Err(no_stored_response(prev_id));
     };
 
-    let history: Vec<Message> = serde_json::from_str(&stored.messages).map_err(|e| {
+    let history = stored_history(&stored.messages).map_err(|e| {
         GatewayError::Internal(format!("stored response {prev_id} is unreadable: {e}"))
     })?;
 
@@ -1068,5 +1080,30 @@ async fn persist(state: &SharedState, save: &SaveCtx, enc: &ResponsesEncoder, ru
     };
     if let Err(e) = store::insert_response(&state.db, &row).await {
         tracing::error!("storing response {}: {e}", row.id);
+    }
+}
+
+#[cfg(test)]
+mod stored_history_tests {
+    use super::*;
+    use crate::ir::{ContentPart, Role};
+
+    #[test]
+    fn a_stored_system_message_of_several_parts_renders_as_it_did_when_stored() {
+        let raw = serde_json::to_string(&vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentPart::text("a"), ContentPart::text("b")],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentPart::text("x"), ContentPart::text("y")],
+            },
+        ])
+        .unwrap();
+        let history = stored_history(&raw).unwrap();
+        assert_eq!(history[0].content.len(), 1);
+        assert_eq!(history[0].joined_text(), "a\nb");
+        assert_eq!(history[1].content.len(), 2);
     }
 }

@@ -124,11 +124,23 @@ impl Layout {
             ..full
         };
         let mut recurrent = 0;
+        // A looped model (`layer_loop`) keeps a cache and a state per pass:
+        // the counts below take each stored layer of the loop core once for
+        // every pass. With `from` > 0 a pass's cache is counted with the
+        // stored layer it repeats. llama.cpp instead appends the passes'
+        // cache slots after the stored layers and counts `--n-gpu-layers`
+        // over all of them (b12648: "offloaded 49/49 layers" for 24 stored),
+        // so a partial offload of a looped model is approximate here.
+        let passes = |a: u64, b: u64, f: &dyn Fn(u64, u64) -> u64| {
+            s.loop_weighted(a, b, |a, b| Some(f(a, b)))
+                .unwrap_or(u64::MAX)
+        };
         if per_layer.is_some() || windows.is_some() {
             // Bounded: the array matched block_count, and arrays are kept
             // only up to `gguf::NUMERIC_ARRAY_RETAIN` elements.
             for i in 0..n {
                 let h = per_layer.map_or(scalar, |p| p[i as usize]);
+                let m = passes(i, i + 1, &|a, b| b - a);
                 let attends = match interval {
                     Some(k) => (i + 1).is_multiple_of(k),
                     None => h > 0,
@@ -137,7 +149,7 @@ impl Layout {
                     // A recurrent block keeps a state; an attention-free
                     // one (Deci-style) keeps nothing.
                     if (interval.is_some() || s.has_recurrent_keys) && i >= from {
-                        recurrent += 1;
+                        recurrent += m;
                     }
                     continue;
                 }
@@ -149,8 +161,8 @@ impl Layout {
                 let k = if windowed { &mut swa } else { &mut full };
                 k.max_heads = k.max_heads.max(h);
                 if i < owners && i >= from {
-                    k.own_layers += 1;
-                    k.own_heads += h;
+                    k.own_layers = k.own_layers.saturating_add(m);
+                    k.own_heads = k.own_heads.saturating_add(h.saturating_mul(m));
                 }
             }
         } else {
@@ -165,15 +177,15 @@ impl Layout {
                 let a = a.min(b);
                 every.map_or(b - a, |k| b / k - a / k)
             };
+            let layers = |a: u64, b: u64| b.saturating_sub(a);
             let special = specials(0, n);
-            let own_special = specials(from, owners);
+            let own_special = passes(from, owners, &specials);
             full.own_layers = own_special;
             full.max_heads = if special > 0 { scalar } else { 0 };
             if interval.is_some() {
-                let on = n.saturating_sub(from.min(n));
-                recurrent = on - specials(from, n);
+                recurrent = passes(from, n, &layers).saturating_sub(passes(from, n, &specials));
             } else if stride.is_some() {
-                swa.own_layers = owners.saturating_sub(from.min(owners)) - own_special;
+                swa.own_layers = passes(from, owners, &layers).saturating_sub(own_special);
                 swa.max_heads = if n > special { scalar } else { 0 };
             }
             full.own_heads = full.own_layers.saturating_mul(scalar);
@@ -399,5 +411,87 @@ mod tests {
         };
         let e = Layout::of(&s).unwrap_err();
         assert!(e.contains("head_count_kv"), "{e}");
+    }
+
+    /// The stored layers, then `count − 1` copies of the core `start..end`:
+    /// the layers llama.cpp keeps a cache for.
+    fn unrolled<T: Clone>(stored: &[T], start: usize, end: usize, count: usize) -> Vec<T> {
+        let mut v = stored.to_vec();
+        for _ in 1..count {
+            v.extend_from_slice(&stored[start..end]);
+        }
+        v
+    }
+
+    fn looped(s: ModelSummary, start: u64, end: u64, count: u64) -> ModelSummary {
+        ModelSummary {
+            layer_loop: Some(crate::gguf::LayerLoop { start, end, count }),
+            ..s
+        }
+    }
+
+    /// A looped model (Inkling 2 Mini: 24 stored layers, core 6..18 run 3
+    /// times) is laid out as the same model unrolled to its 48 cache slots,
+    /// on the per-layer path and in closed form, and with `from` cutting
+    /// into the core.
+    #[test]
+    fn a_looped_model_lays_out_as_its_unrolled_self() {
+        let base = ModelSummary {
+            head_count: Some(24),
+            embedding_length: Some(2304),
+            key_length: Some(128),
+            value_length: Some(128),
+            sliding_window: Some(1024),
+            ..Default::default()
+        };
+        let windows = |n: usize| (0..n).map(|i| (i + 1) % 6 != 0).collect::<Vec<_>>();
+        let per_layer = |w: Vec<bool>| ModelSummary {
+            block_count: Some(w.len() as u64),
+            head_count_kv_per_layer: Some(vec![8; w.len()]),
+            sliding_window_pattern: Some(w.len() as u64),
+            sliding_window_pattern_is_array: true,
+            sliding_window_layers: Some(w),
+            ..base.clone()
+        };
+        let stored = looped(per_layer(windows(24)), 6, 18, 3);
+        let flat = per_layer(unrolled(&windows(24), 6, 18, 3));
+        let l = Layout::of(&stored).unwrap();
+        assert_eq!(l, Layout::of(&flat).unwrap());
+        assert_eq!(l.full.unwrap().own_layers, 8);
+        assert_eq!(l.swa.unwrap().0.own_layers, 40);
+
+        // Closed form: a scalar header with an integer stride.
+        let stride = |layers| ModelSummary {
+            block_count: Some(layers),
+            head_count_kv: Some(8),
+            sliding_window_pattern: Some(6),
+            ..base.clone()
+        };
+        assert_eq!(
+            Layout::of(&looped(stride(24), 6, 18, 3)).unwrap(),
+            Layout::of(&stride(48)).unwrap()
+        );
+
+        // A hybrid in closed form: every 4th layer attends, the rest keep a
+        // state, each pass its own.
+        let hybrid = |layers| ModelSummary {
+            block_count: Some(layers),
+            head_count_kv: Some(8),
+            full_attention_interval: Some(4),
+            ..base.clone()
+        };
+        let l = Layout::of(&looped(hybrid(24), 4, 12, 2)).unwrap();
+        assert_eq!(l, Layout::of(&hybrid(32)).unwrap());
+        assert_eq!((l.full.unwrap().own_layers, l.recurrent_layers), (8, 24));
+
+        // `from` inside the core: the stored layers 10..24 keep their
+        // caches, the core's 10..18 once more per further pass. Of 10..24,
+        // 11, 17 and 23 are full and 11 layers windowed; of 10..18, 11 and
+        // 17 are full and 6 windowed.
+        let l = Layout::of_from(&stored, 10).unwrap();
+        assert_eq!(l.swa.unwrap().0.own_layers, 11 + 2 * 6);
+        assert_eq!(l.full.unwrap().own_layers, 3 + 2 * 2);
+        let c = Layout::of_from(&looped(stride(24), 6, 18, 3), 10).unwrap();
+        assert_eq!(c, l);
     }
 }

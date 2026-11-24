@@ -483,6 +483,7 @@ async fn extract_and_store(
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         let result = agent::run(
             ir,
@@ -698,6 +699,7 @@ impl ExtractionPlan {
                 ),
                 parameters: extract::emit_schema(),
                 strict: None,
+                anthropic_fields: Default::default(),
             },
         )
     }

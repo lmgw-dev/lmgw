@@ -95,7 +95,7 @@ pub(crate) fn speech_lead(code: &str) -> Option<&'static str> {
 pub(crate) fn refusal_link(code: &str) -> Option<(&'static str, &'static str)> {
     match code {
         "voice_needs_transcript" => Some(("/audio-lab", "Open the Audio lab")),
-        "audio_image_lacks_espeak" => Some(("/backends", "Open Engines")),
+        "audio_image_lacks_espeak" => Some(("/backends/images", "Open Engines")),
         _ => None,
     }
 }
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(t, "the audio.cpp image lacks eSpeak NG — m");
         assert_eq!(
             refusal_link("audio_image_lacks_espeak").unwrap().0,
-            "/backends"
+            "/backends/images"
         );
         assert_eq!(refusal_link("upstream"), None);
         // Anything else is said as it came.

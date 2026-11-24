@@ -1,5 +1,6 @@
-//! The Builds tab: one row per build, its run history unfolded under it, and
-//! the two row modals (Check merge, Delete).
+//! A build's pieces in the detail pane: the repositories to start one from
+//! (the overview's), its update state as rows, its run history as a table
+//! in its box, and the two build modals (Check merge, Delete).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -11,110 +12,24 @@ use lmgw_api_types::builds::{
 use super::editor::EditorSeed;
 use super::reports::MergeReportView;
 use super::{
-    ago, engine_chip, extra_short, local_ts, run_duration, run_tag, sha7, short_repo, status_chip,
-    tag_only, use_bk, use_chips, Bk, LogTarget,
+    ago, engine_label, extra_short, local_ts, run_duration, run_tag, sha7, status_chip, tag_only,
+    use_bk, Bk, LogTarget,
 };
 use crate::backends_api as api;
 use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
-use crate::widgets::{ConfirmButton, CopyBtn, MenuItem, Modal, ModalFooter, RowMenu};
+use crate::widgets::{
+    ActionRow, ConfirmButton, MenuItem, Modal, ModalFooter, PrefGroup, RowMenu, StackRow,
+};
 
-/// The builds table's column count (the actions column included).
-const COLS: u32 = 9;
 /// Runs per history page. Said on the page ("the newest 10") and paged
 /// further back with `before`, never a silent cap.
 const PAGE: u32 = 10;
 
+/// What a build is, and the repositories to start one from: the overview's
+/// group, whether or not there are builds yet.
 #[component]
-pub fn BuildsTab() -> impl IntoView {
-    let bk = use_bk();
-    let loaded = move || bk.builds.with(Option::is_some);
-    let empty = move || bk.builds.with(|b| b.as_ref().is_some_and(Vec::is_empty));
-    let build_ids = Memo::new(move |_| {
-        bk.builds.with(|b| {
-            b.as_ref()
-                .map(|b| b.iter().map(|v| v.build.id).collect::<Vec<_>>())
-                .unwrap_or_default()
-        })
-    });
-    view! {
-        {move || {
-            bk.builds_err
-                .get()
-                .map(|e| {
-                    let stale = bk.builds.with(Option::is_some);
-                    view! {
-                        <div class="notice err row">
-                            {if stale { "Refreshing the builds failed: " } else { "Loading the builds failed: " }}
-                            {e}
-                            <button class="btn ghost sm" on:click=move |_| bk.load_builds()>
-                                "Retry"
-                            </button>
-                        </div>
-                    }
-                })
-        }}
-        {move || {
-            bk.usage_err
-                .get()
-                .map(|e| {
-                    view! {
-                        <div class="notice warn">
-                            <b>"Who uses which image could not be told"</b>
-                            {format!(
-                                "{e}. Every \u{201c}used by\u{201d} on this page is empty for that reason, not because nothing uses the image."
-                            )}
-                        </div>
-                    }
-                })
-        }}
-        <div class="fill-pane card pad0">
-            <Show
-                when=empty
-                fallback=move || {
-                    view! {
-                        <table class="data many-cols bk-builds">
-                            <thead>
-                                <tr>
-                                    <th class="bk-late">"Engine"</th>
-                                    <th>"Build"</th>
-                                    <th class="bk-early">"Repository"</th>
-                                    <th>"Ref"</th>
-                                    <th class="col-p2">"Extras"</th>
-                                    <th>"Last run"</th>
-                                    <th class="bk-mid">"Image"</th>
-                                    <th class="col-p3 num-h" title="Class defaults, model overrides and containers (running or stopped) on its moving tag">
-                                        "Used by"
-                                    </th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <Show when=move || !loaded() && bk.builds_err.with(Option::is_none)>
-                                    <tr>
-                                        <td colspan=COLS class="dim">"Loading…"</td>
-                                    </tr>
-                                </Show>
-                                // Keyed by the build: a re-read list updates
-                                // the row in place, so an open menu, an armed
-                                // confirm and an unfolded history survive it.
-                                <For each=move || build_ids.get() key=|id| *id let:id>
-                                    <BuildRow id=id/>
-                                </For>
-                            </tbody>
-                        </table>
-                    }
-                }
-            >
-                <EmptyState/>
-            </Show>
-        </div>
-    }
-}
-
-/// No builds yet: what a build is, and the four repositories to start from.
-#[component]
-fn EmptyState() -> impl IntoView {
+pub fn Starts() -> impl IntoView {
     let bk = use_bk();
     bk.ensure_env();
     let presets = move || match bk.env.get() {
@@ -122,46 +37,37 @@ fn EmptyState() -> impl IntoView {
         _ => Vec::new(),
     };
     view! {
-        <div class="bk-empty">
-            <p>
-                "No builds yet. A build turns a git repository — upstream or a fork, with pull "
-                "requests merged on top — into a container image for one of lmgw's engines. "
-                "Each run is checked on the GPU before anything uses it, and every image keeps "
-                "a record of exactly what went into it."
-            </p>
-            <div class="row">
-                <For each=presets key=|p| p.id.clone() let:p>
-                    {
-                        let label = p.name.clone();
-                        let title = format!("{} · {}", super::engine_label(p.engine), p.repo_url);
-                        let seed = StoredValue::new(EditorSeed::from_preset(&p));
-                        view! {
-                            <button
-                                class="btn"
-                                title=title
-                                on:click=move |_| bk.editor.set(Some(seed.get_value()))
-                            >
-                                {label}
-                            </button>
-                        }
+        <PrefGroup
+            title="Start a build"
+            desc="A build turns a git repository (upstream or a fork, with pull requests merged on top) into a container image for one of lmgw's engines. Each run is checked on the GPU before anything uses it, and every image keeps a record of exactly what went into it."
+        >
+            <For each=presets key=|p| p.id.clone() let:p>
+                {
+                    let seed = StoredValue::new(EditorSeed::from_preset(&p));
+                    view! {
+                        <ActionRow
+                            title=p.name.clone()
+                            sub=format!("{} · {}", engine_label(p.engine), p.repo_url)
+                            chevron=true
+                            on_click=Callback::new(move |()| bk.editor.set(Some(seed.get_value())))
+                        />
                     }
-                </For>
-                <button
-                    class="btn ghost"
-                    on:click=move |_| bk.editor.set(Some(EditorSeed::blank()))
-                >
-                    "Custom URL…"
-                </button>
-            </div>
+                }
+            </For>
+            <ActionRow
+                title="Custom repository…"
+                sub="Any git address: a fork, a mirror, another forge"
+                chevron=true
+                on_click=Callback::new(move |()| bk.editor.set(Some(EditorSeed::blank())))
+            />
             {move || match bk.env.get() {
-                None => Some(view! { <div class="dim">"Loading the repository presets…"</div> }.into_any()),
+                None => Some(view! { <div class="prow notice-row">"Loading the repository presets…"</div> }.into_any()),
                 Some(Err(e)) => {
                     Some(
                         view! {
-                            <div class="notice err row">
-                                "The build environment did not load: "
-                                {e}
-                                <button class="btn ghost sm" on:click=move |_| bk.retry_env()>
+                            <div class="prow problem-row">
+                                <span class="spacer">"The build environment did not load: " {e}</span>
+                                <button class="btn sm" on:click=move |_| bk.retry_env()>
                                     "Retry"
                                 </button>
                             </div>
@@ -171,277 +77,7 @@ fn EmptyState() -> impl IntoView {
                 }
                 Some(Ok(_)) => None,
             }}
-        </div>
-    }
-}
-
-/// What a build is called on the page: its name, else its slug.
-fn display_name(v: &BuildView) -> String {
-    if v.build.spec.name.is_empty() {
-        v.build.spec.slug.clone()
-    } else {
-        v.build.spec.name.clone()
-    }
-}
-
-/// The builds table's row for build `id`. What it shows follows the list as
-/// it is re-read; the row itself stays until the build leaves the list.
-#[component]
-fn BuildRow(id: i64) -> impl IntoView {
-    let bk = use_bk();
-    // A row whose build just left the list keeps its last view until the
-    // `For` drops it.
-    let v = Memo::new(move |prev: Option<&BuildView>| {
-        bk.builds
-            .with(|b| {
-                b.as_ref()
-                    .and_then(|b| b.iter().find(|x| x.build.id == id).cloned())
-            })
-            .or_else(|| prev.cloned())
-            .unwrap_or_default()
-    });
-    let name = Memo::new(move |_| v.with(display_name));
-    let moving = Memo::new(move |_| v.with(|v| v.moving_tag.clone()));
-    let live = Memo::new(move |_| bk.live.with(|m| m.get(&id).cloned()));
-    // The job alone, for what must not be redrawn on every progress tick (a
-    // button under the pointer, the menu).
-    let live_job = Memo::new(move |_| live.with(|l| l.as_ref().map(|l| l.job_id)));
-    let is_live = move || live_job.with(Option::is_some);
-    let open = move || bk.expanded.with(|s| s.contains(&id));
-    let toggle = move |_| {
-        bk.expanded.update(|s| {
-            if !s.remove(&id) {
-                s.insert(id);
-            }
-        })
-    };
-
-    let status_cell = move || {
-        let l = live.get();
-        let last_status = v.with(|v| v.last_run.as_ref().map(|r| r.status));
-        match (l.as_ref(), last_status) {
-            (Some(l), _) => status_chip(BuildRunStatus::Running, Some(l)),
-            (None, Some(s)) => status_chip(s, None),
-            (None, None) => view! { <span class="dim">"never run"</span> }.into_any(),
-        }
-    };
-    let when = move || {
-        v.with(|v| {
-            v.last_run.as_ref().map(|r| {
-                r.finished_at
-                    .clone()
-                    .unwrap_or_else(|| r.started_at.clone())
-            })
-        })
-        .map(|w| {
-            let title = local_ts(&w);
-            view! { <span class="dim bk-when" title=title>{ago(&w)}</span> }
-        })
-    };
-
-    let current_tag = Memo::new(move |_| v.with(|v| v.current_run.as_ref().and_then(run_tag)));
-    let image_title = move || match current_tag.get() {
-        Some(t) => format!("{}\n→ {t}", moving.get()),
-        None => format!("{}\nnot built yet", moving.get()),
-    };
-    let image_cell = move || {
-        current_tag
-            .get()
-            .as_deref()
-            .map(|t| tag_only(t).to_string())
-            .unwrap_or_else(|| "—".to_string())
-    };
-
-    let users = move || v.with(|v| v.used_by.len());
-    let users_title = move || {
-        v.with(|v| {
-            if v.used_by.is_empty() {
-                "nothing uses its moving tag".to_string()
-            } else {
-                v.used_by
-                    .iter()
-                    .map(super::use_label)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        })
-    };
-
-    let extras_title = move || {
-        v.with(|v| {
-            v.build
-                .spec
-                .extras
-                .iter()
-                .map(|e| {
-                    let pin = e
-                        .pin()
-                        .map(|p| format!(" @ {}", sha7(p)))
-                        .unwrap_or_default();
-                    format!("{}{pin}", e.label())
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    };
-    let extras_chips = move || {
-        let extras = v.with(|v| v.build.spec.extras.clone());
-        if extras.is_empty() {
-            return view! { <span class="dim">"—"</span> }.into_any();
-        }
-        extras
-            .iter()
-            .map(|e| {
-                let pin = e.pin().map(|p| format!(" @{}", sha7(p)));
-                let pinned = pin.is_some();
-                view! {
-                    <span class="type-badge" class:bk-pinned=pinned>
-                        {extra_short(e)}
-                        {pin}
-                    </span>
-                }
-            })
-            .collect_view()
-            .into_any()
-    };
-
-    let primary = move || {
-        if is_live() {
-            view! {
-                <button
-                    class="btn ghost sm"
-                    title="The live log, the phase and Cancel"
-                    on:click=move |_| v.with_untracked(|v| bk.open_log(v))
-                >
-                    "Log"
-                </button>
-            }
-            .into_any()
-        } else {
-            view! {
-                <button
-                    class="btn sm"
-                    title="Fetch, merge, build, verify and tag — skipped when these exact inputs already have a verified image"
-                    on:click=move |_| bk.run(id, name.get_untracked(), false)
-                >
-                    "Run"
-                </button>
-            }
-            .into_any()
-        }
-    };
-
-    let menu = Signal::derive(move || {
-        let live_job = live_job.get();
-        let has_run = v.with(|v| v.last_run.is_some());
-        let mut items = vec![
-            MenuItem::new("Rebuild anyway", move || bk.run(id, name.get_untracked(), true))
-                .disabled(live_job.is_some())
-                .title(
-                    "Build even when these exact inputs already have a verified image, pulling newer base images",
-                ),
-            MenuItem::new(
-                if live_job.is_some() { "View live log" } else { "View last log" },
-                move || v.with_untracked(|v| bk.open_log(v)),
-            )
-            .disabled(!has_run && live_job.is_none()),
-            MenuItem::new("Edit…", move || {
-                bk.ensure_env();
-                bk.editor.set(Some(v.with_untracked(EditorSeed::edit)));
-            }),
-            MenuItem::new("Duplicate", move || duplicate(bk, id, name.get_untracked()))
-                .title("A copy to change: the quick way to a variant with one more PR"),
-            MenuItem::new("Check merge", move || {
-                bk.merge.set(Some((id, name.get_untracked())))
-            })
-            .title("Fetch and merge every extra onto the base in a throwaway worktree — nothing is built"),
-            MenuItem::new("Check for updates", move || {
-                bk.check_updates(Some(id), name.get_untracked())
-            })
-            .disabled(bk.checking.with(|c| c.contains(&id) || c.contains(&0)))
-            .title("Ask the remote now whether the ref or an unpinned extra moved since the last verified run"),
-        ];
-        if let Some(job) = live_job {
-            items.push(
-                MenuItem::new("Cancel run", move || bk.cancel(job, name.get_untracked()))
-                    .danger()
-                    .title("Stop the build; the compile cache keeps what it compiled"),
-            );
-        }
-        items.push(
-            MenuItem::new("Delete…", move || {
-                bk.deleting.set(Some(v.get_untracked()))
-            })
-            .disabled(live_job.is_some())
-            .title(if live_job.is_some() {
-                "Cancel the run first"
-            } else {
-                "Delete the build; its runs stay in the history"
-            }),
-        );
-        items
-    });
-
-    let spec = move |f: fn(&lmgw_api_types::builds::BuildSpec) -> String| {
-        move || v.with(|v| f(&v.build.spec))
-    };
-    let repo_title = spec(|s| s.repo_url.clone());
-    let repo_short = spec(|s| short_repo(&s.repo_url));
-    let git_ref = spec(|s| s.git_ref.clone());
-    // The slug is the tooltip's, not the cell's: the cell is the one that
-    // gives way, so it holds the name alone (the editor has the slug too).
-    let name_title = move || {
-        v.with(|v| {
-            let s = &v.build.spec;
-            // An unnamed build already shows its slug as the name.
-            let slug = if s.name.is_empty() {
-                String::new()
-            } else {
-                format!("\n{}", s.slug)
-            };
-            format!("{}{slug}\n{}\n{}", name.get(), s.repo_url, moving.get())
-        })
-    };
-    let flags = move || v.with(|v| v.update.as_ref().map(update_flags));
-    view! {
-        <tr class:bk-open=open>
-            <td class="bk-late">{move || engine_chip(v.with(|v| v.build.spec.engine))}</td>
-            <td class="clip" title=name_title>
-                <button
-                    type="button"
-                    class="link-btn bk-toggle"
-                    aria-expanded=move || open().to_string()
-                    title="Run history"
-                    on:click=toggle
-                >
-                    <span class="caret-icon" aria-hidden="true">"▸"</span>
-                    <span class="bk-name">{move || name.get()}</span>
-                </button>
-            </td>
-            <td class="bk-early mono-sm bk-cut-s" title=repo_title>{repo_short}</td>
-            <td class="mono-sm bk-cut-s" title=git_ref>{git_ref}</td>
-            <td class="col-p2 bk-cut-s" title=extras_title>
-                <span class="bk-chips">{extras_chips}</span>
-            </td>
-            // The update chips ride with the last run (a new run is what
-            // they are about) in a column that never hides and never clips,
-            // so whether a build can be updated reads at every width.
-            <td>
-                <span class="bk-status">{status_cell} {when} {flags}</span>
-            </td>
-            <td class="bk-mid mono-sm bk-cut-s" title=image_title>{image_cell}</td>
-            <td class="col-p3 num" title=users_title>{users}</td>
-            <td class="actions">
-                <span class="row-acts">{primary} <RowMenu items=menu/></span>
-            </td>
-        </tr>
-        <Show when=open>
-            <tr class="detail-row">
-                <td colspan=COLS>
-                    <RunHistory v=v name=name moving=moving/>
-                </td>
-            </tr>
-        </Show>
+        </PrefGroup>
     }
 }
 
@@ -478,7 +114,7 @@ pub fn update_tooltip(u: &UpdateStatus) -> String {
 /// update. One short word each, so the cell stays narrow enough for the
 /// table at every width; the reasons ("master +37 commits", …) are the
 /// tooltip's and the unfolded row's. Nothing when up to date.
-fn update_flags(u: &UpdateStatus) -> impl IntoView {
+pub fn update_flags(u: &UpdateStatus) -> impl IntoView {
     let title = update_tooltip(u);
     let reason = u.has_update().then(|| {
         view! {
@@ -499,7 +135,7 @@ fn update_flags(u: &UpdateStatus) -> impl IntoView {
     view! { {reason} {failed} }
 }
 
-fn duplicate(bk: Bk, id: i64, name: String) {
+pub fn duplicate(bk: Bk, id: i64, name: String) {
     let args = BuildSetArgs {
         action: BuildSetAction::Duplicate,
         id: Some(id),
@@ -562,12 +198,128 @@ impl ReadQueue {
     }
 }
 
-/// A build's runs, newest first, a page at a time. The facts above them
-/// follow the build as the list is re-read.
+/// A build's update state (§8) as its group's rows: the reasons a new run
+/// would build something newer, the extras that moved, what could not be
+/// checked, and when; Check now on the heading's line.
 #[component]
-fn RunHistory(v: Memo<BuildView>, name: Memo<String>, moving: Memo<String>) -> impl IntoView {
+pub fn UpdateGroup(id: i64, v: Memo<BuildView>, name: Memo<String>) -> impl IntoView {
     let bk = use_bk();
-    let id = v.with_untracked(|v| v.build.id);
+    let has_verified = move || {
+        v.with(|v| {
+            v.current_run.is_some()
+                || v.last_run.as_ref().is_some_and(|r| {
+                    matches!(
+                        r.status,
+                        BuildRunStatus::Succeeded | BuildRunStatus::Unverified
+                    )
+                })
+        })
+    };
+    let checking = move || bk.checking.with(|c| c.contains(&id) || c.contains(&0));
+    let suffix = move || {
+        (has_verified() || v.with(|v| v.update.is_some())).then(|| {
+            view! {
+                <button
+                    class="btn flat sm"
+                    disabled=checking
+                    title="Ask the remote now whether the ref or an unpinned extra moved since the last verified run"
+                    on:click=move |_| bk.check_updates(Some(id), name.get_untracked())
+                >
+                    {move || if checking() { "Checking…" } else { "Check now" }}
+                </button>
+            }
+        })
+    };
+    view! {
+        <PrefGroup title="Updates" suffix=ViewFn::from(suffix)>
+            {move || match v.with(|v| v.update.clone()) {
+                Some(u) if u.has_update() => {
+                    let checked = if u.checked_at.is_empty() {
+                        String::new()
+                    } else {
+                        format!("checked {}", ago(&u.checked_at))
+                    };
+                    let checked_title = local_ts(&u.checked_at);
+                    view! {
+                        <div class="prow notice-row warn bk-upd-head" title=checked_title>
+                            <b class="spacer">"Newer inputs than the last verified run"</b>
+                            <span class="dim">{checked}</span>
+                        </div>
+                        {u
+                            .reasons
+                            .iter()
+                            .map(|r| view! { <div class="prow notice-row">{r.clone()}</div> })
+                            .collect_view()}
+                        {(!u.extras.is_empty())
+                            .then(|| {
+                                view! {
+                                    <StackRow title="Extras that moved">
+                                        <div class="bk-chips wrap">
+                                            {u
+                                                .extras
+                                                .iter()
+                                                .map(|x| {
+                                                    view! {
+                                                        <span class="type-badge" title=format!("{}: {}", x.label, x.change)>
+                                                            {format!("{} {}", x.label, x.change)}
+                                                        </span>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </div>
+                                    </StackRow>
+                                }
+                            })}
+                        {u
+                            .errors
+                            .iter()
+                            .map(|e| view! { <div class="prow problem-row">{e.clone()}</div> })
+                            .collect_view()}
+                    }
+                        .into_any()
+                }
+                Some(u) => {
+                    let checked_title = local_ts(&u.checked_at);
+                    let head = if u.errors.is_empty() {
+                        format!("Up to date as of {}", ago(&u.checked_at))
+                    } else {
+                        "The last update check could not finish".to_string()
+                    };
+                    view! {
+                        <div class="prow notice-row" class:warn=!u.errors.is_empty() title=checked_title>
+                            {head}
+                        </div>
+                        {u
+                            .errors
+                            .iter()
+                            .map(|e| view! { <div class="prow problem-row">{e.clone()}</div> })
+                            .collect_view()}
+                    }
+                        .into_any()
+                }
+                None => {
+                    view! {
+                        <div class="prow notice-row">
+                            {if has_verified() {
+                                "Not checked for updates yet."
+                            } else {
+                                "Update checks start once a run has built an image to compare with."
+                            }}
+                        </div>
+                    }
+                        .into_any()
+                }
+            }}
+        </PrefGroup>
+    }
+}
+
+/// A build's runs, newest first, a page at a time, as a table in its box.
+/// The first page is read again whenever the builds list is (a run started,
+/// ended, was verified or made current).
+#[component]
+pub fn RunsGroup(id: i64, v: Memo<BuildView>, name: Memo<String>) -> impl IntoView {
+    let bk = use_bk();
     let runs = RwSignal::new(None::<Vec<BuildRun>>);
     let more = RwSignal::new(false);
     let err = RwSignal::new(None::<String>);
@@ -625,8 +377,6 @@ fn RunHistory(v: Memo<BuildView>, name: Memo<String>, moving: Memo<String>) -> i
             }
         });
     };
-    // The first page, and again whenever the builds list is re-read: a run
-    // started, ended, was verified or made current.
     Effect::new(move |_| {
         bk.rev.track();
         reread.track();
@@ -641,212 +391,81 @@ fn RunHistory(v: Memo<BuildView>, name: Memo<String>, moving: Memo<String>) -> i
             v.with(|v| v.current_run.as_ref().and_then(|r| r.image_id.clone()))
         }),
     };
-    let notes = move || v.with(|v| v.build.spec.notes.clone());
-    let uses = move || v.with(|v| v.used_by.clone());
-    let has_verified = move || {
-        v.with(|v| {
-            v.current_run.is_some()
-                || v.last_run.as_ref().is_some_and(|r| {
-                    matches!(
-                        r.status,
-                        BuildRunStatus::Succeeded | BuildRunStatus::Unverified
-                    )
-                })
-        })
-    };
-    let checking = move || bk.checking.with(|c| c.contains(&id) || c.contains(&0));
-    let check_btn = move || {
-        view! {
-            <button
-                class="btn ghost sm"
-                disabled=checking
-                title="Ask the remote now whether the ref or an unpinned extra moved since the last verified run"
-                on:click=move |_| bk.check_updates(Some(id), name.get_untracked())
-            >
-                {move || if checking() { "Checking…" } else { "Check now" }}
-            </button>
-        }
-    };
+    let count = move || runs.with(|r| r.as_ref().map(|r| r.len().to_string()).unwrap_or_default());
     view! {
-        <div class="bk-detail">
-            <div class="bk-facts">
+        <div class="bk-wide">
+            <PrefGroup title="Runs" count=Signal::derive(count)>
                 {move || {
-                    let m = moving.get();
-                    view! {
-                        <span class="copy-line" title="Picking this tag in a class or model image field follows the build">
-                            <span class="dim">"moving tag"</span>
-                            <code class="mono-sm">{m.clone()}</code>
-                            <CopyBtn text=m/>
-                        </span>
-                    }
-                }}
-                {move || {
-                    let uses = uses();
-                    (!uses.is_empty())
-                        .then(|| {
+                    err.get()
+                        .map(|e| {
                             view! {
-                                <span class="bk-chips">
-                                    <span class="dim">"used by"</span>
-                                    {use_chips(&uses)}
-                                </span>
+                                <div class="prow problem-row">
+                                    <span class="spacer">"The run history did not load: " {e}</span>
+                                    <button class="btn sm" on:click=move |_| load(false)>
+                                        "Retry"
+                                    </button>
+                                </div>
                             }
                         })
                 }}
-            </div>
-            {move || match v.with(|v| v.update.clone()) {
-                Some(u) if u.has_update() => {
-                    let checked = (!u.checked_at.is_empty())
-                        .then(|| format!("checked {}", ago(&u.checked_at)));
-                    let checked_title = local_ts(&u.checked_at);
-                    view! {
-                        <div class="notice warn bk-upd">
-                            <div class="row">
-                                <b class="spacer">"Newer inputs than the last verified run"</b>
-                                <span class="dim" title=checked_title>{checked}</span>
-                                {check_btn()}
-                            </div>
-                            <ul class="bk-upd-list">
-                                {u.reasons.iter().map(|r| view! { <li>{r.clone()}</li> }).collect_view()}
-                            </ul>
-                            {(!u.extras.is_empty())
-                                .then(|| {
-                                    view! {
-                                        <div class="bk-chips">
-                                            <span class="dim">"extras"</span>
-                                            {u
-                                                .extras
-                                                .iter()
-                                                .map(|x| {
-                                                    view! {
-                                                        <span class="type-badge" title=format!("{}: {}", x.label, x.change)>
-                                                            {format!("{} {}", x.label, x.change)}
-                                                        </span>
-                                                    }
-                                                })
-                                                .collect_view()}
-                                        </div>
-                                    }
-                                })}
-                            {u
-                                .errors
-                                .iter()
-                                .map(|e| view! { <div class="status-err mini-note">{e.clone()}</div> })
-                                .collect_view()}
-                        </div>
+                {move || match runs.get() {
+                    None if err.with(Option::is_none) => {
+                        view! { <div class="prow notice-row">"Loading the runs…"</div> }.into_any()
                     }
-                        .into_any()
-                }
-                Some(u) => {
-                    let checked_title = local_ts(&u.checked_at);
-                    let head = if u.errors.is_empty() {
-                        format!("Up to date as of {}", ago(&u.checked_at))
-                    } else {
-                        "The last update check could not finish".to_string()
-                    };
-                    view! {
-                        <div class="bk-upd-line">
-                            <span class=if u.errors.is_empty() { "dim" } else { "status-warn" } title=checked_title>
-                                {head}
-                            </span>
-                            {u
-                                .errors
-                                .iter()
-                                .map(|e| view! { <span class="dim">{e.clone()}</span> })
-                                .collect_view()}
-                            {check_btn()}
-                        </div>
+                    None => ().into_any(),
+                    Some(list) if list.is_empty() => {
+                        view! { <div class="prow notice-row">"No runs yet: Run builds it."</div> }
+                            .into_any()
                     }
-                        .into_any()
-                }
-                None => {
-                    let has_verified = has_verified();
-                    view! {
-                        <div class="bk-upd-line">
-                            <span class="dim">
-                                {if has_verified {
-                                    "Not checked for updates yet."
-                                } else {
-                                    "Update checks start once a run has built an image to compare with."
-                                }}
-                            </span>
-                            {has_verified.then(check_btn)}
-                        </div>
-                    }
-                        .into_any()
-                }
-            }}
-            {move || {
-                let notes = notes();
-                (!notes.trim().is_empty()).then(|| view! { <div class="dim bk-notes">{notes}</div> })
-            }}
-            {move || {
-                err.get()
-                    .map(|e| {
+                    Some(list) => {
                         view! {
-                            <div class="notice err row">
-                                "The run history did not load: "
-                                {e}
-                                <button class="btn ghost sm" on:click=move |_| load(false)>
-                                    "Retry"
-                                </button>
+                            <div class="table-scroll bk-box">
+                                <table class="data bk-sub bk-runs">
+                                    <thead>
+                                        <tr>
+                                            <th>"Status"</th>
+                                            <th>"Started"</th>
+                                            <th class="num-h">"Took"</th>
+                                            <th class="col-p3">"Base"</th>
+                                            <th class="col-p2">"Extras"</th>
+                                            <th class="num-h">"Size"</th>
+                                            <th>"Tag"</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {list
+                                            .into_iter()
+                                            .map(|r| view! { <RunRow run=r ctx=ctx/> })
+                                            .collect_view()}
+                                    </tbody>
+                                </table>
                             </div>
                         }
-                    })
-            }}
-            {move || match runs.get() {
-                None if err.with(Option::is_none) => {
-                    view! { <div class="dim">"Loading the runs…"</div> }.into_any()
-                }
-                None => ().into_any(),
-                Some(list) if list.is_empty() => {
-                    view! { <div class="dim">"No runs yet — Run builds it."</div> }.into_any()
-                }
-                Some(list) => {
-                    view! {
-                        <table class="data bk-sub bk-runs">
-                            <thead>
-                                <tr>
-                                    <th>"Status"</th>
-                                    <th>"Started"</th>
-                                    <th class="num-h">"Took"</th>
-                                    <th>"Base"</th>
-                                    <th class="col-p2">"Extras"</th>
-                                    <th class="num-h">"Size"</th>
-                                    <th>"Tag"</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {list
-                                    .into_iter()
-                                    .map(|r| view! { <RunRow run=r ctx=ctx/> })
-                                    .collect_view()}
-                            </tbody>
-                        </table>
+                            .into_any()
                     }
-                        .into_any()
-                }
-            }}
-            <Show when=move || more.get()>
-                <div class="show-more">
-                    <span>
-                        {move || {
-                            format!(
-                                "The newest {} runs",
-                                runs.with(|r| r.as_ref().map_or(0, Vec::len)),
-                            )
-                        }}
-                    </span>
-                    <button
-                        type="button"
-                        class="link-btn"
-                        disabled=move || loading.get()
-                        on:click=move |_| load(true)
-                    >
-                        {format!("Show {PAGE} older")}
-                    </button>
-                </div>
-            </Show>
+                }}
+                <Show when=move || more.get()>
+                    <div class="prow notice-row">
+                        <span class="spacer">
+                            {move || {
+                                format!(
+                                    "The newest {} runs",
+                                    runs.with(|r| r.as_ref().map_or(0, Vec::len)),
+                                )
+                            }}
+                        </span>
+                        <button
+                            type="button"
+                            class="btn flat sm"
+                            disabled=move || loading.get()
+                            on:click=move |_| load(true)
+                        >
+                            {format!("Show {PAGE} older")}
+                        </button>
+                    </div>
+                </Show>
+            </PrefGroup>
         </div>
     }
 }
@@ -973,10 +592,10 @@ fn RunRow(run: BuildRun, ctx: RunCtx) -> impl IntoView {
             </td>
             <td class="dim" title=started_title>{ago(&run.started_at)}</td>
             <td class="num">{run_duration(&run).unwrap_or_default()}</td>
-            <td class="mono-sm" title=base.clone()>{sha7(&base)}</td>
+            <td class="mono-sm col-p3" title=base.clone()>{sha7(&base)}</td>
             <td class="col-p2 mono-sm bk-cut" title=extras_line.clone()>{extras_line.clone()}</td>
             <td class="num">{run.size_bytes.map(fmt_bytes).unwrap_or_default()}</td>
-            <td class="mono-sm bk-cut" title=tag_title>
+            <td class="mono-sm clip" title=tag_title>
                 {image_gone
                     .then(|| {
                         view! {

@@ -107,15 +107,16 @@ pub enum GatewayError {
     /// §9b). Distinct from [`VramQueueTimeout`](Self::VramQueueTimeout) because
     /// waiting cannot help: nothing that could ever be evicted would make this
     /// one fit, so it fails at once instead of holding a queue slot forever.
-    #[error(
-        "'{model}' needs {need}, and the GPU holds {capacity} in total — no eviction can make \
-         it fit{hint}"
-    )]
+    #[error("'{model}' needs {need}, and {holds} in total — no eviction can make it fit{hint}")]
     VramTooLarge {
         model: String,
         /// "X of GPU memory plus Y headroom" ([`Self::vram_need`]).
         need: String,
-        capacity: String,
+        /// What it was judged against and how much that holds ([`Self::vram_holds`]):
+        /// "the GPU holds 24.0 GiB" on one card; on several the card or
+        /// cards by name and index (device-ledger design §10). One field,
+        /// so the error stays small.
+        holds: String,
         /// The rest of the sentence, from its first `. `, or empty: for an
         /// image pipeline that pins its weights on the card, the setting that
         /// pins it and what would let it run with less (`vram::partial`).
@@ -756,6 +757,12 @@ fn or_send_default(or_default: &bool) -> &'static str {
 }
 
 impl GatewayError {
+    /// [`Self::VramTooLarge`]'s `holds`: `holder` ("the GPU holds") and
+    /// `capacity` bytes.
+    pub fn vram_holds(holder: &str, capacity: u64) -> String {
+        format!("{holder} {}", crate::hf::fmt_bytes(capacity))
+    }
+
     /// [`Self::VramTooLarge`]'s `need`: `need` bytes of GPU memory plus
     /// `headroom`.
     pub fn vram_need(need: u64, headroom: u64) -> String {
@@ -940,9 +947,15 @@ impl GatewayError {
             | Self::ResponseFormatUnsupported { .. }
             | Self::InvalidJsonSchema { .. } => "invalid_request_error",
             Self::Unauthorized(_) | Self::AgentDisabled { .. } => "authentication_error",
+            // A capacity refusal is not a permission one (review N4). Its
+            // 5xx is `server_error`, as lmgw's other OpenAI-shaped surfaces
+            // (realtime, Responses) already say (security round A
+            // verification, item 4); the Anthropic shape keeps `api_error`.
             Self::Refused { status, .. } => match status {
                 401 => "authentication_error",
-                501 => "invalid_request_error",
+                408 | 501 => "invalid_request_error",
+                429 => "rate_limit_error",
+                500..=599 => "server_error",
                 _ => "permission_error",
             },
             Self::UpstreamRelayed(_) => "invalid_request_error",
@@ -988,9 +1001,12 @@ impl GatewayError {
         match self {
             Self::UnknownAlias(_) | Self::NotFound(_) => "not_found_error",
             Self::Unauthorized(_) | Self::AgentDisabled { .. } => "authentication_error",
+            // A capacity refusal is not a permission one (review N4).
             Self::Refused { status, .. } => match status {
                 401 => "authentication_error",
-                501 => "invalid_request_error",
+                408 | 501 => "invalid_request_error",
+                429 => "rate_limit_error",
+                500..=599 => "api_error",
                 _ => "permission_error",
             },
             Self::BadRequest(_)
@@ -1215,13 +1231,25 @@ impl GatewayError {
 
     /// Anthropic-shaped error body.
     pub fn to_anthropic_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        self.to_anthropic_json_with(None)
+    }
+
+    /// [`Self::to_anthropic_json`] with Anthropic's `request_id` beside the
+    /// error, as its own error bodies carry it: the id of the Anthropic
+    /// upstream whose error answer this is (gateway design §6.2). `None`
+    /// writes no `request_id`: lmgw makes no request id of its own yet.
+    pub fn to_anthropic_json_with(&self, request_id: Option<&str>) -> serde_json::Value {
+        let mut body = serde_json::json!({
             "type": "error",
             "error": {
                 "type": self.anthropic_type(),
                 "message": self.to_string(),
             }
-        })
+        });
+        if let Some(id) = request_id {
+            body["request_id"] = serde_json::Value::from(id);
+        }
+        body
     }
 }
 
@@ -1268,6 +1296,35 @@ impl From<serde_json::Error> for GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capacity refusal's type in each shape (review N4, security round A
+    /// verification item 4): the OpenAI shape says `server_error` for its
+    /// 5xx, the Anthropic shape `api_error`; 429 is a rate limit in both.
+    #[test]
+    fn a_refusals_type_follows_its_status_in_each_shape() {
+        let r = |status| GatewayError::Refused {
+            status,
+            code: "example_code",
+            message: "example".into(),
+        };
+        for (status, openai, anthropic) in [
+            (408, "invalid_request_error", "invalid_request_error"),
+            (429, "rate_limit_error", "rate_limit_error"),
+            (500, "server_error", "api_error"),
+            (502, "server_error", "api_error"),
+            (503, "server_error", "api_error"),
+            (507, "server_error", "api_error"),
+            (403, "permission_error", "permission_error"),
+        ] {
+            let e = r(status);
+            assert_eq!(e.to_openai_json()["error"]["type"], openai, "{status}");
+            assert_eq!(
+                e.to_anthropic_json()["error"]["type"],
+                anthropic,
+                "{status}"
+            );
+        }
+    }
 
     /// `GatewayError` rides in the gate's refusal shapes, which
     /// `clippy.toml`'s `large-error-threshold` (224) measures, and in enums

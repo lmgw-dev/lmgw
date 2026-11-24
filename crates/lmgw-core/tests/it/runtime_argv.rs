@@ -37,6 +37,7 @@ fn chat_spec(model_id: &str, gguf: &str, params: LlamaParams, args: &[&str]) -> 
         }),
         health_path: "/health",
         fitted: None,
+        charge: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn aux_spec(
         }),
         health_path: "/health",
         fitted: None,
+        charge: None,
     }
 }
 
@@ -271,6 +273,78 @@ fn mmproj_and_draft_paths_rewrite_onto_the_models_mount() {
         ),
         "{args:?}"
     );
+}
+
+/// Ruling 18: what a start renders for `params`/`args` once the image is
+/// known to list `draft-simple` (the registry decides that, `with_draft_type`).
+fn drafted_args(params: LlamaParams, args: &[&str]) -> Vec<String> {
+    let mut spec = chat_spec("m", "m.gguf", params, args);
+    if let EngineArgs::Llama(l) = &spec.engine {
+        if let Some(d) = l.with_default_spec_type() {
+            spec.engine = EngineArgs::Llama(d);
+        }
+    }
+    render_llama_args(&spec)
+}
+
+fn spec_types(args: &[String]) -> Vec<&str> {
+    args.windows(2)
+        .filter(|w| w[0] == "--spec-type")
+        .map(|w| w[1].as_str())
+        .collect()
+}
+
+fn with_drafter() -> LlamaParams {
+    LlamaParams {
+        draft_gguf_path: Some("d/draft.gguf".into()),
+        ..LlamaParams::default()
+    }
+}
+
+#[test]
+fn a_drafter_without_a_type_gets_draft_simple() {
+    let args = drafted_args(with_drafter(), &[]);
+    assert_eq!(spec_types(&args), ["draft-simple"], "{args:?}");
+    assert!(has_pair(&args, "--model-draft", "/models/d/draft.gguf"));
+    // A drafter named in the arguments is a drafter too, in every spelling.
+    for flag in ["--model-draft", "-md", "--spec-draft-model"] {
+        let args = drafted_args(LlamaParams::default(), &[flag, "/models/d.gguf"]);
+        assert_eq!(spec_types(&args), ["draft-simple"], "{flag}: {args:?}");
+        // ...and the drafter flag is still passed through exactly once.
+        assert_eq!(args.iter().filter(|a| *a == flag).count(), 1, "{args:?}");
+    }
+}
+
+#[test]
+fn a_drafter_with_a_type_keeps_that_type_only() {
+    let params = LlamaParams {
+        spec_type: Some("draft-mtp".into()),
+        ..with_drafter()
+    };
+    let args = drafted_args(params, &[]);
+    assert_eq!(spec_types(&args), ["draft-mtp"], "{args:?}");
+    // The type in the arguments: neither added to nor doubled.
+    for given in [
+        vec!["--spec-type", "ngram-mod"],
+        vec!["--spec-type=ngram-mod"],
+    ] {
+        let args = drafted_args(with_drafter(), &given);
+        assert!(!args.contains(&"draft-simple".to_string()), "{args:?}");
+        assert_eq!(args.iter().filter(|a| a.contains("spec-type")).count(), 1);
+        assert!(args.iter().any(|a| a.ends_with("ngram-mod")), "{args:?}");
+    }
+}
+
+#[test]
+fn no_drafter_means_no_spec_type() {
+    let args = drafted_args(LlamaParams::default(), &[]);
+    assert!(spec_types(&args).is_empty(), "{args:?}");
+    // A type alone (ngram-mod needs no drafter) is not touched either.
+    let params = LlamaParams {
+        spec_type: Some("ngram-mod".into()),
+        ..LlamaParams::default()
+    };
+    assert_eq!(spec_types(&drafted_args(params, &[])), ["ngram-mod"]);
 }
 
 #[test]
@@ -834,6 +908,7 @@ fn podman_run_argv_for_an_audio_model_matches_the_expected_shape() {
         engine: super::runtime_engine_view::audio_args(),
         health_path: "/v1/models",
         fitted: None,
+        charge: None,
     };
 
     let args = podman_run_argv(&spec);
@@ -894,6 +969,7 @@ fn render_llama_args_is_empty_for_an_audio_spec() {
         engine: super::runtime_engine_view::audio_args(),
         health_path: "/v1/models",
         fitted: None,
+        charge: None,
     };
     assert!(render_llama_args(&spec).is_empty());
 }
@@ -984,6 +1060,7 @@ fn image_spec(files: Value, args: Value) -> RenderSpec {
         }),
         health_path: "/sdcpp/v1/capabilities",
         fitted: None,
+        charge: None,
     }
 }
 
@@ -1401,4 +1478,39 @@ fn container_name_and_labels_carry_the_fourth_class() {
         format!("lmgw-image-z-image-turbo-{}", hash6("z-image-turbo"))
     );
     assert_eq!(Class::Image.engine(), "sdcpp");
+}
+
+/// A start's charge on the cards is a label beside the others
+/// (device-ledger design §3.3, D12, D17): the command and every other
+/// argument are what they are without it, the label is the only
+/// difference; a group is its cards joined by `+`; a charge whose cards no
+/// device read named, and none, write no label.
+#[test]
+fn a_charge_is_recorded_in_a_label_and_nothing_else_changes() {
+    use lmgw_core::vram::charge::PLACEMENT_LABEL;
+    use lmgw_core::vram::nvml::DeviceId;
+    use lmgw_core::vram::CardCharge;
+    let mut spec = chat_spec("x", "x.gguf", LlamaParams::default(), &[]);
+    spec.extra_run_args = vec!["--device".into(), "nvidia.com/gpu=all".into()];
+    let without = podman_run_argv(&spec);
+
+    let card = DeviceId::new("GPU-0");
+    spec.charge = Some(CardCharge::over(vec![card.clone()], 5 << 30));
+    let with = podman_run_argv(&spec);
+    let label = format!("{PLACEMENT_LABEL}=GPU-0:{}", 5u64 << 30);
+    let at = with.iter().position(|a| *a == label).expect("the label");
+    assert_eq!(with[at - 1], "--label");
+    let mut rest = with.clone();
+    rest.drain(at - 1..=at);
+    assert_eq!(rest, without, "the label is the only difference");
+
+    spec.charge = Some(CardCharge::over(
+        vec![card, DeviceId::new("0000:17:00.0")],
+        7,
+    ));
+    assert!(podman_run_argv(&spec).contains(&format!("{PLACEMENT_LABEL}=GPU-0+0000:17:00.0:7")));
+    for none in [CardCharge::over(vec![], 7), CardCharge::none()] {
+        spec.charge = Some(none);
+        assert_eq!(podman_run_argv(&spec), without);
+    }
 }

@@ -470,6 +470,16 @@ pub struct RealtimeBudgetStage {
     pub bytes: Option<u64>,
     /// Where the figure comes from, or why there is none.
     pub note: String,
+    /// What the engine itself costs on the card it goes on (device-ledger
+    /// design §4.2): a llama.cpp model's, beside `bytes`; `None` where the
+    /// stage holds nothing on a card or lmgw has no figure.
+    #[serde(default)]
+    pub engine_bytes: Option<u64>,
+    /// On a machine of several cards, the card lmgw would put it on beside
+    /// the stages before it, by name and index (device-ledger design §3.1);
+    /// `None` on one card, and where no card has room for it.
+    #[serde(default)]
+    pub card: Option<String>,
 }
 
 /// `realtime_budget`'s answer.
@@ -485,11 +495,16 @@ pub struct RealtimeBudget {
     /// The stages whose figure is unknown; while any is listed the total is
     /// a lower bound.
     pub unknown: Vec<String>,
-    /// `vram.headroom_mb`: what admission keeps free above a model's
-    /// estimate when it starts one.
+    /// What the engine itself costs beside the known figures, each local
+    /// llama.cpp model on its card (device-ledger design §4.2).
+    #[serde(default)]
+    pub engine_bytes: u64,
+    /// What admission keeps free above a model's estimate when it starts
+    /// one: the headroom, on several cards that of each card the cascade
+    /// is placed on.
     pub headroom_bytes: u64,
-    /// `total_bytes + headroom_bytes`: what the last of the cascade's models
-    /// to start needs free.
+    /// `total_bytes + engine_bytes + headroom_bytes`: what the cascade's
+    /// models need free together.
     pub needed_bytes: u64,
     /// What lmgw may plan against: `vram.budget_mb`, or the devices' real
     /// total. `None` when admission has nothing to measure against.

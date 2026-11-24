@@ -474,7 +474,7 @@ fn StatusLine(rt: Realtime) -> impl IntoView {
                                 view! {
                                     <button type="button" class="vs-x" aria-label="Dismiss"
                                         on:click=move |_| rt.status.dismiss(&n)>
-                                        "✕"
+                                        <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
                                     </button>
                                 }
                             })}

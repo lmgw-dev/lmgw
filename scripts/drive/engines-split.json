@@ -1,0 +1,290 @@
+[
+ {
+  "js": "'The Engines page in the modern design (WP8), on made-up data (scripts/drive/engines-fake.js answers the builds, a build s runs, the images, the downloads and the live feed s jobs): the list beside the detail, selection by click, by the arrow keys and Home/End, a deep link, the search, the live run card, the images as rows grouped by engine, the editor modal from the header, the narrow window s one pane with its back button, the light theme, and the Downloads page s groups with a live transfer. It starts nothing and writes nothing (the fake refuses every write op): safe with the GPU hold on. Run: scripts/ui-drive.py scripts/drive/engines-split.json --dsf 1.25 --block-writes --init-script scripts/drive/engines-fake.js --token-file <dir>.token --base http://<addr> --podman-guard <prefix> --shots <dir>'"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'dark'); localStorage.removeItem('lmgw.ui.engines.list.width'); 'reset'"
+ },
+ {
+  "size": "1536x864"
+ },
+ {
+  "nav": "/backends?fake-engines=1"
+ },
+ {
+  "until": "document.querySelectorAll('.engines-split .mlist a.lrow-link .lrow').length >= 4",
+  "timeout": 20,
+  "label": "the list has the three builds and Local images"
+ },
+ {
+  "expect": "document.querySelector('.engines-split .mdetail-pane .detail-hero h1').textContent === 'Engines' && [...document.querySelectorAll('.mdetail-pane .pref-head h2')].some(h => h.textContent === 'Start a build')",
+  "label": "nothing selected: the overview with where to start a build"
+ },
+ {
+  "expect": "document.querySelector('.engines-split .mlist-head h1').textContent === 'Engines' && document.querySelector('.engines-split .mlist-head .actions .icon-btn svg.i')",
+  "label": "the list head: the title and its icon buttons"
+ },
+ {
+  "shot": "engines-overview-dark"
+ },
+ {
+  "click": ".engines-split .mlist .lrow[data-key=\"/backends/builds/1\"]"
+ },
+ {
+  "until": "document.location.pathname === '/backends/builds/1' && document.querySelector('.mdetail-pane .detail-hero h1').textContent === 'Official master' && document.querySelectorAll('.mdetail-pane table.bk-runs tbody tr').length === 2",
+  "timeout": 10,
+  "label": "a click selects the build: its hero and its two runs"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mdetail-pane .pref-head h2')].map(h => h.textContent).join('|') === 'Source|Image|Updates|Runs'",
+  "label": "the build s groups: Source, Image, Updates, Runs"
+ },
+ {
+  "expect": "document.querySelector('.engines-split .mlist .lrow[data-key=\"/backends/builds/1\"]').classList.contains('sel') && document.querySelector('.mdetail-head .actions').textContent.includes('Run') && document.querySelector('.mdetail-head .actions').textContent.includes('Edit')",
+  "label": "the row is selected; Run and Edit are in the header bar"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-pane .bk-upd-head') && document.querySelector('.mdetail-pane .detail-hero .chips .chip.warn')",
+  "label": "the waiting update shows in the hero and the Updates group"
+ },
+ {
+  "shot": "engines-build-dark"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "document.location.pathname === '/backends/builds/2' && document.querySelector('.mdetail-pane .bk-live .progress > i')",
+  "timeout": 10,
+  "label": "Down moves to the next build; its live run is a card with the bar"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-head .actions').textContent.includes('Log') && document.querySelector('.bk-live .bk-last-line').textContent.includes('Building CUDA')",
+  "label": "a live run: Log in the header, podman s last line in the card"
+ },
+ {
+  "expect": "document.querySelector('.engines-split .mlist .lrow[data-key=\"/backends/builds/2\"] .lrow-state').textContent.includes('build')",
+  "label": "the list row says the live phase"
+ },
+ {
+  "shot": "engines-live-dark"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "until": "document.location.pathname === '/backends/images' && document.querySelectorAll('.mdetail-pane .bk-img-group .boxed .prow.bk-img-row').length === 4",
+  "timeout": 10,
+  "label": "End selects Local images: the four images as rows in boxed groups"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mdetail-pane .bk-img-group .pref-head h2')].map(h => h.textContent).join('|') === 'llama.cpp|audio.cpp' && document.querySelector('.mdetail-pane .bk-img-group .bk-img-count').textContent.startsWith('3 images · ')",
+  "label": "a group per engine, its heading with how many and their size"
+ },
+ {
+  "expect": "(() => { const n = [...document.querySelectorAll('.mdetail-pane .prow.bk-img-row .bk-img-name')].find(x => x.textContent === 'localhost/lmgw-dev-llama.cpp:official-master-0123456-89abcde'); return n && n.checkVisibility() &&n.scrollWidth <= n.clientWidth + 1 && getComputedStyle(n).textOverflow !== 'ellipsis' && n.closest('.prow').querySelector('.bk-img-tags').textContent.includes(':official-master'); })()",
+  "label": "the first line has the full tag, nothing cut, and the other tag under it"
+ },
+ {
+  "expect": "(() => { const r = [...document.querySelectorAll('.mdetail-pane .prow.bk-img-row')].find(x => x.querySelector('.bk-img-name').textContent.includes('official-master-0123456')); const name = r.querySelector('.bk-img-name').getBoundingClientRect(); const sub = r.querySelector('.bk-img-sub'); const st = r.querySelector('.bk-img-state'); const chips = [...st.querySelectorAll('.type-badge')].map(c => c.textContent).join('|'); return chips === 'chat default|aux default|model demo-embed-4b-q4-k-m-cpu' && st.getBoundingClientRect().top >= sub.getBoundingClientRect().bottom - 1 && sub.getBoundingClientRect().top >= name.bottom - 1 && sub.textContent.includes('GiB') && sub.textContent.includes('build Official master') && st.querySelector('.chip.ok'); })()",
+  "label": "the used-by chips sit on the entry's sub-line, under the facts, with the run's state"
+ },
+ {
+  "expect": "(() => { const rows = [...document.querySelectorAll('.mdetail-pane .prow.bk-img-row')]; const upd = rows.find(r => r.querySelector('.bk-img-name').textContent.includes('audio.cpp:v1-demo')); const hand = rows.find(r => r.querySelector('.bk-img-name').textContent.includes('ik-main-demo-build')); return upd && upd.querySelector('.bk-img-state .chip.warn').textContent.includes('update') && upd.querySelector('.prow-end').textContent.includes('Pull update') && upd.querySelector('.bk-img-sub').textContent.includes('pulled from a registry') && hand && hand.querySelector('.bk-img-state .dim').textContent === 'unused' && hand.querySelector('.bk-img-sub').textContent.includes('external') && rows.every(r => r.querySelector('.prow-end .row-acts .btn') && r.querySelector('.prow-end .row-acts .row-menu, .prow-end .row-acts button[aria-haspopup]')); })()",
+  "label": "the registry image has its update chip and Pull update; an unused one says so quietly; every row has Delete and its menu"
+ },
+ {
+  "expect": "(() => { const p = document.querySelector('.mdetail-pane .mdetail-scroll'); return p.scrollWidth <= p.clientWidth + 1; })()",
+  "label": "the images pane does not scroll sideways"
+ },
+ {
+  "shot": "engines-images-dark"
+ },
+ {
+  "key": "Home"
+ },
+ {
+  "until": "document.location.pathname === '/backends/builds/1'",
+  "timeout": 10,
+  "label": "Home goes back to the first build"
+ },
+ {
+  "nav": "/backends/builds/3"
+ },
+ {
+  "until": "document.querySelector('.mdetail-pane .detail-hero h1') && document.querySelector('.mdetail-pane .detail-hero h1').textContent === 'sd-demo' && document.querySelector('.engines-split .mlist .lrow[data-key=\"/backends/builds/3\"]').classList.contains('sel')",
+  "timeout": 20,
+  "label": "a deep link selects its row; an unnamed build is called by its slug"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-pane .detail-hero .chips .chip.err')",
+  "label": "the failed run reads red"
+ },
+ {
+  "nav": "/backends/builds/999"
+ },
+ {
+  "until": "document.querySelector('.mdetail-empty') && document.querySelector('.mdetail-empty').textContent.includes('not on this gateway')",
+  "timeout": 20,
+  "label": "a link to a build that is not there says so"
+ },
+ {
+  "nav": "/backends/builds/1"
+ },
+ {
+  "until": "document.querySelectorAll('.mdetail-pane table.bk-runs tbody tr').length === 2",
+  "timeout": 20
+ },
+ {
+  "click": ".engines-split .mlist"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "type": "mtp"
+ },
+ {
+  "until": "document.querySelectorAll('.engines-split .mlist a.lrow-link[href^=\"/backends/builds/\"]').length === 1",
+  "timeout": 5,
+  "label": "the search leaves the one matching build"
+ },
+ {
+  "click": ".engines-split .mlist a.lrow-link[href^=\"/backends/builds/\"]"
+ },
+ {
+  "until": "document.location.pathname.startsWith('/backends/builds/') && document.location.search === '?q=mtp'",
+  "timeout": 5,
+  "label": "a click on a row keeps the search in the address"
+ },
+ {
+  "expect": "document.querySelector('.engines-split .msearch input').value === 'mtp' && document.querySelectorAll('.engines-split .mlist a.lrow-link[href^=\"/backends/builds/\"]').length === 1",
+  "label": "and in the list"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelectorAll('.engines-split .mlist a.lrow-link[href^=\"/backends/builds/\"]').length === 3",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "click": ".mdetail-head .actions button:nth-of-type(2)"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].length === 1",
+  "timeout": 10,
+  "label": "Edit opens the build editor"
+ },
+ {
+  "shot": "engines-editor-dark"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelectorAll('dialog[open]').length === 0",
+  "timeout": 5,
+  "label": "Esc closes the untouched editor"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "document.querySelector('.engines-split').classList.contains('narrow') && getComputedStyle(document.querySelector('.engines-split .mlist-pane')).display === 'none'",
+  "label": "narrow: the detail alone"
+ },
+ {
+  "shot": "engines-narrow-dark"
+ },
+ {
+  "click": ".mdetail-head .head-main > .icon-btn"
+ },
+ {
+  "until": "document.location.pathname === '/backends' && getComputedStyle(document.querySelector('.engines-split .mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "back goes to the list"
+ },
+ {
+  "size": "1536x864"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'light'); 'light'"
+ },
+ {
+  "nav": "/backends/builds/2"
+ },
+ {
+  "until": "document.querySelector('.mdetail-pane .bk-live')",
+  "timeout": 20
+ },
+ {
+  "shot": "engines-live-light"
+ },
+ {
+  "nav": "/downloads"
+ },
+ {
+  "until": "document.querySelectorAll('.dl-group').length >= 4",
+  "timeout": 20,
+  "label": "Downloads: the groups are there"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.dl-group .dl-fold h2')].map(h => h.textContent).slice(0, 2).join('|') === 'In progress|Needs attention'",
+  "label": "what moves and what wants a hand lead"
+ },
+ {
+  "until": "document.querySelector('.dl-moving .dl-bar .progress > i') && document.querySelector('.dl-moving .dl-bytes').textContent.includes('GiB')",
+  "timeout": 10,
+  "label": "the live transfer has its bar and its bytes"
+ },
+ {
+  "expect": "document.querySelectorAll('.dl-attn .prow.dl-row').length === 2 && document.querySelector('.dl-moving .dl-end .icon-btn')",
+  "label": "the failed and updatable files need attention; Stop is an icon"
+ },
+ {
+  "shot": "downloads-light"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme', 'dark'); 'dark'"
+ },
+ {
+  "nav": "/downloads"
+ },
+ {
+  "until": "document.querySelectorAll('.dl-group').length >= 4",
+  "timeout": 20
+ },
+ {
+  "click": ".dl-group .dl-fold.foldable"
+ },
+ {
+  "until": "document.querySelector('.dl-group .dl-fold.foldable').getAttribute('aria-expanded') === 'false' && !document.querySelector('.dl-fold.foldable').closest('.dl-group').querySelector('.dl-box')",
+  "timeout": 5,
+  "label": "a repo's heading folds its files"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "downloads-dark"
+ },
+ {
+  "click": ".dl-group .dl-fold.foldable"
+ },
+ {
+  "until": "document.querySelector('.dl-group .dl-fold.foldable').getAttribute('aria-expanded') === 'true'",
+  "timeout": 5,
+  "label": "and unfolds them"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.engines.list.width'); 'done'"
+ }
+]

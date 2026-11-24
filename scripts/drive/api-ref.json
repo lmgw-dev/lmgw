@@ -3,41 +3,41 @@
   "nav": "/api-reference?op=get_api_status"
  },
  {
-  "expect": "document.querySelectorAll('.op-item').length > 50",
-  "label": "the rail lists operations from the live OpenAPI doc"
+  "expect": "document.querySelectorAll('.api-row').length > 50",
+  "label": "the list has the operations from the live OpenAPI doc"
  },
  {
-  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/api/status'",
-  "label": "deep link ?op= selects operation A (get_api_status)"
+  "expect": "document.querySelector('.api-hero h1')?.textContent === '/api/status'",
+  "label": "the old ?op= link selects operation A (get_api_status)"
  },
  {
-  "click": ".op-item[data-op='post_v1_chat_completions']"
- },
- {
-  "wait": 0.3
- },
- {
-  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/v1/chat/completions'",
-  "label": "rail click switches A to B (post_v1_chat_completions)"
- },
- {
-  "click": ".op-item[data-op='get_api_status']"
+  "click": ".api-row[data-op='post_v1_chat_completions']"
  },
  {
   "wait": 0.3
  },
  {
-  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/api/status'",
-  "label": "rail click switches B back to A with no panic"
+  "expect": "document.querySelector('.api-hero h1')?.textContent === '/v1/chat/completions'",
+  "label": "list click switches A to B (post_v1_chat_completions)"
  },
  {
-  "click": ".op-item[data-op='post_v1_chat_completions']"
+  "click": ".api-row[data-op='get_api_status']"
  },
  {
   "wait": 0.3
  },
  {
-  "click": ".api-identity .facet",
+  "expect": "document.querySelector('.api-hero h1')?.textContent === '/api/status'",
+  "label": "list click switches B back to A with no panic"
+ },
+ {
+  "click": ".api-row[data-op='post_v1_chat_completions']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".api-identity .seg-btn",
   "nth": 0
  },
  {
@@ -79,7 +79,7 @@
   "label": "the assembled SSE text is non-empty"
  },
  {
-  "click": ".api-identity .facet",
+  "click": ".api-identity .seg-btn",
   "nth": 1
  },
  {
@@ -95,7 +95,7 @@
   "wait": 0.2
  },
  {
-  "click": ".api-op-bar button.btn.ghost.sm",
+  "click": ".mdetail-head .actions button.btn.ghost.sm",
   "nth": 0
  },
  {
@@ -110,11 +110,11 @@
   "label": "Copy as curl never contains the pasted key"
  },
  {
-  "click": ".api-identity .facet",
+  "click": ".api-identity .seg-btn",
   "nth": 0
  },
  {
-  "click": ".op-item[data-op='post_v1_audio_transcriptions']"
+  "click": ".api-row[data-op='post_v1_audio_transcriptions']"
  },
  {
   "wait": 0.3
@@ -124,7 +124,7 @@
   "label": "a multipart op (post_v1_audio_transcriptions) shows a file input"
  },
  {
-  "click": ".op-item[data-op='post_v1_chat_completions']"
+  "click": ".api-row[data-op='post_v1_chat_completions']"
  },
  {
   "wait": 0.3
@@ -136,18 +136,18 @@
   "wait": 0.2
  },
  {
-  "expect": "[...document.querySelectorAll('.api-op-bar button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
+  "expect": "[...document.querySelectorAll('.mdetail-head .actions button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
   "label": "Stop appears while the stream is in flight"
  },
  {
-  "click": ".api-op-bar button.btn.ghost.sm",
+  "click": ".mdetail-head .actions button.btn.ghost.sm",
   "nth": 1
  },
  {
   "wait": 0.3
  },
  {
-  "expect": "!document.querySelector('.api-op-bar .tester-send[disabled]')",
+  "expect": "!document.querySelector('.mdetail-head .tester-send[disabled]')",
   "label": "Send is enabled again after Stop"
  },
  {
@@ -157,7 +157,7 @@
   "wait": 0.2
  },
  {
-  "expect": "[...document.querySelectorAll('.api-op-bar button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
+  "expect": "[...document.querySelectorAll('.mdetail-head .actions button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
   "label": "Stop-then-Send: sending again after Stop starts a fresh stream"
  },
  {

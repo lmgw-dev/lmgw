@@ -15,6 +15,7 @@ use crate::state::SharedState;
 use super::background::{self, Restart};
 use super::download::Engine;
 use super::ledger::Ledger;
+use super::place::{others_hold_on, Mode, Placement};
 use super::scheduler::{Waiter, CONTROL_TIMEOUT, POLL};
 use super::stage_watch::WaitPhase;
 use super::stall::{evicting_stage, waiting_stage};
@@ -126,8 +127,10 @@ impl VramScheduler {
             // traffic that fits.
             let up = self.is_up(state, target);
             let reservation = if snap.settings.vram.enabled && !up && on_gpu {
-                match self
-                    .arbitrate(state, snap, target, alias, fallback.as_deref_mut())
+                // Boxed: the placing and the queue's futures are large in a
+                // debug build, and a test thread's 2 MiB is shared by the
+                // whole chain from the route to here.
+                match Box::pin(self.arbitrate(state, snap, target, alias, fallback.as_deref_mut()))
                     .await?
                 {
                     Decided::Go(reservation) => reservation,
@@ -301,11 +304,8 @@ impl VramScheduler {
         let Some(fp) = self.footprint(snap, class, model_id).await else {
             return Fit::Unchecked;
         };
-        let headroom = self.start_headroom(snap, class, model_id, &fp);
-        let margin = self.start_margin(snap, class, model_id, &fp);
-
         let _gate = self.ask_gate().await;
-        let l = self.ledger(state, snap).await;
+        let l = Box::pin(self.ledger(state, snap)).await;
         // Again, after the last await before the claim: `snap` is the one
         // this start began with, and the lease (or the hold) may have come on
         // while it waited for the footprint, the gate or the ledger. Under
@@ -316,45 +316,111 @@ impl VramScheduler {
         if let Some(block) = state.snapshot().gpu_block() {
             return held(&block, model_id);
         }
-        let Some(cap) = l.capacity.as_ref() else {
+        if l.capacity.is_none() {
+            return Fit::Unchecked;
+        }
+        if let Some(problem) = self.pin_gone(snap, &target, &l.devices) {
+            return Fit::Failed(format!("'{model_id}' {problem}"));
+        }
+        // The card it goes on (device-ledger design §5): this start never
+        // evicts or waits, so only a card with room now takes it, and one
+        // with nothing of lmgw's on it before an idle model elsewhere that
+        // it would not evict (`Mode::Still`).
+        let p = self.placement(snap, &target, &fp, &l, Mode::Still, None);
+        self.background_on(state, snap, &target, fp, &l, p)
+    }
+
+    /// [`Self::check_background_start`]'s decision on the cards `p` names,
+    /// on ledger `l`, under the gate: a reservation where the start fits
+    /// there now, else why not. A start that never evicts or waits; also
+    /// a model moved to another card to make room (device-ledger design
+    /// §6.2).
+    pub(super) fn background_on(
+        &self,
+        state: &SharedState,
+        snap: &Snapshot,
+        target: &Target,
+        fp: super::Footprint,
+        l: &Ledger,
+        p: Placement,
+    ) -> Fit {
+        let model_id = target.model_id.as_str();
+        let Some(cap) = l.capacity_on(&p.cards, None) else {
             return Fit::Unchecked;
         };
+        let (headroom, margin, floor) = (p.headroom, p.margin, p.floor);
         // A row llama.cpp's `--fit` would shrink, fitted to what this
         // reading's card can give it (`partial::llama`).
-        let fp = self.fit_in(snap, &target, fp, &l);
-        let needs = fp.total_bytes.saturating_add(headroom);
+        let fp = self.fit_in_on(target, fp, l, &p, None);
+        let needs = fp
+            .total_bytes
+            .saturating_add(p.engine)
+            .saturating_add(headroom);
         // A pipeline that can run with less on the card is never too large
-        // for it (`partial`). Too large is judged without the learned
-        // growth, which only decides whether there is room now (`headroom`).
-        let structural = self.card_headroom(snap, class, model_id, &fp);
-        if fp.total_bytes.saturating_add(structural) > cap.total && !super::partial::adapts(&fp) {
+        // for it (`partial`). Too large is judged without the learned room,
+        // which only decides whether there is room now (`headroom`), against
+        // every card it may use (§5.8).
+        if let Some(t) = self.too_large(snap, target, &fp, l) {
             return Fit::Full(format!(
-                "'{model_id}' needs {} plus {} headroom and the GPU holds {} in total{}",
-                fmt_bytes(fp.total_bytes),
-                fmt_bytes(structural),
-                fmt_bytes(cap.total),
-                super::partial::too_large_hint(snap, &target, &fp)
+                "'{model_id}' needs {} plus {} headroom and {} {} in total{}",
+                fmt_bytes(t.bytes),
+                fmt_bytes(t.structural),
+                t.holder,
+                fmt_bytes(t.capacity),
+                super::partial::too_large_hint(snap, target, &fp)
+                    + &self.no_split_hint(snap, target, &fp)
             ));
+        }
+        // A split (device-ledger design §4.3): where each of its cards holds
+        // its part now, else not now.
+        if p.split.is_some() {
+            return match self.split_short(l, target, &p, None) {
+                None => match super::place::split_grant(&p) {
+                    Some(grant) => Fit::Go(StartPermit {
+                        _reservation: Some(self.reserve_as(state, target, &p, grant)),
+                    }),
+                    None => Fit::Unchecked,
+                },
+                Some((card, short, free)) => Fit::Full(format!(
+                    "'{model_id}' is split over {} cards and needs {} on {} where only {} is \
+                     free — {}",
+                    p.cards.len(),
+                    fmt_bytes(short),
+                    super::place::card_label(&l.devices, &card),
+                    fmt_bytes(free),
+                    describe_holders(l, &super::stall::wait_cards(l, std::slice::from_ref(&card))),
+                )),
+            };
         }
         // The whole where it fits, else what `partial` gives it. This start
         // never evicts, so anything else of lmgw's on the card is something
-        // it could wait for; with nothing of lmgw's there, the learned
-        // growth is no reason not to start (`room_now`).
-        let room = self.room_now(snap, &l, &target, (headroom, margin), false);
-        let Some(grant) = super::partial::decide(&target, &fp, room) else {
+        // it could wait for; with nothing of lmgw's there, the learned room
+        // and, where nothing smaller fits, its margin are no reason not to
+        // start (`room_on`, `partial::decide`).
+        let room = self.room_on(l, target, &p, &cap, false);
+        let Some(grant) = super::partial::decide(target, &fp, room) else {
             return Fit::Full(format!(
-                "'{model_id}' needs {} and only {} is free — {}{}",
+                "'{model_id}' needs {} and only {} is free{} — {}{}",
                 fmt_bytes(needs),
                 fmt_bytes(cap.free),
-                describe_holders(&l),
+                self.on_words(l, &p),
+                describe_holders(l, &super::stall::wait_cards(l, &p.cards)),
                 super::partial::why_not(&fp, room)
                     .map(|w| format!("; {w}"))
                     .unwrap_or_default()
             ));
         };
-        let grant = self.note_growth(&target, grant, (headroom, margin), cap.free);
+        let grant = self.note_growth(
+            target,
+            grant,
+            (headroom + p.engine, margin + p.engine, floor + p.engine),
+            cap.free,
+        );
+        // A context lowered to one card of several, said as the editor
+        // says it (device-ledger design §8.2).
+        let grant = self.one_card_grant(snap, target, &fp, &p, l, grant);
         Fit::Go(StartPermit {
-            _reservation: Some(self.reserve_as(state, &target, grant)),
+            _reservation: Some(self.reserve_as(state, target, &p, grant)),
         })
     }
 
@@ -375,39 +441,54 @@ impl VramScheduler {
         let Some(fp) = self.footprint(snap, target.class, &target.model_id).await else {
             return Ok(Decided::Go(None));
         };
-        let headroom = self.start_headroom(snap, target.class, &target.model_id, &fp);
 
         // Is there anything to decide against at all?
         let (fp, needs) = {
-            let l = self.ledger(state, snap).await;
-            let Some(cap) = l.capacity.as_ref() else {
+            let l = Box::pin(self.ledger(state, snap)).await;
+            if l.capacity.is_none() {
                 tracing::debug!(
                     "VRAM admission inactive: {}",
                     l.inactive_reason.as_deref().unwrap_or("no capacity")
                 );
                 return Ok(Decided::Go(None));
-            };
+            }
+            // A pinned card that is gone: no other card (device-ledger
+            // design §8), and the fallback answers where there is one.
+            if let Some(problem) = self.pin_gone(snap, target, &l.devices) {
+                return Err(GatewayError::GpuSetup {
+                    model: target.model_id.clone(),
+                    problem,
+                    detail: String::new(),
+                });
+            }
+            // The card it would go on now (device-ledger design §5); the
+            // wait asks again on every reading until it commits to one.
+            let p = self.placement(snap, target, &fp, &l, Mode::Owner, None);
             // A row llama.cpp's `--fit` would shrink, fitted to what this
             // reading's card can give it (`partial::llama`); fitted again
             // on every reading of the wait (`Self::decide`).
-            let fp = self.fit_in(snap, target, fp, &l);
-            let needs = fp.total_bytes.saturating_add(headroom);
-            // A model bigger than the GPU never becomes admissible, however
-            // long it waits, so it is refused here rather than queued forever
-            // — unless it can run with less on the card, which admission
-            // then gives it (`partial`). Judged without the learned growth,
-            // which only decides whether there is room now (`headroom`).
-            let structural = self.card_headroom(snap, target.class, &target.model_id, &fp);
-            if fp.total_bytes.saturating_add(structural) > cap.total && !super::partial::adapts(&fp)
-            {
+            let fp = self.fit_in_on(target, fp, &l, &p, None);
+            let needs = fp
+                .total_bytes
+                .saturating_add(p.engine)
+                .saturating_add(p.headroom);
+            // A model bigger than every card it may use never becomes
+            // admissible, however long it waits, so it is refused here
+            // rather than queued forever — unless it can run with less on
+            // the card, which admission then gives it (`partial`). Judged
+            // without the learned room, which only decides whether there
+            // is room now (`headroom`), and against each card it may use,
+            // or their sum for a chat model that goes over them (§5.8).
+            if let Some(t) = self.too_large(snap, target, &fp, &l) {
                 return Err(GatewayError::VramTooLarge {
                     model: target.model_id.clone(),
-                    need: GatewayError::vram_need(fp.total_bytes, structural),
-                    capacity: fmt_bytes(cap.total),
-                    hint: super::partial::too_large_hint(snap, target, &fp),
+                    need: GatewayError::vram_need(t.bytes, t.structural),
+                    holds: GatewayError::vram_holds(&t.holder, t.capacity),
+                    hint: super::partial::too_large_hint(snap, target, &fp)
+                        + &self.no_split_hint(snap, target, &fp),
                 });
             }
-            (fp, needs)
+            (fp, super::CardCharge::over(p.cards.clone(), needs))
         };
 
         let started = Instant::now();
@@ -460,12 +541,14 @@ impl VramScheduler {
     /// every reading of the card where llama.cpp's `--fit` would shrink it
     /// ([`Self::fit_in`]).
     ///
-    /// **Learned growth decides waiting** (`headroom`): a start waits for,
-    /// and evicts, lmgw's own models until its footprint and its headroom —
-    /// the learned growth and its margin — are free. Once nothing of lmgw's
-    /// is left to wait for or evict, it goes ahead wherever it fits with its
-    /// margin alone, with a warning that names the growth
-    /// ([`Self::note_growth`]).
+    /// **The learned room decides waiting** (`headroom`, device-ledger
+    /// design WP13): a start waits for, and evicts, lmgw's own models until
+    /// its footprint and its headroom — the card's floor, its learned room
+    /// and the start's margin — are free; `place` has already preferred a
+    /// card where that holds, now or after evicting there. Once nothing of
+    /// lmgw's is left to wait for or evict, it goes ahead wherever it fits
+    /// with the floor and its margin, with a warning that names the room
+    /// it took ([`Self::note_growth`]). The floor is never given up.
     #[allow(clippy::too_many_arguments)]
     async fn decide(
         &self,
@@ -503,8 +586,6 @@ impl VramScheduler {
             }
         };
 
-        let headroom = self.start_headroom(snap, target.class, &target.model_id, base);
-        let margin = self.start_margin(snap, target.class, &target.model_id, base);
         self.set_phase(waiter_id, WaitPhase::Measuring, None);
         // Held from the first look that does not fit until this returns,
         // however it returns (candidate-aliases §4.5, §12 entry 47).
@@ -513,6 +594,10 @@ impl VramScheduler {
         let mut looked = false;
         // Why a pipeline that can run with less still waits, logged once.
         let mut said_why = false;
+        // The cards this start committed to, once a reading could not start
+        // it at once (device-ledger design §5.5, D15): asked of `place` no
+        // more while it holds them.
+        let mut claim: Option<(super::scheduler::Claimed, Placement)> = None;
         loop {
             // Switched on while this request waited — the hold, or a
             // benchmark's lease (benchmark design §3.2): nothing new goes on
@@ -523,13 +608,13 @@ impl VramScheduler {
             if let Some(block) = state.snapshot().gpu_block() {
                 return Err(block.refusal(target.model_id.clone(), ""));
             }
-            let l = self.ledger(state, snap).await;
-            let Some(cap) = l.capacity.as_ref() else {
+            let l = Box::pin(self.ledger(state, snap)).await;
+            if l.capacity.is_none() {
                 // Telemetry vanished mid-wait (driver reset). Forwarding
                 // unarbitrated is the same behaviour as a gateway without this
                 // feature, and strictly better than a hang.
                 return Ok(Decided::Go(None));
-            };
+            }
 
             // Somebody else started it while this request waited: their
             // reservation (or their registry entry) already accounts for it,
@@ -541,29 +626,119 @@ impl VramScheduler {
                 return Ok(Decided::Go(None));
             }
 
+            // The cards: the claim's, else where `place` puts it on this
+            // reading (§5).
+            let own = claim.as_ref().map(|(c, _)| c.id);
+            let p = match &claim {
+                Some((_, p)) => p.clone(),
+                None => self.placement(snap, target, base, &l, Mode::Owner, None),
+            };
+            let Some(cap) = l.capacity_on(&p.cards, own) else {
+                return Ok(Decided::Go(None));
+            };
+            let (headroom, margin, floor) = (p.headroom, p.margin, p.floor);
+            // Only a split holds it, and none fits now (owner, 2026-11-18):
+            // the cards that split waits on. It commits to no card and
+            // evicts nothing on the roomiest one, which can never hold it.
+            let split_wait = match &claim {
+                Some(_) => None,
+                None => self.split_wait(snap, target, base, &l, &p),
+            };
+
             // Fitted to what this reading's card can give it: lmgw's own
             // models counted as room, so evicting them changes nothing,
             // and with none left the target is what is free beside its
             // margin (`partial::llama`).
-            let fitted = self.fit_in(snap, target, base.clone(), &l);
+            let fitted = self.fit_in_on(target, base.clone(), &l, &p, own);
             let fp = &fitted;
-            let needs = fp.total_bytes.saturating_add(headroom);
-            self.set_needs(waiter_id, needs);
-            if cap.free >= needs {
+            // A split needs its part on each of its cards (§4.3): the card
+            // short of it is the one an eviction or a wait is on.
+            let parts = self.split_needs(&l, target, &p);
+            let short = self.split_short(&l, target, &p, own);
+            let needs = match parts.is_empty() {
+                true => fp
+                    .total_bytes
+                    .saturating_add(p.engine)
+                    .saturating_add(headroom),
+                false => parts.iter().map(|(_, b)| *b).fold(0, u64::saturating_add),
+            };
+            self.set_needs(
+                waiter_id,
+                match parts.is_empty() {
+                    true => super::CardCharge::over(p.cards.clone(), needs),
+                    false => super::CardCharge::per_card(parts.clone()),
+                },
+            );
+            if let (Some(grant), None) = (super::place::split_grant(&p), &short) {
+                self.set_phase(waiter_id, WaitPhase::Starting, None);
+                return Ok(Decided::Go(Some(self.reserve_as(state, target, &p, grant))));
+            }
+            if p.split.is_none() && cap.free >= needs {
                 self.set_phase(waiter_id, WaitPhase::Starting, None);
                 let room = super::partial::Room {
                     free: cap.free,
-                    headroom,
-                    others_hold: others_hold(&l, target),
+                    headroom: headroom.saturating_add(p.engine),
+                    floor: headroom.saturating_add(p.engine),
+                    others_hold: others_hold_on(&l, target, &p.cards),
                     fallback: fallback.as_ref().is_some_and(|f| f.live()),
-                    cards: self.cards_for(snap, target),
+                    cards: p.count(),
                 };
                 let grant = super::partial::whole(target, fp, room);
-                return Ok(Decided::Go(Some(self.reserve_as(state, target, grant))));
+                // A context lowered to one card of several, said as the
+                // editor says it (device-ledger design §8.2).
+                let grant = self.one_card_grant(snap, target, fp, &p, &l, grant);
+                return Ok(Decided::Go(Some(self.reserve_as(state, target, &p, grant))));
             }
 
+            // The cards an eviction or a wait is on: a split's short card,
+            // else all of the placement's. On a computer with several cards
+            // the phases and words name them, with what is needed and free
+            // there (device-ledger design §10).
+            let evict_on = match (&short, &split_wait) {
+                (Some((card, _, _)), _) => vec![card.clone()],
+                (None, Some(on)) => on.clone(),
+                (None, None) => p.cards.clone(),
+            };
+            let (wait_needs, wait_free) = match (&short, &split_wait) {
+                (Some((_, n, f)), _) => (*n, *f),
+                (None, Some(on)) => (needs, l.capacity_on(on, own).map_or(cap.free, |c| c.free)),
+                (None, None) => (needs, cap.free),
+            };
+            let cards = super::stall::wait_cards(&l, &evict_on);
+            // What it waited for, said once it is out of time: the models
+            // of lmgw's on the cards a split needs where only a split holds
+            // it.
+            let holding = |l: &Ledger| match (&split_wait, &p.split) {
+                (Some(_), _) => describe_split_holders(l, &cards),
+                // A split's wait, a row's own on its pin among them, names
+                // the budget its parts share.
+                (None, Some(_)) => describe_holders(l, &cards) + &split_budget_note(l),
+                (None, None) => describe_holders(l, &cards),
+            };
+
             if budget.is_some_and(|d| started.elapsed() >= d) {
-                return Err(expired(describe_holders(&l)));
+                return Err(expired(holding(&l)));
+            }
+
+            // Not now: it commits to these cards, where one card or a split
+            // was answered (§5.5); a split claims its part on each card. A
+            // group is the pooled wait of before.
+            let waits = super::place::waits_on(&l, target, &p);
+            if claim.is_none() && !parts.is_empty() && l.devices.len() > 1 {
+                let c = self.claim_parts(state, waiter_id, parts.clone(), waits);
+                claim = Some((c, p.clone()));
+            } else if claim.is_none()
+                && split_wait.is_none()
+                && p.cards.len() == 1
+                && l.devices.len() > 1
+            {
+                let c = self.claim(state, waiter_id, p.cards.clone(), needs, waits);
+                claim = Some((c, p.clone()));
+            } else if let Some((c, _)) = &claim {
+                match parts.is_empty() {
+                    true => self.reclaim(c.id, needs, waits),
+                    false => self.reclaim_parts(c.id, &parts, waits),
+                }
             }
 
             // Short of room: every resident model drains for the owner —
@@ -571,19 +746,34 @@ impl VramScheduler {
             // wait evicts or waits for do not stay busy with guests (§4.5).
             // A guest's run that holds one claim for a whole tool loop keeps
             // its model for the run: a request that has started finishes.
-            if drain.is_none() {
+            // Not where only a split holds it: the roomiest card it was
+            // answered can never hold it, so nothing there is evicted or
+            // drained for it.
+            if drain.is_none() && split_wait.is_none() {
                 drain = Some(background::owner_drain(state));
             }
-            self.set_stage(waiter_id, &evicting_stage(needs, Some(cap.free), None));
-            if self
-                .evict_one(
-                    state,
-                    target,
-                    &l,
-                    background::Victims::Any,
-                    Some((waiter_id, needs)),
-                )
-                .await
+            if split_wait.is_none() {
+                self.set_stage(
+                    waiter_id,
+                    &evicting_stage(wait_needs, Some(wait_free), None, &cards, false),
+                );
+            }
+            if split_wait.is_none()
+                && self
+                    .evict_one(
+                        state,
+                        target,
+                        &l,
+                        background::Victims::Any,
+                        Some(ForWait {
+                            id: waiter_id,
+                            needs: wait_needs,
+                            free: wait_free,
+                            cards: &cards,
+                        }),
+                        &evict_on,
+                    )
+                    .await
             {
                 continue;
             }
@@ -604,50 +794,100 @@ impl VramScheduler {
                 {
                     Gated::Held(gate) => gate,
                     Gated::External(short) => return Ok(Decided::External(short)),
-                    Gated::Expired => return Err(expired(describe_holders(&l))),
+                    Gated::Expired => return Err(expired(holding(&l))),
                 };
                 // Measured again whatever the pass found: the gate was let go.
                 continue;
             }
             // Nothing more can be made free now. With nothing of lmgw's
-            // left on the card, the learned growth is no reason to wait any
+            // left on the card, the learned room is no reason to wait any
             // longer: a start that fits beside what other programs hold now
-            // with its margin goes ahead, warned (`room_now`). Else a
+            // with the floor and its margin goes ahead, warned (`room_on`);
+            // and where nothing smaller of it fits beside the margin, one
+            // that fits beside the floor alone, its margin given up last
+            // (`partial::decide`), warned too. Else a
             // pipeline that can run with less on the card goes ahead with
             // what `partial` gives it — its on-card part, or what is free
             // where that leaves the working budget it has rendered with;
             // short of that, only when nothing else of lmgw's could be
             // waited for and no fallback would answer instead.
-            let room = self.room_now(
-                snap,
+            let room = self.room_on(
                 &l,
                 target,
-                (headroom, margin),
+                &p,
+                &cap,
                 fallback.as_ref().is_some_and(|f| f.live()),
             );
-            if let Some(grant) = super::partial::decide(target, fp, room) {
-                let grant = self.note_growth(target, grant, (headroom, margin), cap.free);
+            // A split goes ahead only card by card, above (§4.3): never
+            // with a grant that would leave its split to the engine.
+            let go = match p.split {
+                Some(_) => None,
+                None => super::partial::decide(target, fp, room),
+            };
+            if let Some(grant) = go {
+                let grant = self.note_growth(
+                    target,
+                    grant,
+                    (headroom + p.engine, margin + p.engine, floor + p.engine),
+                    cap.free,
+                );
                 self.set_phase(waiter_id, WaitPhase::Starting, None);
-                return Ok(Decided::Go(Some(self.reserve_as(state, target, grant))));
+                return Ok(Decided::Go(Some(self.reserve_as(state, target, &p, grant))));
             }
             if !said_why {
-                if let Some(why) = super::partial::why_not(fp, room) {
+                let why = super::partial::why_not(fp, room)
+                    .map(|w| w + &self.no_split_hint(snap, target, fp))
+                    .or_else(|| {
+                        Some(self.no_split_hint(snap, target, fp))
+                            .filter(|h| !h.is_empty())
+                            .map(|h| h.trim_start_matches(". ").to_string())
+                    });
+                if let Some(why) = why {
                     said_why = true;
                     tracing::info!(
-                        "{}/{} waits for room: {why}",
+                        "{}/{} waits for room{}: {why}",
                         target.class.as_str(),
-                        target.model_id
+                        target.model_id,
+                        match cards.is_empty() {
+                            true => String::new(),
+                            false => format!(" on {}", lmgw_api_types::WaitCard::list(&cards)),
+                        }
                     );
                 }
             }
             self.set_phase(
                 waiter_id,
                 WaitPhase::WaitingForRoom {
-                    needs_bytes: needs,
-                    free_bytes: cap.free,
+                    needs_bytes: wait_needs,
+                    free_bytes: wait_free,
+                    cards: cards.clone(),
                 },
-                Some(&waiting_stage(&l, target, needs, cap.free)),
+                Some(&waiting_stage(
+                    &l, target, wait_needs, wait_free, &evict_on, &cards,
+                )),
             );
+            // A start that committed to its cards gives the gate back while
+            // it waits (§5.5): a start that fits another card is not held
+            // up by it, and one on its card sees what it claimed there. So
+            // does one only a split holds, which holds nothing meanwhile: a
+            // later, smaller start may take the room first (owner,
+            // 2026-11-18).
+            if claim.is_some() || split_wait.is_some() {
+                drop(gate);
+                tokio::time::sleep(POLL).await;
+                if let Some(short) = self.recheck(state, target, alias, &mut fallback).await {
+                    return Ok(Decided::External(short));
+                }
+                gate = match self
+                    .take_gate(state, target, alias, None, started, budget, &mut fallback)
+                    .await
+                {
+                    Gated::Held(gate) => gate,
+                    Gated::External(short) => return Ok(Decided::External(short)),
+                    Gated::Expired => return Err(expired(holding(&l))),
+                };
+                continue;
+            }
             tokio::time::sleep(POLL).await;
             if let Some(short) = self.recheck(state, target, alias, &mut fallback).await {
                 return Ok(Decided::External(short));
@@ -663,7 +903,7 @@ impl VramScheduler {
                     // Out of time back in the queue: what this request was
                     // waiting for is still the busy models it yielded over,
                     // not "another request being admitted" (§12 entry 74).
-                    Gated::Expired => return Err(expired(describe_holders(&l))),
+                    Gated::Expired => return Err(expired(holding(&l))),
                 };
             }
         }
@@ -743,6 +983,10 @@ impl VramScheduler {
     /// Stop the least recently used idle container. Returns false when every
     /// resident model is busy — the caller then waits rather than killing work.
     ///
+    /// `on`: the cards that are short (device-ledger design §6.1); only a
+    /// model charged there is a victim. Empty: every card, the pooled
+    /// capacity.
+    ///
     /// `victims`: any idle model, or only idle `Background`-owned ones — a
     /// guest's start, which never evicts the owner's (candidate-aliases
     /// §4.4). `waiter`: the wait this eviction makes room for and the bytes
@@ -755,7 +999,8 @@ impl VramScheduler {
         target: &Target,
         l: &Ledger,
         victims: background::Victims,
-        waiter: Option<(u64, u64)>,
+        waiter: Option<ForWait<'_>>,
+        on: &[super::nvml::DeviceId],
     ) -> bool {
         // Residency in the registry is what makes a model a candidate, never a
         // nonzero estimate (§4): a resident whose footprint reads zero would be
@@ -789,6 +1034,13 @@ impl VramScheduler {
                     && idle(e)
                     && !(e.class == target.class && e.model_id == target.model_id)
                     && (victims == background::Victims::Any || e.owner == Origin::Background)
+                    // Only a model on the cards that are short (device-ledger
+                    // design §6.1): an idle model on another card is left
+                    // alone.
+                    && l.residents.iter().any(|r| {
+                        r.generation == Some(e.generation)
+                            && super::ledger::Ledger::is_on(r, on)
+                    })
             })
             .collect();
         // Least recently used first.
@@ -815,11 +1067,28 @@ impl VramScheduler {
                     }
                 }
             }
-            if let Some((id, needs)) = waiter {
+            if let Some(w) = &waiter {
                 let victim = format!("{}/{}", c.class.as_str(), c.model_id);
-                let free = l.capacity.as_ref().map(|c| c.free);
-                let stage = evicting_stage(needs, free, Some(&victim));
-                self.set_phase(id, WaitPhase::Evicting { victim }, Some(&stage));
+                // On one card the machine's free, as it always was; on
+                // several, what is free on the cards the wait is on.
+                let free = match w.cards.is_empty() {
+                    true => l.capacity.as_ref().map(|c| c.free),
+                    false => Some(w.free),
+                };
+                // Started again on another card after the stop (§6.2): the
+                // same question `repack` asks below, on the same reading.
+                let moves =
+                    !w.cards.is_empty() && !self.elsewhere(&state.snapshot(), l, c, on).is_empty();
+                let stage = evicting_stage(w.needs, free, Some(&victim), w.cards, moves);
+                self.set_phase(
+                    w.id,
+                    WaitPhase::Evicting {
+                        victim,
+                        cards: w.cards.to_vec(),
+                        moves,
+                    },
+                    Some(&stage),
+                );
             }
             // Never forced: `stop` refuses on its own in-flight count, so a
             // request that raced in between the candidate list and here still
@@ -842,13 +1111,22 @@ impl VramScheduler {
                         .find(|r| r.container == c.class && r.model == c.model_id)
                         .map(|r| r.estimated_bytes)
                         .unwrap_or(0);
+                    let from = super::stall::wait_cards(l, on);
                     tracing::info!(
-                        "evicted {}/{} ({}) to make room for {}",
+                        "evicted {}/{} ({}){} to make room for {}",
                         c.class.as_str(),
                         c.model_id,
                         fmt_bytes(estimated),
+                        match from.is_empty() {
+                            true => String::new(),
+                            false => format!(" from {}", lmgw_api_types::WaitCard::list(&from)),
+                        },
                         target.model_id
                     );
+                    // Started again on another card that holds it now
+                    // (device-ledger design §6.2), by a task of its own:
+                    // this start does not wait for it.
+                    self.repack(state, l, c, on, target);
                     return true;
                 }
                 Err(e) => {
@@ -859,6 +1137,18 @@ impl VramScheduler {
         }
         false
     }
+}
+
+/// The wait an eviction makes room for ([`VramScheduler::evict_one`]): its
+/// waiter, what it needs and what is free on the cards it waits for, and
+/// those cards named on a computer with several (empty on one card), so
+/// the phase names the victim's card and whether it moves (device-ledger
+/// design §6.2, §10).
+pub(super) struct ForWait<'a> {
+    pub id: u64,
+    pub needs: u64,
+    pub free: u64,
+    pub cards: &'a [lmgw_api_types::WaitCard],
 }
 
 /// What a start over reads again (ladder design §12 entry 51): the snapshot
@@ -1018,70 +1308,74 @@ pub(crate) fn broadcast(state: &SharedState) {
     });
 }
 
-/// Something of lmgw's other than `target` is on the card or reserved for
-/// it: a wait could free it (`partial::Room::others_hold`).
-pub(super) fn others_hold(l: &Ledger, target: &Target) -> bool {
-    l.residents
-        .iter()
-        .any(|r| !(r.container == target.class && r.model == target.model_id))
-}
-
-/// What lmgw's own models other than `target` on the card are charged, which
-/// a wait or an eviction frees: each its charge and the peak kept free for
-/// it, as `beside` counts what evicting one gives back. A reservation (a
-/// start another admission decided) is no victim and is not counted.
-pub(super) fn freeable(l: &Ledger, target: &Target) -> u64 {
-    l.residents
-        .iter()
-        .filter(|r| !(r.container == target.class && r.model == target.model_id))
-        .filter(|r| r.state != "reserved")
-        .map(|r| {
-            r.estimated_bytes
-                .saturating_add(r.peak_extra_bytes.unwrap_or(0))
-        })
-        .fold(0u64, u64::saturating_add)
-}
-
 impl VramScheduler {
     /// The room a start decides in once nothing more can be made free, on
-    /// ledger `l` (per-model containers §4, "Learned growth decides
-    /// waiting"): kept free beside it is its `headroom` — the learned growth
-    /// and its margin — while anything of lmgw's is on the card that a wait
-    /// could free; with nothing of lmgw's left, only its `margin`, so a start
-    /// that fits beside what other programs hold now goes ahead
-    /// ([`Self::note_growth`] says so).
-    pub(super) fn room_now(
+    /// the cards of placement `p` as ledger `l` reads them, with `cap` their
+    /// capacity (per-model containers §4, "Headroom"; device-ledger design
+    /// §5.6, WP13): kept free beside it is its headroom — the floor, the
+    /// learned room and its margin — while anything of lmgw's is on those
+    /// cards that a wait could free; with nothing of lmgw's left there, the
+    /// floor and its margin, so a start that fits beside what other
+    /// programs hold now goes ahead ([`Self::note_growth`] says so), and
+    /// the floor alone where nothing smaller fits beside the margin
+    /// (`partial::Room::floor`, given up last). The engine's cost there
+    /// rides on each.
+    pub(super) fn room_on(
         &self,
-        snap: &Snapshot,
         l: &Ledger,
         target: &Target,
-        (headroom, margin): (u64, u64),
+        p: &Placement,
+        cap: &super::ledger::Capacity,
         fallback: bool,
     ) -> super::partial::Room {
-        let others = others_hold(l, target);
+        let others = others_hold_on(l, target, &p.cards);
         super::partial::Room {
-            free: l.capacity.as_ref().map_or(0, |c| c.free),
-            headroom: if others { headroom } else { margin },
+            free: cap.free,
+            headroom: if others { p.headroom } else { p.margin }.saturating_add(p.engine),
+            floor: if others { p.headroom } else { p.floor }.saturating_add(p.engine),
             others_hold: others,
             fallback,
-            cards: self.cards_for(snap, target),
+            cards: p.count(),
+        }
+    }
+
+    /// " on <card>" for a refusal where the placement is one card of
+    /// several: by name and index, never by id; empty otherwise.
+    pub(super) fn on_words(&self, l: &Ledger, p: &Placement) -> String {
+        match p.cards.as_slice() {
+            [one] if l.devices.len() > 1 => l
+                .devices
+                .iter()
+                .find(|d| &d.id == one)
+                .map(|d| format!(" on {} (card {})", d.name, d.index))
+                .unwrap_or_default(),
+            _ => String::new(),
         }
     }
 
     /// `grant`, with the warning of a start that goes ahead without the
-    /// learned growth kept free beside it where it does
-    /// ([`Self::growth_let_go`]).
+    /// learned room or its margin kept free beside it where it does
+    /// ([`Self::growth_let_go`]). `kept`: what it keeps while it can make
+    /// room another way, once the room is given up, and once the margin is
+    /// too. An image pipeline's partial grant sets its context aside inside
+    /// itself (`partial::Room`), the image margin's stand-in: the margin is
+    /// in the grant, never given up, and what it keeps beside it is less
+    /// by it.
     pub(super) fn note_growth(
         &self,
         target: &Target,
         grant: super::partial::Grant,
-        kept: (u64, u64),
+        (headroom, margin, floor): (u64, u64, u64),
         free: u64,
     ) -> super::partial::Grant {
         use super::partial::Grant;
-        let bytes = match &grant {
-            Grant::Whole(b) | Grant::Noted(b, _) => *b,
-            Grant::Partial(g) => g.bytes,
+        let (bytes, kept) = match &grant {
+            Grant::Whole(b) | Grant::Noted(b, _) => (*b, (headroom, margin, floor)),
+            Grant::Partial(g) if g.llama.is_none() => {
+                let set_aside = margin.saturating_sub(floor);
+                (g.bytes, (headroom.saturating_sub(set_aside), floor, floor))
+            }
+            Grant::Partial(g) => (g.bytes, (headroom, margin, floor)),
         };
         let Some(note) = self.growth_let_go(target, bytes, kept, free) else {
             return grant;
@@ -1102,12 +1396,76 @@ impl VramScheduler {
 
 /// What is holding the GPU, for a refusal message. A timeout that only says
 /// "timed out" leaves the owner nothing to act on.
-pub(super) fn describe_holders(l: &Ledger) -> String {
-    if l.residents.is_empty() {
-        return "nothing lmgw put there is resident — another process is using the GPU".into();
+///
+/// `cards`: on a computer with several, the cards the start waited for
+/// (device-ledger design §10): the message names them and lists lmgw's
+/// models there. Empty on one card, and the message is as it always was.
+pub(super) fn describe_holders(l: &Ledger, cards: &[lmgw_api_types::WaitCard]) -> String {
+    let on = lmgw_api_types::WaitCard::list(cards);
+    let parts = holders_on(l, cards);
+    if parts.is_empty() {
+        return match cards {
+            [] => "nothing lmgw put there is resident — another process is using the GPU".into(),
+            [_] => {
+                format!("nothing lmgw put on {on} is resident — another process is using that card")
+            }
+            _ => format!(
+                "nothing lmgw put on {on} is resident — other processes are using those cards"
+            ),
+        };
     }
-    let mut parts: Vec<String> = l
+    match cards {
+        [] => format!("held by {}", parts.join(", ")),
+        _ => format!("{on} is held by {}", parts.join(", ")),
+    }
+}
+
+/// What a start only a split holds waited for (owner, 2026-11-18): no card
+/// holds it whole, and the split it needs over `cards` waited for the busy
+/// or starting models of lmgw's there — not "another process is using that
+/// card", which [`describe_holders`] would say of the roomiest card it was
+/// answered.
+pub(super) fn describe_split_holders(l: &Ledger, cards: &[lmgw_api_types::WaitCard]) -> String {
+    let on = lmgw_api_types::WaitCard::list(cards);
+    let parts = holders_on(l, cards);
+    let said = match parts.is_empty() {
+        true => format!(
+            "no card holds it whole, and a split over {on} found no room there although \
+             nothing lmgw put there is resident — other processes are using those cards"
+        ),
+        false => format!(
+            "no card holds it whole, and the split it needs over {on} waited for {} to leave \
+             room there",
+            parts.join(", ")
+        ),
+    };
+    said + &split_budget_note(l)
+}
+
+/// What a split's wait or refusal adds under a declared budget over several
+/// cards (owner, 2026-11-18): its parts together fit within what the budget
+/// leaves too; empty without one.
+pub(super) fn split_budget_note(l: &Ledger) -> String {
+    match l.budget_total() {
+        Some(b) => format!(
+            " (under the GPU memory budget of {}, a split's parts on its cards together, \
+             their engine's cost included, fit within what it leaves)",
+            fmt_bytes(b)
+        ),
+        None => String::new(),
+    }
+}
+
+/// lmgw's models with bytes on `cards` (every card for none), each as
+/// "class/model (size…)", sorted.
+fn holders_on(l: &Ledger, cards: &[lmgw_api_types::WaitCard]) -> Vec<String> {
+    let ids: Vec<super::nvml::DeviceId> = cards.iter().map(|c| c.id.clone()).collect();
+    let there: Vec<&super::ResidentView> = l
         .residents
+        .iter()
+        .filter(|r| Ledger::is_on(r, &ids))
+        .collect();
+    let mut parts: Vec<String> = there
         .iter()
         .map(|r| {
             format!(
@@ -1140,5 +1498,5 @@ pub(super) fn describe_holders(l: &Ledger) -> String {
         })
         .collect();
     parts.sort();
-    format!("held by {}", parts.join(", "))
+    parts
 }

@@ -16,7 +16,7 @@ use crate::fmt::{age, grouped, hue_for, log_time};
 use crate::live::use_live;
 use crate::model_ops::{LogsButton, ModelRunButtons};
 use crate::widgets::{filter_words, matches_word, CopyBtn, Facet, FacetSet, FilterBar, PageFrame};
-use crate::widgets::{MachineCard, PageMode, Section};
+use crate::widgets::{Ico, Icon, MachineCard, PageMode, Section};
 
 const FEED_LIMIT: usize = 25;
 
@@ -152,15 +152,15 @@ pub fn Overview() -> impl IntoView {
             <div class="auto-grid fit tile-row">
                 <div class={move || if nums.get().0 > 0 { "tile hot" } else { "tile" }}>
                     <div class="tile-value">{move || nums.get().0.to_string()}</div>
-                    <div class="tile-label">"active now"</div>
+                    <div class="tile-label">"Active now"</div>
                 </div>
                 <div class="tile">
                     <div class="tile-value">{move || nums.get().1.to_string()}</div>
-                    <div class="tile-label">"req / min"</div>
+                    <div class="tile-label">"Requests / min"</div>
                 </div>
                 <div class={move || if nums.get().2 > 0 { "tile bad" } else { "tile" }}>
                     <div class="tile-value">{move || nums.get().2.to_string()}</div>
-                    <div class="tile-label">"errors / min"</div>
+                    <div class="tile-label">"Errors / min"</div>
                 </div>
                 // Counted in memory by this gateway process, so it starts over
                 // with it: the tile says so, the tooltip says since when.
@@ -177,7 +177,7 @@ pub fn Overview() -> impl IntoView {
                     }
                 >
                     <div class="tile-value">{move || grouped(nums.get().3)}</div>
-                    <div class="tile-label">"tokens since start"</div>
+                    <div class="tile-label">"Tokens since start"</div>
                 </div>
             </div>
 
@@ -579,8 +579,8 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
     let state = r.rt.as_ref().map(|rt| rt.state.clone());
     let (chip_cls, chip_label) = match state.as_deref() {
         Some("ready") => ("chip ok", "ready"),
-        Some("starting") => ("chip live", "starting"),
-        Some("stopping") => ("chip live", "stopping"),
+        Some("starting") => ("chip info", "starting"),
+        Some("stopping") => ("chip info", "stopping"),
         _ => ("chip off", "stopped"),
     };
     let hue = hue_for(&r.name);
@@ -1196,10 +1196,14 @@ fn FeedRow(r: RequestRow) -> impl IntoView {
         (Some(p), None) => p.to_string(),
         _ => "—".into(),
     };
+    // The server stores `?` for a request that named no model.
+    let no_model = r.ingress_proto != "mcp" && matches!(r.requested_alias.trim(), "" | "?");
     let name = if r.ingress_proto == "mcp" {
         r.mcp_tool
             .clone()
             .unwrap_or_else(|| r.requested_alias.clone())
+    } else if no_model {
+        "No model".to_string()
     } else {
         r.requested_alias.clone()
     };
@@ -1221,13 +1225,20 @@ fn FeedRow(r: RequestRow) -> impl IntoView {
         <tr class:err-row=!ok title=tip>
             <td class="dim mono-sm">{t.time}</td>
             <td class="clip" title=name_tip>
-                <i class="swatch" style=format!("--hue:{hue}")></i>
-                <span class="mono-sm">{name.clone()}</span>
+                {(!no_model).then(|| view! { <i class="swatch" style=format!("--hue:{hue}")></i> })}
+                <span class="mono-sm" class:dim=no_model>{name.clone()}</span>
             </td>
             <td class="dim col-p3">{r.upstream_name.clone().unwrap_or_default()}</td>
             <td>
                 <span class=if ok { "status-ok" } else { "status-err" }>{r.status}</span>
-                {r.streamed.then(|| view! { <span class="dim">" ~"</span> })}
+                {r.streamed
+                    .then(|| {
+                        view! {
+                            <span class="stream-mark" title="Streamed">
+                                <Icon ico=Ico::Stream class="stream-ico"/>
+                            </span>
+                        }
+                    })}
             </td>
             <td class="num col-p2">{r.ttfb_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</td>
             <td class="num">{r.total_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</td>

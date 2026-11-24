@@ -182,7 +182,7 @@ fn user_content(parts: &[ContentPart]) -> Vec<Value> {
         .iter()
         .filter_map(|p| match p {
             ContentPart::Text { text, .. } => Some(json!({"type": part::INPUT_TEXT, "text": text})),
-            ContentPart::Image { mime, source } => Some(input_image(mime, source)),
+            ContentPart::Image { mime, source, .. } => Some(input_image(mime, source)),
             _ => None,
         })
         .collect()
@@ -219,7 +219,7 @@ fn assistant_items(parts: &[ContentPart], scope: &SealScope, out: &mut Vec<Value
             ContentPart::Text { text, .. } | ContentPart::Refusal { text } if !text.is_empty() => {
                 texts.push(text)
             }
-            ContentPart::ToolUse { id, name, args } => {
+            ContentPart::ToolUse { id, name, args, .. } => {
                 flush(&mut texts, out);
                 out.push(json!({
                     "type": item::FUNCTION_CALL,
@@ -276,17 +276,19 @@ fn tool_output(id: &str, content: &[ToolResultBlock]) -> Value {
     let mut dropped = Vec::new();
     for b in content {
         match b {
-            ToolResultBlock::Image { mime, data } => match tool_images::openai_image(mime, data) {
-                Ok(format) => out.push(input_image(
-                    format.mime(),
-                    &ImageSource::Base64 { data: data.clone() },
-                )),
-                Err(why) => {
-                    let text = tool_image_placeholder(mime, data, &why);
-                    out.push(json!({"type": part::INPUT_TEXT, "text": text}));
-                    dropped.push(format!("{} ({why})", tool_image_note(mime, data)));
+            ToolResultBlock::Image { mime, data, .. } => {
+                match tool_images::openai_image(mime, data) {
+                    Ok(format) => out.push(input_image(
+                        format.mime(),
+                        &ImageSource::Base64 { data: data.clone() },
+                    )),
+                    Err(why) => {
+                        let text = tool_image_placeholder(mime, data, &why);
+                        out.push(json!({"type": part::INPUT_TEXT, "text": text}));
+                        dropped.push(format!("{} ({why})", tool_image_note(mime, data)));
+                    }
                 }
-            },
+            }
             other => {
                 let text = FlattenToolResults.render(id, std::slice::from_ref(other));
                 if text.as_str().is_some_and(|t| !t.is_empty()) {

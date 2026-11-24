@@ -870,6 +870,7 @@ async fn local_inner(st: &SharedState, q: LocalQuery) -> Result<dto::UsageLocalR
                     completion: Some(local_out as u64),
                     cached_in: Some(local_cached as u64),
                     cache_write: None,
+                    cache_write_1h: None,
                     reasoning: Some(local_reasoning as u64),
                 },
                 Some(p),

@@ -309,7 +309,11 @@ Consequences and corrections:
   concurrently against their reservations (the router itself handled
   parallel child loads fine, and independent containers trivially do).
   This is in scope, not follow-up — it is the actual fix for the observed
-  queueing. Per-GPU gates stay follow-up.
+  queueing. Per-GPU gates stay follow-up. *Since 2026-11-16 ([the device ledger](2026-11-13-device-ledger-design.md), §5.5,
+  D11):* still one gate on a computer with several cards, but a start that
+  waits for room on one card claims that card and gives the gate back while
+  it waits, so a start that fits another card is not held up by it. A gate
+  per card is in that record's "Not yet".
 - **A model that would work is never refused; one that fits only partially
   starts with a warning** (the owner's ruling of 2026-11-11: a model that would work is never blocked; one that fits only partially starts with a warning. A start must
   also not push other residents into OOM; where lmgw does not know a figure
@@ -329,7 +333,12 @@ Consequences and corrections:
   name). `--max-vram` is a per-device budget while the ledger pools the
   devices, so on several cards sd-server could draw the budget on each:
   such a row takes the whole-pipeline path, and its refusal or wait line
-  says partial fitting on several cards is not done yet. A row whose args
+  says partial fitting on several cards is not done yet. *Since 2026-11-16
+  ([the device ledger](2026-11-13-device-ledger-design.md), WP5, ruling 12):* lmgw places an image model on one card and hands its
+  engine that card alone, so `--max-vram` is that card's budget and the
+  pipeline is fitted partially there. Only a row lmgw cannot hand a card (an
+  AMD card, a native start, a GPU node in its run arguments) is still placed
+  on its cards as a group and takes the whole-pipeline path, and says so. A row whose args
   set its own `max_vram` gets that budget plus its context where that much
   is free beyond the headroom, else the normal path; one whose own
   `max_vram` is 0 or less follows the driver's free memory, which bounds
@@ -477,7 +486,8 @@ Consequences and corrections:
   Not done yet: the grant is the entry's for its life, so a pipeline
   squeezed once stays squeezed and warned after the card frees up, until
   its container stops (no re-grant on a later idle relaunch yet); partial
-  fitting on several cards (per-device budgets); the working budget is the
+  fitting on several cards (per-device budgets; *since 2026-11-16 a model is
+  placed on one card instead*, [the device ledger](2026-11-13-device-ledger-design.md) §5); the working budget is the
   row's, not per size, so a figure raised by a large picture holds for the
   small ones too. Not counted as partial yet: an aux row's partial
   `--n-gpu-layers` and llama.cpp's `--fit` on an aux row, which admission
@@ -534,6 +544,8 @@ Consequences and corrections:
     off` would leave llama.cpp nothing to keep it with: admission keeps it
     instead where it is more than the headroom, in the target, in the
     start's needs and in the "too large" judgement, and the note says so.
+    *Since 2026-11-16* ([the device ledger](2026-11-13-device-ledger-design.md) §5) it is kept on each card lmgw considers for
+    the model, as that card's headroom where it is more.
   - *What it is charged.* Where what the card can give it now cannot hold
     the row as written beside its margin (a trained context of 262144
     tokens on a 4 GiB card), it is charged its **target**, the most of it
@@ -584,7 +596,13 @@ Consequences and corrections:
     the registry entry and in the start answer. A row whose engine sees
     more than one card is charged as written: llama.cpp splits layers by
     each card's free memory while the ledger pools the cards, so fitting on
-    several cards is not done yet.
+    several cards is not done yet. *Since 2026-11-16 ([the device ledger](2026-11-13-device-ledger-design.md), WP5, WP6):* lmgw
+    places a row on one card and fits it to that card; a chat row that sets
+    its context and that no card holds is split by lmgw over the fewest cards
+    that hold it, with `--split-mode layer --tensor-split` and `--fit off`,
+    each card charged its part. Fitting a row smaller over several cards is
+    still not done (that record's "Not yet"), and a row lmgw cannot hand a
+    card is still charged as written on the cards it sees.
   - *Measured 2026-11-11* on a Windows test VM (a GTX 970 test card, 4 GiB, a 560-series driver), llama.cpp `b12244` CUDA 12 as lmgw's engine install fetched
     it, a debug lmgw (the headless runner, a scratch data dir), fixed
     headroom 1024 MiB, the desktop at 130 MiB. Qwen3-4B-Instruct-2507 Q4_K_M
@@ -667,7 +685,8 @@ Consequences and corrections:
     0106, `vram_outside_hours`). Auto's headroom is the largest rise over the
     last 7 days: the most any reading exceeded an earlier one, across hours.
     A rise shorter than 30 s is not seen. Pooled over the devices, as the
-    ledger pools them; per-device growth is not learned yet. No reading is
+    ledger pools them; per-device growth is not learned yet (*since
+    2026-11-13 it is learned per card*, migration 0109, [the device ledger](2026-11-13-device-ledger-design.md) WP3). No reading is
     taken while the GPU hold or a benchmark's lease keeps lmgw's models off
     the card: whatever has the card then would read as growth of the
     desktop's (a 19 GiB job under the hold would teach 19 GiB and refuse models for a week).
@@ -987,7 +1006,8 @@ questions are answered; none blocks the design.
 
 ## 11. Out of scope
 
-Merging the three model tables; per-GPU admission gates; engines beyond
+Merging the three model tables; per-GPU admission gates (still out of
+scope: [the device ledger](2026-11-13-device-ledger-design.md) keeps one gate, §5.5); engines beyond
 llama.cpp/audio.cpp; remote podman hosts; any change to cloud-upstream
 routing; a `public` column for aux/audio models; an alias mechanism for
 local models (the upstream-FK route died with the managed rows — it would

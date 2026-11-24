@@ -1,11 +1,13 @@
-//! Models → Configured: everything this gateway is set up to serve — the four
-//! local runtimes and the cloud aliases — as one grouped table, plus one line
-//! per passthrough upstream pointing at its catalog (`model_catalog.rs`),
-//! which is where the hundreds of models an upstream like kilo offers live.
-//! HF-first: the primary action is the Hugging Face wizard; picking a GGUF
-//! already on disk is the exception path (wired in the local-model editor).
-
-use std::collections::HashMap;
+//! Models: everything this gateway is set up to serve — the four local
+//! runtimes and the cloud aliases — as a list beside the selected row's
+//! detail (docs/design/ui-rebuild/modern-sample.html), plus one row per
+//! passthrough upstream pointing at its catalog (`model_catalog.rs`), which
+//! is where the hundreds of models an upstream like kilo offers live.
+//!
+//! The selection is the path (`/models/<class>/<id>`, [`route`]), so a link
+//! from another page opens the same view with that row selected, and leaving
+//! a row with unsaved edits asks through the dirty guard. This module keeps
+//! what the panes share: the list's data, its rows, and the ops a row runs.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -16,19 +18,26 @@ use lmgw_api_types::{
 use serde_json::{json, Value};
 
 mod aux_row;
+/// The detail pane: the selected row's header actions, hero and settings.
+mod detail;
 /// `/models/find`: Find a model by its name (find-a-model design §8.1).
 mod find;
 mod licence;
+/// The list pane: the header, the filter, the search and the rows.
+mod list;
+/// Which row the path selects.
+mod route;
+/// The list beside the detail, the handle between them, and the narrow
+/// window's one-pane navigation.
+mod split;
 pub use find::ModelFindPage;
 
 use crate::catalog::use_model_catalog;
-use crate::fmt::{age, fmt_bytes, grouped, hue_for, of};
+use crate::fmt::fmt_bytes;
 use crate::model_ops::{container_action, LogsModal, StopRefusedModal};
-use crate::ops_state::{model_key, use_ops, OpsState};
-use crate::widgets::{
-    filter_words, use_toasts, CopyBtn, Facet, FacetSet, FilterBar, GroupRow, MenuItem, Modal,
-    ModalFooter, NavTab, PageFrame, PageMode, RowMenu, SubNav, Toasts, Tone,
-};
+use crate::ops_state::{use_ops, OpsState};
+use crate::widgets::list_pane::Nav;
+use crate::widgets::{use_toasts, Modal, ModalFooter, Toasts};
 
 /// Bumped after every mutation: the page refetches its list into place and
 /// refreshes the shared model catalog. Kept as a context so the wizard and
@@ -213,35 +222,6 @@ impl ModelsData {
     }
 }
 
-/// The two views of Models with their sizes: what is configured, and what
-/// the passthrough upstreams offer. Hidden catalog models count — hidden is
-/// "not advertised", not gone — and a catalog that failed to load says so.
-#[component]
-pub(super) fn ModelsTabs(
-    #[prop(into)] configured: Signal<Option<usize>>,
-    /// (models, hidden, catalogs that failed to load)
-    #[prop(into)]
-    catalogs: Signal<Option<(usize, usize, usize)>>,
-) -> impl IntoView {
-    let tabs = Signal::derive(move || {
-        let mut conf = NavTab::new("Configured", "/models").exact();
-        if let Some(n) = configured.get() {
-            conf = conf.count(grouped(n as u64));
-        }
-        let mut cat = NavTab::new("Upstream catalogs", "/models/catalog");
-        if let Some((n, hidden, failed)) = catalogs.get() {
-            let mut c = format!("{} · {} hidden", grouped(n as u64), grouped(hidden as u64));
-            if failed > 0 {
-                c.push_str(&format!(" · {failed} failed"));
-                cat = cat.tone(Tone::Bad);
-            }
-            cat = cat.count(c);
-        }
-        vec![conf, cat]
-    });
-    view! { <SubNav tabs=tabs/> }
-}
-
 /// The configured classes, in table order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Class {
@@ -257,10 +237,6 @@ enum Class {
     Candidate,
 }
 
-/// Index of the passthrough group in the open-state array, after the classes.
-const CATALOGS: usize = 6;
-const COLS: u32 = 7;
-
 impl Class {
     const ALL: [Self; 6] = [
         Self::Chat,
@@ -271,11 +247,7 @@ impl Class {
         Self::Candidate,
     ];
 
-    fn idx(self) -> usize {
-        self as usize
-    }
-
-    /// The facet id, and the name its group's open state persists under.
+    /// The filter's id for the class (`?show=`).
     fn id(self) -> &'static str {
         match self {
             Self::Chat => "chat",
@@ -287,32 +259,10 @@ impl Class {
         }
     }
 
-    fn facet(self) -> &'static str {
-        match self {
-            Self::Chat => "Chat",
-            Self::Aux => "Aux",
-            Self::Audio => "Audio",
-            Self::Image => "Image",
-            Self::Alias => "Aliases",
-            Self::Candidate => "Candidate aliases",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Chat => "Local · chat",
-            Self::Aux => "Local · embeddings, rerank + decisions",
-            Self::Audio => "Local · audio",
-            Self::Image => "Local · image",
-            Self::Alias => "Cloud aliases",
-            Self::Candidate => "Candidate aliases",
-        }
-    }
-
     /// What `live.runtime` and the container op call the class. An alias
     /// has no container — a candidate alias either, even though the
-    /// candidates it points at do (the row list shows each candidate's own
-    /// state instead, in `CandidateStateCell`).
+    /// candidates it points at do (its state is what its own derivation
+    /// last found: a problem count).
     fn runtime(self) -> Option<&'static str> {
         match self {
             Self::Chat => Some("chat"),
@@ -535,7 +485,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             id: a.id,
             model_id: a.model_id.clone(),
             name: v.public_name.clone(),
-            kind: a.task.clone(),
+            kind: super::audio_spec::task_label(&a.task),
             kind_title: format!("{} · family {} · {} mode", a.task, a.family, a.mode),
             note: String::new(),
             file,
@@ -591,13 +541,17 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             model_id: i.model_id.clone(),
             name: v.public_name.clone(),
             kind: if i.modes.is_empty() {
-                "img_gen".into()
+                crate::labels::image_mode_label("img_gen")
             } else {
-                i.modes.join(" · ")
+                i.modes
+                    .iter()
+                    .map(|m| crate::labels::image_mode_label(m))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
             },
             kind_title: "stable-diffusion.cpp pipeline".into(),
             note: if i.edit {
-                "edits".into()
+                "Edits images".into()
             } else {
                 String::new()
             },
@@ -725,32 +679,11 @@ struct CatalogLine {
     hidden: usize,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum Item {
-    Group(Class),
-    Row(Box<Row>),
-    CatalogGroup,
-    Catalog(CatalogLine),
-}
-
-/// What the table shows under the current filter, with the counts every
-/// header needs: (shown, total) per class, then for the catalogs.
-#[derive(Clone, PartialEq)]
-struct Shown {
-    items: Vec<Item>,
-    counts: [(usize, usize); 7],
-    rows: usize,
-    total: usize,
-}
-
-/// The router's navigate, shareable by `Copy` handlers.
-type Navigate = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
-
 /// What a row reaches: every op goes through here, so each one refetches
 /// the list and refreshes the shared catalog the same way. Captured at
 /// render — event handlers run with no reactive owner to look context up in.
 #[derive(Clone, Copy)]
-struct PageCtx {
+pub(super) struct PageCtx {
     toasts: Toasts,
     reload: ModelsReload,
     editors: Editors,
@@ -762,7 +695,10 @@ struct PageCtx {
     refused: RwSignal<Option<(&'static str, String, String)>>,
     /// The row whose Delete… asks, (class, id, name).
     deleting: RwSignal<Option<(Class, i64, String)>>,
-    navigate: StoredValue<Navigate>,
+    /// The page's moves, the unsaved-edits guard asked first.
+    nav: Nav,
+    /// The Hugging Face wizard's modal.
+    wizard_open: RwSignal<bool>,
 }
 
 impl PageCtx {
@@ -789,36 +725,16 @@ impl PageCtx {
         });
     }
 
-    fn edit(self, class: Class, id: i64) {
-        let full = self.data.full;
-        let find = |f: &ModelsFull| -> bool {
-            match class {
-                Class::Aux => f.aux.iter().find(|v| v.model.id == id).map(|v| {
-                    self.editors.aux.set(Some(v.model.clone()));
-                }),
-                Class::Audio => f.audio.iter().find(|v| v.model.id == id).map(|v| {
-                    self.editors.audio.set(Some(v.model.clone()));
-                }),
-                Class::Image => f.image.iter().find(|v| v.model.id == id).map(|v| {
-                    self.editors.image_derived.set(v.derived_prompt_style);
-                    self.editors.image.set(Some(v.model.clone()));
-                }),
-                Class::Alias => f.aliases.iter().find(|a| a.id == id).map(|a| {
-                    self.editors.alias.set(Some(a.clone()));
-                }),
-                Class::Candidate => f.candidate_aliases.iter().find(|c| c.id == id).map(|c| {
-                    self.editors.candidate.set(Some(c.clone()));
-                }),
-                Class::Chat => None,
-            }
-            .is_some()
-        };
-        if class == Class::Chat {
-            self.navigate
-                .with_value(|nav| nav(&format!("/models/local/{id}")));
-        } else {
-            full.with_untracked(|f| f.as_ref().map(find));
-        }
+    /// Go to `to` (a path in the app), asking first when unsaved edits
+    /// would be left behind ([`Nav::go`]). Whether it moved now.
+    fn go(self, to: &str, replace: bool) -> bool {
+        self.nav.go(to, replace)
+    }
+
+    /// Go to `to` without asking: what would be asked about is gone already
+    /// (the edits of a row that was deleted).
+    fn go_unasked(self, to: &str, replace: bool) {
+        self.nav.go_unasked(to, replace);
     }
 
     fn container(self, class: &'static str, model_id: String, action: &'static str) {
@@ -902,9 +818,6 @@ pub fn Models() -> impl IntoView {
 
     let data = ModelsData::new();
     let catalog = use_model_catalog();
-    let live = crate::live::use_live();
-    let navigate = leptos_router::hooks::use_navigate();
-    let nav: Navigate = std::sync::Arc::new(move |href: &str| navigate(href, Default::default()));
     let page = PageCtx {
         toasts: use_toasts(),
         reload,
@@ -914,7 +827,8 @@ pub fn Models() -> impl IntoView {
         logs: RwSignal::new(None),
         refused: RwSignal::new(None),
         deleting: RwSignal::new(None),
-        navigate: StoredValue::new(nav),
+        nav: Nav::new(),
+        wizard_open,
     };
 
     // Every op bumps `reload`: the list is refetched into place, and the
@@ -928,466 +842,59 @@ pub fn Models() -> impl IntoView {
         n
     });
 
-    let rows = Memo::new(move |_| {
-        data.full
-            .with(|f| f.as_ref().map(rows_of).unwrap_or_default())
-    });
-    let lines = Memo::new(move |_| {
-        data.full.with(|f| {
-            f.as_ref()
-                .map(|f| {
-                    f.passthrough
-                        .iter()
-                        .map(|p| CatalogLine {
-                            id: p.id,
-                            name: p.upstream.clone(),
-                            prefix: p.prefix.clone(),
-                            hidden: p.hidden.len(),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-    });
-    // Models per upstream as `/v1/models` lists them: hidden ones are left
-    // out there, so each line adds its hidden count back.
-    let listed = Memo::new(move |_| {
-        catalog.entries.with(|es| {
-            let mut m: HashMap<String, usize> = HashMap::new();
-            for e in es.iter().filter(|e| !e.local) {
-                *m.entry(e.source.clone()).or_default() += 1;
-            }
-            m
-        })
-    });
-    let catalog_total =
-        move |l: &CatalogLine| listed.with(|m| m.get(&l.name).copied().unwrap_or(0)) + l.hidden;
-
-    let query = crate::url_state::use_query_signal("q");
-    let facet = crate::url_state::use_query_signal("show");
-    let open: [RwSignal<bool>; 7] = std::array::from_fn(|i| {
-        let id = Class::ALL.get(i).map(|c| c.id()).unwrap_or("catalogs");
-        crate::prefs::persisted_bool(&format!("open.models.group.{id}"), true)
-    });
-
-    let shown = Memo::new(move |_| {
-        let mut s = Shown {
-            items: Vec::new(),
-            counts: [(0, 0); 7],
-            rows: 0,
-            total: 0,
-        };
-        // Nothing is known yet (or the first load failed): no group may say
-        // "none yet — add one" about a list that never arrived (review
-        // code:M1). The Loading row or the error says where things are.
-        if data.full.with(Option::is_none) {
-            return s;
-        }
-        let words = filter_words(&query.get());
-        let f = facet.get();
-        let narrowed = !words.is_empty() || !f.is_empty();
-        // Only the Running facet reads the runtime frame, so the table is
-        // not re-derived on every frame the bus sends.
-        let rt = if f == "running" {
-            live.runtime.get().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let keep = |r: &Row| {
-            r.matches(&words)
-                && match f.as_str() {
-                    "" => true,
-                    "disabled" => !r.enabled,
-                    "running" => is_running(&rt, r),
-                    id => r.class.id() == id,
-                }
-        };
-        rows.with(|rs| {
-            s.total = rs.len();
-            for c in Class::ALL {
-                let all: Vec<&Row> = rs.iter().filter(|r| r.class == c).collect();
-                let mine: Vec<&Row> = all.iter().copied().filter(|r| keep(r)).collect();
-                s.counts[c.idx()] = (mine.len(), all.len());
-                s.rows += mine.len();
-                // A class's own facet keeps its group even with nothing in
-                // it: the header is where the way to add the first one is.
-                if narrowed && mine.is_empty() && f != c.id() {
-                    continue;
-                }
-                s.items.push(Item::Group(c));
-                // A filter holds every group open: a folded group would hide
-                // the very matches its count reports.
-                if narrowed || open[c.idx()].get() {
-                    s.items
-                        .extend(mine.into_iter().cloned().map(|r| Item::Row(Box::new(r))));
-                }
-            }
-        });
-        // The catalogs are not configured models: a class or state facet
-        // leaves them out, a text filter matches the upstream's name.
-        lines.with(|ls| {
-            let hits: Vec<&CatalogLine> = ls
-                .iter()
-                .filter(|l| {
-                    f.is_empty()
-                        && words.iter().all(|w| {
-                            format!("{} {}", l.name, l.prefix)
-                                .to_lowercase()
-                                .contains(w.as_str())
-                        })
-                })
-                .collect();
-            let models: usize = ls.iter().map(catalog_total).sum();
-            s.counts[CATALOGS] = (models, models);
-            if ls.is_empty() || (narrowed && hits.is_empty()) {
-                return;
-            }
-            s.items.push(Item::CatalogGroup);
-            if narrowed || open[CATALOGS].get() {
-                s.items.extend(hits.into_iter().cloned().map(Item::Catalog));
-            }
-        });
-        s
-    });
-
-    let facets = Signal::derive(move || {
-        if data.full.with(Option::is_none) {
-            return Vec::new();
-        }
-        let rt = live.runtime.get().unwrap_or_default();
-        rows.with(|rs| {
-            let mut v: Vec<Facet> = Class::ALL
-                .iter()
-                .map(|c| Facet {
-                    id: c.id().into(),
-                    label: c.facet().into(),
-                    count: rs.iter().filter(|r| r.class == *c).count(),
-                })
-                .collect();
-            v.push(Facet {
-                id: "disabled".into(),
-                label: "Disabled".into(),
-                count: rs.iter().filter(|r| !r.enabled).count(),
-            });
-            v.push(Facet {
-                id: "running".into(),
-                label: "Running".into(),
-                count: rs.iter().filter(|r| is_running(&rt, r)).count(),
-            });
-            v
-        })
-    });
-
-    let configured =
-        Signal::derive(move || data.full.with(|f| f.as_ref().map(|_| rows.with(Vec::len))));
-    let catalogs = Signal::derive(move || {
-        data.full.with(|f| {
-            f.as_ref().map(|_| {
-                lines.with(|ls| {
-                    let hidden = ls.iter().map(|l| l.hidden).sum::<usize>();
-                    (ls.iter().map(catalog_total).sum::<usize>(), hidden, 0)
-                })
-            })
-        })
-    });
-
-    let group_count = move |i: usize| {
-        Signal::derive(move || {
-            shown.with(|s| {
-                let (n, t) = s.counts[i];
-                of(n, t)
-            })
-        })
-    };
-
-    let render = move |it: Item| -> AnyView {
-        match it {
-            Item::Group(c) => view! {
-                <GroupRow
-                    colspan=COLS
-                    label=c.title()
-                    count=group_count(c.idx())
-                    open=open[c.idx()]
-                    meta=move || move || group_meta(c, shown, rows, live)
-                    actions=move || group_actions(c, editors, catalog_open, recipes_open)
-                />
-            }
-            .into_any(),
-            Item::Row(r) => view! { <ModelRow r=*r page=page/> }.into_any(),
-            Item::CatalogGroup => view! {
-                <GroupRow
-                    colspan=COLS
-                    label="Upstream catalogs"
-                    count=group_count(CATALOGS)
-                    open=open[CATALOGS]
-                    meta=|| "every model of an expose-all upstream, resolved live"
-                    actions=|| {
-                        view! {
-                            <a class="btn ghost sm" href="/upstreams">
-                                "Upstreams"
-                            </a>
-                        }
-                    }
-                />
-            }
-            .into_any(),
-            Item::Catalog(l) => {
-                let total = Signal::derive({
-                    let l = l.clone();
-                    move || catalog_total(&l)
-                });
-                view! { <CatalogRow l=l total=total loading=catalog.loading/> }.into_any()
-            }
-        }
-    };
+    let params = leptos_router::hooks::use_params_map();
+    let sel =
+        Memo::new(move |_| params.with(|p| route::Sel::parse(p.get_str("class"), p.get_str("id"))));
 
     view! {
-        <PageFrame
-            title="Models"
-            sub="everything the gateway can serve"
-            mode=PageMode::Fill
-            head_extra=move || view! { <ModelsTabs configured=configured catalogs=catalogs/> }
-            actions=move || {
-                view! {
-                    // Also in its group's header, which a long local list
-                    // pushes below the fold: an alias is half of what this
-                    // page configures, so its way in stays on screen.
-                    <button
-                        class="btn"
-                        title="Map a name clients request to a model of an upstream"
-                        on:click=move |_| editors.alias.set(Some(AliasView::default()))
-                    >
-                        "New alias"
-                    </button>
-                    // Find a model (find-a-model design §8.1): by its name,
-                    // sized to the card; the file list stays beside it.
-                    <a
-                        class="btn primary"
-                        href="/models/find"
-                        title="Find a model by the name someone told you: lmgw picks the file that fits your graphics card"
-                    >
-                        "Find a model"
-                    </a>
-                    <button class="btn" on:click=move |_| wizard_open.set(true)>
-                        "Add from Hugging Face"
-                    </button>
-                }
-            }
-            toolbar=move || {
-                view! {
-                    <FilterBar
-                        query=query
-                        placeholder="Filter by name or file"
-                        shown=Signal::derive(move || shown.with(|s| s.rows))
-                        total=Signal::derive(move || shown.with(|s| s.total))
-                        noun="models"
-                        facets=FacetSet { items: facets, active: facet }
-                        status=Signal::derive(move || {
-                            match (data.full.with(Option::is_some), data.error.with(Option::is_some)) {
-                                (true, _) => String::new(),
-                                (false, false) => "Loading…".to_string(),
-                                (false, true) => "not loaded".to_string(),
+        <split::ModelsSplit page=page sel=sel/>
+        <Modal open=wizard_open title="Add model from Hugging Face" fill=true>
+            <super::wizard::HfWizard/>
+        </Modal>
+        <Modal open=catalog_open.0 title="Add audio model from the catalog" fill=true>
+            <super::audio_catalog::AudioCatalogBrowser open=catalog_open.0/>
+        </Modal>
+        <Modal open=recipes_open.0 title="Add image model from a recipe" fill=true>
+            <super::image_recipes::ImageRecipeBrowser open=recipes_open.0/>
+        </Modal>
+        // New rows of these classes are made in their modal editors, as
+        // before; a saved row is edited in the detail pane.
+        <super::model_editors::AliasEditor editing=editors.alias on_saved=move || bump(reload)/>
+        <super::model_editors::AuxEditor editing=editors.aux on_saved=move || bump(reload)/>
+        <super::model_editors::AudioEditor editing=editors.audio on_saved=move || bump(reload)/>
+        <super::model_editors::ImageEditor editing=editors.image on_saved=move || bump(reload)/>
+        <super::candidate_alias_editor::CandidateAliasEditor
+            editing=editors.candidate
+            full=page.data.full
+            on_saved=move || bump(reload)
+        />
+        <LogsModal target=page.logs/>
+        <DeleteModal page=page/>
+        {move || {
+            page.refused
+                .get()
+                .map(|(class, model_id, msg)| {
+                    let mid = StoredValue::new(model_id);
+                    view! {
+                        <StopRefusedModal
+                            message=msg
+                            on_cancel=move || page.refused.set(None)
+                            on_force=move || {
+                                page.refused.set(None);
+                                container_action(
+                                    page.ops,
+                                    page.toasts,
+                                    class,
+                                    mid.get_value(),
+                                    "stop",
+                                    true,
+                                    |_| {},
+                                );
                             }
-                        })
-                    />
-                }
-            }
-        >
-            {move || {
-                data.error
-                    .get()
-                    .map(|e| {
-                        let stale = data.full.with(Option::is_some);
-                        view! {
-                            <div class="notice err row">
-                                {if stale { "Refreshing the list failed: " } else { "Loading models failed: " }}
-                                {e}
-                                <button class="btn ghost sm" on:click=move |_| data.load()>
-                                    "Retry"
-                                </button>
-                            </div>
-                        }
-                    })
-            }}
-            <div class="fill-pane card pad0">
-                <table class="data">
-                    <thead>
-                        <tr>
-                            <th>"Model"</th>
-                            <th class="col-p2">"Type"</th>
-                            <th>"File"</th>
-                            <th class="col-p3 num-h">"Ctx"</th>
-                            <th class="col-p2" title="What answers when it cannot: under the GPU hold, when VRAM outside lmgw is short, for background requests, when its upstream is out of quota or unreachable, while it is disabled">
-                                "Fallback"
-                            </th>
-                            <th title="Where its container is; a disabled model is not served at all">
-                                "State"
-                            </th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <Show when=move || data.full.with(Option::is_none) && data.error.with(Option::is_none)>
-                            <tr>
-                                <td colspan=COLS class="dim">"Loading…"</td>
-                            </tr>
-                        </Show>
-                        <For each=move || shown.with(|s| s.items.clone()) key=|it| it.clone() let:it>
-                            {render(it)}
-                        </For>
-                    </tbody>
-                </table>
-            </div>
-
-            <Modal open=wizard_open title="Add model from Hugging Face" fill=true>
-                <super::wizard::HfWizard/>
-            </Modal>
-            <Modal open=catalog_open.0 title="Add audio model from the catalog" fill=true>
-                <super::audio_catalog::AudioCatalogBrowser open=catalog_open.0/>
-            </Modal>
-            <Modal open=recipes_open.0 title="Add image model from a recipe" fill=true>
-                <super::image_recipes::ImageRecipeBrowser open=recipes_open.0/>
-            </Modal>
-            <super::model_editors::AliasEditor editing=editors.alias on_saved=move || bump(reload)/>
-            <super::model_editors::AuxEditor editing=editors.aux on_saved=move || bump(reload)/>
-            <super::model_editors::AudioEditor editing=editors.audio on_saved=move || bump(reload)/>
-            <super::model_editors::ImageEditor editing=editors.image on_saved=move || bump(reload)/>
-            <super::candidate_alias_editor::CandidateAliasEditor
-                editing=editors.candidate
-                full=page.data.full
-                on_saved=move || bump(reload)
-            />
-            <LogsModal target=page.logs/>
-            <DeleteModal page=page/>
-            {move || {
-                page.refused
-                    .get()
-                    .map(|(class, model_id, msg)| {
-                        let mid = StoredValue::new(model_id);
-                        view! {
-                            <StopRefusedModal
-                                message=msg
-                                on_cancel=move || page.refused.set(None)
-                                on_force=move || {
-                                    page.refused.set(None);
-                                    container_action(
-                                        page.ops,
-                                        page.toasts,
-                                        class,
-                                        mid.get_value(),
-                                        "stop",
-                                        true,
-                                        |_| {},
-                                    );
-                                }
-                            />
-                        }
-                    })
-            }}
-        </PageFrame>
-    }
-}
-
-/// A group header's dim note: what a class with nothing in it is waiting
-/// for, or how many of its models are up.
-fn group_meta(
-    c: Class,
-    shown: Memo<Shown>,
-    rows: Memo<Vec<Row>>,
-    live: crate::live::LiveBus,
-) -> String {
-    if shown.with(|s| s.counts[c.idx()].1) == 0 {
-        return c.empty().to_string();
-    }
-    let rt = live.runtime.get().unwrap_or_default();
-    let (up, off) = rows.with(|rs| {
-        let mine = rs.iter().filter(|r| r.class == c);
-        (
-            mine.clone().filter(|r| is_running(&rt, r)).count(),
-            mine.filter(|r| !r.enabled).count(),
-        )
-    });
-    let mut parts = Vec::new();
-    if up > 0 {
-        parts.push(format!("{up} running"));
-    }
-    if off > 0 {
-        parts.push(format!("{off} disabled"));
-    }
-    parts.join(" · ")
-}
-
-/// Each group carries the ways to add to it.
-fn group_actions(
-    c: Class,
-    editors: Editors,
-    catalog_open: CatalogOpen,
-    recipes_open: RecipesOpen,
-) -> AnyView {
-    match c {
-        Class::Chat => view! {
-            <a class="btn ghost sm" href="/models/local/new" title="Wire up a GGUF that is already in the models dir">
-                "From disk"
-            </a>
-        }
-        .into_any(),
-        Class::Aux => view! {
-            <button
-                class="btn ghost sm"
-                title="Wire up an embedding, rerank or decision GGUF that is already in the aux models dir; Fill from plan reads its header"
-                on:click=move |_| editors.aux.set(Some(blank_aux_model()))
-            >
-                "New"
-            </button>
-        }
-        .into_any(),
-        Class::Audio => view! {
-            <button class="btn ghost sm" on:click=move |_| editors.audio.set(Some(blank_audio_model()))>
-                "New"
-            </button>
-            <button
-                class="btn ghost sm"
-                title="Browse audio.cpp's model families and install a package"
-                on:click=move |_| catalog_open.0.set(true)
-            >
-                "Add from catalog"
-            </button>
-        }
-        .into_any(),
-        Class::Image => view! {
-            <button class="btn ghost sm" on:click=move |_| {
-                editors.image_derived.set(None);
-                editors.image.set(Some(blank_image_model()));
-            }>
-                "New"
-            </button>
-            <button
-                class="btn ghost sm"
-                title="Shipped stable-diffusion.cpp pipelines — download every component, then fill the editor"
-                on:click=move |_| recipes_open.0.set(true)
-            >
-                "Add from recipe"
-            </button>
-        }
-        .into_any(),
-        Class::Alias => view! {
-            <button class="btn ghost sm" on:click=move |_| editors.alias.set(Some(AliasView::default()))>
-                "New alias"
-            </button>
-        }
-        .into_any(),
-        Class::Candidate => view! {
-            <button
-                class="btn ghost sm"
-                title="A client-facing name backed by a primary local model plus alternates, used only when already loaded"
-                on:click=move |_| editors
-                    .candidate
-                    .set(Some(super::candidate_alias_editor::blank_candidate_alias()))
-            >
-                "Add candidate alias"
-            </button>
-        }
-        .into_any(),
+                        />
+                    }
+                })
+        }}
     }
 }
 
@@ -1446,371 +953,5 @@ fn DeleteModal(page: PageCtx) -> impl IntoView {
                     })
             }}
         </Modal>
-    }
-}
-
-/// Where a model's container is, from the runtime frame: idle is the normal
-/// state of an on-demand model, so it is neutral, not a warning, and green is
-/// kept for what is actually up. (A disabled row says so instead, and is
-/// dimmed: being switched off is its whole state.)
-#[component]
-fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
-    let live = crate::live::use_live();
-    let mid = StoredValue::new(model_id);
-    let rt = move || {
-        live.runtime.with(|rows| {
-            rows.as_deref()
-                .and_then(|rows| mid.with_value(|m| runtime_of(rows, class, m).cloned()))
-        })
-    };
-    // Its start waits for the download for the graphics card (machine-check
-    // design §5): no container yet, so that is its state. The flag alone
-    // redraws the cell; the bytes move inside the chip.
-    let dl = crate::gpu_download::live_for(
-        class.runtime().unwrap_or_default().to_string(),
-        mid.get_value(),
-    );
-    let downloading = Memo::new(move |_| dl.with(Option::is_some));
-    move || {
-        let r = rt();
-        if r.is_none() && downloading.get() {
-            return view! {
-                <crate::gpu_download::DlChip dl=Signal::derive(move || dl.get().unwrap_or_default())/>
-            }
-            .into_any();
-        }
-        let (cls, label) = match r.as_ref().map(|r| r.state.as_str()) {
-            Some("ready") => (
-                "chip ok",
-                format!(
-                    "running · {}",
-                    age(r.as_ref().map_or(0, |r| r.started_at_age_seconds))
-                ),
-            ),
-            Some("starting") => ("chip live", "starting".to_string()),
-            Some("stopping") => ("chip live", "stopping".to_string()),
-            Some(other) => ("chip live", other.to_string()),
-            None => ("chip off", "idle".to_string()),
-        };
-        // An image start that found problems keeps them here, on the row,
-        // rather than only in the Overview table.
-        let warnings = r.as_ref().map(|r| r.warnings.clone()).unwrap_or_default();
-        // Ownership (candidate-aliases design §4.4, §6): absent is the
-        // owner's, and there is nothing to say about the normal case — a
-        // badge only ever appears for the exception.
-        let background = r
-            .as_ref()
-            .is_some_and(|r| r.owner.as_deref() == Some("background"));
-        let draining = r.as_ref().is_some_and(|r| r.draining_for_owner);
-        let on_cpu = r
-            .as_ref()
-            .is_some_and(|r| r.placement.as_deref() == Some("cpu"));
-        view! {
-            <span class=cls>
-                <span class="dot"></span>
-                {label}
-            </span>
-            {on_cpu
-                .then(|| {
-                    view! {
-                        <span
-                            class="type-badge"
-                            style="margin-left:4px"
-                            title="Its container runs on the CPU: nothing on the GPU, and the GPU hold does not stop it"
-                        >
-                            "CPU"
-                        </span>
-                    }
-                })}
-            {background
-                .then(|| {
-                    view! {
-                        <span
-                            class="type-badge"
-                            style="margin-left:4px"
-                            title="Started by background traffic (a background candidate alias, or a request sent with x-lmgw-background: on); no ordinary request has claimed it since"
-                        >
-                            "background"
-                        </span>
-                    }
-                })}
-            {draining
-                .then(|| {
-                    view! {
-                        <span
-                            class="chip warn"
-                            style="margin-left:4px"
-                            title="An ordinary request is waiting for GPU room, so no model takes new background work until it is served"
-                        >
-                            "owner waiting for room"
-                        </span>
-                    }
-                })}
-            {(!warnings.is_empty())
-                .then(|| {
-                    view! {
-                        <span class="chip warn" style="margin-left:4px" title=warnings.join("\n")>
-                            {format!("{} warning{}", warnings.len(), if warnings.len() == 1 { "" } else { "s" })}
-                        </span>
-                    }
-                })}
-        }
-        .into_any()
-    }
-}
-
-#[component]
-fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
-    let class = r.class;
-    let id = r.id;
-    let enabled = r.enabled;
-    let mid = StoredValue::new(r.model_id.clone());
-    let name_for_delete = StoredValue::new(r.name.clone());
-    let hue = hue_for(&r.name);
-    let testing = RwSignal::new(false);
-    let live = crate::live::use_live();
-    let navigate = StoredValue::new(leptos_router::hooks::use_navigate());
-
-    let chip = view! {
-        <span class="model-chip" style=format!("--hue:{hue}")>
-            <i></i>
-            {r.name.clone()}
-        </span>
-    };
-    // The name opens the editor: a routed page for chat, the class's modal
-    // for the rest.
-    let name = if class == Class::Chat {
-        view! {
-            <a href=format!("/models/local/{id}") class="row-link" title="Open the editor">
-                {chip}
-            </a>
-        }
-        .into_any()
-    } else {
-        view! {
-            <button type="button" class="link-btn row-link" title="Open the editor" on:click=move |_| page.edit(class, id)>
-                {chip}
-            </button>
-        }
-        .into_any()
-    };
-
-    let items = Signal::derive(move || {
-        let mut v = vec![MenuItem::new("Edit", move || page.edit(class, id))];
-        if class == Class::Chat {
-            v.push(
-                MenuItem::new("Duplicate", move || {
-                    page.op(
-                        "local_model_set",
-                        json!({ "action": "duplicate", "id": id }),
-                    )
-                })
-                .title("Clone under a fresh id — same GGUF, params, args and flags"),
-            );
-            // Benchmark design §8.2: the New benchmark modal, this row picked.
-            v.push(
-                MenuItem::new("Benchmark…", move || {
-                    let href = super::benchmarks::new_href(Some(&mid.get_value()), None);
-                    navigate.with_value(|n| n(&href, Default::default()));
-                })
-                .title("Measure this row: load, probes, prefill, decode, concurrent and mixed load, tokens per joule — it takes the whole GPU while it runs"),
-            );
-        }
-        let toggle = if enabled { "disable" } else { "enable" };
-        v.push(MenuItem::new(
-            if enabled { "Disable" } else { "Enable" },
-            move || page.op(class.op(), json!({ "action": toggle, "id": id })),
-        ));
-        if let Some(rc) = class.runtime() {
-            let busy = mid.with_value(|m| page.ops.busy(&model_key(rc, m)));
-            let up = live.runtime.with(|rows| {
-                rows.as_deref()
-                    .is_some_and(|rows| mid.with_value(|m| runtime_of(rows, class, m).is_some()))
-            });
-            // A disabled model is not served: a container started for it
-            // would hold VRAM for nothing (the start op does not check), so
-            // Start and Restart wait for Enable. Stop stays — that is how
-            // one left running is let go (review code:M4).
-            const OFF: &str = "Enable it first: a disabled model is not served";
-            if up {
-                v.push(
-                    MenuItem::new("Stop", move || page.container(rc, mid.get_value(), "stop"))
-                        .disabled(busy),
-                );
-                v.push(
-                    MenuItem::new("Restart", move || {
-                        page.container(rc, mid.get_value(), "restart")
-                    })
-                    .disabled(busy || !enabled)
-                    .title(if enabled {
-                        "Stop and start its container again, with the saved configuration"
-                    } else {
-                        OFF
-                    }),
-                );
-            } else {
-                v.push(
-                    MenuItem::new("Start", move || {
-                        page.container(rc, mid.get_value(), "start")
-                    })
-                    .disabled(busy || !enabled)
-                    .title(if enabled {
-                        "Start its container now; may evict other models under the VRAM ledger"
-                    } else {
-                        OFF
-                    }),
-                );
-            }
-            v.push(
-                MenuItem::new("Logs", move || page.logs.set(Some((rc, mid.get_value()))))
-                    .title("podman logs for this model's container"),
-            );
-        }
-        v.push(
-            MenuItem::new("Delete…", move || {
-                page.deleting
-                    .set(Some((class, id, name_for_delete.get_value())))
-            })
-            .title(match class {
-                Class::Alias | Class::Candidate => "Remove the alias from the gateway config",
-                _ => {
-                    "Remove it from the gateway config and stop its container; the files on \
-                      disk stay"
-                }
-            }),
-        );
-        v
-    });
-
-    let probe = match class {
-        Class::Aux => Some(aux_row::probe_of(&r.kind)),
-        other => other.probe(),
-    };
-    let test = probe.map(|probe| {
-        view! {
-            <button
-                class="btn sm"
-                disabled=move || testing.get() || !enabled
-                title=if enabled {
-                    format!(
-                        "Load test: starts this model's container if it is not running (which may evict others under the VRAM ledger), then {probe}"
-                    )
-                } else {
-                    "Enable it first: a disabled model is not served, so there is nothing to test".to_string()
-                }
-                on:click=move |_| run_test(page.toasts, class, mid.get_value(), testing)
-            >
-                {move || if testing.get() { "Testing…" } else { "Test" }}
-            </button>
-        }
-    });
-
-    view! {
-        <tr class:muted=!enabled>
-            <td>{name}</td>
-            <td class="col-p2">
-                <span class="type-badge" title=r.kind_title.clone()>
-                    {r.kind.clone()}
-                </span>
-                {r.licence.clone().map(|chip| view! { <licence::LicenceChip chip=*chip/> })}
-                {(!r.note.is_empty()).then(|| view! { <span class="dim cell-note">{r.note.clone()}</span> })}
-            </td>
-            <td class="clip mono-sm dim" title=r.file_title.clone()>
-                {(!r.copy.is_empty()).then(|| view! { <CopyBtn text=r.copy.clone() title="Copy the full path"/> })}
-                {r.file.clone()}
-            </td>
-            <td class="num col-p3">{r.ctx.map(|c| grouped(c as u64)).unwrap_or_else(|| "—".into())}</td>
-            <td class="col-p2 clip mono-sm">
-                // The tooltip names the whole fallback: the cell clips a long
-                // one.
-                {match r.fallback.clone() {
-                    Some(f) => view! {
-                        <span title=format!("Fallback {f}: answers when {} can't", r.name)>{f.clone()}</span>
-                    }
-                        .into_any(),
-                    None => view! { <span class="dim" title="No fallback: when it cannot answer, the request gets the error it gives">"—"</span> }
-                        .into_any(),
-                }}
-            </td>
-            <td>
-                {if !enabled {
-                    view! {
-                        <span class="chip off" title="Not served; ⋯ → Enable brings it back">
-                            <span class="dot"></span>
-                            "disabled"
-                        </span>
-                    }
-                        .into_any()
-                } else if class.runtime().is_some() {
-                    view! {
-                        <RuntimeCell class=class model_id=r.model_id.clone()/>
-                        <super::candidate_alias_editor::DeferredBadge deferrals_24h=r.deferrals_24h/>
-                    }
-                        .into_any()
-                } else if class == Class::Candidate {
-                    view! {
-                        <super::candidate_alias_editor::CandidateStateCell
-                            problems=r.problems
-                            deferrals_24h=r.deferrals_24h
-                        />
-                    }
-                        .into_any()
-                } else {
-                    view! { <span class="dim" title="Served by its upstream on each request; it has no container">"—"</span> }
-                        .into_any()
-                }}
-            </td>
-            <td class="actions">{test} <RowMenu items=items/></td>
-        </tr>
-    }
-}
-
-/// One passthrough upstream: its request prefix, its size, and the way to
-/// its catalog.
-#[component]
-fn CatalogRow(l: CatalogLine, total: Signal<usize>, loading: RwSignal<bool>) -> impl IntoView {
-    let hue = hue_for(&l.name);
-    let href = format!(
-        "/models/catalog?upstream={}",
-        String::from(js_sys::encode_uri_component(&l.name))
-    );
-    let prefix = StoredValue::new(l.prefix.trim_matches('/').to_string());
-    let hidden = l.hidden;
-    let line = move || {
-        let n = total.get();
-        let size = if n == 0 && loading.get() {
-            "counting…".to_string()
-        } else if n == 0 {
-            "no models listed right now — the catalog view says why".to_string()
-        } else {
-            format!(
-                "{} models · {} hidden",
-                grouped(n as u64),
-                grouped(hidden as u64)
-            )
-        };
-        format!("requests as {}/<id> · {size}", prefix.get_value())
-    };
-    view! {
-        <tr>
-            <td>
-                <span class="model-chip" style=format!("--hue:{hue}")>
-                    <i></i>
-                    {l.name.clone()}
-                </span>
-            </td>
-            <td class="col-p2">
-                <span class="type-badge">"catalog"</span>
-            </td>
-            <td class="clip dim" title=line>{line}</td>
-            <td class="num col-p3">"—"</td>
-            <td class="col-p2 dim" title="A passthrough model has no fallback; an alias of it can have one">"—"</td>
-            <td>
-                <span class="dim" title="Served by the upstream on each request">"—"</span>
-            </td>
-            <td class="actions">
-                <a class="btn sm" href=href>"Open catalog"</a>
-            </td>
-        </tr>
     }
 }

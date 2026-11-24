@@ -121,6 +121,9 @@ impl TempChats {
             row.model = r.model.clone();
             row.answered_by = r.answered_by.clone();
             row.images_note = r.images_note.clone();
+            // A resumed turn's reply holds the merged notices already
+            // (`chat_turn::resume::Prior::merged`).
+            row.notices = r.notices.clone();
             row.pending_approvals = r.pending_approvals.clone();
             t.touch();
             true

@@ -1,0 +1,152 @@
+[
+ {
+  "js": "'Benchmarks as a list beside the opened run (modern design WP10), on the faked runs of scripts/drive/records-fake.js: the status page beside the list, a click opens a run at its path, the arrows move the selection, the old ?run= link lands on the run path, a failed run says so first, a run read late after the selection moved is dropped, picking two runs for Compare (the base first) opens the comparison, + opens the New benchmark dialog (the fake refuses its plan, so nothing can start), and the narrow window (one pane at a time, the back button). Nothing starts, cancels or deletes a run: the fake refuses those ops. Run: scripts/ui-drive.py scripts/drive/benchmarks-split.json --init-script scripts/drive/records-fake.js --dsf 1.25 --token-file <dir>.token --base http://<addr>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.benchmarks.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/benchmarks?fake-records=1"
+ },
+ {
+  "until": "document.querySelectorAll('.mlist .lrow').length === 4",
+  "timeout": 15,
+  "label": "the list has the four faked runs"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; 'helpers'"
+ },
+ {
+  "expect": "document.querySelector('.bench-split:not(.narrow)') && __h1() === 'Benchmarks' && /What a run measures/.test(document.querySelector('.mdetail-pane').textContent)",
+  "label": "wide: nothing opened shows the status page beside the list"
+ },
+ {
+  "shot": "bench-status"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/benchmarks/44\"]"
+ },
+ {
+  "until": "location.pathname === '/benchmarks/44' && __h1() === 'Run 44' && __sel()[0] === '/benchmarks/44'",
+  "timeout": 5,
+  "label": "a click opens the run at its path"
+ },
+ {
+  "until": "document.querySelector('.bn-flow .bn-tiles')",
+  "timeout": 5,
+  "label": "the run's headline tiles show"
+ },
+ {
+  "shot": "bench-run"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname === '/benchmarks/43' && __h1() === 'Run 43'",
+  "timeout": 5,
+  "label": "the arrows move the selection"
+ },
+ {
+  "nav": "/benchmarks?run=42"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; 'helpers'"
+ },
+ {
+  "until": "location.pathname === '/benchmarks/42' && !location.search.includes('run=') && /The run failed/.test(document.querySelector('.bn-flow').textContent)",
+  "timeout": 8,
+  "label": "the old ?run= link lands on the run's path; a failed run says so first"
+ },
+ {
+  "js": "window.__recordsFakeHold = { 'bench_run:41': 1500 }; 'hold'"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/benchmarks/41\"]"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/benchmarks/44\"]"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "expect": "location.pathname === '/benchmarks/44' && __h1() === 'Run 44' && !/canceled/i.test(document.querySelector('.bn-flow .detail-hero .chips').textContent)",
+  "label": "a run read late after the selection moved on is dropped"
+ },
+ {
+  "js": "window.__recordsFakeHold = {}; 'released'"
+ },
+ {
+  "click": ".bn-pick-btn"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/benchmarks/44\"]"
+ },
+ {
+  "click": ".mlist .lrow[data-key=\"/benchmarks/41\"]"
+ },
+ {
+  "until": "/Compare 2 runs/.test(document.querySelector('.bn-pick-foot').textContent) && /base: run 44/.test(document.querySelector('.bn-pick-foot').textContent) && location.pathname === '/benchmarks/44'",
+  "timeout": 3,
+  "label": "in pick mode a click picks a run (the first one is the base) instead of opening it"
+ },
+ {
+  "shot": "bench-picked"
+ },
+ {
+  "click": ".bn-pick-foot .btn"
+ },
+ {
+  "until": "location.pathname === '/benchmarks' && /compare=44,41/.test(location.search) && __h1() === 'Compare runs'",
+  "timeout": 8,
+  "label": "Compare opens the comparison in the detail pane"
+ },
+ {
+  "click": ".bn-pick-foot .link-btn"
+ },
+ {
+  "click": ".mlist-head .icon-btn[aria-label=\"New benchmark\"]"
+ },
+ {
+  "until": "/new=1/.test(location.search) && document.querySelector('dialog[open]')",
+  "timeout": 5,
+  "label": "+ opens the New benchmark dialog"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]')",
+  "timeout": 3,
+  "label": "Esc closes it"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/benchmarks/44"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.mlist .lrow.sel')].map(r => r.dataset.key); window.__h1 = () => (document.querySelector('.mdetail-pane .detail-hero h1') || {}).textContent; 'helpers'"
+ },
+ {
+  "until": "document.querySelector('.bench-split.narrow') && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[aria-label=\"Back to the runs\"]')",
+  "timeout": 8,
+  "label": "narrow: the run alone, with a back button"
+ },
+ {
+  "shot": "bench-narrow-run"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[aria-label=\"Back to the runs\"]"
+ },
+ {
+  "until": "location.pathname === '/benchmarks' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the list"
+ }
+]

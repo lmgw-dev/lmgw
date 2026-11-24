@@ -384,3 +384,43 @@ async fn a_count_passes_the_block_through() {
     let sent = bodies_at(&mock, "/v1/messages/count_tokens").await;
     assert_eq!(sent[0]["messages"], body["messages"]);
 }
+
+/// A compaction entry that carries a `cache_creation` split is taken out of
+/// the top level again: the client gets the top-level counts and split the
+/// upstream's top level said (and none when its top level had no object),
+/// the iterations as they came.
+#[tokio::test]
+async fn a_compaction_entry_s_cache_split_stays_out_of_the_top_level() {
+    let iterations = json!([
+        {"type": "compaction", "input_tokens": 144, "output_tokens": 276,
+         "cache_read_input_tokens": 50, "cache_creation_input_tokens": 70,
+         "cache_creation": {"ephemeral_5m_input_tokens": 20, "ephemeral_1h_input_tokens": 50}},
+        {"type": "message", "input_tokens": 80, "output_tokens": 4},
+    ]);
+    let with_split = json!({
+        "input_tokens": 80, "output_tokens": 4,
+        "cache_read_input_tokens": 500, "cache_creation_input_tokens": 40,
+        "cache_creation": {"ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 30},
+        "iterations": iterations,
+    });
+    let mut flat = with_split.clone();
+    flat.as_object_mut().unwrap().remove("cache_creation");
+    for usage in [with_split, flat] {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "tgt",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn", "stop_sequence": null, "usage": usage,
+            })))
+            .mount(&mock)
+            .await;
+        let gw = world(&mock.uri(), Protocol::Anthropic).await;
+        let body = json!({"model": "m", "max_tokens": 64, "messages": history()});
+        let resp = post_with(&gw, "/v1/messages", ON_DEMAND, &body).await;
+        assert_eq!(resp.status(), 200);
+        let answer: Value = resp.json().await.unwrap();
+        assert_eq!(answer["usage"], usage, "{answer}");
+    }
+}

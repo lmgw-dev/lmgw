@@ -124,7 +124,7 @@ impl Inputs {
     pub fn room(card: Option<&CardNow>) -> Option<Room> {
         card.map(|c| Room {
             capacity: c.room(FitMeasure::WholeCard),
-            headroom: c.card.headroom,
+            headroom: c.keep(FitMeasure::WholeCard),
         })
     }
 }
@@ -465,11 +465,12 @@ fn shown(
     card: Option<&CardNow>,
     why_line: impl Fn(&WeightsFile) -> String,
 ) -> Shown {
-    let headroom = card.map_or(0, |c| c.card.headroom);
+    // Each measure's room beside what admission keeps free by it
+    // (`CardNow::keep`), as the fit marks it.
     let room = |m: FitMeasure| {
         card.map(|c| Room {
             capacity: c.room(m),
-            headroom,
+            headroom: c.keep(m),
         })
     };
     let [beside, whole] = picks(
@@ -625,7 +626,7 @@ fn card(found: &Found, inputs: &Inputs, lists: &Lists) -> Option<ModelCard> {
             let room = inputs
                 .card
                 .as_ref()
-                .map(|k| (k.room(FitMeasure::WholeCard), k.card.headroom));
+                .map(|k| (k.room(FitMeasure::WholeCard), k.keep(FitMeasure::WholeCard)));
             c.fit.notes.push(match (a.bytes, room) {
                 (Some(b), Some((room, headroom))) => format!(
                     "{}, the file the address names, needs {} with the headroom, and the card \
@@ -808,7 +809,9 @@ mod tests {
             more_uploads: false,
             asked_file: Some("m-Q8_0.gguf".into()),
         });
-        // 16 GiB in use by other programs: 8 GiB beside, 24 on the card.
+        // 16 GiB held by lmgw's own models: 8 GiB beside them, 24 on the
+        // card once they unload (the whole card: what other programs hold
+        // stays, lmgw's models go).
         let inputs = Inputs {
             card: Some(CardNow {
                 card: Card {
@@ -818,9 +821,17 @@ mod tests {
                     admission: true,
                 },
                 hold: false,
-                outside: Some(16 * GIB),
-                residents: Vec::new(),
+                beside_alone: GIB,
+                beside_with: GIB,
+                outside: Some(0),
+                residents: vec![lmgw_api_types::model_find::CardResident {
+                    class: "chat".into(),
+                    model: "other".into(),
+                    bytes: 16 * GIB,
+                }],
                 left_out: Vec::new(),
+                which: None,
+                cards: None,
             }),
             downloads_rate: None,
             engine: Engine::NotKnown("a test".into()),

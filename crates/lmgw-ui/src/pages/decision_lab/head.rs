@@ -8,7 +8,7 @@ use lmgw_api_types::decision_lab::{DecisionBackend, DecisionLabModel};
 
 use super::page::Lab;
 use crate::catalog::CatalogEntry;
-use crate::widgets::ModelPicker;
+use crate::widgets::{Ico, Icon, ModelPicker};
 
 /// How a chip reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,8 +133,8 @@ pub(super) fn facts(m: &DecisionLabModel) -> Vec<Fact> {
 pub(super) fn state_chip(local: bool, state: Option<&str>) -> (&'static str, &'static str) {
     match state {
         Some("ready") => ("chip ok", "ready"),
-        Some("starting") => ("chip live", "starting…"),
-        Some("stopping") => ("chip live", "stopping…"),
+        Some("starting") => ("chip info", "starting…"),
+        Some("stopping") => ("chip info", "stopping…"),
         Some(_) => ("chip off", "stopped"),
         None if !local => ("chip off", "remote"),
         None => ("chip off", "stopped"),
@@ -192,36 +192,55 @@ pub(super) fn first_pick(models: &[DecisionLabModel]) -> Option<String> {
         .map(|m| m.name.clone())
 }
 
+/// The header bar's subtitle: the model picker.
 #[component]
-pub(super) fn Head(lab: Lab) -> impl IntoView {
+pub(super) fn ModelSub(lab: Lab) -> impl IntoView {
     let list = Signal::derive(move || entries(&lab.models.get()));
     let status = Signal::derive(move || lab.list.get());
+    view! { <ModelPicker value=lab.alias entries=list status=status/> }
+}
+
+/// The header bar's facts about the picked model, as pills; in a pane too
+/// narrow for them beside the title, a Facts button opens the same pills
+/// in a popover (`facts_menu`), so the header keeps its height.
+#[component]
+pub(super) fn Head(lab: Lab) -> impl IntoView {
     view! {
-        <span class="lab-label">"Model"</span>
-        <ModelPicker value=lab.alias entries=list status=status/>
-        <span class="dl-facts">
-            {move || {
-                lab.model()
-                    .map(|m| {
-                        facts(&m)
-                            .into_iter()
-                            .map(|f| {
-                                let cls = match f.tone {
-                                    Tone::Plain => "dl-fact",
-                                    Tone::Warn => "dl-fact warn",
-                                    Tone::Err => "dl-fact err",
-                                };
-                                view! {
-                                    <span class=cls title=f.title>
-                                        {f.text}
-                                    </span>
-                                }
-                            })
-                            .collect_view()
-                    })
-            }}
+        <span class="dl-facts dl-facts-inline">
+            <FactPills lab=lab/>
         </span>
-        <span class="spacer"></span>
+        <super::facts_menu::FactsMenu lab=lab/>
+    }
+}
+
+/// The picked model's facts as pills (empty while none is picked).
+#[component]
+pub(super) fn FactPills(lab: Lab) -> impl IntoView {
+    move || {
+        lab.model().map(|m| {
+            facts(&m)
+                .into_iter()
+                .map(|f| {
+                    let cls = match f.tone {
+                        Tone::Plain => "dl-fact",
+                        Tone::Warn => "dl-fact warn",
+                        Tone::Err => "dl-fact err",
+                    };
+                    view! {
+                        <span class=cls title=f.title>
+                            {f.text}
+                        </span>
+                    }
+                })
+                .collect_view()
+        })
+    }
+}
+
+/// The header bar's actions: the model's state and Reload.
+#[component]
+pub(super) fn Actions(lab: Lab) -> impl IntoView {
+    view! {
         {move || {
             lab.model()
                 .map(|m| {
@@ -241,11 +260,12 @@ pub(super) fn Head(lab: Lab) -> impl IntoView {
                 })
         }}
         <button
-            class="btn ghost"
+            class="icon-btn lab-reload"
             title="Read the model list and its facts again"
+            aria-label="Reload"
             on:click=move |_| lab.reload_models()
         >
-            "Reload"
+            <Icon ico=Ico::Refresh/>
         </button>
     }
 }

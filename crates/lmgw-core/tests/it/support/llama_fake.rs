@@ -680,13 +680,9 @@ impl ScriptedGpu {
 
 impl GpuProbe for ScriptedGpu {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
-        Ok(vec![GpuMemory {
-            index: 0,
-            name: "FakeGPU 3090".into(),
-            total_bytes: 24 << 30,
-            used_bytes: 2 << 30,
-            free_bytes: 22 << 30,
-        }])
+        let mut m = super::fake_machine::Machine::one_card("FakeGPU 3090", 24 << 30);
+        m.unlisted(0, 2 << 30);
+        Ok(m.devices())
     }
 
     fn source(&self) -> String {

@@ -56,7 +56,7 @@ pub(super) async fn call_as(w: &World, d: &Device, name: &str, args: Value) -> (
         .blocks
         .iter()
         .map(|b| match b {
-            ToolResultBlock::Text { text } => text.clone(),
+            ToolResultBlock::Text { text, .. } => text.clone(),
             other => format!("{other:?}"),
         })
         .collect::<Vec<_>>()

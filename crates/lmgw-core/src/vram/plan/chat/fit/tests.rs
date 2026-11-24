@@ -49,6 +49,7 @@ pub(crate) fn files(s: ModelSummary) -> Arc<ChatFiles> {
             missing: Vec::new(),
         },
         draft: None,
+        projector: false,
     })
 }
 

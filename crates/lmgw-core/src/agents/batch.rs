@@ -845,7 +845,8 @@ impl StepOut {
 #[derive(Debug)]
 struct StepFail {
     error: String,
-    partial: StepOut,
+    /// Boxed: the error stays under `clippy.toml`'s `large-error-threshold`.
+    partial: Box<StepOut>,
 }
 
 impl StepFail {
@@ -854,14 +855,14 @@ impl StepFail {
     fn bare(error: impl Into<String>) -> Self {
         Self {
             error: error.into(),
-            partial: StepOut::data(Value::Null, Meter::default()),
+            partial: Box::new(StepOut::data(Value::Null, Meter::default())),
         }
     }
 
     fn with(error: impl Into<String>, partial: StepOut) -> Self {
         Self {
             error: error.into(),
-            partial,
+            partial: Box::new(partial),
         }
     }
 }
@@ -1147,7 +1148,7 @@ impl Run<'_> {
             return Ok(StepOut::data(value.clone(), meter));
         }
         let first_text = outcome.blocks.iter().find_map(|b| match b {
-            ToolResultBlock::Text { text } => Some(text.as_str()),
+            ToolResultBlock::Text { text, .. } => Some(text.as_str()),
             _ => None,
         });
         match first_text.and_then(|t| serde_json::from_str::<Value>(t.trim()).ok()) {
@@ -1226,6 +1227,7 @@ impl Run<'_> {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
 
         let mut sink = RunSink {
@@ -1351,6 +1353,7 @@ impl Run<'_> {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         // A turn's `output` is always the author's own schema.
         ir.response_format = Some(response_format(schema, "agent_output", false));
@@ -1852,6 +1855,7 @@ impl Run<'_> {
             context_management: None,
             compaction: None,
             thinking_display: None,
+            cache_control: None,
         };
         if !schema.is_null() {
             // Every egress translates it (structured-output design §6):
@@ -2032,7 +2036,7 @@ impl Run<'_> {
         // that same block back out of `self.applied` (§4.1, §4.6).
         let (out, failed) = match self.run_step(&step, &tctx, "run.apply").await {
             Ok(out) => (out, None),
-            Err(f) => (f.partial, Some(f.error)),
+            Err(f) => (*f.partial, Some(f.error)),
         };
         let applied = json!({
             "output": out.value,

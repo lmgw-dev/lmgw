@@ -46,9 +46,16 @@ impl Page {
         self.data.with(|d| pinned_why_in(d.as_ref()?, key))
     }
 
-    /// `d`'s unit as its row shows it now ([`unit_shown`]).
-    pub(super) fn unit_of(&self, d: &Def) -> &'static str {
-        self.data.with(|data| unit_shown(d.unit, data.as_ref()))
+    /// `d`'s unit as its row shows it now: another field's draft value
+    /// when the row names one (the budget's is the currency), else
+    /// [`unit_shown`].
+    pub(super) fn unit_of(&self, d: &Def) -> String {
+        if !d.unit_from.is_empty() {
+            return self.form.text(d.unit_from).trim().to_string();
+        }
+        self.data
+            .with(|data| unit_shown(d.unit, data.as_ref()))
+            .to_string()
     }
 
     /// Whether this is the server image's settings answer ([`container_in`]).

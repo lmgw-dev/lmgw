@@ -13,7 +13,7 @@ pub(in crate::web) fn lab_of(name: &str) -> Result<LabKind, Response> {
         err_json(
             StatusCode::NOT_FOUND,
             "not_found",
-            format!("there is no lab '{name}': decision, image or audio"),
+            format!("there is no lab '{name}': decision, image, audio or documents"),
         )
     })
 }

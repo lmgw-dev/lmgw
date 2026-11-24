@@ -726,6 +726,7 @@ pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, S
             fallback_on_external: s.vram.fallback_on_external,
             headroom_mode: s.vram.headroom_mode,
             headroom_mb: s.vram.headroom_mb,
+            keep_free: s.vram.keep_free.clone(),
             headroom: state.vram.headroom_now(&snap),
         },
         router: class(&s.router),

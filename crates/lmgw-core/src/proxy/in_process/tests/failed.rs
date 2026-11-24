@@ -57,6 +57,7 @@ async fn a_failed_whole_response_s_row_keeps_its_usage() {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let e = sample_once(
         &state,

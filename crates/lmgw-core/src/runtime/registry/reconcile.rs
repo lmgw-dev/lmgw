@@ -144,6 +144,8 @@ impl Registry {
                 served: e.served,
                 adopted: e.adopted,
                 engine_key: e.engine_key.clone(),
+                card_charge: e.card_charge.clone(),
+                moved: e.moved,
             })
             .collect();
         out.sort_by(|a, b| (a.class, &a.model_id).cmp(&(b.class, &b.model_id)));
@@ -437,6 +439,9 @@ impl Registry {
                 // What admission gave its start, from the label it carries,
                 // and the note that it is not held to it where it is not.
                 let (grant, unheld) = adopted_grant(&render, class, &model_id).unzip();
+                // What it was charged on the cards, from its label
+                // (device-ledger design §3.3).
+                let card_charge = adopted_charge(&row.labels, class, &model_id, name);
                 slot.insert(Entry {
                     generation: next_generation(),
                     container_name: name.to_string(),
@@ -489,6 +494,12 @@ impl Registry {
                     // nothing of it was measured either (`vram::headroom`).
                     served: false,
                     adopted: true,
+                    // Without the label (an lmgw before the device ledger,
+                    // or a start no decision stood behind) the ledger
+                    // charges it on the cards its arguments pass, and says
+                    // so on the resident; it is not restarted for it.
+                    card_charge,
+                    moved: false,
                 });
                 Ok(true)
             }
@@ -517,6 +528,16 @@ impl Registry {
             let path = crate::runtime::audio::config_dir(spec.data_dir, &spec.runtime.model_id)
                 .join(crate::runtime::audio::CONFIG_FILE_NAME);
             let on_disk = std::fs::read_to_string(&path).ok();
+            // A container lmgw handed its cards was started with the device
+            // index those cards are numbered by (device-ledger design §8.1).
+            let handed;
+            let settings = match labels.contains_key(crate::runtime::argv::HANDED_LABEL) {
+                true => {
+                    handed = crate::runtime::audio::handed_settings(settings);
+                    &handed
+                }
+                false => settings,
+            };
             if on_disk.as_deref()
                 != Some(crate::runtime::audio::render_single_model_config(settings, model).as_str())
             {
@@ -531,6 +552,13 @@ impl Registry {
         // falls back exactly as a start does — and then the comparison is the
         // one that decides, not the probe.
         let (probed, _) = self.with_sdcpp_caps(spec).await;
+        // And a drafter's type the way a start gives it (ruling 18): the
+        // container of a row that set a drafter and no type carries
+        // `--spec-type draft-simple` from its start on.
+        let probed = match probed {
+            Some(p) => Some(p),
+            None => self.with_draft_type(container_prefix, spec.runtime).await,
+        };
         let runtime: &ModelRuntime = probed.as_ref().unwrap_or(spec.runtime);
         // `preview_spec`, not `render_spec`: this renders in order to *compare*
         // argv, and the container it is comparing against is already running —
@@ -571,6 +599,30 @@ impl Registry {
                 bytes: f.bytes,
                 placement,
             });
+        }
+        // A container whose cards lmgw handed it (`lmgw.handed`, device-ledger
+        // design §7.1): its command was rendered without llama-server's own
+        // flags that number a card (§8.1) and without the row's own split
+        // where it was not kept (§7.2), and so must the one it is compared
+        // with. Only the cards are read back: the comparison is
+        // of the command, and the charge is the placement label's.
+        if let Some(ids) = labels.get(crate::runtime::argv::HANDED_LABEL) {
+            let cards: Vec<crate::vram::nvml::DeviceId> = ids
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(crate::vram::nvml::DeviceId::new)
+                .collect();
+            // One handed its cards for the row's own split was started
+            // with it as written (`lmgw.own-split`, §7.2).
+            let charge = crate::vram::CardCharge::over(cards.clone(), 0);
+            let charge = match labels.contains_key(crate::runtime::argv::OWN_SPLIT_LABEL) {
+                true => charge.keeping_own_split(),
+                false => charge.handed(),
+            };
+            if !cards.is_empty() {
+                render.charge = Some(charge);
+            }
         }
         self.launcher
             .same_start(container_prefix, &render, inspected, labels)?;
@@ -726,12 +778,54 @@ fn adopted_grant(
     Some((grant, note))
 }
 
+/// What an adopted container was charged on the cards, from its
+/// [`PLACEMENT_LABEL`](crate::vram::charge::PLACEMENT_LABEL) (device-ledger
+/// design §3.3, D12). `None` without the label, and for one that cannot be
+/// read, which is logged: the ledger then charges it as a container without
+/// one. A card the label names that this machine no longer lists is the
+/// ledger's to find, at each reading of the cards.
+fn adopted_charge(
+    labels: &HashMap<String, String>,
+    class: Class,
+    model_id: &str,
+    name: &str,
+) -> Option<crate::vram::CardCharge> {
+    let label = labels.get(crate::vram::charge::PLACEMENT_LABEL)?;
+    let charge = crate::vram::CardCharge::parse(label);
+    if charge.is_none() {
+        tracing::warn!(
+            container = %name,
+            "adopting {class} model '{model_id}': its {} label ({label:?}) cannot be read, so \
+             it is charged on the cards its arguments pass",
+            crate::vram::charge::PLACEMENT_LABEL
+        );
+    }
+    charge
+}
+
 /// The grant of an adopted llama-server container lmgw fitted in `--fit`'s
 /// place, from its `lmgw.llama-fit` label as compared: what the ledger
 /// charges it, with the warning a start leaves — a lowered context, or
 /// layers off the card — worded for the adoption.
 fn adopted_fit(f: crate::runtime::argv::Fitted, class: Class, model_id: &str) -> PartialGrant {
     let p = f.placement;
+    // A split lmgw placed over several cards (device-ledger design §7.2):
+    // nothing of it was made smaller.
+    if p.split.is_some() && p.ctx.is_none() && p.n_gpu_layers.is_none() && p.n_cpu_moe.is_none() {
+        return PartialGrant {
+            bytes: f.bytes,
+            max_vram_bytes: 0,
+            warning: format!(
+                "{}/{model_id} was adopted from an earlier run of lmgw, which split it over its \
+                 cards ({} in all) and told llama-server {}; it keeps that until its container \
+                 stops",
+                class.as_str(),
+                crate::hf::fmt_bytes(f.bytes),
+                p.flags()
+            ),
+            llama: Some(p),
+        };
+    }
     let lead = match (p.n_gpu_layers, p.n_cpu_moe) {
         (None, None) => crate::vram::partial::llama::CONTEXT_FITTED,
         _ => crate::vram::partial::PARTIAL_FIT,

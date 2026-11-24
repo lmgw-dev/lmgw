@@ -261,9 +261,9 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "Read a GGUF's own metadata: architecture, trained context length, layer and \
-                 head counts, quantization, whether it carries a chat template, whether it \
-                 has MTP layers, and whether it is weights / a multimodal projector / a \
-                 speculative drafter. Also says which class serves it ('serve_as': an \
+                 head counts, a looped model's loop core ('layer_loop'), quantization, whether \
+                 it carries a chat template, whether it has MTP layers, and whether it is \
+                 weights / a multimodal projector / a speculative drafter. Also says which class serves it ('serve_as': an \
                  embedding, rerank or decision model is an aux model, recognised by the \
                  pooling_type, classifier head or decision.type in its header, whatever \
                  directory it sits in), \
@@ -405,7 +405,14 @@ pub(super) fn tools() -> Vec<Builtin> {
                  component of a known family with its repo, file and size. \
                  With fit=true each 'weights' file also gets its fit on this computer's \
                  graphics card (`fit`: by the whole card and beside what runs on it now, with \
-                 the longest conversation that fits) and the answer names the `recommended` \
+                 the longest conversation that fits; each with `cards`, the fit over the \
+                 graphics cards judged at the context Get it would create: `min_cards`, the \
+                 fewest cards whose total memory holds it, 'budget' under a declared budget; \
+                 `free`, whether the cards it would use have room now, after unloading lmgw's \
+                 idle models (named) or what it needs against what is there; \
+                 `experts_in_ram` for a mixture-of-experts model no card holds whole; and \
+                 `choices` where no single card holds its full context, the ways \
+                 lmgw__model_get's 'layout' takes) and the answer names the `recommended` \
                  file with its reason (`picks`). That reads GGUF headers from Hugging Face, \
                  1 to 16 MiB each: one file's, then only the files near the card's edge and \
                  those that could be the recommended one; the others are estimated from it \
@@ -854,6 +861,63 @@ pub(super) fn tools() -> Vec<Builtin> {
             required: &[],
         },
         Builtin {
+            name: "lmgw__doc_tools",
+            writes: false,
+            description:
+                "What this computer can turn into text for a model, and what installing a \
+                 package would add (Settings › Documents). formats: each kind of file (plain \
+                 text, office files, PDF, scanned pages and pictures, audio) with the handler \
+                 that reads it here, how well (full, partial, none) and a plain sentence saying \
+                 what the person gets or what is missing. tools: lmgw's own document reader (the \
+                 program installed with lmgw that reads web pages, e-books, e-mail, old Excel \
+                 files and pictures as a child process) and every optional tool lmgw can \
+                 use (poppler for PDFs, tesseract, pandoc, ffmpeg, LibreOffice), found or not, \
+                 with its version, path, licence, what lmgw reads with it now (empty: not used \
+                 yet) and what its probe read beside the version (poppler's binaries, \
+                 tesseract's language packs, ffmpeg's audio decoders, LibreOffice's parts); a \
+                 tool whose version run failed carries why. missing: each tool that is not \
+                 installed, with the command or page that installs it on this computer (in the \
+                 server image: a derived image) and what it would let lmgw read. Detection is \
+                 in memory: every tool is checked at start, and this call looks the tools up \
+                 again first, probing one whose binary appeared, went away or changed, so an \
+                 install shows without a restart. It only reads.",
+            props: vec![],
+            required: &[],
+        },
+        Builtin {
+            name: "lmgw__doc_jobs_stored",
+            writes: false,
+            description:
+                "What lmgw's background document conversions hold on this computer (Settings › \
+                 Retention, 'Stored conversions'): jobs = how many jobs have files in the data \
+                 dir, bytes = what those take together (the uploads of jobs still running and \
+                 the converted text of ended ones, until the job retention removes them), \
+                 running = jobs running now, queued_files = files of running jobs with no \
+                 outcome yet. It only reads.",
+            props: vec![],
+            required: &[],
+        },
+        Builtin {
+            name: "lmgw__doc_adapter_usage",
+            writes: false,
+            description:
+                "Who calls lmgw's docling-serve-compatible routes (/v1/convert/*), and what they \
+                 send (Settings › Documents, 'Who calls the docling route'). keys: one row per \
+                 key that called them in the kept request log (most recent first), with its \
+                 request and file counts, when it last called, the routes with counts, every \
+                 docling option it set with its value and lmgw's outcome (honoured: done as \
+                 docling does; mapped: lmgw's equivalent served it; not_yet: left out for now, \
+                 the answer says so; refused: a named 400), the options lmgw handles \
+                 differently first, and the hosts of the http sources it sent (refused, as \
+                 lmgw fetches no web address unless the owner allows it). Values are kept only \
+                 for options whose values are a small fixed set (to_formats, ocr_engine, \
+                 pipeline); free text and addresses read as 'set'. No file names, content, \
+                 URLs, headers or prompts are recorded. The records follow the request log's \
+                 retention. It only reads.",
+            props: vec![],
+            required: &[],
+        },
+        Builtin {
             name: "lmgw__model_find",
             writes: false,
             description:
@@ -867,8 +931,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                  and walks the top author's originals of the top one's kind to the first whose upload has a \
                  file that fits by its size (an upload by the maker first, gated ones last); when none \
                  fits, the card is the one closest to fitting (nothing_fits). It reads no file header, so \
-                 the card's marks are by size ('fits_by_size'): lmgw__hf_repo with fit=true on the card's \
-                 upload reads the header (1 to 16 MiB) and checks exactly. A search usually costs 3 to 8 \
+                 the card's marks are by size ('fits_by_size'), its `fit.cards` too (Min. cards by size, \
+                 Free VRAM on one card): lmgw__hf_repo with fit=true on the card's \
+                 upload reads the header (1 to 16 MiB) and checks exactly, a split and the experts in \
+                 RAM included. The file it picks is the best one a single card holds. A search usually costs 3 to 8 \
                  Hugging Face requests: the two searches, two per model the walk reads (its uploads, a \
                  tree) plus one per gated or unanswered upload or further tree page, and the display \
                  name; lmgw sets no bound of its own, the hub's limit is the bound. hub_budget carries \

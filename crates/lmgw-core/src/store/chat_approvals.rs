@@ -397,6 +397,7 @@ pub fn close_record(record: Option<&str>, pending: &PendingApprovals) -> Option<
             name: Some(name.clone()),
             content: ToolResultBlock::one(pending.closing_text(k, id)),
             is_error: true,
+            cache_control: None,
         })
         .collect();
     if results.is_empty() {
@@ -435,7 +436,7 @@ fn reword_unsaved(record: Option<&str>, pending: &PendingApprovals) -> Option<St
             continue;
         };
         let unsaved = matches!(content.as_slice(),
-            [ToolResultBlock::Text { text }] if text == APPROVED_UNSAVED);
+            [ToolResultBlock::Text { text, .. }] if text == APPROVED_UNSAVED);
         if unsaved {
             *content = ToolResultBlock::one(pending.closing_text(k, id));
             changed = true;
@@ -759,7 +760,7 @@ pub async fn resume_chat_reply(
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
            completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, images_note=?10,
-           pending_approvals=?11, reasoning_seals=?12
+           pending_approvals=?11, reasoning_seals=?12, notices=?13
          WHERE id=?1 AND thread_id=?2 AND role='assistant'",
     )
     .bind(id)
@@ -774,6 +775,7 @@ pub async fn resume_chat_reply(
     .bind(&r.images_note)
     .bind(r.pending_approvals.as_ref().map(PendingApprovals::to_json))
     .bind(super::chat_seals::to_column(&r.reasoning_seals))
+    .bind(super::chat_notices::to_column(&r.notices))
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -889,16 +891,19 @@ mod tests {
                     id: "a".into(),
                     name: "desktop__notify".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
                 ContentPart::ToolUse {
                     id: "b".into(),
                     name: "desktop__notify".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
                 ContentPart::ToolUse {
                     id: "c".into(),
                     name: "desktop__notify".into(),
                     args: json!({}),
+                    cache_control: None,
                 },
             ],
         }])

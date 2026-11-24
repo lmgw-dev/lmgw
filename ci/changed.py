@@ -13,10 +13,17 @@ plan as shell assignments on stdout, which ci/check.sh evals:
                    checked on its own (for wasm32, and with its tls feature)
   RUN_WORKLET      1 when the audio worklets changed
   RUN_PUBLISH      1 when scripts/publish-github.sh or its helpers changed
-  RUN_RPM_GUARD    1 when ci/rpm_guard.py, its allowlist, the bundle config or the
-                   pinned polkit policy changed
+  RUN_RPM_GUARD    1 when ci/rpm_guard.py, ci/arch_guard*, its allowlist, the bundle
+                   config or the pinned polkit policy changed
   RUN_COMPAT       1 when the live compat check (scripts/compat_live*, compat-live.sh)
                    changed
+  RUN_CARDS        1 when the multi-card measurement (scripts/multi-card-measure.py or its
+                   test) changed
+  RUN_CONVERT_COMPARE  1 when the comparison script (scripts/convert-compare.py or its test)
+                   changed
+  RUN_FRAME        1 when the README screenshots' window frame (scripts/window-frame.py, its
+                   test or drive script) or what it copies from the shell (linux.rs's shadow,
+                   the window radius, the page's radius, the default interface scale) changed
   NEXTEST_FILTER   the nextest filterset for the selected tests
 
 The it-module half reads ci/it-map.toml; its header says how the naming
@@ -34,6 +41,11 @@ import tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IT_DIR = "crates/lmgw-core/tests/it"
+# What scripts/window-frame.py copies from the shell and the page (scripts/window_frame_test.py
+# compares them).
+FRAME_SOURCES = {"scripts/drive/window-frame.js", "src-tauri/src/window_chrome/linux.rs",
+                 "src-tauri/src/window_chrome.rs", "crates/lmgw-ui/src/frame.rs",
+                 "crates/lmgw-ui/src/ui_scale.rs"}
 CORE = "lmgw-core"
 CORE_SRC = "crates/lmgw-core/src/"
 UI_DIR = "crates/lmgw-ui/"
@@ -318,13 +330,22 @@ def main():
     publish = [f for f in files if f.startswith(("scripts/publish", "scripts/pre-push-github"))]
     say(f"publish script check: {'yes (' + publish[0] + ' changed)' if publish else 'skipped (no change to scripts/publish*)'}")
     # The polkit policy's content is pinned in ci/rpm-allowlist.toml.
-    rpm_guard = [f for f in files if f.startswith(("ci/rpm", "src-tauri/icons/",
+    rpm_guard = [f for f in files if f.startswith(("ci/rpm", "ci/arch_guard", "src-tauri/icons/",
                                                    "crates/lmgw-machine-helper/polkit/"))
                  or f == "src-tauri/tauri.conf.json"]
-    say(f"RPM guard check: {'yes (' + rpm_guard[0] + ' changed)' if rpm_guard else 'skipped (no change to ci/rpm*, src-tauri/tauri.conf.json, its icons or the polkit policy)'}")
+    say(f"RPM guard check: {'yes (' + rpm_guard[0] + ' changed)' if rpm_guard else 'skipped (no change to ci/rpm*, ci/arch_guard*, src-tauri/tauri.conf.json, its icons or the polkit policy)'}")
 
     compat = [f for f in files if f.startswith(("scripts/compat_live", "scripts/compat-live"))]
     say(f"compat rules check: {'yes (' + compat[0] + ' changed)' if compat else 'skipped (no change to scripts/compat_live*)'}")
+    cards = [f for f in files if f.startswith(("scripts/multi-card-measure", "scripts/multi_card_measure"))]
+    say(f"multi-card measurement check: {'yes (' + cards[0] + ' changed)' if cards else 'skipped (no change to scripts/multi-card-measure*)'}")
+
+    compare = [f for f in files if f.startswith(("scripts/convert-compare", "scripts/convert_compare"))]
+    say(f"comparison script check: {'yes (' + compare[0] + ' changed)' if compare else 'skipped (no change to scripts/convert-compare*)'}")
+
+    frame = [f for f in files if f.startswith(("scripts/window-frame", "scripts/window_frame"))
+             or f in FRAME_SOURCES]
+    say(f"window frame check: {'yes (' + frame[0] + ' changed)' if frame else 'skipped (no change to scripts/window-frame* or the shell frame it copies)'}")
 
     out = {
         "CHANGED_CRATES": " ".join(sorted(touched)),
@@ -335,6 +356,9 @@ def main():
         "RUN_PUBLISH": "1" if publish else "0",
         "RUN_RPM_GUARD": "1" if rpm_guard else "0",
         "RUN_COMPAT": "1" if compat else "0",
+        "RUN_CARDS": "1" if cards else "0",
+        "RUN_CONVERT_COMPARE": "1" if compare else "0",
+        "RUN_FRAME": "1" if frame else "0",
         "NEXTEST_FILTER": " | ".join(clauses),
     }
     for k, v in out.items():

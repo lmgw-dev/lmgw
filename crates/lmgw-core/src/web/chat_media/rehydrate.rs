@@ -134,6 +134,7 @@ impl Hydrator {
                         Some(Found::Picture { mime, data }) => ToolResultBlock::Image {
                             mime: mime.clone(),
                             data: data.clone(),
+                            cache_control: None,
                         },
                         Some(Found::Other) => ToolResultBlock::text(format!("[att:{id}]")),
                         Some(Found::Gone) | None => {

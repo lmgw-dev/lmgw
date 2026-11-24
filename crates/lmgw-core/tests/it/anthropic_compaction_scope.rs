@@ -62,6 +62,7 @@ fn asked_again(compaction: Compaction) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 

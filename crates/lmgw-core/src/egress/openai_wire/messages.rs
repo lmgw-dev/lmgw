@@ -69,7 +69,7 @@ pub fn messages_json(ir: &ChatRequest, tool_results: &dyn ToolResultRenderer) ->
                     .content
                     .iter()
                     .filter_map(|p| match p {
-                        ContentPart::ToolUse { id, name, args } => Some(json!({
+                        ContentPart::ToolUse { id, name, args, .. } => Some(json!({
                             "id": wire_call_id(id),
                             "type": "function",
                             "function": {
@@ -144,7 +144,7 @@ fn user_content_json(parts: &[ContentPart]) -> Value {
     for p in parts {
         match p {
             ContentPart::Text { text, .. } => arr.push(json!({"type": "text", "text": text})),
-            ContentPart::Image { mime, source } => {
+            ContentPart::Image { mime, source, .. } => {
                 let url = match source {
                     ImageSource::Url { url } => url.clone(),
                     ImageSource::Base64 { data } => format!("data:{mime};base64,{data}"),

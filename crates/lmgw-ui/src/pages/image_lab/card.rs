@@ -228,7 +228,7 @@ fn runless_view(lab: Lab, state: Runless) -> AnyView {
     match state {
         Runless::Live => view! {
             <div class="dl-status">
-                <span class="chip live">
+                <span class="chip info" data-state="running">
                     <i class="dot"></i>
                     "rendering…"
                 </span>
@@ -240,7 +240,7 @@ fn runless_view(lab: Lab, state: Runless) -> AnyView {
         .into_any(),
         Runless::InFlight => view! {
             <div class="dl-status">
-                <span class="chip live">
+                <span class="chip info" data-state="running">
                     <i class="dot"></i>
                     "in flight — its answer is on its way"
                 </span>
@@ -338,12 +338,12 @@ fn RunBody(lab: Lab, run: LabRunView) -> impl IntoView {
     let empty = ok && no_shots;
     let raw = run.response.clone();
     view! {
-        {failure.map(|f| view! { <div class="notice err">{format!("⚠ {f}")}</div> })}
+        {failure.map(|f| view! { <div class="notice err">{f}</div> })}
         {gpu_setup
             .then(|| {
                 view! { <crate::widgets::machine_check::MachineInCard/> }
             })}
-        {empty.then(|| view! { <div class="notice err">"⚠ the answer carried no picture"</div> })}
+        {empty.then(|| view! { <div class="notice err">"The answer carried no picture"</div> })}
         <div class="gallery" hidden=no_shots>
             {shots
                 .into_iter()

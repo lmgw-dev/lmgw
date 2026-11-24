@@ -542,7 +542,7 @@ use common::{serve, Gw};
 /// tell "the thread got the server" from "the thread got the tools it picked".
 /// Same shape as the `/v1/responses` suite's stub — deliberately, since both
 /// planes resolve through one `mcp::exec::resolve`.
-async fn mcp_stub() -> String {
+pub(crate) async fn mcp_stub() -> String {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
@@ -597,7 +597,7 @@ async fn mcp_stub() -> String {
     format!("http://{addr}/mcp")
 }
 
-async fn register_mcp(state: &SharedState, prefix: &str, url: &str) {
+pub(crate) async fn register_mcp(state: &SharedState, prefix: &str, url: &str) {
     store::insert_mcp_server(
         &state.db,
         &NewMcpServer {
@@ -627,7 +627,7 @@ async fn register_mcp(state: &SharedState, prefix: &str, url: &str) {
     state.mcp.reconcile(&state.snapshot()).await;
 }
 
-async fn patch_settings(base: &Gw, tid: i64, body: Value) {
+pub(crate) async fn patch_settings(base: &Gw, tid: i64, body: Value) {
     base.client()
         .post(format!("{base}/chat/api/threads/{tid}/settings"))
         .json(&body)
@@ -820,6 +820,78 @@ async fn an_unresolvable_server_is_reported_instead_of_ignored() {
         mock.received_requests().await.unwrap().len(),
         0,
         "with no tools resolved the model must not be called"
+    );
+}
+
+/// A label that offers no tools beside one that does: the turn answers with
+/// the working server's tools, and the reply keeps the notice about the
+/// other — on the wire after the stream, in every read of the thread, never
+/// in its text.
+#[tokio::test]
+async fn a_label_that_offered_no_tools_is_kept_with_the_reply() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+                    "text/event-stream",
+                ),
+        )
+        .mount(&mock)
+        .await;
+    let (state, base) = setup(&mock.uri()).await;
+    let stub = mcp_stub().await;
+    register_mcp(&state, "stub", &stub).await;
+    let tid = new_thread(&base, "chat").await;
+    patch_settings(
+        &base,
+        tid,
+        json!({"mcp_tools": [{"server_label": "ghost"}, {"server_label": "stub"}]}),
+    )
+    .await;
+
+    let body = base
+        .client()
+        .post(format!("{base}/chat/api/threads/{tid}/send"))
+        .json(&json!({"content": "hello"}))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("\"server_label\":\"ghost\""), "{body}");
+
+    let t: Value = base
+        .client()
+        .get(format!("{base}/chat/api/threads/{tid}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply = t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("a saved reply: {t:#}"));
+    assert_eq!(
+        reply["content"], "ok",
+        "the notice is not in the text: {reply:#}"
+    );
+    let notices = reply["notices"].as_array().expect("the reply's notices");
+    assert_eq!(notices.len(), 1, "{reply:#}");
+    assert_eq!(notices[0]["server_label"], "ghost");
+    assert_eq!(notices[0]["code"], "tool_unknown");
+    assert!(notices[0]["message"].as_str().unwrap().contains("ghost"));
+    assert!(
+        t["messages"][0].get("notices").is_none(),
+        "the user message has none: {t:#}"
     );
 }
 

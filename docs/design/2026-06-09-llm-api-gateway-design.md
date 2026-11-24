@@ -129,7 +129,9 @@ egress shapes. Built incrementally (text → tools → multimodal).
 Mapping notes: OpenAI `tools`/`tool_calls` ↔ Anthropic `tool_use`/`tool_result`
 content blocks ↔ Gemini `functionDeclarations`/`functionCall`/`functionResponse`;
 system prompt is a top-level field for Anthropic/Gemini but a message for OpenAI;
-finish/stop reasons normalized.
+finish/stop reasons normalized. *(2026-11-12)* Anthropic's prompt-caching
+marks ride on the parts, tools and request that carried them (`ir::cache`,
+§6.1 "Prompt caching"); only the Anthropic egress reads them.
 
 ## 6. Ingress (client-facing API)
 
@@ -610,6 +612,92 @@ a by-URL document or image counts as a Files API one does: its URL is not
 counted and the block is named; `/v1/messages/count_tokens`
 off an Anthropic route counts the same text, as the egress sends it.
 
+**Prompt caching** *(2026-11-12)*: Anthropic's `cache_control` marks
+(`{"type": "ephemeral"}`, with a `ttl` of `"5m"` or `"1h"`) reach an
+Anthropic upstream where the client wrote them. Before, the IR had nowhere
+to keep them: the ingress joined the `system` blocks into one string and
+dropped every mark, so nothing was ever cached and every request paid the
+full input price. Anthropic renders tools, then `system`, then the
+messages, and any byte change in that prefix is a miss, so lmgw sends what
+the client wrote, in its order.
+
+- **Where the IR keeps them** (`ir::cache`): each mark verbatim
+  (`CacheControl`, so `ttl` and a field Anthropic adds next survive) on the
+  part that carried it: a text, an image, a `tool_use`, a `tool_result`,
+  and a text or image block inside a `tool_result`. A `system` string is
+  one System message with one text part, as before; a `system` array is
+  one System message with one text part per non-empty text block, each
+  with its mark. A tool keeps every key the IR does not model
+  (`ToolDef::anthropic_fields`): its `cache_control`, and the fields lmgw
+  dropped before (`eager_input_streaming`, `input_examples`, …), all but
+  the implied `"type": "custom"`. The top-level `cache_control` (automatic
+  caching, Anthropic placing the breakpoint) is
+  `ChatRequest::cache_control`. A `null` is no mark. A verbatim block
+  (`document`, `search_result`, a Files API image) and a `compaction`
+  block keep their own mark inside the block, as before.
+- **Anthropic upstream:** every mark on its own block. `system` stays a
+  string when no part carries a mark and every System message has one text
+  part (the messages' texts joined by a blank line, as it was sent before
+  marks existed, so a request from another dialect with several System
+  messages is unchanged); otherwise it is the blocks, one per part, each
+  with its mark. The tool objects get their fields back as written; the
+  top-level `cache_control` goes on as written, on
+  `/v1/messages/count_tokens`' rendered body too. Every block of a
+  `tool_result` is one Anthropic block and is never merged with a
+  neighbour (a text keeps its own mark; JSON, audio and a resource each
+  become a `text` block of their own; an empty text is left out), because
+  Anthropic's cache is a byte-prefix match and the bytes of an unchanged
+  result must not depend on where the client's mark sits in a given turn.
+  The merge of
+  consecutive same-role turns keeps each mark on its block. The answer's
+  `cache_creation_input_tokens` and `cache_read_input_tokens` come back as
+  Anthropic reported them.
+- **Every other upstream** (OpenAI, OpenAI-compatible, Gemini, llama.cpp)
+  never reads a mark, so its body is the one it got before marks existed.
+  A System message's text parts reach a single-text system slot joined by
+  a blank line (`Message::joined_text`), the join the Messages ingress
+  made before; the Chat Completions and Responses ingresses join a system
+  message's text parts by a line break into one part, as their system
+  text always was. The response names `cache_control` once in
+  `x-lmgw-params-ignored` when the request carried any mark, and every
+  other Anthropic tool field as `tools.<key>` (`tools.field` for a key
+  that is no plain token). These names add no log line.
+- **Counting:** a mark is no prompt text. lmgw's estimates read parts'
+  texts, not their marks, and a verbatim block's `cache_control` is among
+  the keys `proxy/count_messages/estimate.rs` never counts. A tool's
+  other Anthropic fields (`input_examples`) are not counted yet.
+- **Usage: the writes by TTL** *(2026-11-12)*. Beside the flat
+  `cache_creation_input_tokens`, Anthropic's `usage` carries
+  `cache_creation: {ephemeral_5m_input_tokens, ephemeral_1h_input_tokens}`.
+  The IR keeps its 1-hour part (`Usage::cache_write_1h_tokens`, read by
+  `ir::cache_writes`, in a compaction entry of `usage.iterations` too); it
+  belongs to the input group, so a later report with an input total
+  replaces it (`merge`), and separate calls add it up (`add`). A stream's
+  `message_delta` usage has no `cache_creation` object of its own and its
+  counts are cumulative: one whose write total is at least `message_start`'s
+  keeps `message_start`'s 1-hour part, the additional writes counting as
+  5-minute ones (what Anthropic adds after `message_start` are its server
+  tools' writes, which are 5-minute entries), and one with a smaller total
+  has no split (`egress/anthropic/usage.rs`). The
+  Messages wire writes `cache_creation` with both members beside
+  `cache_creation_input_tokens` in the answer's `usage` and a stream's
+  `message_start`, the 5-minute member being the total minus the 1-hour
+  part; the closing `message_delta` carries the flat counters only, as
+  Anthropic's `MessageDeltaUsage` does. An answer whose upstream reported
+  no split gets no such object, as an absent counter is no zero. The OpenAI
+  wires have one cache-write counter and stay as they were. The 1-hour part
+  is priced at 2x the input rate (usage-analytics design §2.3, "Cache
+  writes by TTL"); the request log keeps one cache-write count and does
+  not record the split yet.
+- **Not yet:** marks are not translated for an OpenAI-compatible upstream
+  that takes `cache_control` on content parts (an aggregator in front of
+  Claude models). A request on `/v1/chat/completions` or `/v1/responses`
+  carries no marks, so on an Anthropic upstream nothing is cached for it.
+  A `tool_result` image by URL becomes a resource the Anthropic egress
+  sends as text, and its mark is not sent yet. A mark on a `thinking` block
+  is dropped without a note (Anthropic refuses one there). A Messages
+  tool's `strict` is not sent to Anthropic yet, and no header names it.
+
 What a model takes is on `GET /v1/models`: `capabilities.context_editing`
 on an Anthropic route, and Anthropic's own `context_management` block on the
 Anthropic-shaped entry (model-capabilities design §2.1, §2.2.1). Both list
@@ -619,6 +707,69 @@ names a compaction edit where the catalog does, and the block's
 before)*; the block's `supported` is `true` only where the catalog says so.
 On-demand compaction is `context_editing.compaction` and Anthropic's own
 `compaction` block.
+
+### 6.2 The Messages stream's `message_start` and Anthropic's `request-id` (added 2026-11-12)
+
+Anthropic's stream opens with `message_start`, whose `message.usage` holds
+the request's input counts: `input_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens`, the `cache_creation` split and a small
+`output_tokens`. A client that caches reads them there, before the answer
+streams.
+
+- **Anthropic upstream:** the Messages encoder holds its `message_start`
+  back until the upstream's first delta arrives
+  (`ingress/anthropic/start.rs`). The Anthropic decoder turns the
+  upstream's own `message_start` usage into that first delta, so the
+  client's `message_start` carries it, written by the same rules as the
+  answer's `usage` (`anthropic_usage`: the input without the cache
+  counters, each cache counter only when reported, `cache_creation` only
+  with a reported split). A first delta that is no usage (an upstream
+  `message_start` without one) opens the message with zeros ahead of it.
+  An upstream `error` as the first event goes out alone and ends the
+  stream, as an Anthropic stream that opens with one does. A stream that
+  ends before any delta still opens its message in `finish()`. Then `ping`
+  and the rest follow as before; the closing `message_delta`'s usage is
+  unchanged (the totals, its input counts when the upstream reported
+  them).
+- **Every other upstream** reports its usage only at the end:
+  `message_start` goes out at once, with zeros, as before.
+- **Which mode:** the one place a Messages stream is encoded is the
+  proxied chat stream (`proxy/chat_stream.rs`), which passes the answering
+  route's protocol to `ClientProto::new_stream_encoder`; a fallback alias
+  that answers is that route, so its protocol decides. Nothing else writes
+  into a Messages client's stream: lmgw sends no keep-alive frames of its
+  own there (an upstream's `ping` or comment only restarts the silence
+  clock, `proxy/silence.rs`), so the hold cannot put a frame ahead of
+  `message_start`. The client has the response headers at once and the
+  first event when the upstream's first event came.
+- **Several upstream calls for one answer** (lmgw running tools itself):
+  `message_start` shows the first call's counts, and the closing
+  `message_delta` the totals. No Messages route runs such a loop yet: the
+  tool loop serves `/v1/responses` and the Chat page, whose encoders are
+  their own.
+
+**Anthropic's `request-id`** *(2026-11-12)*: Anthropic answers every
+request with a `request-id` response header (`req_…`) and puts the same id
+in its error body (`{"type": "error", "error": {…}, "request_id": "req_…"}`).
+lmgw relays the id an Anthropic-protocol upstream gave
+(`proxy/chat/request_id.rs`):
+
+- A `/v1/messages` answer, whole or streamed, carries the answering
+  Anthropic upstream's `request-id` header when it sent one; an error
+  answer without that header carries its body's `request_id` as the header
+  when that is a valid header value (a rejected one is logged escaped).
+- An error in the Anthropic envelope carries `request_id` when the error
+  is that upstream's own answer: its body's `request_id`, else its
+  `request-id` header (`GatewayError::to_anthropic_json_with`); the error
+  response carries the header too, the upstream's own header first. The id rides from the send to the
+  response in `GateHeaders` (set by the stream's and the unary send's read
+  of the upstream's answer), so a refusal from where the request was
+  handed, or an error lmgw raises after an answer it could not read, has
+  none.
+- **Not yet:** lmgw makes no request id of its own, so answers from every
+  other upstream and errors lmgw raises itself carry neither the header nor
+  `request_id`. A mid-stream `error` event carries no `request_id` either;
+  the stream's headers have the id.
 
 ## 7. Egress adapters
 
@@ -635,7 +786,10 @@ trait Egress {
 
 - **openai** — near pass-through; also serves llama-server (kind `llama_server`).
 - **anthropic** — `/v1/messages`, `x-api-key` + `anthropic-version` headers,
-  content-block SSE events.
+  content-block SSE events. *(2026-11-12)* It is the one egress that writes
+  prompt-caching marks: each part's `cache_control` on its block, `system`
+  as the client's string or blocks, a tool's other Anthropic fields, the
+  top-level `cache_control` (§6.1, "Prompt caching").
 - **gemini** — `:generateContent` / `:streamGenerateContent`, `contents[]`/`parts`
   shape, `role: "model"`, key via query/header.
 

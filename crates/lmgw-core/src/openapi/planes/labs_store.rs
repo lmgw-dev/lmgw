@@ -62,7 +62,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 "One page of what the lab kept, newest first: each group (one click: the \
                  form, the plan of cells, the override) with its runs in cell order and its \
                  artifacts. A set run's items are not the history's: they are read by their \
-                 run. `{lab}` is decision, image or audio; any other is a 404 \
+                 run. `{lab}` is decision, image, audio or documents; any other is a 404 \
                  not_found. `before` takes the groups older than that id (the next page), \
                  `limit` the page's size (absent, every group left: the server sets no \
                  maximum), `model` only the groups whose plan asks that model. `total` \

@@ -129,7 +129,10 @@ fn every_ref_resolves_against_the_document_root() {
 fn both_documents_stay_small() {
     // Generous on purpose: the point is catching a regression of the 16 MB
     // kind (R2 #1: 16.1 MB before, ~0.56 MB after), not policing growth.
-    const ADMIN_MAX: usize = 2_000_000;
+    // Raised 2026-11-12 from 2_000_000, which the admin document reached
+    // with the models paging and prompt-caching texts; 2026-11-19 to
+    // 2_400_000, which it reached with the conversions' bounds (2_205_493).
+    const ADMIN_MAX: usize = 2_400_000;
     const V1_MAX: usize = 1_000_000;
     let admin = serde_json::to_vec(admin_doc()).unwrap().len();
     let v1 = serde_json::to_vec(v1_doc()).unwrap().len();
@@ -333,6 +336,8 @@ fn secret_inputs_per_operation() {
         ("post /api/op/agent_run", &["body.values"][..]),
         // The pairing token (device link design §3.4).
         ("post /devices/enrol", &["body.token"][..]),
+        // docling-serve's WebSocket key (document-conversion design §7.4.1).
+        ("get /v1/status/ws/{task_id}", &["query:api_key"][..]),
     ]);
 
     let doc = admin_doc();

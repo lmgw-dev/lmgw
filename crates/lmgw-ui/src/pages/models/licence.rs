@@ -48,7 +48,7 @@ pub(super) fn LicenceChip(chip: Chip) -> impl IntoView {
     match chip.href {
         Some(href) => view! {
             <a
-                class="type-badge licence-badge as-link"
+                class="chip chip-link"
                 href=href
                 target="_blank"
                 rel="noreferrer"
@@ -59,7 +59,7 @@ pub(super) fn LicenceChip(chip: Chip) -> impl IntoView {
         }
         .into_any(),
         None => view! {
-            <span class="type-badge licence-badge" title=chip.title>
+            <span class="chip" title=chip.title>
                 {chip.label}
             </span>
         }

@@ -479,6 +479,7 @@ impl World {
             self.m.facts.clone(),
             Arc::new(|| {
                 Some(Ok(vec![lmgw_core::vram::GpuMemory {
+                    id: lmgw_core::vram::nvml::DeviceId("0000:c5:00.0".into()),
                     index: 0,
                     name: "amdgpu card1".into(),
                     total_bytes: 16_000_000_000,

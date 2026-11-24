@@ -144,10 +144,10 @@ if [[ "$SERVER_ONLY" == 1 ]]; then
   # The same for the server binary: lmgw-server's --version and lmgw-core's
   # /api/version carry $VERSION.
   rm -rf dist
-  cargo clean -p lmgw-server -p lmgw-core
+  cargo clean -p lmgw-server -p lmgw-core -p lmgw-doc-reader
 else
   rm -rf target/release/bundle dist
-  cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper
+  cargo clean -p lmgw -p lmgw-core -p lmgw-machine-helper -p lmgw-doc-reader
 fi
 
 # The Leptos UI must exist before lmgw-core compiles: rust-embed bakes
@@ -200,8 +200,22 @@ if [[ "$SERVER_ONLY" == 1 ]]; then
     echo "ERROR: lmgw-server was built on a system that is not Fedora; the image needs its release" >&2
     exit 1
   fi
+  # The document reader the server starts for web pages, e-books, e-mail, old Excel files and
+  # pictures (document-conversion design §6.2): it goes into the image beside lmgw-server
+  # (ci/build-image.sh). `-p` keeps it the small executable it is: none of lmgw-core's features.
+  cargo build --release -p lmgw-doc-reader
+  if [[ ! -f target/release/lmgw-doc-reader || -L target/release/lmgw-doc-reader ]]; then
+    echo "ERROR: cargo built no target/release/lmgw-doc-reader" >&2
+    exit 1
+  fi
+  READER_LINE="$(target/release/lmgw-doc-reader --version)"
+  if [[ "$READER_LINE" != "lmgw-doc-reader ${VERSION} "* ]]; then
+    echo "ERROR: target/release/lmgw-doc-reader --version printed '${READER_LINE}', not 'lmgw-doc-reader ${VERSION} …'" >&2
+    exit 1
+  fi
   mkdir -p dist
   install -m 0755 target/release/lmgw-server dist/lmgw-server
+  install -m 0755 target/release/lmgw-doc-reader dist/lmgw-doc-reader
   # Consumed by ci/build-image.sh.
   { echo "VERSION=${VERSION}"; echo "SERVER_FEDORA_RELEASE=${SERVER_FEDORA_RELEASE}"; } > dist/build.env
   echo "Built ${SERVER_LINE} on Fedora ${SERVER_FEDORA_RELEASE}"
@@ -231,6 +245,16 @@ fi
 cargo build --release -p lmgw-machine-helper
 if [[ ! -f target/release/lmgw-machine-helper || -L target/release/lmgw-machine-helper ]]; then
   echo "ERROR: cargo built no target/release/lmgw-machine-helper" >&2
+  exit 1
+fi
+
+# The document reader (document-conversion design §5.2, §6.1): tauri.conf.json packs
+# target/release/lmgw-doc-reader as /usr/libexec/lmgw/lmgw-doc-reader, where the gateway looks
+# for it (../libexec/lmgw from /usr/bin/lmgw), so it is built before the bundle too, and
+# ci/rpm_guard.py pins the package's copy to this file's digest.
+cargo build --release -p lmgw-doc-reader
+if [[ ! -f target/release/lmgw-doc-reader || -L target/release/lmgw-doc-reader ]]; then
+  echo "ERROR: cargo built no target/release/lmgw-doc-reader" >&2
   exit 1
 fi
 

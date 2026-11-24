@@ -60,13 +60,13 @@ pub struct EnrolRequest {
     /// DER SubjectPublicKeyInfo, an EC P-256 key.
     pub public_key: String,
     /// The device's own name, as its user chose it on the device ("Anna's
-    /// phone"): free text, shown on the Devices card beside the name the
+    /// phone"): free text, shown on the device's page in lmgw beside the name the
     /// owner gave the link (*added 2026-10-23*). Named `device_name` here,
-    /// as the card's field is, because the answer's `device.name` is the
+    /// as the page's field is, because the answer's `device.name` is the
     /// owner's name for the link. Optional, and never trusted for anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
-    /// Free text naming the client, shown on the Devices card
+    /// Free text naming the client, shown on the device's page in lmgw
     /// ("Kai mobile 0.1.0 (Android 16)"). Optional, and never trusted for
     /// anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,7 +117,7 @@ pub struct Enrolment {
     /// The device's lmgw URLs, `https`, in the owner's order (§3.1).
     pub urls: Vec<String>,
     /// The confirmation code ([`confirm_code`]): the device shows it, and
-    /// the owner confirms the same code on the Devices card (§3.5).
+    /// the owner confirms the same code on the device's page in lmgw (§3.5).
     pub confirm_code: String,
     /// Whether the owner confirmed this enrolment already (an answer asked
     /// again after the Confirm). Until then every request of the device is
@@ -220,7 +220,7 @@ pub fn parse_confirm_code(typed: &str) -> Option<String> {
 pub fn unconfirmed_message(confirm_code: &str) -> String {
     format!(
         "this device waits for the owner's confirmation: confirm the code {confirm_code} on \
-         lmgw's Devices card"
+         the device's page in lmgw (Usage → Keys & budgets)"
     )
 }
 

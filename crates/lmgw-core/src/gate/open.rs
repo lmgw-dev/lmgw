@@ -339,9 +339,10 @@ impl FallbackReason {
 /// §4, candidate-aliases design §4.7), always together, and
 /// `x-lmgw-fallback-chain` beside them (openai egress design §14.5);
 /// `x-lmgw-rung` on a ladder row (ladder design §6); and `x-lmgw-candidate`
-/// on a request a candidate alias's model answered (§4.1). One struct with
-/// one method that stamps them all, so the sites never change when one is
-/// added.
+/// on a request a candidate alias's model answered (§4.1); and, on
+/// `/v1/messages`, the answering Anthropic upstream's own `request-id`
+/// (gateway design §6.2). One struct with one method that stamps them all,
+/// so the sites never change when one is added.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GateHeaders {
     /// The hops the request was handed to: the last answers.
@@ -352,6 +353,21 @@ pub struct GateHeaders {
     /// The candidate alias's model the request was given to (§4.1): the
     /// model id, as `x-lmgw-candidate` says it. Gone once a fallback answers.
     candidate: Option<String>,
+    /// The request ids of the Anthropic upstream whose answer (or error
+    /// answer) a Messages client gets, relayed as Anthropic's header
+    /// ([`Self::set_request_id`]). Boxed: the gate's refusal shapes carry a
+    /// `GateHeaders` and sit under `clippy.toml`'s error-size threshold.
+    request_id: Option<Box<UpstreamIds>>,
+}
+
+/// The ids an Anthropic upstream's answer carried: its `request-id` header
+/// and, on an error, its body's `request_id`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpstreamIds {
+    /// The upstream's `request-id` response header.
+    pub header: Option<String>,
+    /// The upstream error body's `request_id`.
+    pub body: Option<String>,
 }
 
 impl GateHeaders {
@@ -405,6 +421,20 @@ impl GateHeaders {
         self.rung.as_ref()
     }
 
+    /// Record the request id of the upstream whose answer the client gets
+    /// (`proxy::chat::request_id`): a Messages answer of an Anthropic
+    /// upstream, or its error answer. `None` leaves the header off.
+    pub(crate) fn set_request_id(&mut self, ids: UpstreamIds) {
+        self.request_id = Some(Box::new(ids));
+    }
+
+    /// The id for an error body's `request_id`: the upstream body's, else
+    /// its header's.
+    pub fn request_id(&self) -> Option<&str> {
+        let ids = self.request_id.as_deref()?;
+        ids.body.as_deref().or(ids.header.as_deref())
+    }
+
     /// The model or alias that is answering instead of the one requested,
     /// when the gate re-routed it: the last hop of the chain.
     pub fn fallback(&self) -> Option<&str> {
@@ -441,9 +471,25 @@ impl GateHeaders {
     pub fn stamp(&self, mut resp: Response) -> Response {
         use crate::proxy::{
             CANDIDATE_HEADER, FALLBACK_CHAIN_HEADER, FALLBACK_HEADER, FALLBACK_REASON_HEADER,
+            REQUEST_ID_HEADER,
         };
         use axum::http::header::{HeaderName, HeaderValue};
 
+        // The upstream's own `request-id` header as it sent it, else the
+        // error body's id when that is a valid header value.
+        if let Some(id) = self
+            .request_id
+            .as_deref()
+            .and_then(|ids| ids.header.as_ref().or(ids.body.as_ref()))
+        {
+            match HeaderValue::from_str(id) {
+                Ok(v) => {
+                    resp.headers_mut()
+                        .insert(HeaderName::from_static(REQUEST_ID_HEADER), v);
+                }
+                Err(e) => tracing::warn!("cannot relay the upstream's request-id {id:?}: {e}"),
+            }
+        }
         let Some((alias, reason)) = self.chain.last() else {
             if let Some(rung) = &self.rung {
                 resp.headers_mut()
@@ -994,12 +1040,15 @@ pub(super) async fn admit_route(
     let admitted = match fallback {
         Some(fb) => {
             let serves = fallback_serves(state, &fb.name, &fb.route, &alias, check);
-            let admission = crate::vram::admit_or_external(
+            // Boxed, like the other awaits of this function: admission's
+            // futures are large in a debug build, and a test thread's 2 MiB
+            // is what the whole chain down to the ledger shares.
+            let admission = Box::pin(crate::vram::admit_or_external(
                 state,
                 &route,
                 &alias,
                 Some(crate::vram::ExternalFallback::confirmed_by(serves)),
-            )
+            ))
             .await;
             match admission {
                 Ok(crate::vram::Admission::External(_)) => {
@@ -1014,8 +1063,10 @@ pub(super) async fn admit_route(
                         chain.push(name, key, reason);
                         reason = FallbackReason::Disabled;
                     }
-                    return match chain::take(state, walk, chain, fb.name, fb.key, fb.route, reason)
-                        .await
+                    return match Box::pin(chain::take(
+                        state, walk, chain, fb.name, fb.key, fb.route, reason,
+                    ))
+                    .await
                     {
                         Next::Opened(o) => Ok(o),
                         Next::Failed(f) => Err(f),
@@ -1035,7 +1086,7 @@ pub(super) async fn admit_route(
             }
         }
         // Exactly `admit_or_external(.., None)`: no probe, no inspect.
-        None => crate::vram::admit(state, &route, &alias).await,
+        None => Box::pin(crate::vram::admit(state, &route, &alias)).await,
     };
     match admitted {
         Ok(mut hold) => {

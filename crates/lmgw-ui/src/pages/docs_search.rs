@@ -21,7 +21,7 @@ use lmgw_api_types::{
 use serde_json::json;
 
 use crate::fmt::fmt_bytes;
-use crate::widgets::{use_toasts, Explain, Select};
+use crate::widgets::{use_toasts, ComboRow, Ico, Icon, NumberRow, PrefGroup, Spin, SwitchRow};
 
 use super::docs::use_docs;
 
@@ -212,13 +212,13 @@ pub fn Playground() -> impl IntoView {
     };
 
     let corpus_opts = Signal::derive(move || state.options());
-    // The knobs, folded to the values they hold: the results are what the
-    // page is for, and a dozen fields ahead of them pushed them off screen.
+    // The knobs fold to the values they hold: the results are what the page
+    // is for, and a dozen rows ahead of them pushed them off screen.
+    let params_open = crate::prefs::persisted_bool("open.docs.explain.params", false);
     let params_line = move || {
         let budget = budget.get();
         format!(
-            "Stage parameters · k_fts {} · k_vec {} · rrf {} · rerank {} · limit {} · budget {} · \
-             weights {} / {} / {} / {}",
+            "BM25 {} \u{b7} vectors {} \u{b7} damping {} \u{b7} rerank {} \u{b7} {} chunks \u{b7} {} \u{b7} weights {} / {} / {} / {}",
             k_fts.get(),
             k_vec.get(),
             rrf_k.get(),
@@ -229,9 +229,9 @@ pub fn Playground() -> impl IntoView {
             },
             limit.get(),
             if budget.trim().is_empty() {
-                "none".to_string()
+                "no budget".to_string()
             } else {
-                budget
+                format!("budget {budget}")
             },
             w_payload.get(),
             w_heading.get(),
@@ -239,156 +239,194 @@ pub fn Playground() -> impl IntoView {
             w_summary.get(),
         )
     };
+    let weight = Spin {
+        step: 0.1,
+        digits: 2,
+        ..Spin::default()
+    };
+    let num_err = |sig: RwSignal<String>, blank_ok: bool| {
+        Signal::derive(move || {
+            sig.with(|t| {
+                let t = t.trim();
+                if t.is_empty() && blank_ok {
+                    return None;
+                }
+                t.parse::<f64>()
+                    .is_err()
+                    .then(|| format!("\u{201c}{t}\u{201d} is not a number"))
+            })
+        })
+    };
 
     view! {
-        <div class="fill-pane playground">
-        <div class="card">
-            <div class="row pg-query">
-                <div class="field">
-                    <label>"Corpus"</label>
-                    <Select value=state.selected options=corpus_opts placeholder="pick a corpus"/>
-                </div>
-                <div class="field pg-q">
-                    <label>"Query"</label>
-                    <input
-                        class="input"
-                        placeholder="how do I add a middleware layer?"
-                        prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
-                        on:keydown=move |ev| {
-                            if ev.key() == "Enter" {
-                                search(());
+        <div class="fill-pane docs-scroll playground">
+        <div class="docs-flow">
+            <PrefGroup>
+                <ComboRow title="Corpus" value=state.selected options=corpus_opts placeholder="pick a corpus"/>
+                <div class="prow kb-query">
+                    <label class="msearch">
+                        <Icon ico=Ico::Search/>
+                        <input
+                            type="search"
+                            placeholder="how do I add a middleware layer?"
+                            aria-label="Query"
+                            spellcheck="false"
+                            prop:value=move || query.get()
+                            on:input=move |ev| query.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" {
+                                    search(());
+                                }
                             }
-                        }
-                    />
+                        />
+                    </label>
+                    <button
+                        type="button"
+                        class="btn suggested pill"
+                        disabled=move || searching.get() || state.selected_corpus().is_none()
+                        title=move || if state.selected_corpus().is_none() { "Pick a corpus first" } else { "" }
+                        on:click=move |_| search(())
+                    >
+                        {move || if searching.get() { "Searching…" } else { "Search" }}
+                    </button>
                 </div>
-                <button
-                    class="btn primary"
-                    disabled=move || searching.get()
-                    on:click=move |_| search(())
-                >
-                    {move || if searching.get() { "Searching…" } else { "Search" }}
-                </button>
-            </div>
+            </PrefGroup>
 
-            <div class="pg-params">
-                <Explain summary=params_line persist="docs.explain.params">
-                    <div class="field-grid">
-                        <NumField label="k_fts · BM25 candidates" sig=k_fts/>
-                        <NumField label="k_vec · KNN candidates" sig=k_vec/>
-                        <NumField label="rrf_k · rank damping" sig=rrf_k/>
-                        <NumField label="k_rerank · cross-encoder depth" sig=k_rerank/>
-                        <NumField label="limit · chunks returned" sig=limit/>
-                        <NumField label="budget_tokens · empty = none" sig=budget/>
-                    </div>
-                    <div class="mini-head">"BM25 column weights"</div>
-                    <div class="field-grid">
-                        <NumField label="payload" sig=w_payload/>
-                        <NumField label="heading_path" sig=w_heading/>
-                        <NumField label="derived_title" sig=w_title/>
-                        <NumField label="derived_summary" sig=w_summary/>
-                    </div>
-                    <div class="mini-head">"Eval default"</div>
-                    <div class="field-grid">
-                        <NumField label="eval_k · hit@k depth a run measures at" sig=eval_k/>
-                    </div>
-                    <div class="row">
-                        <label class="check">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || rerank.get()
-                                on:change=move |ev| rerank.set(event_target_checked(&ev))
+            <section class="pref-group pg-params">
+                <div class="pref-head">
+                    <h2>"Stage parameters"</h2>
+                    <span class="pref-suffix">
+                        <button
+                            type="button"
+                            class="btn flat sm pg-params-toggle"
+                            aria-expanded=move || params_open.get().to_string()
+                            on:click=move |_| params_open.update(|o| *o = !*o)
+                        >
+                            {move || if params_open.get() { "Hide" } else { "Show" }}
+                        </button>
+                    </span>
+                </div>
+                <p class="pref-desc pg-params-line" title=params_line>{params_line}</p>
+                <Show when=move || params_open.get()>
+                    <div class="pg-param-groups">
+                        <PrefGroup title="Stages">
+                            <NumberRow title="BM25 candidates" value=k_fts error=num_err(k_fts, false) wire="k_fts"/>
+                            <NumberRow title="Vector candidates" value=k_vec error=num_err(k_vec, false) wire="k_vec"/>
+                            <NumberRow title="Rank damping" sub="Reciprocal rank fusion's k" value=rrf_k error=num_err(rrf_k, false) wire="rrf_k"/>
+                            <SwitchRow
+                                title="Rerank stage"
+                                sub="Run the cross-encoder when a reranker is attached"
+                                value=rerank
                             />
-                            "run the cross-encoder stage when a reranker is attached"
-                        </label>
-                        <span class="spacer"></span>
-                        <button
-                            class="btn ghost"
-                            on:click=move |_| {
-                                if let Some(s) = settings.get().and_then(|r| r.ok()) {
-                                    seed(&s.docs_search);
+                            <NumberRow title="Rerank depth" value=k_rerank error=num_err(k_rerank, false) wire="k_rerank"/>
+                            <NumberRow title="Chunks returned" value=limit error=num_err(limit, false) wire="limit"/>
+                            <NumberRow
+                                title="Token budget"
+                                value=budget
+                                placeholder="none"
+                                unit="tokens"
+                                error=num_err(budget, true)
+                                wire="budget_tokens"
+                            />
+                        </PrefGroup>
+                        <PrefGroup title="BM25 column weights">
+                            <NumberRow title="Payload" value=w_payload spin=weight buttons=true error=num_err(w_payload, false) wire="fts_weights.payload"/>
+                            <NumberRow title="Heading path" value=w_heading spin=weight buttons=true error=num_err(w_heading, false) wire="fts_weights.heading_path"/>
+                            <NumberRow title="Derived title" value=w_title spin=weight buttons=true error=num_err(w_title, false) wire="fts_weights.derived_title"/>
+                            <NumberRow title="Derived summary" value=w_summary spin=weight buttons=true error=num_err(w_summary, false) wire="fts_weights.derived_summary"/>
+                        </PrefGroup>
+                        <PrefGroup title="Eval default">
+                            <NumberRow
+                                title="hit@k depth"
+                                sub="The depth an eval run measures at"
+                                value=eval_k
+                                error=num_err(eval_k, false)
+                                wire="eval_k"
+                            />
+                        </PrefGroup>
+                        <div class="pg-param-actions">
+                            <button
+                                type="button"
+                                class="btn"
+                                on:click=move |_| {
+                                    if let Some(s) = settings.get().and_then(|r| r.ok()) {
+                                        seed(&s.docs_search);
+                                    }
                                 }
-                            }
-                        >
-                            "Reset to defaults"
-                        </button>
-                        <button
-                            class="btn ghost"
-                            title="Write these values back as the gateway's defaults"
-                            on:click=save_defaults
-                        >
-                            "Save as defaults"
-                        </button>
+                            >
+                                "Reset to defaults"
+                            </button>
+                            <button
+                                type="button"
+                                class="btn"
+                                title="Write these values back as the gateway's defaults"
+                                on:click=save_defaults
+                            >
+                                "Save as defaults"
+                            </button>
+                        </div>
                     </div>
-                </Explain>
-            </div>
-        </div>
+                </Show>
+            </section>
 
-        {move || error.get().map(|e| view! { <div class="notice err">{e}</div> })}
+            {move || error.get().map(|e| view! { <div class="notice err kb-note">{e}</div> })}
 
-        {move || {
-            result
-                .get()
-                .map(|r| {
-                    // Each `move ||` below captures its own piece: one `r`
-                    // cannot be moved into several closures.
-                    let DocsSearchResponse { hits, trace, urls, status, markdown, .. } = r;
-                    let warnings = status.warnings;
-                    let hit_count = hits.len();
-                    view! {
-                        <For each=move || warnings.clone() key=|w| w.clone() let:w>
-                            <div class="notice warn">{w}</div>
-                        </For>
-                        <section class="ov-section">
-                            <div class="row" style="justify-content:space-between; align-items:baseline">
-                                <h2>"What a docs__query caller receives"</h2>
-                                <button
-                                    class="btn ghost"
-                                    on:click=move |_| show_raw.update(|s| *s = !*s)
-                                >
-                                    {move || {
-                                        if show_raw.get() {
-                                            "Show rendered"
-                                        } else {
-                                            "Show raw markdown"
-                                        }
-                                    }}
-                                </button>
-                            </div>
-                            <div class="card">
-                                <MarkdownPane markdown=markdown raw=show_raw/>
-                            </div>
-                        </section>
-                        <section class="ov-section">
-                            <h2>{format!("Ranked chunks · {hit_count}")}</h2>
-                            <For each=move || hits.clone() key=|h| h.chunk.id.clone() let:hit>
-                                {
-                                    let url = urls.get(&hit.chunk.id).cloned();
-                                    view! { <HitCard hit=hit url=url/> }
-                                }
+            {move || {
+                result
+                    .get()
+                    .map(|r| {
+                        // Each `move ||` below captures its own piece: one `r`
+                        // cannot be moved into several closures.
+                        let DocsSearchResponse { hits, trace, urls, status, markdown, .. } = r;
+                        let warnings = status.warnings;
+                        let hit_count = hits.len();
+                        view! {
+                            <For each=move || warnings.clone() key=|w| w.clone() let:w>
+                                <div class="notice warn kb-note">{w}</div>
                             </For>
-                        </section>
-                        <section class="ov-section">
-                            <h2>"Trace"</h2>
-                            <TracePane t=trace/>
-                        </section>
-                    }
-                })
-        }}
+                            <PrefGroup
+                                title="What a docs__query caller receives"
+                                suffix=move || {
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="btn flat sm"
+                                            on:click=move |_| show_raw.update(|s| *s = !*s)
+                                        >
+                                            {move || {
+                                                if show_raw.get() {
+                                                    "Show rendered"
+                                                } else {
+                                                    "Show raw markdown"
+                                                }
+                                            }}
+                                        </button>
+                                    }
+                                }
+                            >
+                                <div class="prow block pg-answer">
+                                    <MarkdownPane markdown=markdown raw=show_raw/>
+                                </div>
+                            </PrefGroup>
+                            <PrefGroup title=format!("Ranked chunks · {hit_count}")>
+                                <For each=move || hits.clone() key=|h| h.chunk.id.clone() let:hit>
+                                    {
+                                        let url = urls.get(&hit.chunk.id).cloned();
+                                        view! { <HitRow hit=hit url=url/> }
+                                    }
+                                </For>
+                                {(hit_count == 0).then(|| view! { <div class="prow kb-none">"No chunks."</div> })}
+                            </PrefGroup>
+                            <section class="pref-group">
+                                <div class="pref-head">
+                                    <h2>"Trace"</h2>
+                                </div>
+                                <TracePane t=trace/>
+                            </section>
+                        }
+                    })
+            }}
         </div>
-    }
-}
-
-#[component]
-fn NumField(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
-    view! {
-        <div class="field">
-            <label>{label}</label>
-            <input
-                class="input mono"
-                prop:value=move || sig.get()
-                on:input=move |ev| sig.set(event_target_value(&ev))
-            />
         </div>
     }
 }
@@ -409,7 +447,7 @@ fn MarkdownPane(markdown: String, raw: RwSignal<bool>) -> impl IntoView {
             when=move || raw.get()
             fallback=move || view! { <div class="md" node_ref=md_ref></div> }
         >
-            <pre class="preset" style="white-space:pre-wrap; word-break:break-word">
+            <pre class="kb-excerpt-text pg-raw">
                 {markdown.clone()}
             </pre>
         </Show>
@@ -417,7 +455,7 @@ fn MarkdownPane(markdown: String, raw: RwSignal<bool>) -> impl IntoView {
 }
 
 #[component]
-fn HitCard(hit: SearchHit, url: Option<String>) -> impl IntoView {
+fn HitRow(hit: SearchHit, url: Option<String>) -> impl IntoView {
     let c = hit.chunk.clone();
     let ranks = [
         hit.fts_rank.map(|r| format!("bm25 #{r}")),
@@ -431,28 +469,29 @@ fn HitCard(hit: SearchHit, url: Option<String>) -> impl IntoView {
     .collect::<Vec<_>>()
     .join(" · ");
     view! {
-        <div class="card" style="margin-bottom:8px">
-            <div class="row">
-                <span class="type-badge" title=c.id.clone()>{short_id(&c.id)}</span>
-                <span class="mono-sm">{c.heading_path.clone()}</span>
-                <span class="spacer" style="flex:1"></span>
-                <span class="dim mono-sm">{ranks} " · " {hit.tokens} " tok"</span>
+        <div class="prow stack kb-excerpt pg-hit">
+            <div class="kb-excerpt-head">
+                <span class="chip mono-chip" title=c.id.clone()>{short_id(&c.id)}</span>
+                <span class="kb-excerpt-path" title=c.heading_path.clone()>{c.heading_path.clone()}</span>
+                <span class="kb-excerpt-score">{ranks} " · " {hit.tokens} " tok"</span>
             </div>
             {url
                 .map(|u| {
                     view! {
-                        <div class="dim mini-note">
-                            <a href=u.clone() target="_blank" rel="noreferrer">{u.clone()}</a>
-                        </div>
+                        <a class="pg-hit-url" href=u.clone() target="_blank" rel="noreferrer" title=u.clone()>
+                            {u.clone()}
+                        </a>
                     }
                 })}
-            <pre class="preset" style="white-space:pre-wrap; word-break:break-word; margin-top:8px">
-                {c.payload.clone()}
-            </pre>
+            <pre class="kb-excerpt-text pg-payload">{c.payload.clone()}</pre>
         </div>
     }
 }
 
+/// One search's trace as a boxed group: what embedded and scanned it, the
+/// FTS query, the token counter and the timings as rows, then the stages'
+/// candidates side by side (scrolling sideways inside the box when they do
+/// not fit), and what the token budget trimmed.
 #[component]
 pub(super) fn TracePane(t: SearchTraceView) -> impl IntoView {
     let ti = t.timings;
@@ -462,43 +501,51 @@ pub(super) fn TracePane(t: SearchTraceView) -> impl IntoView {
     );
     let dropped = t.budget_dropped.clone();
     let dropped_any = !dropped.is_empty();
+    let kernel = format!(
+        "{} · {} vectors · {}",
+        t.knn_kernel,
+        t.resident_vectors,
+        fmt_bytes(t.resident_bytes)
+    );
+    let counter = format!("{} · {} tokens used", t.token_counter, t.budget_used_tokens);
     view! {
-        <div class="card">
-            <div class="detail-grid">
-                <span class="dim">"Embedding"</span>
-                <span class="mono-sm">{t.embed_model.clone()}</span>
-                <span class="dim">"KNN kernel"</span>
-                <span class="mono-sm">
-                    {t.knn_kernel.clone()} " · " {t.resident_vectors} " vectors · "
-                    {fmt_bytes(t.resident_bytes)}
-                </span>
-                <span class="dim">"FTS query"</span>
-                <span class="mono-sm">{t.fts_query.clone()}</span>
-                <span class="dim">"Token counter"</span>
-                <span class="mono-sm">
-                    {t.token_counter.clone()} " · " {t.budget_used_tokens} " tokens used"
-                </span>
-                <span class="dim">"Timings"</span>
-                <span class="mono-sm" style="grid-column:2 / -1">{timings}</span>
-            </div>
-
-            <div class="tablewrap" style="margin-top:12px">
-                <div class="docs-stages">
-                    <StageTable title="BM25 (negative, lower is better)" hits=t.fts.clone()/>
-                    <StageTable title="Exact KNN (cosine)" hits=t.knn.clone()/>
-                    <FusedTable t=t.clone()/>
-                    <RerankStage t=t.clone()/>
+        <div class="boxed trace-card">
+            <TraceRow title="Embedding" value=t.embed_model.clone()/>
+            <TraceRow title="KNN kernel" value=kernel/>
+            <TraceRow title="FTS query" value=t.fts_query.clone()/>
+            <TraceRow title="Token counter" value=counter/>
+            <TraceRow title="Timings" value=timings/>
+            <div class="prow block">
+                <div class="table-scroll">
+                    <div class="docs-stages">
+                        <StageTable title="BM25 (negative, lower is better)" hits=t.fts.clone()/>
+                        <StageTable title="Exact KNN (cosine)" hits=t.knn.clone()/>
+                        <FusedTable t=t.clone()/>
+                        <RerankStage t=t.clone()/>
+                    </div>
                 </div>
             </div>
-
             <Show when=move || dropped_any>
-                <div class="notice warn" style="margin-top:10px">
+                <div class="prow notice-row warn">
                     <b>{format!("{} chunk(s) trimmed by the token budget", dropped.len())}</b>
-                    <span class="detail mono-sm" title=dropped.join(", ")>
+                    " "
+                    <span class="mono-sm" title=dropped.join(", ")>
                         {dropped.iter().map(|d| short_id(d)).collect::<Vec<_>>().join(", ")}
                     </span>
                 </div>
             </Show>
+        </div>
+    }
+}
+
+/// A fact of the trace: its title, and the value under it wrapping, in the
+/// monospace face (a query, a kernel, the timings run long).
+#[component]
+fn TraceRow(title: &'static str, value: String) -> impl IntoView {
+    view! {
+        <div class="prow trace-row">
+            <span class="prow-title">{title}</span>
+            <span class="trace-value">{value}</span>
         </div>
     }
 }
@@ -508,7 +555,7 @@ fn StageTable(title: &'static str, hits: Vec<StageHitView>) -> impl IntoView {
     let empty = hits.is_empty();
     view! {
         <div>
-            <div class="mini-head">{title} " · " {hits.len()}</div>
+            <div class="stage-head">{title} " · " {hits.len()}</div>
             <table class="data">
                 <tbody>
                     <For each=move || hits.clone() key=|h| (h.rank, h.chunk_id.clone()) let:h>
@@ -532,7 +579,7 @@ fn FusedTable(t: SearchTraceView) -> impl IntoView {
     let fused = t.fused.clone();
     view! {
         <div>
-            <div class="mini-head">
+            <div class="stage-head">
                 "RRF fusion · k=" {format!("{:.0}", t.params.rrf_k)} " · " {fused.len()}
             </div>
             <table class="data">
@@ -565,7 +612,7 @@ fn RerankStage(t: SearchTraceView) -> impl IntoView {
             {match (t.rerank_skipped.clone(), t.rerank_model.clone()) {
                 (Some(reason), _) => {
                     view! {
-                        <div class="mini-head">"Rerank · skipped"</div>
+                        <div class="stage-head">"Rerank · skipped"</div>
                         <div class="notice warn">{reason}</div>
                     }
                         .into_any()
@@ -574,7 +621,7 @@ fn RerankStage(t: SearchTraceView) -> impl IntoView {
                     let hits = t.rerank.clone();
                     let label = model.unwrap_or_else(|| "cross-encoder".into());
                     view! {
-                        <div class="mini-head">{label} " · " {hits.len()}</div>
+                        <div class="stage-head">{label} " · " {hits.len()}</div>
                         <table class="data">
                             <tbody>
                                 <For

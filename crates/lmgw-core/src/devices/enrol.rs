@@ -342,7 +342,7 @@ async fn commit(job: Job) -> Result<Enrolment, Response> {
                 code::PAIRING_TOKEN_EXPIRED,
                 &format!(
                     "this pairing token lapsed at {at} (a token lives devices.token_minutes); \
-                     make a new one on lmgw's Devices card"
+                     make a new one in lmgw under Usage → Keys & budgets"
                 ),
             ))
         }
@@ -352,8 +352,8 @@ async fn commit(job: Job) -> Result<Enrolment, Response> {
                 StatusCode::GONE,
                 code::PAIRING_TOKEN_EXPIRED,
                 &format!(
-                    "this pairing token was ended on lmgw's Devices card at {at}; make a new one \
-                     there"
+                    "this pairing token was ended in lmgw at {at}; give the device a New token… on \
+                     its page under Usage → Keys & budgets"
                 ),
             ))
         }
@@ -380,7 +380,7 @@ async fn commit(job: Job) -> Result<Enrolment, Response> {
                 StatusCode::GONE,
                 code::PAIRING_TOKEN_USED,
                 "this pairing token was used by another device: someone else used this code — \
-                 delete the device on lmgw's Devices card if it was not yours",
+                 delete the device on its page in lmgw (Usage → Keys & budgets) if it was not yours",
             ))
         }
         Enrolled::Disabled { name } => Err(Refusal::device_disabled(&name).into_response()),
@@ -463,7 +463,7 @@ fn unknown_token() -> Response {
         StatusCode::UNAUTHORIZED,
         code::PAIRING_TOKEN_UNKNOWN,
         "lmgw knows no such pairing token (never made, or its device was deleted); make a new \
-         link on lmgw's Devices card",
+         link with Pair a device… in lmgw under Usage → Keys & budgets",
     )
 }
 

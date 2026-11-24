@@ -82,6 +82,11 @@ pub struct Footprint {
     /// placement admission fitted it to puts on the card.
     #[serde(skip)]
     pub llama: Option<chat::fit::LlamaFit>,
+    /// Set for a chat row whose header says what each layer holds: where a
+    /// split over several cards puts each part of it ([`chat::by_layer`],
+    /// device-ledger design §4.3). `None` for every other model.
+    #[serde(skip)]
+    pub by_layer: Option<std::sync::Arc<chat::by_layer::ByLayer>>,
 }
 
 impl From<Footprint> for lmgw_api_types::RungFootprint {
@@ -97,6 +102,7 @@ impl From<Footprint> for lmgw_api_types::RungFootprint {
             note,
             partial: _,
             llama: _,
+            by_layer: _,
         } = f;
         Self {
             weights_bytes,
@@ -120,6 +126,7 @@ impl Footprint {
             note,
             partial: None,
             llama: None,
+            by_layer: None,
         }
     }
 

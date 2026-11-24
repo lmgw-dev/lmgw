@@ -14,7 +14,7 @@
 //! arms (§4.7): a name not listed here is unreachable, and adding an op means
 //! adding it here, which is what forces it into the docs.
 
-/// The 68 arms of [`super::api::op`]'s own `match` — everything dispatched
+/// The 72 arms of [`super::api::op`]'s own `match` — everything dispatched
 /// there directly.
 pub const MAIN_OPS: &[&str] = &[
     "upstream_set",
@@ -47,6 +47,11 @@ pub const MAIN_OPS: &[&str] = &[
     "headroom_forget",
     "machine_check",
     "machine_settings_fit",
+    "doc_tools",
+    "doc_tools_check",
+    "doc_adapter_usage",
+    "doc_jobs_stored",
+    "doc_model_add",
     "audio_catalog",
     "voice_transcribe",
     "voice_generate",
@@ -150,7 +155,7 @@ pub const ACCOUNT_OPS: &[&str] = &[
 pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 
 /// Every op name, in list order — `MAIN_OPS`, then `AGENT_OPS`, `KEY_OPS`,
-/// `ACCOUNT_OPS`, `SETTINGS_OPS`. 110 in total (§4.7, plus the benchmark design's seven,
+/// `ACCOUNT_OPS`, `SETTINGS_OPS`. 115 in total (§4.7, plus the benchmark design's seven,
 /// §8.1, `voice_transcribe`, audio-class gap 5, the Voices lab's two, the realtime design's
 /// `realtime_budget`, §12, the device link's four, §9.4, and
 /// `image_upscaler_add`, chat-media-tools §9, `upstream_quota_clear`,
@@ -159,7 +164,9 @@ pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 /// `model_get`, `model_fit_again` and `model_get_status`, find-a-model design §9.1, and
 /// the ten account ops, headless server design §5.6, and `audit_list`, §5.8, and
 /// `engine_releases` and `engine_fallback_clear`, Windows design §4.2, and
-/// `headroom_forget`, per-model containers §4).
+/// `headroom_forget`, per-model containers §4, and `doc_tools`,
+/// `doc_tools_check`, `doc_adapter_usage` and `doc_jobs_stored`, document-conversion
+/// design §7.5, and `doc_model_add`, its WP8).
 pub fn all() -> impl Iterator<Item = &'static str> {
     MAIN_OPS
         .iter()
@@ -170,7 +177,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Is `name` one of the 110? What `op()` checks before it looks at its own
+/// Is `name` one of the 115? What `op()` checks before it looks at its own
 /// arms (§4.7): unlisted means unreachable, whatever a `match` arm below it
 /// might otherwise have answered.
 pub fn is_op(name: &str) -> bool {
@@ -194,9 +201,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_five_lists_are_110_names_with_no_duplicate() {
+    fn the_five_lists_are_115_names_with_no_duplicate() {
         let all: Vec<&str> = all().collect();
-        assert_eq!(all.len(), 110, "{all:#?}");
+        assert_eq!(all.len(), 115, "{all:#?}");
         let set: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), all.len(), "a name appears in more than one list");
     }

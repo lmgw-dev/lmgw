@@ -14,13 +14,14 @@ use lmgw_api_types::lab_store::{LabExportFormat, LabKind};
 
 use super::client::{ExportScope, LabHistory};
 use crate::pages::docs::download;
-use crate::widgets::{MenuItem, RowMenu, Select};
+use crate::widgets::{Ico, MenuItem, RowMenu, Select};
 
 /// What a media lab's files are called in its menus.
 fn media_noun(lab: LabKind) -> Option<&'static str> {
     match lab {
         LabKind::Audio => Some("audio"),
         LabKind::Image => Some("pictures"),
+        LabKind::Documents => Some("texts"),
         LabKind::Decision => None,
     }
 }
@@ -99,10 +100,10 @@ pub(in crate::pages) fn ExportMenu(
             .chain(models.get().into_iter().map(|m| (m.clone(), m)))
             .collect::<Vec<_>>()
     });
-    let (menu_title, menu_label) = if media_noun(history.lab).is_some() {
-        ("Save the files the kept runs made", "Save ▾")
+    let menu_title = if media_noun(history.lab).is_some() {
+        "Save the files the kept runs made"
     } else {
-        ("Export the kept history as a file", "Export ▾")
+        "Export the kept history as a file"
     };
     let items = Signal::derive(move || {
         let model = history.model.get();
@@ -119,11 +120,7 @@ pub(in crate::pages) fn ExportMenu(
             <Select value=pick options=options placeholder="all models"/>
         </span>
         <span class="lh-export">
-            <RowMenu
-                items=items
-                title=menu_title
-                label=Signal::derive(move || menu_label.to_string())
-            />
+            <RowMenu items=items title=menu_title icon=Ico::Download/>
         </span>
     }
 }

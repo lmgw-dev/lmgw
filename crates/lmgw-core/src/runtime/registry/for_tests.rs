@@ -46,6 +46,8 @@ impl Registry {
                 served: false,
                 adopted: false,
                 engine_key: None,
+                card_charge: None,
+                moved: false,
             },
         );
         generation

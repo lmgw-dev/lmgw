@@ -62,7 +62,7 @@ pub(super) fn reference_order(
     listed: &[Listed],
     indices: &[usize],
 ) -> Vec<usize> {
-    let fits_in = |b: u64, m| b.saturating_add(card.card.headroom) <= card.room(m);
+    let fits_in = |b: u64, m| b.saturating_add(card.keep(m)) <= card.room(m);
     let tier = |b: u64| match (
         fits_in(b, FitMeasure::Beside),
         fits_in(b, FitMeasure::WholeCard),

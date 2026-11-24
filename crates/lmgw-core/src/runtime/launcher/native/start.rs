@@ -147,12 +147,15 @@ impl Native {
         #[cfg(windows)]
         super::windows::configure(&mut cmd);
 
-        let child = self.spawner.spawn(cmd).await.map_err(|e| {
-            failed(format!(
-                "{} could not be started: {e}",
-                resolved.install.exe.display()
-            ))
-        })?;
+        let spawner = &self.spawner;
+        let child = super::busy_retry::spawn_retrying(cmd, |cmd| spawner.spawn_keeping(cmd))
+            .await
+            .map_err(|e| {
+                failed(format!(
+                    "{} could not be started: {e}",
+                    resolved.install.exe.display()
+                ))
+            })?;
         #[cfg(windows)]
         if let Err(e) = self.job.assign(&child, &resolved.limits) {
             let mut child = child;

@@ -75,7 +75,7 @@ pub(super) fn PreviewPart(lab: Lab) -> impl IntoView {
     view! {
         {move || nr.preview_err.get().map(|e| view! {
             <div class="notice err dl-preview-failed">
-                {format!("⚠ The preview did not load: {e}")}
+                {format!("The preview did not load: {e}")}
                 " "
                 <button class="btn ghost sm" on:click=move |_| preview_again(lab)>"Retry"</button>
             </div>

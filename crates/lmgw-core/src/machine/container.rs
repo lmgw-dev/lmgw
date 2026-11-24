@@ -73,7 +73,11 @@ pub(super) fn judge_toolkit(
 pub(super) fn card_first(card: &MachineItem, container: bool) -> MachineItem {
     let without_card = matches!(
         card.cause,
-        Some(MachineCause::CardNotPassedIn | MachineCause::AmdNoComputeNode)
+        Some(
+            MachineCause::CardNotPassedIn
+                | MachineCause::CardDeniedBySelinux
+                | MachineCause::AmdNoComputeNode
+        )
     );
     words::not_checked(
         MachineItemId::CardForModels,
@@ -158,9 +162,9 @@ fn reword_toolkit(it: &mut MachineItem, outcome: Toolkit12) -> Toolkit12 {
     match it.cause.clone() {
         Some(MachineCause::ToolkitMissing | MachineCause::ToolkitOtherProvider { .. }) => {
             it.state = ItemState::Problem;
-            it.sentence = "One piece is missing so models can use the graphics card: this \
-                           server image is incomplete. On the host: load a current lmgw server \
-                           image and restart the service."
+            it.sentence = "The NVIDIA Container Toolkit is missing from this server image, so \
+                           models can't use the graphics card. On the host: load a current lmgw \
+                           server image and restart the service."
                 .into();
             it.detail.push(load_image());
             Toolkit12::Steps
@@ -292,6 +296,7 @@ mod tests {
         };
         for cause in [
             MachineCause::CardNotPassedIn,
+            MachineCause::CardDeniedBySelinux,
             MachineCause::AmdNoComputeNode,
         ] {
             assert_eq!(

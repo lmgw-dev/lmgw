@@ -30,8 +30,26 @@ pub fn remember_queries() {
         let path = loc.pathname.get();
         let search = loc.search.get();
         LAST_QUERY.with(|m| {
-            m.borrow_mut().insert(path, search);
+            let mut m = m.borrow_mut();
+            // An opened record keeps its list's filters under the list's own
+            // path, so the Requests / Conversations switch brings them back.
+            for base in ["/traffic/conversations", "/traffic"] {
+                if path == base || path.starts_with(&format!("{base}/")) {
+                    m.insert(base.to_string(), search.clone());
+                    break;
+                }
+            }
+            m.insert(path, search);
         });
+    });
+}
+
+/// Forget the query string `path` was last shown with: a link that only
+/// moved on (an old `?tab=` link, replaced by its tab's path) must not
+/// bring that query back to the next tab leading to `path`.
+pub fn forget_query(path: &str) {
+    LAST_QUERY.with(|m| {
+        m.borrow_mut().remove(path);
     });
 }
 

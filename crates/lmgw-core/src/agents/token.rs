@@ -62,8 +62,8 @@ fn mint() -> String {
 ///
 /// If the manifest declares no model-alias field, or every one of them is empty
 /// — which is today's shipped mail labeler, whose `model` field has no
-/// `default` — the policy is [`ScopeMode::All`] and the page says *"token: any
-/// model"*. A derived allow-list that silently came out empty would refuse
+/// `default` — the policy is [`ScopeMode::All`] and the page says *"Its token
+/// reaches any model"*. A derived allow-list that silently came out empty would refuse
 /// every call the agent makes, which is the failure this rule exists to avoid.
 pub fn derive_scope(agent: &Agent) -> (ScopeMode, String) {
     let mut patterns: Vec<String> = Vec::new();
@@ -103,8 +103,8 @@ pub fn derive_scope(agent: &Agent) -> (ScopeMode, String) {
 /// a mode name.
 pub fn scope_note(mode: ScopeMode, patterns: &str) -> String {
     match mode {
-        ScopeMode::All => "token: any model".to_string(),
-        _ => format!("token: {}", patterns.replace('\n', ", ")),
+        ScopeMode::All => "Its token reaches any model".to_string(),
+        _ => format!("Its token reaches: {}", patterns.replace('\n', ", ")),
     }
 }
 
@@ -596,7 +596,7 @@ mod tests {
         let (mode, patterns) = derive_scope(&a);
         assert_eq!(mode, ScopeMode::All);
         assert_eq!(patterns, "");
-        assert_eq!(scope_note(mode, &patterns), "token: any model");
+        assert_eq!(scope_note(mode, &patterns), "Its token reaches any model");
     }
 
     #[test]

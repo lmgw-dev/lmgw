@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::server::TlsStream;
 
 use super::MainTls;
-use crate::server::conn::{canonical, Conn, Via};
+use crate::server::conn::{canonical, Conn, Cuttable, Via};
 
 /// How long the accept loop waits after an accept that failed for a reason
 /// of the listener's own (the process out of descriptors), so it does not
@@ -93,7 +93,7 @@ impl Drop for MainTlsListener {
 }
 
 impl axum::serve::Listener for MainTlsListener {
-    type Io = TlsStream<TcpStream>;
+    type Io = Cuttable<TlsStream<TcpStream>>;
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, SocketAddr) {
@@ -129,8 +129,8 @@ impl axum::serve::Listener for MainTlsListener {
                     }
                 },
                 Some(done) = self.pending.join_next(), if !self.pending.is_empty() => {
-                    if let Ok(Some(ready)) = done {
-                        return ready;
+                    if let Ok(Some((io, peer))) = done {
+                        return (Cuttable::new(io), peer);
                     }
                 }
             }
@@ -158,6 +158,7 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Main
         let local = stream
             .io()
             .get_ref()
+            .get_ref()
             .0
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -169,6 +170,7 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Main
             local: canonical(local),
             device: None,
             socket: None,
+            cut: Some(stream.io().cut()),
         }
     }
 }

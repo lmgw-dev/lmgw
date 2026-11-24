@@ -418,7 +418,7 @@ fn without_media(ir: &ChatRequest, images: bool, tool_images: bool) -> ChatReque
                 continue;
             };
             for block in content.iter_mut() {
-                if let ToolResultBlock::Image { mime, data } = block {
+                if let ToolResultBlock::Image { mime, data, .. } = block {
                     let text = tool_image_placeholder(mime, data, TEXT_ONLY_SLOT);
                     *block = ToolResultBlock::text(text);
                 }
@@ -475,6 +475,7 @@ async fn with_lmgw_reasoning(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     let mut resolved = resolve_params(&tiers, ctx, route);
     if no_tiers && resolved.reasoning_control().enabled != Some(false) {

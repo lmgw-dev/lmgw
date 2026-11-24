@@ -41,8 +41,9 @@ mod dispatch;
 pub(crate) use dispatch::model_stem;
 /// Recording a dispatch's answer as the group's run, and the answer.
 mod kept;
-/// The multipart body an edit is relayed as.
-mod multipart;
+/// The multipart body an edit is relayed as (the Documents lab relays its
+/// files the same way).
+pub(super) mod multipart;
 /// A generation's pictures found in the route's answer.
 mod outputs;
 

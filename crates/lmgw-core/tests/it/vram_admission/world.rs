@@ -187,6 +187,18 @@ pub(super) struct World {
     /// to the model's [`Self::size`] and then lists it, so a list sees more
     /// than the device read before it and less than the one after.
     pub(super) growing: HashMap<String, u64>,
+    /// The machine's cards as (name, total), in the driver's order, for a
+    /// test of several cards (device-ledger design §12). Empty: one card,
+    /// "FakeGPU", of the probe's total — every test before the device
+    /// ledger.
+    pub(super) cards: Vec<(String, u64)>,
+    /// Model id -> what its process holds on each card, by card index
+    /// (`None`: listed there without a figure) — a model split over cards.
+    /// Absent: its [`Self::size`] on card 0.
+    pub(super) spread: HashMap<String, Vec<(usize, Option<u64>)>>,
+    /// Bytes held by programs outside lmgw on each card, by card index,
+    /// beside [`Self::outside`] on card 0.
+    pub(super) outside_on: Vec<(usize, u64)>,
 }
 
 impl World {
@@ -248,15 +260,81 @@ impl Transient {
 const OUTSIDE_PID: u32 = 7_000_000;
 
 impl World {
-    fn used(&self) -> u64 {
-        let own: u64 = self
+    /// What is on the card now, as the shared fake machine holds it: each
+    /// loaded or lingering container's process at its size, one the driver
+    /// does not list ([`Self::unlisted`], or no PID) as memory in use no
+    /// list shows, and the program outside lmgw.
+    fn machine(&self, total: u64) -> Machine {
+        let mut m = match self.cards.is_empty() {
+            true => Machine::one_card("FakeGPU", total),
+            false => self
+                .cards
+                .iter()
+                .enumerate()
+                .fold(Machine::new(), |m, (i, (name, total))| {
+                    m.card(card_id(i as u32), name, *total)
+                }),
+        };
+        let on_card = self
             .loaded
             .iter()
-            .chain(self.lingering.iter().filter(|m| !self.loaded.contains(*m)))
-            .filter_map(|id| self.size.get(id))
-            .sum();
-        own + self.outside
+            .chain(self.lingering.iter().filter(|m| !self.loaded.contains(*m)));
+        for id in on_card {
+            let size = self.size.get(id).copied();
+            // Split as the test states it, else on the one card its
+            // rendered arguments name (device-ledger design §7.1), else —
+            // a split lmgw made (§4.3) — what its placement label says on
+            // each card it names, else on card 0.
+            let parts = self.spread.get(id).cloned().unwrap_or_else(|| {
+                let argv = self.argv.get(id);
+                let named = argv.map(|a| m.cards_named(a));
+                match named.as_deref() {
+                    Some([one]) => vec![(*one, size)],
+                    Some(several) if several.len() > 1 => {
+                        split_parts(argv.unwrap(), &m).unwrap_or_else(|| vec![(0, size)])
+                    }
+                    _ => vec![(0, size)],
+                }
+            });
+            for (card, bytes) in parts {
+                match self.pids.get(id) {
+                    Some(&pid) if !self.unlisted.contains(id) => m.hold(card, pid, bytes),
+                    _ => m.unlisted(card, bytes.unwrap_or(0)),
+                };
+            }
+        }
+        if self.outside > 0 {
+            m.hold(0, OUTSIDE_PID, Some(self.outside));
+        }
+        for (i, &(card, bytes)) in self.outside_on.iter().enumerate() {
+            m.hold(card, OUTSIDE_PID + 1 + i as u32, Some(bytes));
+        }
+        m
     }
+}
+
+/// What a container started split over several cards holds on each: its
+/// placement label's part on each card, by the card's index; `None` where
+/// the label is not one of single-card parts.
+fn split_parts(argv: &[String], m: &Machine) -> Option<Vec<(usize, Option<u64>)>> {
+    let prefix = format!("{}=", lmgw_core::vram::charge::PLACEMENT_LABEL);
+    let label = argv.iter().find_map(|a| a.strip_prefix(prefix.as_str()))?;
+    let charge = lmgw_core::vram::CardCharge::parse(label)?;
+    charge
+        .parts()
+        .iter()
+        .map(|p| match p.cards.as_slice() {
+            [one] => {
+                let named = vec![
+                    "--device".to_string(),
+                    format!("nvidia.com/gpu={}", one.as_str()),
+                ];
+                let i = *m.cards_named(&named).first()?;
+                Some((i, Some(p.bytes)))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// A driver whose numbers follow what the containers actually hold — which is
@@ -268,14 +346,7 @@ pub(super) struct FakeGpu {
 
 impl GpuProbe for FakeGpu {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
-        let used = self.world.lock().unwrap().used();
-        Ok(vec![GpuMemory {
-            index: 0,
-            name: "FakeGPU".into(),
-            total_bytes: self.total,
-            used_bytes: used,
-            free_bytes: self.total.saturating_sub(used),
-        }])
+        Ok(self.world.lock().unwrap().machine(self.total).devices())
     }
 
     fn source(&self) -> String {
@@ -290,7 +361,7 @@ impl GpuProbe for FakeGpu {
         }
     }
 
-    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         let mut w = self.world.lock().unwrap();
         if !w.attribution {
             return Err("FakeGPU lists no processes".into());
@@ -299,26 +370,6 @@ impl GpuProbe for FakeGpu {
         for (m, b) in growing {
             *w.size.entry(m).or_default() += b;
         }
-        let mut out: Vec<ProcessMemory> = w
-            .loaded
-            .iter()
-            .chain(w.lingering.iter())
-            .filter(|m| !w.unlisted.contains(*m))
-            .filter_map(|m| {
-                Some(ProcessMemory {
-                    pid: *w.pids.get(m)?,
-                    bytes: w.size.get(m).copied(),
-                })
-            })
-            .collect();
-        if w.outside > 0 {
-            out.push(ProcessMemory {
-                pid: OUTSIDE_PID,
-                bytes: Some(w.outside),
-            });
-        }
-        out.sort_by_key(|p| p.pid);
-        out.dedup_by_key(|p| p.pid);
-        Ok(out)
+        Ok(w.machine(self.total).processes())
     }
 }

@@ -640,12 +640,12 @@ pub(super) enum Tone {
 /// The listener in a line: its scope, port, and what it holds.
 pub(super) fn listener_words(s: &DeviceListenerStatus) -> (String, Tone) {
     match s.state {
-        DeviceListenerState::Off => ("device listener off".into(), Tone::Off),
+        DeviceListenerState::Off => ("Device listener off".into(), Tone::Off),
         DeviceListenerState::Error => (
-            format!(
-                "device listener not serving: {}",
-                s.error.clone().unwrap_or_default()
-            ),
+            s.error
+                .clone()
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| "The device listener is not serving.".to_string()),
             Tone::Warn,
         ),
         DeviceListenerState::Listening => {
@@ -658,8 +658,8 @@ pub(super) fn listener_words(s: &DeviceListenerStatus) -> (String, Tone) {
             };
             (
                 format!(
-                    "device listener on: {scope}{port} · {} connection(s)",
-                    s.connections
+                    "Device listener on: {scope}{port} · {}",
+                    crate::fmt::count_of(s.connections as usize, "connections")
                 ),
                 Tone::Ok,
             )
@@ -1300,7 +1300,7 @@ mod tests {
         assert_eq!(tone, Tone::Ok);
         assert_eq!(
             line,
-            "device listener on: every address, port 8788 · 3 connection(s)"
+            "Device listener on: every address, port 8788 · 3 connections"
         );
         let lo = DeviceListenerStatus {
             listen: Some("loopback".into()),

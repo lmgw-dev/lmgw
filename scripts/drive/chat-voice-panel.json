@@ -20,9 +20,7 @@
  {
   "js": "window.lmgwRealtimeMock.patchThread({})"
  },
- {
-  "click": "button[title^='New temporary chat']"
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='New temporary chat']"},
  {
   "until": "location.search.startsWith('?t=-') && !!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
   "timeout": 15,
@@ -49,7 +47,7 @@
   "label": "ribbon-chat: live"
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "ribbon-chat: the ribbon draws"
  },
@@ -143,7 +141,7 @@
   "timeout": 5
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "ribbon-focus: the ribbon draws"
  },
@@ -230,7 +228,7 @@
   "label": "orb-chat: live"
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "orb-chat: the orb draws"
  },
@@ -324,7 +322,7 @@
   "timeout": 5
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "orb-focus: the orb draws"
  },
@@ -411,7 +409,7 @@
   "label": "ring-chat: live"
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "ring-chat: the ring draws"
  },
@@ -505,7 +503,7 @@
   "timeout": 5
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
   "label": "ring-focus: the ring draws"
  },

@@ -10,7 +10,9 @@
 //! qualifies beside what runs now is the whole card's pick, and its chip
 //! and the line above the list both say it fits once those make room.
 
-use lmgw_api_types::model_find::{CardMeasure, FileFit, FitMark, FitMeasure, PlanFit};
+use lmgw_api_types::model_find::{
+    CardMeasure, CardsFit, FileFit, FitCard, FitMark, FitMeasure, PlanFit,
+};
 use lmgw_api_types::RepoFiles;
 
 use crate::fmt::{fmt_bytes, grouped};
@@ -34,16 +36,23 @@ fn tokens(n: u64) -> String {
 /// The words of a fit by its header (`Fits` or `FitsShorter`). An
 /// estimate's shorter conversation is a floor: the file's own header may
 /// give a longer one, never a shorter one.
+///
+/// On a computer with several graphics cards it names the card the fit was
+/// measured against: "fits on card 2 · 32 768 tokens".
 fn fits_words(f: &FileFit, estimated: bool) -> String {
+    let fits = match &f.card {
+        Some(c) => format!("fits on {}", c.short()),
+        None => "fits".to_string(),
+    };
     match (f.mark, f.ctx, f.trained_ctx) {
         (FitMark::FitsShorter, Some(c), Some(t)) => format!(
-            "fits · {}{} of {}",
+            "{fits} · {}{} of {}",
             if estimated { "at least " } else { "" },
             grouped(c),
             tokens(t)
         ),
-        (_, Some(c), _) => format!("fits · {}", tokens(c)),
-        _ => "fits".into(),
+        (_, Some(c), _) => format!("{fits} · {}", tokens(c)),
+        _ => fits,
     }
 }
 
@@ -52,20 +61,35 @@ fn fits_words(f: &FileFit, estimated: bool) -> String {
 /// models when it has some on the card. What other programs use not being
 /// known, only lmgw's models are named when there are any (the beside
 /// measure left out nothing else).
-pub(crate) fn who(card: Option<&CardMeasure>) -> &'static str {
+///
+/// On a computer with several graphics cards the words name the card, and
+/// lmgw's models there may move to another card rather than unload
+/// (device-ledger design §6.2, §10).
+pub(crate) fn who(card: Option<&CardMeasure>) -> String {
     let (outside, ours) = card.map_or((None, false), |c| {
         (c.outside_bytes, !c.residents.is_empty())
     });
-    who_of(outside, ours)
+    who_on(outside, ours, card.and_then(|c| c.card.as_ref()))
 }
 
 /// [`who`] from what is beside a file: what other programs hold (`None`
-/// when not known) and whether lmgw has models on the card.
-pub(crate) fn who_of(outside: Option<u64>, ours: bool) -> &'static str {
-    match (outside, ours) {
-        (Some(o), true) if o > 0 => "other programs close and lmgw's other models unload",
-        (_, true) => "lmgw's other models unload",
-        _ => "other programs close",
+/// when not known), whether lmgw has models on the card, and the card,
+/// named where the computer has several.
+pub(crate) fn who_on(outside: Option<u64>, ours: bool, card: Option<&FitCard>) -> String {
+    match card.map(FitCard::short) {
+        None => match (outside, ours) {
+            (Some(o), true) if o > 0 => "other programs close and lmgw's other models unload",
+            (_, true) => "lmgw's other models unload",
+            _ => "other programs close",
+        }
+        .to_string(),
+        Some(c) => match (outside, ours) {
+            (Some(o), true) if o > 0 => {
+                format!("other programs on {c} close and lmgw's other models there unload or move")
+            }
+            (_, true) => format!("lmgw's other models on {c} unload or move"),
+            _ => format!("other programs on {c} close"),
+        },
     }
 }
 
@@ -118,6 +142,24 @@ pub(crate) fn mark(fit: &PlanFit, estimated_from: Option<&str>, lead: Lead) -> O
         ));
     }
     Some(Mark { text, tone, tip })
+}
+
+/// The fit over the cards (device-ledger design WP12) of the fit `mark`
+/// shows for a file: Min. cards, Free VRAM and the experts in RAM judged at
+/// that fit's context. `None` without a card.
+pub(crate) fn shown_cards(fit: &PlanFit, lead: Lead) -> Option<CardsFit> {
+    let (b, w) = (&fit.beside, &fit.whole_card);
+    if b.mark == FitMark::NoCard {
+        return None;
+    }
+    let shown = match b.mark {
+        _ if lead == Lead::WholeCard && matches!(w.mark, FitMark::Fits | FitMark::FitsShorter) => w,
+        m if m.fits() => b,
+        _ if w.mark.fits() => w,
+        FitMark::Unknown => b,
+        _ => w,
+    };
+    shown.cards.clone()
 }
 
 /// The lines above the list once the marks are in (D64, D120): the
@@ -402,6 +444,26 @@ mod tests {
             "fits once other programs close and lmgw's other models unload"
         );
         assert_eq!(once(false, Some(GB)), "fits once other programs close");
+        // On a computer with several cards: the card, and a move.
+        let card = FitCard {
+            index: 2,
+            name: "NVIDIA RTX 6000 Ada Generation".into(),
+            of: 4,
+        };
+        assert_eq!(
+            who_on(Some(GB), true, Some(&card)),
+            "other programs on card 2 close and lmgw's other models there unload or move"
+        );
+        assert_eq!(
+            who_on(None, true, Some(&card)),
+            "lmgw's other models on card 2 unload or move"
+        );
+        let mut on = file(Fits, Beside, Some(32_768));
+        on.card = Some(card);
+        assert_eq!(
+            fits_words(&on, false),
+            "fits on card 2 · 32\u{202F}768 tokens"
+        );
     }
 
     /// The whole card's pick, recommended because nothing qualifies beside

@@ -8,6 +8,8 @@ use crate::telemetry::{outcome_of, RequestClass};
 
 use super::*;
 
+pub mod error_msg;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RequestLogRow {
     pub id: i64,
@@ -89,7 +91,7 @@ pub struct RequestLogRow {
     /// migration 0074.
     pub approved_by: Option<String>,
     /// The listener the request came in on (device link design §4.5):
-    /// `plain` or `devices` — migration 0081.
+    /// `plain`, `tls` or `devices` — migrations 0081 and 0108.
     pub via: String,
     /// The `service_tier` an `openai` answer reported, verbatim; `NULL` for
     /// every other row — migration 0092.
@@ -217,7 +219,7 @@ pub struct NewRequestLog {
     /// Who approved the tool call this row records ([`RequestLogRow::approved_by`]).
     pub approved_by: Option<String>,
     /// The listener the request came in on (device link design §4.5): the
-    /// plain one, or the device listener.
+    /// plain one, the main TLS listener, or the device listener.
     pub via: crate::server::Via,
     /// The `service_tier` an `openai` answer reported, verbatim
     /// ([`crate::pricing::ServedTier::reported`]); `None` for every other
@@ -373,7 +375,7 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(l.completion_tokens)
     .bind(l.streamed as i64)
     .bind(&l.error_kind)
-    .bind(&l.error_msg)
+    .bind(l.error_msg.as_deref().map(error_msg::bounded))
     .bind(l.max_tokens_clamped.map(|v| v as i64))
     .bind(l.key_id)
     .bind(l.class.as_str())

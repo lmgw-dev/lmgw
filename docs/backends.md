@@ -194,6 +194,31 @@ Outcomes:
   current, that run is promoted too, full retention included.
 - **broken** — built, a verify check failed. Not promoted.
 
+**On a computer with several graphics cards** verify runs with the class's
+run args as written, so the probe sees every card they pass. What lmgw
+reads from an image's `--help` for placing a model on the cards (the
+README's "Several graphics cards"):
+
+- `--split-mode` and `--tensor-split`: a chat model is split over several
+  cards only where the image lists both (and `-devd` too, for a row with a
+  draft model). lmgw renders `--split-mode layer --tensor-split <layers per
+  card>`, and `--fit off` where the image has `--fit`. An image without
+  them is never split: a model with its context set that no single card
+  holds waits or is refused, and says why. A row's own `--tensor-split` is
+  passed as written where the row is pinned to as many cards as it has
+  entries, and not passed otherwise (the README's "Several graphics
+  cards").
+- `--fit`: as on one card, lmgw fits a row to the card it chose only where
+  the image lists it.
+
+A container lmgw hands its cards gets them by UUID (`--device
+nvidia.com/gpu=GPU-…`, `NVIDIA_VISIBLE_DEVICES`) with
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, so the engine numbers them in the order of
+their PCI addresses, the order of the `--tensor-split` entries. Any CUDA
+build reads these; nothing in the build has to change. On AMD cards lmgw
+hands out no single card (it can only do so through NVIDIA's CDI names):
+a model there runs on every card the run args pass.
+
 ## 5. Caches and timings
 
 - **ccache**, one cache-mount id per `(engine, backend)`: `lmgw-<engine>-<backend>`

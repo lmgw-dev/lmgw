@@ -1,4 +1,4 @@
-//! An upstream remembered out of quota, under its row (openai egress design
+//! An upstream remembered out of quota, a group of its detail (openai egress design
 //! §14.6): since when, the provider's code, what happens meanwhile, when it
 //! is asked again, and **Check now**, which forgets it so the next request
 //! goes to it (`upstream_quota_clear`).
@@ -9,6 +9,7 @@ use lmgw_api_types::{RowSaved, UpstreamQuota};
 use serde_json::json;
 
 use crate::fmt::local_datetime;
+use crate::widgets::{ActionRow, PrefGroup};
 
 /// When `unix_s` is, in the reader's local time: the clock time ("14:02")
 /// on the day it is read, with the date on any other ("2026-10-26 14:07"),
@@ -41,12 +42,11 @@ fn quota_line(since: Option<String>, code: &str, next: Option<String>) -> String
     )
 }
 
-/// The detail row (`span` columns wide); `cleared` runs after Check now.
+/// The group in the upstream's detail; `cleared` runs after Check now.
 #[component]
-pub(super) fn QuotaRow(
+pub(super) fn QuotaGroup(
     id: i64,
     quota: UpstreamQuota,
-    span: u32,
     toasts: crate::widgets::Toasts,
     cleared: Callback<()>,
 ) -> impl IntoView {
@@ -58,7 +58,7 @@ pub(super) fn QuotaRow(
         .unwrap_or_default();
     let now = (js_sys::Date::now() / 1000.0) as i64;
     let line = quota_line(when(quota.since, now), &code, when(quota.next_check, now));
-    let check = move |_| {
+    let check = move || {
         if busy.get_untracked() {
             return;
         }
@@ -69,7 +69,7 @@ pub(super) fn QuotaRow(
                 &json!({ "id": id }),
             )
             .await;
-            busy.set(false);
+            let _ = busy.try_set(false);
             match res {
                 Ok(v) => {
                     toasts.ok(v.message);
@@ -79,26 +79,26 @@ pub(super) fn QuotaRow(
             }
         });
     };
+    let message = quota.message.clone();
     view! {
-        <tr class="detail-row up-quota">
-            <td colspan=span>
-                <div class="up-quota-line">
-                    <span class="chip warn" title=quota.message.clone()>
-                        <span class="dot"></span>
-                        "out of quota"
-                    </span>
-                    <span>{line}</span>
-                    <button
-                        class="btn sm"
-                        disabled=move || busy.get()
-                        title="Forget it now: the next request goes to this upstream again"
-                        on:click=check
-                    >
-                        "Check now"
-                    </button>
-                </div>
-            </td>
-        </tr>
+        <PrefGroup title="Out of quota">
+            <div class="prow notice-row warn up-quota-line" title=message>
+                {line}
+            </div>
+            <ActionRow
+                title="Forget it now"
+                sub="The next request goes to this upstream again"
+            >
+                <button
+                    type="button"
+                    class="btn"
+                    disabled=move || busy.get()
+                    on:click=move |_| check()
+                >
+                    {move || if busy.get() { "Checking…" } else { "Check now" }}
+                </button>
+            </ActionRow>
+        </PrefGroup>
     }
 }
 

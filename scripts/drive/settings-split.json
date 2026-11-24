@@ -1,0 +1,388 @@
+[
+ {
+  "js": "'Settings as categories beside the shown one: the split view at a wide window (a bare /settings shows Network, a click and the arrows select a category, the handle resizes the list and keeps its width), a deep link scrolled to and flashed, a change to Max request body (the accent dot, the category counting it, the save toast; a category switch keeps it without asking, leaving Settings asks; Ctrl+S saves, the saved value is read back after a reload, then put back), text that is no number blocking Save until Discard, the search (counts on the categories, every hit in the detail, Esc clears), and the narrow window (one pane at a time, the back button, the search listing the hits as links). It SAVES: run it on a dev copy, never on production. Run: scripts/ui-drive.py scripts/drive/settings-split.json --dsf 1.25 --token-file <dir>.token --base http://<addr> --podman-guard <prefix>'"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.ui.settings.list.width'); 'reset'"
+ },
+ {
+  "size": "1229x691"
+ },
+ {
+  "nav": "/settings"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.set-cats .lrow.sel')].map(r => r.dataset.key); window.__shown = () => [...document.querySelectorAll('.set-flow')].filter(f => !f.hidden).map(f => f.dataset.cat); window.__row = () => document.getElementById('f-max-body-mb'); window.__field = () => __row().querySelector('input.spin-field'); window.__num = () => __field().value.replace(/\\s/g, ''); window.__v0 = sessionStorage.getItem('wp3v0'); window.__cat = k => document.querySelector('.set-cats .lrow[data-key=\"' + k + '\"]'); 'helpers'"
+ },
+ {
+  "until": "document.querySelector('.set-cats .lrow') && document.querySelector('.set-flow:not([hidden]) .pref-group')",
+  "timeout": 15,
+  "label": "the categories and a category's groups are there"
+ },
+ {
+  "expect": "document.querySelector('.settings-split:not(.narrow)') && __sel().join() === 'network' && __shown().join() === 'network'",
+  "label": "wide: a bare /settings shows Network beside the list, selected"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "wide: no horizontal overflow"
+ },
+ {
+  "expect": "__cat('gpu').querySelector('svg.lrow-ico') && [...document.querySelectorAll('.set-cats .lrow')].length === 13",
+  "label": "thirteen categories, each with its glyph"
+ },
+ {
+  "click": ".set-cats .lrow[data-key=\"gpu\"]"
+ },
+ {
+  "until": "location.pathname === '/settings/gpu' && __sel().join() === 'gpu' && __shown().join() === 'gpu'",
+  "timeout": 5,
+  "label": "a click selects the category: its path, its page"
+ },
+ {
+  "expect": "document.querySelector('.set-cats').contains(document.activeElement) && getComputedStyle(document.querySelector('.set-cats .lrow.sel')).backgroundColor !== getComputedStyle(__cat('network')).backgroundColor",
+  "label": "the list has the focus: the selection takes the accent's tint"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "until": "location.pathname === '/settings/runtimes' && __sel().join() === 'runtimes'",
+  "timeout": 5,
+  "label": "ArrowDown moves the selection, and the page follows"
+ },
+ {
+  "key": "ArrowUp"
+ },
+ {
+  "until": "location.pathname === '/settings/gpu'",
+  "timeout": 5,
+  "label": "ArrowUp moves it back"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "until": "location.pathname === '/settings/about'",
+  "timeout": 5,
+  "label": "End goes to the last category"
+ },
+ {
+  "key": "Home"
+ },
+ {
+  "until": "location.pathname === '/settings/network'",
+  "timeout": 5,
+  "label": "Home to the first"
+ },
+ {
+  "js": "window.__w0 = document.querySelector('.mlist-pane').getBoundingClientRect().width; const h = document.querySelector('.mhandle'); const r = h.getBoundingClientRect(); const x = r.left + r.width / 2; const pe = (t, cx) => h.dispatchEvent(new PointerEvent(t, {pointerId: 9, pointerType: 'mouse', isPrimary: true, button: t === 'pointermove' ? -1 : 0, buttons: t === 'pointerup' ? 0 : 1, clientX: cx, clientY: 300, bubbles: true, cancelable: true})); pe('pointerdown', x); pe('pointermove', x + 20); pe('pointerup', x + 30); 'dragged'"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - (__w0 + 30)) <= 1 && +localStorage.getItem('lmgw.ui.settings.list.width') === Math.round(__w0 + 30)",
+  "label": "the handle resizes the categories and keeps the width"
+ },
+ {
+  "dblclick": ".mhandle"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "Math.abs(document.querySelector('.mlist-pane').getBoundingClientRect().width - __w0) <= 1 && localStorage.getItem('lmgw.ui.settings.list.width') === null",
+  "label": "a double-click forgets it"
+ },
+ {
+  "js": "window.__flashed = false; new MutationObserver(ms => ms.forEach(m => { if (m.target.id === 'f-router-request-timeout-seconds' && m.target.classList.contains('flash')) window.__flashed = true; })).observe(document.querySelector('.set-scroll'), {attributes: true, attributeFilter: ['class'], subtree: true}); 'watching'"
+ },
+ {
+  "go": "/settings/runtimes#f-router-request-timeout-seconds",
+  "via": "history"
+ },
+ {
+  "until": "window.__flashed",
+  "timeout": 10,
+  "label": "a deep link flashes its setting"
+ },
+ {
+  "expect": "(() => { const r = document.getElementById('f-router-request-timeout-seconds').getBoundingClientRect(); const s = document.querySelector('.set-scroll').getBoundingClientRect(); return r.top >= s.top && r.bottom <= s.bottom; })() && __sel().join() === 'runtimes'",
+  "label": "and scrolls it into view, its category selected"
+ },
+ {
+  "nav": "/settings/network"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.set-cats .lrow.sel')].map(r => r.dataset.key); window.__shown = () => [...document.querySelectorAll('.set-flow')].filter(f => !f.hidden).map(f => f.dataset.cat); window.__row = () => document.getElementById('f-max-body-mb'); window.__field = () => __row().querySelector('input.spin-field'); window.__num = () => __field().value.replace(/\\s/g, ''); window.__v0 = sessionStorage.getItem('wp3v0'); window.__cat = k => document.querySelector('.set-cats .lrow[data-key=\"' + k + '\"]'); 'helpers'"
+ },
+ {
+  "until": "__row() && __field() && __num() !== ''",
+  "timeout": 15
+ },
+ {
+  "js": "window.__v0 = __num(); sessionStorage.setItem('wp3v0', __v0); __v0"
+ },
+ {
+  "expect": "!document.querySelector('.save-toast.show') && !document.querySelector('.set-scroll .prow.dirty')",
+  "label": "a loaded page has no changes"
+ },
+ {
+  "js": "(() => { const i = __field(); i.value = String(+__v0 + 1); i.dispatchEvent(new Event('change', {bubbles: true})); })(); 'set'"
+ },
+ {
+  "until": "__row().classList.contains('dirty') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "a change marks the row and shows the save toast"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent === '1 unsaved change' && __cat('network').querySelector('.lrow-state').textContent === '1 unsaved'",
+  "label": "the toast and the category count it"
+ },
+ {
+  "click": ".set-cats .lrow[data-key=\"gpu\"]"
+ },
+ {
+  "until": "location.pathname === '/settings/gpu'",
+  "timeout": 5
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]') && document.querySelector('.save-toast.show') && __row().classList.contains('dirty')",
+  "label": "a category switch does not ask and keeps the change"
+ },
+ {
+  "go": "/models"
+ },
+ {
+  "until": "[...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on Settings'))",
+  "timeout": 5,
+  "label": "leaving Settings asks first"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "location.pathname === '/settings/gpu' && __row().classList.contains('dirty')",
+  "label": "Stay keeps the page and the change"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "s"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && !__row().classList.contains('dirty')",
+  "timeout": 10,
+  "label": "Ctrl+S saves: no change left"
+ },
+ {
+  "nav": "/settings/network"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.set-cats .lrow.sel')].map(r => r.dataset.key); window.__shown = () => [...document.querySelectorAll('.set-flow')].filter(f => !f.hidden).map(f => f.dataset.cat); window.__row = () => document.getElementById('f-max-body-mb'); window.__field = () => __row().querySelector('input.spin-field'); window.__num = () => __field().value.replace(/\\s/g, ''); window.__v0 = sessionStorage.getItem('wp3v0'); window.__cat = k => document.querySelector('.set-cats .lrow[data-key=\"' + k + '\"]'); 'helpers'"
+ },
+ {
+  "until": "__row() && __field() && __num() === String(+__v0 + 1)",
+  "timeout": 15,
+  "label": "after a reload the saved value is read back"
+ },
+ {
+  "js": "(() => { const i = __field(); i.value = 'lots'; i.dispatchEvent(new Event('change', {bubbles: true})); })(); 'set'"
+ },
+ {
+  "until": "__row().classList.contains('invalid') && document.querySelector('.save-toast.show')",
+  "timeout": 5,
+  "label": "text that is no number marks the row"
+ },
+ {
+  "expect": "document.querySelector('.save-toast-text').textContent === '1 field to fix' && document.querySelector('.save-toast .btn.suggested').disabled && __row().querySelector('.prow-err')",
+  "label": "the toast says to fix it, Save waits, the row says why"
+ },
+ {
+  "click": ".save-toast .btn:not(.suggested)"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && __num() === String(+__v0 + 1)",
+  "timeout": 5,
+  "label": "Discard puts the saved value back"
+ },
+ {
+  "js": "(() => { const i = __field(); i.value = __v0; i.dispatchEvent(new Event('change', {bubbles: true})); })(); 'set'"
+ },
+ {
+  "until": "document.querySelector('.save-toast.show')",
+  "timeout": 5
+ },
+ {
+  "click": ".save-toast .btn.suggested"
+ },
+ {
+  "until": "!document.querySelector('.save-toast.show') && __num() === __v0",
+  "timeout": 10,
+  "label": "Save puts the first value back"
+ },
+ {
+  "click": ".set-cats .lrow.sel"
+ },
+ {
+  "key": "/"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "/ focuses the search"
+ },
+ {
+  "type": "timeout"
+ },
+ {
+  "until": "__shown().length > 1 && document.querySelector('.set-search-line') && __sel().length === 0",
+  "timeout": 5,
+  "label": "a search shows every category with a hit, none selected"
+ },
+ {
+  "expect": "+__cat('runtimes').querySelector('.lrow-state').textContent > 0 && __cat('appearance').classList.contains('off')",
+  "label": "the categories count their hits, the ones without dimmed"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "document.querySelector('.msearch input').value === '' && __shown().join() === 'network'",
+  "timeout": 5,
+  "label": "Esc clears the search"
+ },
+ {
+  "keydown": "ControlLeft"
+ },
+ {
+  "key": "f"
+ },
+ {
+  "keyup": "ControlLeft"
+ },
+ {
+  "expect": "document.activeElement === document.querySelector('.msearch input')",
+  "label": "Ctrl+F focuses the search"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "size": "819x560"
+ },
+ {
+  "nav": "/settings"
+ },
+ {
+  "js": "window.__sel = () => [...document.querySelectorAll('.set-cats .lrow.sel')].map(r => r.dataset.key); window.__shown = () => [...document.querySelectorAll('.set-flow')].filter(f => !f.hidden).map(f => f.dataset.cat); window.__row = () => document.getElementById('f-max-body-mb'); window.__field = () => __row().querySelector('input.spin-field'); window.__num = () => __field().value.replace(/\\s/g, ''); window.__v0 = sessionStorage.getItem('wp3v0'); window.__cat = k => document.querySelector('.set-cats .lrow[data-key=\"' + k + '\"]'); 'helpers'"
+ },
+ {
+  "until": "document.querySelector('.set-cats .lrow')",
+  "timeout": 15
+ },
+ {
+  "expect": "document.querySelector('.settings-split.narrow') && getComputedStyle(document.querySelector('.mdetail-pane')).display === 'none'",
+  "label": "narrow: the categories alone"
+ },
+ {
+  "expect": "document.querySelector('.content').scrollWidth <= document.querySelector('.content').clientWidth",
+  "label": "narrow: no horizontal overflow"
+ },
+ {
+  "click": ".set-cats .lrow[data-key=\"retention\"]"
+ },
+ {
+  "until": "location.pathname === '/settings/retention' && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.querySelector('.mdetail-head .icon-btn[title=\"Back to the categories\"]')",
+  "timeout": 5,
+  "label": "narrow: a category shows alone, with a back button"
+ },
+ {
+  "expect": "document.querySelector('.mdetail-head h1').textContent === 'Retention'",
+  "label": "narrow: its header says which"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the categories\"]"
+ },
+ {
+  "until": "location.pathname === '/settings' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back shows the categories"
+ },
+ {
+  "until": "document.activeElement === document.querySelector('.set-cats')",
+  "timeout": 3,
+  "label": "narrow: the list has the focus again"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "expect": "location.pathname === '/settings' && __sel().join() === 'usage-cost'",
+  "label": "narrow: the arrows move the highlight without opening"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "location.pathname === '/settings/usage-cost' && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none'",
+  "timeout": 5,
+  "label": "narrow: Enter opens it"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the categories\"]"
+ },
+ {
+  "until": "location.pathname === '/settings'",
+  "timeout": 5
+ },
+ {
+  "click": ".msearch input"
+ },
+ {
+  "type": "prefix"
+ },
+ {
+  "until": "document.querySelector('.set-cats a.lrow-link[href*=\"#f-\"] .lrow-meta')",
+  "timeout": 5,
+  "label": "narrow: a search lists the matching settings, where each is"
+ },
+ {
+  "js": "window.__hit = document.querySelector('.set-cats a.lrow-link[href*=\"#f-\"]').getAttribute('href'); __hit"
+ },
+ {
+  "click": ".set-cats a.lrow-link[href*=\"#f-\"]"
+ },
+ {
+  "until": "location.pathname + location.hash === __hit && getComputedStyle(document.querySelector('.mlist-pane')).display === 'none' && document.getElementById(__hit.split('#')[1]) && document.getElementById(__hit.split('#')[1]).checkVisibility()",
+  "timeout": 5,
+  "label": "narrow: a hit opens its category at the setting, the search ended"
+ },
+ {
+  "expect": "!location.search.includes('q=')",
+  "label": "narrow: the address has no search left"
+ },
+ {
+  "nav": "/settings/retention?q=prefix"
+ },
+ {
+  "until": "document.querySelector('.mdetail-head .icon-btn[title=\"Back to the categories\"]') && location.search === '?q=prefix'",
+  "timeout": 5,
+  "label": "narrow: a category opened with a search in the address shows alone"
+ },
+ {
+  "click": ".mdetail-head .icon-btn[title=\"Back to the categories\"]"
+ },
+ {
+  "until": "location.pathname === '/settings' && location.search === '?q=prefix' && getComputedStyle(document.querySelector('.mlist-pane')).display !== 'none'",
+  "timeout": 5,
+  "label": "narrow: back lands on /settings?q=prefix, the query kept with its ?"
+ }
+]

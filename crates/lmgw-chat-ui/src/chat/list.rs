@@ -2,6 +2,7 @@
 //! list's view.
 
 use super::*;
+use lmgw_ui_kit::widgets::{Ico, Icon};
 
 // ---------------------------------------------------------------------------
 // Thread list
@@ -318,18 +319,15 @@ pub(crate) fn ThreadList(
     query: RwSignal<String>,
     current: Memo<Option<i64>>,
     on_open: Callback<i64>,
-    on_new: Callback<&'static str>,
-    /// What New chat says it does: "New chat in <folder>" while a thread of
-    /// a folder is open (chat-plane design §9.10).
-    #[prop(into)]
-    new_label: Signal<String>,
     on_delete: Callback<i64>,
     on_pin: Callback<(i64, bool)>,
     on_archive: Callback<(i64, bool)>,
     renaming: RwSignal<Option<i64>>,
     on_rename: Callback<(i64, String)>,
     view_archived: RwSignal<bool>,
-    #[prop(into)] archived_count: Signal<i64>,
+    /// How many conversations each view holds: (active, archived).
+    #[prop(into)]
+    view_counts: Signal<(usize, usize)>,
     folders: FolderEnv,
     on_pick: Callback<(i64, Option<i64>)>,
 ) -> impl IntoView {
@@ -338,74 +336,26 @@ pub(crate) fn ThreadList(
     let q_box: NodeRef<leptos::html::Input> = NodeRef::new();
     use_slash_focus(q_box);
     view! {
-        <div class="density-dense">
+        // A column: the search and the view sticky at the top, the rows the
+        // one scroller under them (chat.css), so the date headings stick
+        // under the search.
+        <div class="thread-pane density-dense">
+            // The search and which conversations show, sticky over the
+            // rows; New chat and the other ways to start are in the panel's
+            // head (`list_head`).
             <div class="thread-tools">
-                <div class="row">
-                    <button
-                        class="btn"
-                        title=move || new_label.get()
-                        aria-label=move || new_label.get()
-                        on:click=move |_| on_new.run("chat")
-                    >
-                        "New chat"
-                    </button>
-                    <button
-                        class="btn ghost"
-                        title="New Admin Chat — wired to the lmgw self-admin tools"
-                        on:click=move |_| on_new.run("admin")
-                    >
-                        "Admin chat"
-                    </button>
-                </div>
-                <button
-                    type="button"
-                    class="btn ghost sm"
-                    title="New temporary chat — kept in memory only, discarded when you leave it"
-                    on:click=move |_| on_new.run("temporary")
-                >
-                    "New temporary chat"
-                </button>
-                <button
-                    type="button"
-                    class="btn ghost sm"
-                    title="New folder — group conversations, with settings new chats in it start from"
-                    on:click=move |_| folders.create()
-                >
-                    "New folder"
-                </button>
-                <button
-                    type="button"
-                    class="btn ghost sm"
-                    class:active=move || view_archived.get()
-                    title=move || {
-                        if view_archived.get() {
-                            "Back to conversations"
-                        } else {
-                            "Threads the auto-archive sweep (or a manual Archive) filed away"
-                        }
-                    }
-                    on:click=move |_| view_archived.update(|v| *v = !*v)
-                >
-                    {move || {
-                        if view_archived.get() {
-                            "Active conversations".to_string()
-                        } else {
-                            format!("Archived ({})", archived_count.get())
-                        }
-                    }}
-                </button>
-                // The list's own ⋯ (export every chat) ends the filter's line:
-                // beside New chat and Admin chat it took the room the panel's
-                // floor does not have, and widened the list (a sideways bar).
-                <div class="thread-filter">
+                <label class="thread-search">
+                    <Icon ico=Ico::Search/>
                     <input
-                        class="input thread-q"
+                        class="thread-q"
                         type="search"
                         node_ref=q_box
                         data-slash
-                        placeholder="Filter by title or model"
-                        title="Filter · / focuses, Esc clears"
+                        placeholder="Search conversations"
+                        title="Filter by title or model · / focuses, Esc clears"
+                        aria-label="Filter conversations by title or model"
                         autocomplete="off"
+                        spellcheck="false"
                         prop:value=move || query.get()
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev| {
@@ -415,10 +365,44 @@ pub(crate) fn ThreadList(
                             }
                         }
                     />
-                    <crate::chat_export::ExportAll/>
+                    <Show when=filtering>
+                        <button
+                            type="button"
+                            class="thread-q-clear"
+                            title="Clear the filter"
+                            aria-label="Clear the filter"
+                            on:click=move |_| query.set(String::new())
+                        >
+                            <Icon ico=Ico::Close/>
+                        </button>
+                    </Show>
+                </label>
+                <div class="seg thread-view" role="group" aria-label="Which conversations show">
+                    <button
+                        type="button"
+                        class="seg-btn"
+                        class:active=move || !view_archived.get()
+                        aria-pressed=move || (!view_archived.get()).to_string()
+                        title="The conversations in use"
+                        on:click=move |_| view_archived.set(false)
+                    >
+                        "Active"
+                        <span class="count">{move || view_counts.get().0}</span>
+                    </button>
+                    <button
+                        type="button"
+                        class="seg-btn thread-view-archived"
+                        class:active=move || view_archived.get()
+                        aria-pressed=move || view_archived.get().to_string()
+                        title="Threads the auto-archive sweep (or a manual Archive) filed away"
+                        on:click=move |_| view_archived.set(true)
+                    >
+                        "Archived"
+                        <span class="count">{move || view_counts.get().1}</span>
+                    </button>
                 </div>
             </div>
-            <div class="thread-list">
+            <div class="thread-list" on:keydown=|ev| super::list_keys::on_key(&ev)>
                 <Show when=move || filtering() && items.with(Vec::is_empty)>
                     <div class="empty">
                         {move || format!("None of {} conversations match.", total.get())}
@@ -589,7 +573,7 @@ pub(crate) fn ThreadList(
                                                     aria-label="Discard this temporary chat"
                                                     on:click=move |_| on_delete.run(id)
                                                 >
-                                                    "✕"
+                                                    <Icon ico=Ico::Close/>
                                                 </button>
                                             }
                                                 .into_any()

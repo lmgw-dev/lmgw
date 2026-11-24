@@ -142,6 +142,11 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             )
         })
         .collect();
+    // What the engine itself costs on each model's card (device-ledger
+    // design §4.2).
+    if b.engine_bytes > 0 {
+        segments.push(("Engine".into(), "var(--c-other)".into(), b.engine_bytes));
+    }
     if b.headroom_bytes > 0 {
         segments.push(("Headroom".into(), "var(--c-other)".into(), b.headroom_bytes));
     }
@@ -200,11 +205,19 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
         ),
         None => format!("{} needed", fmt_bytes(b.needed_bytes)),
     };
-    let models = format!(
-        "{} for the models and {} headroom",
-        fmt_bytes(b.total_bytes),
-        fmt_bytes(b.headroom_bytes)
-    );
+    let models = match b.engine_bytes {
+        0 => format!(
+            "{} for the models and {} headroom",
+            fmt_bytes(b.total_bytes),
+            fmt_bytes(b.headroom_bytes)
+        ),
+        e => format!(
+            "{} for the models, {} the engine costs on their cards and {} headroom",
+            fmt_bytes(b.total_bytes),
+            fmt_bytes(e),
+            fmt_bytes(b.headroom_bytes)
+        ),
+    };
     let detail = match (b.verdict.as_str(), capacity, outside) {
         (_, None, _) => format!(
             "{models}; there is nothing to compare it with: {}",
@@ -239,7 +252,12 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
         .is_none()
         .then(|| b.outside_note.clone())
         .flatten()
-        .map(|why| format!("What other programs hold is not measured: {why}."));
+        .map(|why| {
+            format!(
+                "What other programs hold is not measured: {}.",
+                why.trim_end_matches('.')
+            )
+        });
     let rows = b
         .stages
         .iter()
@@ -253,7 +271,7 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
             view! {
                 <tr>
                     <td class="wrap">
-                        <span class="rt-stage">
+                        <span class="rt-stage-name">
                             <span
                                 class="rt-swatch"
                                 style=format!("background:{}", stage_colour(&s.stage))
@@ -281,7 +299,9 @@ fn budget_view(b: RealtimeBudget) -> impl IntoView {
                                 }
                             })}
                     </td>
-                    <td>{place_label(s)}</td>
+                    // The card it goes on, where the machine has several
+                    // (device-ledger design §3.1).
+                    <td>{s.card.clone().unwrap_or_else(|| place_label(s).to_string())}</td>
                     <td class="num" class:t-warn=unknown>{bytes}</td>
                     <td class="wrap dim rt-note">{s.note.clone()}</td>
                 </tr>

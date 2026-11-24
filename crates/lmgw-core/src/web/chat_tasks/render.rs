@@ -74,6 +74,7 @@ pub(crate) fn result_row(row: &McpTaskRow) -> ResultRow {
                 id: id.clone(),
                 name: JOB_RESULT.to_string(),
                 args: json!({"job": row.task_id, "tool": row.tool}),
+                cache_control: None,
             }],
         },
         Message {
@@ -83,6 +84,7 @@ pub(crate) fn result_row(row: &McpTaskRow) -> ResultRow {
                 name: Some(JOB_RESULT.to_string()),
                 content: blocks,
                 is_error: status != TaskStatus::Completed,
+                cache_control: None,
             }],
         },
     ];

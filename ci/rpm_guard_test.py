@@ -9,12 +9,13 @@ exactly the allowlisted files, and one per kind of problem the guard refuses. Th
 that the destinations tauri-bundler derives from src-tauri/tauri.conf.json are exactly the
 allowlist's files, so a new bundle path fails here before it fails a pipeline, and that the
 allowlist's `pinned` entries name what tauri.conf.json packs (the policy's sha256 is its
-source's, the helper's `built` file is its source). Without rpmbuild the sample packages are
-skipped, visibly, and the config checks still run.
+source's, the helper's and the document reader's `built` files are their sources). Without
+rpmbuild the sample packages are skipped, visibly, and the config checks still run.
 
-The samples stand in for the root helper with a few bytes that start like an ELF file, and
-check them against a copy of the allowlist whose `built` names that stand-in; the policy in
-them is the real one, so its pinned sha256 is the real pin.
+The samples stand in for the root helper and for the document reader with a few bytes each
+that start like an ELF file, and check them against a copy of the allowlist whose `built`
+entries name those stand-ins; the policy in them is the real one, so its pinned sha256 is the
+real pin.
 """
 
 import hashlib
@@ -37,6 +38,13 @@ POLICY = "/usr/share/polkit-1/actions/io.github.lmgw-dev.lmgw.machine-setup.poli
 HELPER_BUILT = 'built = "target/release/lmgw-machine-helper"'
 # What the samples ship as the helper: an ELF header's first bytes, then something of its own.
 FAKE_HELPER = b"\x7fELF\x02\x01\x01\x00 rpm_guard_test stand-in for the root helper\n"
+# The document reader the gateway starts for untrusted files (crates/lmgw-doc-reader), and its
+# stand-in.
+READER = "/usr/libexec/lmgw/lmgw-doc-reader"
+READER_BUILT = 'built = "target/release/lmgw-doc-reader"'
+# (Like the helper's, shorter than an ELF header with the test's "changed" added: rpmbuild
+# refuses a noarch package that holds a whole ELF header, 64 bytes.)
+FAKE_READER = b"\x7fELF\x02\x01\x01\x00 rpm_guard_test stand-in for the doc reader\n"
 
 failures = []
 
@@ -63,6 +71,11 @@ def allowlisted_requires():
         return tomllib.load(f)["dependencies"]["requires"]
 
 
+def allowlisted_recommends():
+    with open(ALLOWLIST, "rb") as f:
+        return tomllib.load(f)["dependencies"]["recommends"]
+
+
 def tauri_sources():
     """bundle.linux.rpm.files of src-tauri/tauri.conf.json: destination -> source path,
     absolute."""
@@ -85,17 +98,21 @@ class Builder:
         os.makedirs(self.home)
         self.n = 0
         # What a file holds unless a test says otherwise; every other file is "x\n".
-        self.contents = {HELPER: FAKE_HELPER, POLICY: policy_bytes()}
+        self.contents = {HELPER: FAKE_HELPER, READER: FAKE_READER, POLICY: policy_bytes()}
 
-    def build(self, files, sections="", extra=(), header=(), requires=None, contents=None):
+    def build(self, files, sections="", extra=(), header=(), requires=None, contents=None,
+              recommends=None):
         """files: [(attr, path)], regular files with attr like "0644,root,root" or
         "%caps(...) 0755,root,root"; extra: [(install command, %files line)] for anything else
         (a symlink, a directory); sections: more spec text (scriptlets); header: more tag lines
         (Provides:, Obsoletes:, ...); requires: the Requires names, default the allowlist's;
+        recommends: the Recommends names, default the allowlist's;
         contents: {path: bytes} over the defaults (the stand-in helper, the real policy).
         Returns the .rpm."""
         if requires is None:
             requires = allowlisted_requires()
+        if recommends is None:
+            recommends = allowlisted_recommends()
         contents = {**self.contents, **(contents or {})}
         self.n += 1
         release = str(self.n)
@@ -126,6 +143,7 @@ class Builder:
             "License: MIT",
             "BuildArch: noarch",
             *[f"Requires: {r}" for r in requires],
+            *[f"Recommends: {r}" for r in recommends],
             *header,
             "",
             "%description",
@@ -189,7 +207,7 @@ def write_allowlist(tmp, name, text):
 
 
 def clean_files():
-    return [("0755,root,root" if p in ("/usr/bin/lmgw", HELPER) else "0644,root,root", p)
+    return [("0755,root,root" if p in ("/usr/bin/lmgw", HELPER, READER) else "0644,root,root", p)
             for p in allowlisted_files()]
 
 
@@ -206,13 +224,20 @@ def samples(tmp):
         text = f.read()
     check(text.count(HELPER_BUILT) == 1, "the allowlist pins the helper to the file ci/build.sh "
           "builds", HELPER_BUILT)
-    SAMPLE_ALLOWLIST = write_allowlist(tmp, "allowlist.toml",
-                                       text.replace(HELPER_BUILT, f'built = "{stand_in}"'))
+    reader_stand_in = os.path.join(tmp, "built-reader")
+    with open(reader_stand_in, "wb") as f:
+        f.write(FAKE_READER)
+    check(text.count(READER_BUILT) == 1, "the allowlist pins the document reader to the file "
+          "ci/build.sh builds", READER_BUILT)
+    SAMPLE_ALLOWLIST = write_allowlist(
+        tmp, "allowlist.toml",
+        text.replace(HELPER_BUILT, f'built = "{stand_in}"')
+            .replace(READER_BUILT, f'built = "{reader_stand_in}"'))
     b = Builder(tmp)
     lic = "/usr/share/licenses/lmgw/silero-vad/LICENSE"
 
     rc, out = guard(b.build(clean_files()))
-    check(rc == 0 and "no scriptlets" in out and "2 pinned file(s) as pinned" in out,
+    check(rc == 0 and "no scriptlets" in out and "3 pinned file(s) as pinned" in out,
           "a clean package passes", out)
 
     pinned(b, tmp, stand_in)
@@ -357,6 +382,9 @@ def samples(tmp):
     for tag in ("Recommends", "Suggests", "Supplements", "Enhances"):
         rc, out = guard(b.build(clean_files(), header=[f"{tag}: bash"]))
         check(rc == 1 and f"({tag.lower()} bash)" in out, f"an extra {tag} is refused", out)
+    rc, out = guard(b.build(clean_files(), recommends=allowlisted_recommends()[1:]))
+    check(rc == 1 and f"(recommends {allowlisted_recommends()[0]}): is in the allowlist's" in out,
+          "a missing Recommends is refused", out)
     allow = os.path.join(tmp, "allow-obs.toml")
     with open(allow, "w") as f:
         f.write(allowlist_text().replace("obsoletes = []", 'obsoletes = ["old-lmgw"]'))
@@ -405,6 +433,14 @@ def pinned(b, tmp, stand_in):
     rc, out = guard(b.build(clean_files(), contents={HELPER: FAKE_HELPER + b"changed"}))
     check(rc == 1 and f"{HELPER}: is not the file this job built: its sha256 is" in out,
           "a helper that is not the file this job built is refused", out)
+
+    rc, out = guard(b.build(with_attr(clean_files(), READER, "0775,root,root")))
+    check(rc == 1 and READER in out,
+          "a document reader of another mode is refused", out)
+
+    rc, out = guard(b.build(clean_files(), contents={READER: FAKE_READER + b"changed"}))
+    check(rc == 1 and f"{READER}: is not the file this job built: its sha256 is" in out,
+          "a document reader that is not the file this job built is refused", out)
 
     clean = b.build(clean_files())
     gone = write_allowlist(tmp, "allow-gone.toml", allowlist_text().replace(
@@ -520,7 +556,8 @@ def pinned_config_check():
             check(os.path.normpath(os.path.join(ROOT, pin["built"])) == src,
                   f"the pinned built file of {dest} is what tauri.conf.json packs",
                   f"built: {pin['built']}, packed: {os.path.relpath(src, ROOT)}")
-    check(set(pins) == {HELPER, POLICY}, "the helper and its policy are pinned",
+    check(set(pins) == {HELPER, READER, POLICY},
+          "the helper, its policy and the document reader are pinned",
           f"pinned: {sorted(pins)}")
 
 
@@ -567,9 +604,10 @@ def bundle_destinations():
 
 def depends_check():
     with open(TAURI_CONF) as f:
-        depends = json.load(f)["bundle"]["linux"]["rpm"].get("depends", [])
-    rpm_conf = json.load(open(TAURI_CONF))["bundle"]["linux"]["rpm"]
-    other = [k for k in ("provides", "obsoletes", "conflicts", "recommends", "suggests",
+        rpm_conf = json.load(f)["bundle"]["linux"]["rpm"]
+    depends = rpm_conf.get("depends", [])
+    recommends = rpm_conf.get("recommends", [])
+    other = [k for k in ("provides", "obsoletes", "conflicts", "suggests",
                          "supplements", "enhances") if rpm_conf.get(k)]
     # The sonames are what tauri-bundler adds itself; everything else is `depends`.
     requires = allowlisted_requires()
@@ -577,7 +615,12 @@ def depends_check():
     check(set(requires) - sonames == set(depends) and set(depends) <= set(requires),
           "the allowlist's requires are tauri.conf.json's depends plus the bundler's sonames",
           f"depends: {sorted(depends)}\nrequires: {sorted(requires)}")
-    check(not other, "tauri.conf.json asks for no provides/obsoletes/conflicts/... "
+    # The optional tools (document-conversion design §6.1): the allowlist's recommends are
+    # exactly tauri.conf.json's.
+    check(sorted(recommends) == sorted(allowlisted_recommends()),
+          "the allowlist's recommends are tauri.conf.json's recommends",
+          f"tauri.conf.json: {sorted(recommends)}\nallowlist: {sorted(allowlisted_recommends())}")
+    check(not other, "tauri.conf.json asks for no provides/obsoletes/conflicts/suggests/... "
           "(the allowlist pins them empty)", f"set in the config: {other}")
 
 

@@ -340,6 +340,7 @@ pub async fn test_profile(
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     };
     match call(&state, &caller, &ir).await {
         Ok(answer) => Json(TestAnswer { system, ..answer }).into_response(),

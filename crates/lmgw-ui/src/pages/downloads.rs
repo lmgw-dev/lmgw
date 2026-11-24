@@ -1,7 +1,13 @@
-//! Downloads — every tracked Hugging Face file, grouped by the repo it came
-//! from, with live progress off the shared jobs feed (§9c), update tracking
-//! (ETag drift → one-click re-download), and the recovery path for wizard
-//! downloads that finished after the window closed ("Plan & create").
+//! Downloads — every tracked Hugging Face file, with live progress off the
+//! shared jobs feed (§9c), update tracking (ETag drift → one-click
+//! re-download), and the recovery path for wizard downloads that finished
+//! after the window closed ("Plan & create").
+//!
+//! The files are boxed groups of rows (modern-sample.html): what is moving
+//! (a bar under its name, Stop at its end) and what wants a hand (failed,
+//! changed on Hugging Face, gone from the disk; Retry, Update, Download
+//! again) first, then each repo's downloaded files, folded from its heading,
+//! and the single-file repos together.
 //!
 //! The rows are the durable `hf_models` records; the bytes moving through
 //! them are `hf_download` jobs on the `/api/events` `jobs` frame, so the list
@@ -27,13 +33,12 @@ use super::wizard::{self, file_role, Planned};
 use crate::catalog::use_model_catalog;
 use crate::fmt::{fmt_bytes, grouped};
 use crate::widgets::{
-    filter_words, use_toasts, Facet, FacetSet, FilterBar, GroupRow, MenuItem, Modal, ModalFooter,
-    PageFrame, PageMode, RowMenu, Toasts,
+    filter_words, use_toasts, Facet, FacetSet, FilterBar, Ico, Icon, MenuItem, Modal, ModalFooter,
+    PageFrame, RowMenu, Toasts,
 };
 
 /// The four container targets, in the order the page lists them.
 const TARGETS: [&str; 4] = ["chat", "aux", "audio", "image"];
-const COLS: u32 = 7;
 
 /// Jobs feed key of the transfer for one tracked download row.
 fn job_key(id: i64) -> String {
@@ -94,8 +99,8 @@ fn planable_target(target: &str) -> bool {
     matches!(target, "chat" | "aux")
 }
 
-/// One tracked file, with what the page knows about it, flattened for the
-/// table.
+/// One tracked file, with what the page knows about it, flattened for its
+/// row.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct FileItem {
     id: i64,
@@ -143,6 +148,22 @@ impl FileItem {
         )
         .to_lowercase();
         words.iter().all(|w| hay.contains(w.as_str()))
+    }
+
+    fn section(&self, running: bool) -> Section {
+        // A row claiming to transfer with no job behind it (cut off, or
+        // paused) needs a Resume: it is under Needs attention, as the failed
+        // facet counts it.
+        if running {
+            Section::Moving
+        } else if self.in_flight()
+            || matches!(self.status.as_str(), "failed" | "update_available")
+            || self.on_disk == Some(false)
+        {
+            Section::Attention
+        } else {
+            Section::Done
+        }
     }
 
     fn in_flight(&self) -> bool {
@@ -200,13 +221,35 @@ fn uses_of(m: &ModelsFull) -> HashMap<String, (String, Vec<String>)> {
     out
 }
 
-/// One repo's files, in table order: what it downloads on its own first,
+/// Where a file stands, which is the group it is listed in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    /// Transferring, or waiting to go on (paused, cut off).
+    Moving,
+    /// Failed, changed on Hugging Face, or gone from the disk.
+    Attention,
+    Done,
+}
+
+/// What a group of the page is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    Moving,
+    Attention,
+    /// One repo's downloaded files.
+    Repo,
+    /// The downloaded files of every repo with one file.
+    Singles,
+}
+
+/// One repo's files, in list order: what it downloads on its own first,
 /// then the companions hanging off it. Or, `singles`, every repo that has
 /// one file: a band of its own over each of those was two rows per file,
 /// and a file row out of any band would read as the band above's (review
 /// ux:U-19). Those rows name their repo instead.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Group {
+    kind: Kind,
     repo: String,
     singles: bool,
     files: Vec<FileItem>,
@@ -400,18 +443,35 @@ pub fn Downloads() -> impl IntoView {
         let f = facet.get();
         let run = running.get();
         let mut by_repo: BTreeMap<String, (Vec<FileItem>, usize)> = BTreeMap::new();
+        // What is moving, and what wants a hand, lead; what sits on the disk
+        // follows, by its repo.
+        let (mut moving, mut moving_total) = (Vec::new(), 0);
+        let (mut attention, mut attention_total) = (Vec::new(), 0);
         items.with(|all| {
             for it in all {
-                let e = by_repo
-                    .entry(it.repo.clone())
-                    .or_insert_with(|| (Vec::new(), 0));
-                e.1 += 1;
-                if it.matches(&words) && it.facet(&f, run.contains(&it.id)) {
-                    e.0.push(it.clone());
+                let shown = it.matches(&words) && it.facet(&f, run.contains(&it.id));
+                let (list, total) = match it.section(run.contains(&it.id)) {
+                    Section::Moving => (&mut moving, &mut moving_total),
+                    Section::Attention => (&mut attention, &mut attention_total),
+                    Section::Done => {
+                        let e = by_repo
+                            .entry(it.repo.clone())
+                            .or_insert_with(|| (Vec::new(), 0));
+                        e.1 += 1;
+                        if shown {
+                            e.0.push(it.clone());
+                        }
+                        continue;
+                    }
+                };
+                *total += 1;
+                if shown {
+                    list.push(it.clone());
                 }
             }
         });
-        let group = |repo: String, singles: bool, mut files: Vec<FileItem>, total: usize| {
+        let group = |kind: Kind, repo: String, mut files: Vec<FileItem>, total: usize| {
+            let singles = kind != Kind::Repo;
             files.sort_by(|a, b| {
                 let key = |f: &FileItem| {
                     (
@@ -428,6 +488,7 @@ pub fn Downloads() -> impl IntoView {
             users.sort();
             users.dedup();
             Group {
+                kind,
                 repo,
                 singles,
                 files,
@@ -438,17 +499,40 @@ pub fn Downloads() -> impl IntoView {
         };
         let (mut singles, mut singles_total) = (Vec::new(), 0);
         let mut out: Vec<Group> = Vec::new();
+        if !moving.is_empty() {
+            out.push(group(Kind::Moving, String::new(), moving, moving_total));
+        }
+        if !attention.is_empty() {
+            out.push(group(
+                Kind::Attention,
+                String::new(),
+                attention,
+                attention_total,
+            ));
+        }
+        // A repo is a single-file one by all its files, wherever they are
+        // listed: its downloaded projector beside weights still in flight
+        // stays under the repo's own heading.
+        let per_repo: HashMap<String, usize> = items.with(|all| {
+            let mut m = HashMap::new();
+            for it in all {
+                *m.entry(it.repo.clone()).or_default() += 1;
+            }
+            m
+        });
+        let mut repos: Vec<Group> = Vec::new();
         for (repo, (files, total)) in by_repo {
-            if total == 1 {
+            if per_repo.get(&repo).copied().unwrap_or(total) == 1 {
                 singles_total += 1;
                 singles.extend(files);
             } else if !files.is_empty() {
-                out.push(group(repo, false, files, total));
+                repos.push(group(Kind::Repo, repo, files, total));
             }
         }
-        out.sort_by_key(|g| g.repo.to_lowercase());
+        repos.sort_by_key(|g| g.repo.to_lowercase());
+        out.extend(repos);
         if !singles.is_empty() {
-            out.push(group(String::new(), true, singles, singles_total));
+            out.push(group(Kind::Singles, String::new(), singles, singles_total));
         }
         out
     });
@@ -520,13 +604,20 @@ pub fn Downloads() -> impl IntoView {
                     .count()
             };
             format!(
-                "{} files from {} repos · {} on disk · {} downloading · {} failed · {} updates",
+                "{} {} from {} {} · {} on disk · {} downloading · {} failed · {} {}",
                 grouped(all.len() as u64),
+                if all.len() == 1 { "file" } else { "files" },
                 grouped(repos as u64),
+                if repos == 1 { "repo" } else { "repos" },
                 fmt_bytes(bytes),
                 n("downloading") + pulling,
                 n("failed"),
                 n("updates"),
+                if n("updates") == 1 {
+                    "update"
+                } else {
+                    "updates"
+                },
             )
         })
     };
@@ -576,50 +667,85 @@ pub fn Downloads() -> impl IntoView {
     };
 
     let render_group = move |g: Group| {
-        let persist = if g.singles {
-            "open.downloads.singles".to_string()
-        } else {
-            format!("open.downloads.repo.{}", g.repo)
+        let persist = match g.kind {
+            Kind::Singles => Some("open.downloads.singles".to_string()),
+            Kind::Repo => Some(format!("open.downloads.repo.{}", g.repo)),
+            Kind::Moving | Kind::Attention => None,
         };
-        let open = crate::prefs::persisted_bool(&persist, true);
+        let open = match &persist {
+            Some(p) => crate::prefs::persisted_bool(p, true),
+            None => RwSignal::new(true),
+        };
+        let foldable = persist.is_some();
         let count = if g.files.len() == g.total {
             grouped(g.total as u64)
         } else {
             format!("{} of {}", g.files.len(), g.total)
         };
-        let meta = if g.singles {
-            format!(
+        let meta = match g.kind {
+            Kind::Moving => "transferring, or waiting to go on".to_string(),
+            Kind::Attention => "failed, changed on Hugging Face, or gone from the disk".to_string(),
+            Kind::Singles => format!(
                 "{} · one file each, its repo named on the row",
                 fmt_bytes(g.bytes)
-            )
-        } else {
-            let users = if g.users.is_empty() {
-                "unused".to_string()
-            } else {
-                format!("used by {}", g.users.join(", "))
-            };
-            format!("{} · {users}", fmt_bytes(g.bytes))
+            ),
+            Kind::Repo => {
+                let users = if g.users.is_empty() {
+                    "unused".to_string()
+                } else {
+                    format!("used by {}", g.users.join(", "))
+                };
+                format!("{} · {users}", fmt_bytes(g.bytes))
+            }
         };
-        let label = if g.singles {
-            "Single-file repos".to_string()
-        } else {
-            g.repo.clone()
+        let label = match g.kind {
+            Kind::Moving => "In progress".to_string(),
+            Kind::Attention => "Needs attention".to_string(),
+            Kind::Singles => "Single-file repos".to_string(),
+            Kind::Repo => g.repo.clone(),
         };
         let singles = g.singles;
+        let kind = g.kind;
         let files = StoredValue::new(g.files);
+        let meta_title = meta.clone();
+        let toggle = move |_| {
+            if foldable {
+                open.update(|o| *o = !*o);
+            }
+        };
         view! {
-            <GroupRow
-                colspan=COLS
-                label=label
-                count=Signal::stored(count)
-                open=open
-                meta=move || view! { <span title=meta.clone()>{meta.clone()}</span> }
-            />
-            <Show when=move || open.get() || narrowed.get()>
-                <For each=move || files.get_value() key=|f| f.clone() let:f>
-                    <FileRow f=f ctx=ctx with_repo=singles/>
-                </For>
-            </Show>
+            <section class="pref-group dl-group" class:dl-moving=kind == Kind::Moving class:dl-attn=kind == Kind::Attention>
+                <div class="pref-head dl-head">
+                    <button
+                        type="button"
+                        class="dl-fold"
+                        class:foldable=foldable
+                        disabled=!foldable
+                        aria-expanded=move || (open.get() || narrowed.get()).to_string()
+                        title=if foldable { "Fold or unfold this repo's files" } else { "" }
+                        on:click=toggle
+                    >
+                        {foldable.then(|| view! { <Icon ico=Ico::Right class="dl-caret"/> })}
+                        <h2 class:mono=kind == Kind::Repo title=label.clone()>{label.clone()}</h2>
+                        <span class="dl-count">{count}</span>
+                    </button>
+                </div>
+                <p class="pref-desc dl-meta" title=meta_title>{meta}</p>
+                <Show when=move || open.get() || narrowed.get()>
+                    <div class="boxed dl-box">
+                        <For each=move || files.get_value() key=|f| f.clone() let:f>
+                            <FileRow f=f ctx=ctx with_repo=singles/>
+                        </For>
+                    </div>
+                </Show>
+            </section>
+        }
+    };
+    let check_title = move || {
+        if checking.get() {
+            "Checking every tracked file against Hugging Face…"
+        } else {
+            "Check for updates: compare every tracked file with Hugging Face"
         }
     };
 
@@ -627,11 +753,18 @@ pub fn Downloads() -> impl IntoView {
         <PageFrame
             title="Downloads"
             sub=summary
-            mode=PageMode::Fill
+            class="downloads"
             actions=move || {
                 view! {
-                    <button class="btn" disabled=move || checking.get() on:click=check_updates>
-                        {move || if checking.get() { "Checking…" } else { "Check for updates" }}
+                    <button
+                        type="button"
+                        class="icon-btn"
+                        title=check_title
+                        aria-label=check_title
+                        disabled=move || checking.get()
+                        on:click=check_updates
+                    >
+                        <Icon ico=Ico::Refresh/>
                     </button>
                 }
             }
@@ -648,75 +781,62 @@ pub fn Downloads() -> impl IntoView {
                 }
             }
         >
-            {move || {
-                data.error
-                    .get()
-                    .map(|e| {
-                        let stale = data.rows.with(Option::is_some);
-                        view! {
-                            <div class="notice err row">
-                                {if stale { "Refreshing the list failed: " } else { "Loading downloads failed: " }}
-                                {e}
-                                <button class="btn ghost sm" on:click=move |_| data.load()>
-                                    "Retry"
-                                </button>
-                            </div>
-                        }
-                    })
-            }}
-            {move || {
-                data.disk
-                    .with(|d| {
-                        d.iter()
-                            .filter_map(|(t, r)| r.as_ref().err().map(|e| format!("{t}: {e}")))
-                            .collect::<Vec<_>>()
-                    })
-                    .into_iter()
-                    .map(|e| {
-                        view! {
-                            <div class="notice warn">
-                                "Could not list a models dir, so its files show no size, users or on-disk state — "
-                                {e}
-                            </div>
-                        }
-                    })
-                    .collect_view()
-            }}
-            // What the models run in, downloading for the graphics card
-            // (machine-check design §5, D16): a model download fetches it
-            // too, and so does a first start.
-            <crate::gpu_download::GpuPulls/>
-            <div class="fill-pane card pad0">
-                <table class="data dl-table">
-                    <thead>
-                        <tr>
-                            <th>"File"</th>
-                            <th class="col-p2">"Role"</th>
-                            <th class="col-p3">"Target"</th>
-                            <th class="col-p2 users">"Used by"</th>
-                            <th>"Status"</th>
-                            <th class="num-h">"Size"</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <Show when=move || data.rows.with(Option::is_none) && data.error.with(Option::is_none)>
-                            <tr>
-                                <td colspan=COLS class="dim">"Loading…"</td>
-                            </tr>
-                        </Show>
-                        <Show when=move || data.rows.with(|r| r.as_ref().is_some_and(Vec::is_empty))>
-                            <tr>
-                                <td colspan=COLS class="empty">
-                                    "Nothing tracked yet — files added from Hugging Face (Models → Add from Hugging Face) appear here."
-                                </td>
-                            </tr>
-                        </Show>
-                        <For each=move || groups.get() key=|g| g.clone() let:g>
-                            {render_group(g)}
-                        </For>
-                    </tbody>
-                </table>
+            <div class="dl-flow">
+                {move || {
+                    data.error
+                        .get()
+                        .map(|e| {
+                            let stale = data.rows.with(Option::is_some);
+                            view! {
+                                <div class="notice err row">
+                                    {if stale { "Refreshing the list failed: " } else { "Loading downloads failed: " }}
+                                    {e}
+                                    <button class="btn ghost sm" on:click=move |_| data.load()>
+                                        "Retry"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
+                {move || {
+                    data.disk
+                        .with(|d| {
+                            d.iter()
+                                .filter_map(|(t, r)| r.as_ref().err().map(|e| format!("{t}: {e}")))
+                                .collect::<Vec<_>>()
+                        })
+                        .into_iter()
+                        .map(|e| {
+                            view! {
+                                <div class="notice warn">
+                                    "Could not list a models dir, so its files show no size, users or on-disk state: "
+                                    {e}
+                                </div>
+                            }
+                        })
+                        .collect_view()
+                }}
+                // What the models run in, downloading for the graphics card
+                // (machine-check design §5, D16): a model download fetches it
+                // too, and so does a first start.
+                <crate::gpu_download::GpuPulls/>
+                <Show when=move || data.rows.with(Option::is_none) && data.error.with(Option::is_none)>
+                    <div class="dl-empty">"Loading…"</div>
+                </Show>
+                <Show when=move || data.rows.with(|r| r.as_ref().is_some_and(Vec::is_empty))>
+                    <div class="dl-empty">
+                        "Nothing tracked yet: files added from Hugging Face (Models → Add from Hugging Face) appear here."
+                    </div>
+                </Show>
+                <Show when=move || {
+                    data.rows.with(|r| r.as_ref().is_some_and(|r| !r.is_empty()))
+                        && groups.with(Vec::is_empty)
+                }>
+                    <div class="dl-empty">"No file matches the filter."</div>
+                </Show>
+                <For each=move || groups.get() key=|g| g.clone() let:g>
+                    {render_group(g)}
+                </For>
             </div>
             <DeleteModal confirm=confirm ctx=ctx/>
         </PageFrame>
@@ -772,7 +892,7 @@ fn status_chip(f: &FileItem, job: Option<&JobRow>) -> AnyView {
                 }
             });
         return view! {
-            <span class="chip live"><span class="dot"></span>{label}</span>
+            <span class="chip info"><span class="dot"></span>{label}</span>
         }
         .into_any();
     }
@@ -817,7 +937,7 @@ fn status_chip(f: &FileItem, job: Option<&JobRow>) -> AnyView {
         }
         .into_any(),
         "update_available" => view! {
-            <span class="chip live" title="the file changed on Hugging Face">
+            <span class="chip info" title="the file changed on Hugging Face">
                 <span class="dot"></span>
                 "update available"
             </span>
@@ -879,6 +999,12 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
         _ => None,
     };
 
+    let redl_icon = match redl_label {
+        Some("Resume") => Ico::Play,
+        Some("Download again") => Ico::Download,
+        _ => Ico::Refresh,
+    };
+
     let planning = RwSignal::new(false);
     let plan_create = move |_| {
         if planning.get_untracked() {
@@ -935,11 +1061,13 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
             return Some(
                 view! {
                     <button
-                        class="btn ghost sm"
+                        type="button"
+                        class="icon-btn"
                         title="Stop this transfer; the entry stays and can be resumed"
+                        aria-label="Stop"
                         on:click=move |_| item.with_value(|f| ctx.hf_set("cancel", f, "cancel requested"))
                     >
-                        "Cancel"
+                        <Icon ico=Ico::Stop/>
                     </button>
                 }
                 .into_any(),
@@ -949,14 +1077,27 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
             return Some(
                 view! {
                     <button
-                        class="btn sm"
+                        type="button"
+                        class="icon-btn"
+                        title=label
+                        aria-label=label
                         on:click=move |_| item.with_value(|f| ctx.hf_set("redownload", f, "download started"))
                     >
-                        {label}
+                        <Icon ico=redl_icon/>
                     </button>
                 }
                 .into_any(),
             );
+        }
+        None
+    };
+
+    // "Plan & create" sits before the state chip, not in the action's slot,
+    // so a row that has it keeps the size, the slot and the menu where the
+    // other rows have them.
+    let plan_btn = move || {
+        if running() || redl_label.is_some() {
+            return None;
         }
         item.with_value(|f| f.planable).then(|| {
             view! {
@@ -1059,24 +1200,59 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
         true => file_title,
         false => format!("{file_title}\n{rev_long}"),
     };
+    // The bar: the job's share, or a segment travelling while the total
+    // is not known.
+    let bar = move || {
+        job.get().map(|j| {
+            let known = j.percent.is_some();
+            let width = j.percent.unwrap_or(0).min(100);
+            let words = match j.total {
+                Some(t) if t > 0 => format!("{} of {}", fmt_bytes(j.done), fmt_bytes(t)),
+                _ if j.done > 0 => format!("{} so far", fmt_bytes(j.done)),
+                _ => String::new(),
+            };
+            view! {
+                <div class="dl-bar">
+                    <div class="progress" class:indeterminate=!known>
+                        <i style=known.then(|| format!("width:{width}%"))></i>
+                    </div>
+                    <span class="dl-bytes">{words}</span>
+                </div>
+            }
+        })
+    };
+    let role = f.role.clone();
+    let target = f.target.clone();
+    let users_line = users.unwrap_or_else(|| "unused".to_string());
     view! {
-        <tr class:companion=f.companion>
-            <td class="clip mono-sm" title=file_title>
-                {(!sub.is_empty()).then(|| view! { <span class="pfx">{sub.clone()}</span> })}
-                {name}
-                {(!rev_short.is_empty()).then(|| view! { <span class="dim">" " {rev_short}</span> })}
-            </td>
-            <td class="col-p2">
-                <span class="type-badge" title=role_title>{f.role.clone()}</span>
-            </td>
-            <td class="col-p3 dim">{f.target.clone()}</td>
-            <td class="col-p2 dim users" title=users_title>
-                {users.unwrap_or_else(|| "unused".to_string())}
-            </td>
-            <td>{chip}</td>
-            <td class="num">{size_cell(&f)}</td>
-            <td class="actions">{primary} <RowMenu items=menu/></td>
-        </tr>
+        <div class="prow dl-row" class:companion=f.companion>
+            <div class="prow-text">
+                <span class="prow-title dl-name" title=file_title>
+                    {(!sub.is_empty()).then(|| view! { <span class="pfx">{sub.clone()}</span> })}
+                    {name}
+                    {(!rev_short.is_empty()).then(|| view! { <span class="dim">" " {rev_short}</span> })}
+                </span>
+                <span class="prow-sub dl-sub">
+                    <span class="type-badge" title=role_title>{role}</span>
+                    <span>{target}</span>
+                    <span class="dl-users" title=users_title>{users_line}</span>
+                </span>
+                {bar}
+            </div>
+            <div class="prow-end dl-end">
+                {plan_btn}
+                {chip}
+                <span class="dl-size">{size_cell(&f)}</span>
+                // A row with no icon action keeps its width, so the sizes end on one line.
+                {move || {
+                    primary()
+                        .or_else(|| {
+                            Some(view! { <span class="icon-btn-slot" aria-hidden="true"></span> }.into_any())
+                        })
+                }}
+                <RowMenu items=menu/>
+            </div>
+        </div>
     }
 }
 

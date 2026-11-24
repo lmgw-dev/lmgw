@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::scope::Scope;
 use crate::url_state::use_query_signal;
 use crate::widgets::model_finder::{ModelFinder, ReadyModel};
-use crate::widgets::{use_toasts, PageFrame};
+use crate::widgets::{use_toasts, Ico, Icon, PageFrame};
 
 /// The part of the created thread "Say hello" reads.
 #[derive(Deserialize)]
@@ -79,7 +79,12 @@ pub fn ModelFindPage() -> impl IntoView {
             sub="by the name someone told you, sized to your graphics card"
             class="find-page"
             actions=|| view! {
-                <a class="btn ghost" href="/models" title="Everything the gateway can serve">"Models"</a>
+                <a class="icon-btn" href="/downloads" title="Downloads" aria-label="Downloads">
+                    <Icon ico=Ico::Download/>
+                </a>
+                <a class="icon-btn" href="/models" title="Models: everything the gateway can serve" aria-label="Models">
+                    <Icon ico=Ico::Models/>
+                </a>
             }
         >
             <ModelFinder query=query on_ready=on_ready on_search=on_search/>

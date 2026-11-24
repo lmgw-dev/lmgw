@@ -5,9 +5,9 @@ Prompts are tiny so a full matrix stays cheap."""
 import json
 from dataclasses import dataclass
 
-from . import classify
+from . import caching, classify
 
-from .common import UNSUPPORTED, Outcome
+from .common import SKIPPED, UNSUPPORTED, Outcome
 from .media import png_b64
 
 ALL_ROUTES = ("chat", "messages", "responses")
@@ -292,6 +292,39 @@ def compaction(c):
     c.soft("kiwi" in t3.text.lower(), f"the summary lost the code word: {t3.text[:80]!r}")
 
 
+def _cache_twice(c, system, one_hour=False):
+    """The prompt-cache scenarios' shared body: `system` sent twice in a row, judged by
+    caching.judge. A route that is not Anthropic-protocol names cache_control in
+    x-lmgw-params-ignored and caches nothing: the cell is skipped, not failed."""
+    turns = []
+    for _ in range(2):
+        st = c.route.new(system=system)
+        c.route.user(st, "Reply with exactly one word: pong")
+        turns.append(c.call(st, max_tokens=16))
+        ignored = c.kit.rec.log[-1].lmgw_headers().get(caching.IGNORED_HEADER, "")
+        if caching.ignores_cache_control(ignored):
+            raise Outcome(SKIPPED, f"{caching.IGNORED_HEADER} names cache_control ({ignored}): "
+                                   "the route is not Anthropic-protocol, nothing is cached")
+    starts = [t.start_usage for t in turns] if c.stream else None
+    for rule, detail in caching.judge(turns[0].raw_usage, turns[1].raw_usage, starts, one_hour):
+        c.expect(False, rule, detail)
+
+
+def prompt_cache(c):
+    """Prompt caching on /v1/messages: a system prefix of at least 5,000 tokens with a
+    cache_control mark, sent twice in a row. The second answer reads what the first wrote (or
+    read: another cell may have written it a moment before); streamed, message_start already
+    shows the input."""
+    _cache_twice(c, [{"type": "text", "text": caching.prefix(), "cache_control": {"type": "ephemeral"}}])
+
+
+def prompt_cache_1h(c):
+    """The same with the 1-hour TTL (cache_control ttl "1h") and a prefix text of its own: the
+    first answer shows a 1-hour write in usage.cache_creation (or a read), the second reads."""
+    _cache_twice(c, [{"type": "text", "text": caching.prefix(label="one-hour fixture"),
+                      "cache_control": {"type": "ephemeral", "ttl": "1h"}}], one_hour=True)
+
+
 def error_unknown_model(c):
     st = c.route.new()
     c.route.user(st, "hi")
@@ -332,6 +365,10 @@ CATALOGUE = [
     Scenario("count_tokens", "the route's token counter", count_tokens, modes=("plain",)),
     Scenario("compaction", "on-demand compaction: the block alone, then sent back first", compaction,
              routes=("messages",), needs="compaction"),
+    Scenario("prompt_cache", "prompt caching: a marked 5,000-token system prefix, sent twice", prompt_cache,
+             routes=("messages",)),
+    Scenario("prompt_cache_1h", "prompt caching with the 1-hour TTL: its own 5,000-token prefix, sent twice",
+             prompt_cache_1h, routes=("messages",)),
     Scenario("error_unknown_model", "error shape: unknown model", error_unknown_model, modes=("plain",),
              model_free=True),
     Scenario("error_malformed", "error shape: malformed JSON body", error_malformed, modes=("plain",),

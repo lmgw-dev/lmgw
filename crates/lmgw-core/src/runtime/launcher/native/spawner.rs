@@ -35,18 +35,29 @@ impl Spawner {
 
     /// `cmd.spawn()` on the spawner thread, inside the caller's tokio
     /// runtime (whose process driver then reaps the child).
-    pub(super) async fn spawn(
+    /// `spawn`, handing the command back with the answer so a refused spawn
+    /// can be tried again.
+    pub(super) async fn spawn_keeping(
         &self,
         mut cmd: tokio::process::Command,
-    ) -> std::io::Result<tokio::process::Child> {
+    ) -> (
+        tokio::process::Command,
+        std::io::Result<tokio::process::Child>,
+    ) {
         let runtime = tokio::runtime::Handle::current();
         let (reply, answer) = oneshot::channel();
         let job: Job = Box::new(move || {
             let _entered = runtime.enter();
-            let _ = reply.send(cmd.spawn());
+            let spawned = cmd.spawn();
+            let _ = reply.send((cmd, spawned));
         });
         let gone = || std::io::Error::other("the native launcher's spawner thread has ended");
-        self.queue.send(job).map_err(|_| gone())?;
-        answer.await.map_err(|_| gone())?
+        if self.queue.send(job).is_err() {
+            return (tokio::process::Command::new(""), Err(gone()));
+        }
+        match answer.await {
+            Ok(back) => back,
+            Err(_) => (tokio::process::Command::new(""), Err(gone())),
+        }
     }
 }

@@ -5,6 +5,8 @@
 __pycache__/
 # ci/build.sh output (the RPM + latest.json); CI artifacts, never committed
 /dist/
+# ci/build-arch.sh output (the Arch package, its .sha256 + arch.json)
+/dist-arch/
 # Kept locally, not published: the idea list and the internal change log
 /docs/ideas.md
 /docs/release-notes.md

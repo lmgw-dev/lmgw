@@ -137,6 +137,7 @@ fn threads_placeholder(on_cpu: bool, args: &[String], s: Option<&SettingsFull>) 
     match threads_in_effect(None, on_cpu, args, &s.host_cpu) {
         (Some(n), source) => format!("{n} · {}", source.label()),
         (None, AuxThreadsSource::Args) => "from the extra args (not a number)".into(),
+        (None, AuxThreadsSource::LlamaServer) => "Server default".into(),
         (None, source) => source.label().into(),
     }
 }
@@ -311,10 +312,7 @@ mod tests {
             threads_placeholder(true, &[], Some(&s)),
             "16 · physical cores"
         );
-        assert_eq!(
-            threads_placeholder(false, &[], Some(&s)),
-            "llama-server's default"
-        );
+        assert_eq!(threads_placeholder(false, &[], Some(&s)), "Server default");
         let args = lines("--threads\n4\n");
         assert_eq!(
             threads_placeholder(true, &args, Some(&s)),

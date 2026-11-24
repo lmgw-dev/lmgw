@@ -1,21 +1,28 @@
-//! The head line: the text-to-speech model, then what it is — its family,
-//! the licence its package states (information only), whether the GPU hold
-//! hands it to a fallback now — and Reload.
+//! The header bar: the text-to-speech model as the title's subtitle, then
+//! what it is — its family, the licence its package states (information
+//! only), whether the GPU hold hands it to a fallback now — and Reload.
 
 use leptos::prelude::*;
 
 use super::page::{Facts, Lab};
-use crate::widgets::ModelPicker;
+use crate::widgets::{Ico, Icon, ModelPicker};
 
+/// The header bar's subtitle: the model picker.
 #[component]
-pub(super) fn Head(lab: Lab) -> impl IntoView {
+pub(super) fn ModelSub(lab: Lab) -> impl IntoView {
     view! {
-        <span class="lab-label">"Model"</span>
         <ModelPicker
             value=lab.alias
             tasks=lmgw_api_types::realtime::SPEECH_TASKS
             recent_key="voicelab"
         />
+    }
+}
+
+/// The header bar's facts about the picked model.
+#[component]
+pub(super) fn Head(lab: Lab) -> impl IntoView {
+    view! {
         {move || match lab.facts.get() {
             Facts::Loaded(f) => {
                 let kind = match &f.row {
@@ -44,7 +51,7 @@ pub(super) fn Head(lab: Lab) -> impl IntoView {
                 let held = match (&f.fallback, f.held) {
                     (Some(fb), held) => Some(view! {
                         <span
-                            class="chip live"
+                            class="chip info"
                             title=if held {
                                 "The GPU hold pauses this model now: its configured fallback answers"
                             } else {
@@ -70,10 +77,17 @@ pub(super) fn Head(lab: Lab) -> impl IntoView {
             Facts::Loading => view! { <span class="dim mini-note">"reading…"</span> }.into_any(),
             Facts::Failed(_) | Facts::None => ().into_any(),
         }}
-        <span class="spacer"></span>
+    }
+}
+
+/// The header bar's action: Reload.
+#[component]
+pub(super) fn Actions(lab: Lab) -> impl IntoView {
+    view! {
         <button
-            class="btn ghost"
+            class="icon-btn lab-reload"
             title="Read the model's facts, the rounds and the voice library again"
+            aria-label="Reload"
             on:click=move |_| {
                 lab.load_facts();
                 lab.load_rounds();
@@ -81,7 +95,7 @@ pub(super) fn Head(lab: Lab) -> impl IntoView {
                 lab.load_sentences();
             }
         >
-            "Reload"
+            <Icon ico=Ico::Refresh/>
         </button>
     }
 }

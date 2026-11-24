@@ -32,7 +32,7 @@
 
 use std::collections::BTreeSet;
 
-use super::nvml::ProcessMemory;
+use super::nvml::{DeviceId, DeviceProcesses, ProcessMemory};
 
 #[cfg(windows)]
 pub mod d3dkmt;
@@ -253,31 +253,45 @@ pub fn read_opened(p: &dyn Opened, adapters: &[&Adapter]) -> Read {
     }
 }
 
-/// Per-process GPU memory on `devices` for the PIDs asked about, by the
-/// rules in the module docs.
+/// Per-process GPU memory on each of `devices` (NVML's, by id and PCI
+/// address) for the PIDs asked about, by the rules in the module docs: one
+/// list per device, in `devices`' order (device-ledger design §2.3).
+///
+/// Each process is read once per device, on that device's adapter alone: on
+/// a machine with one card that is today's single read, and on one with
+/// several it is a read per card for every PID asked about.
 pub fn processes(
     kernel: &dyn Kernel,
-    devices: &[PciAddress],
+    devices: &[(DeviceId, PciAddress)],
     own: &[u32],
     retired: &[u32],
-) -> Result<Vec<ProcessMemory>, String> {
+) -> Result<Vec<DeviceProcesses>, String> {
     let adapters = kernel.adapters()?;
-    let counted = counted(&adapters, devices)?;
+    let pcis: Vec<PciAddress> = devices.iter().map(|(_, p)| *p).collect();
+    let counted = counted(&adapters, &pcis)?;
     let own_set: BTreeSet<u32> = own.iter().copied().collect();
     let asked: BTreeSet<u32> = own_set.iter().chain(retired).copied().collect();
-    let mut out = Vec::new();
+    let mut out: Vec<DeviceProcesses> = devices
+        .iter()
+        .map(|(id, _)| DeviceProcesses {
+            device: id.clone(),
+            processes: Vec::new(),
+        })
+        .collect();
     for pid in asked {
-        match kernel.local_committed(pid, &counted) {
-            Read::Gone | Read::Bytes(0) => {}
-            Read::Bytes(b) => out.push(ProcessMemory {
-                pid,
-                bytes: Some(b),
-            }),
-            Read::Failed(why) if own_set.contains(&pid) => {
-                return Err(format!("process {pid}'s GPU memory: {why}"))
+        for (adapter, on) in counted.iter().zip(out.iter_mut()) {
+            match kernel.local_committed(pid, std::slice::from_ref(adapter)) {
+                Read::Gone | Read::Bytes(0) => {}
+                Read::Bytes(b) => on.processes.push(ProcessMemory {
+                    pid,
+                    bytes: Some(b),
+                }),
+                Read::Failed(why) if own_set.contains(&pid) => {
+                    return Err(format!("process {pid}'s GPU memory: {why}"))
+                }
+                // A tombstone's PID may be another user's process by now.
+                Read::Failed(_) => {}
             }
-            // A tombstone's PID may be another user's process by now.
-            Read::Failed(_) => {}
         }
     }
     Ok(out)

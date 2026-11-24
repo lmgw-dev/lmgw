@@ -473,8 +473,8 @@ pub enum KeyRefused {
     /// client certificate alone. The client must send none.
     CredentialOnDeviceListener,
     /// `device_unconfirmed`: enrolled, and waiting for the owner to confirm
-    /// the device's code on lmgw's Devices card (device link §3.5). The
-    /// client shows "Confirm `<code>` on lmgw's Devices card" with its own
+    /// the device's code on its page in lmgw (device link §3.5). The client
+    /// shows "Confirm `<code>` in lmgw under Usage → Keys & budgets" with its own
     /// [`Credentials::confirm_code`], derived from its own key (the refusal's
     /// message is for people, not parsed), and asks again on its own
     /// backoff.

@@ -306,6 +306,9 @@ pub async fn sign_out() -> crate::api::Result<()> {
 /// the routes, so signing in re-creates every resource the page had in flight
 /// and each one asks again, now with a cookie. With accounts on it asks for
 /// a sign-in name and a password; on a set-password link it is that form.
+///
+/// The card takes the shared `.card` look; its inner form is not ported to
+/// preference rows yet.
 #[component]
 pub fn LoginCard() -> impl IntoView {
     let accounts_on = Signal::derive(|| gate().accounts_on.get());

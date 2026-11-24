@@ -41,7 +41,7 @@ pub(super) fn rewrite(ir: &str, ids: &HashMap<i64, i64>) -> Option<String> {
                             changed = true;
                         }
                     }
-                    ToolResultBlock::Text { text } => {
+                    ToolResultBlock::Text { text, .. } => {
                         if let Some(t) = in_text(text, ids) {
                             *text = t;
                             changed = true;
@@ -181,6 +181,7 @@ mod tests {
                     "image": "att:-12", "prompt": "make it blue, as att:-31 was",
                     "more": ["att:-3"], "n": 3,
                 }),
+                cache_control: None,
             }],
         };
         let only_call = serde_json::to_string(&vec![call]).unwrap();
@@ -212,6 +213,7 @@ mod tests {
                     },
                 ],
                 is_error: false,
+                cache_control: None,
             }],
         }];
         let ir = serde_json::to_string(&record).unwrap();

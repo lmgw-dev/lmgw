@@ -19,7 +19,7 @@ mod lines;
 /// The quit signals, installed before the start.
 mod signals;
 
-pub use lines::{deployment_lines, Line, CONTAINERENV};
+pub use lines::{container_marker, deployment_lines, Line, CONTAINERENV, DOCKERENV};
 pub use signals::quit_signals;
 
 /// Why this start must not go on (D1), when it must not: a production start
@@ -128,7 +128,7 @@ pub async fn prepare(
 
     // 5. The gateway, with what its environment pins and seeds applied
     // before its snapshot is first read.
-    for line in deployment_lines(env, Path::new(CONTAINERENV).exists()) {
+    for line in deployment_lines(env, container_marker()) {
         line.log();
     }
     let start = Start {

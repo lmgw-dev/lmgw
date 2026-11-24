@@ -163,7 +163,7 @@ async fn an_install_says_when_it_downloaded_and_when_podman_had_no_digest() {
             .report
             .warnings
             .iter()
-            .any(|w| w.contains("podman could not report a digest")),
+            .any(|w| w.contains("Podman could not report a digest")),
         "{live}"
     );
 }

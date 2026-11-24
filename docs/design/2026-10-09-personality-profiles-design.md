@@ -404,10 +404,21 @@ above is the current code, and `chat_golden.rs` pins it byte for byte.
   threads".
 - **The thread header** shows a profile chip beside the model when a profile is set; a click
   opens the drawer.
-- **The editor page** is `/chat/profiles`, with the profile list beside the editor (PageFrame
-  rules, one scroller). The editor component is the kit's (§6.2); the page only frames it and
-  passes `thread_id` when it was opened from a thread. The dashboard hosts the editor as well as
-  the desktop client (decision 7).
+- **The profiles page** is `/chat/profiles/:sel?` (`/chat/profiles/<id>`, `/chat/profiles/new`):
+  a list beside the selected profile's detail on the shared split view, like Upstreams. The list
+  head has a back button to the Chat (or to the thread) and a + menu (New profile, Add the
+  built-in Concise); a row shows the name, "Default" on the profile new threads start with, and
+  who uses it. `?thread=` and the search (`?q=`) are carried across every selection. With nothing
+  selected the page is a status page (the count, the default as a link to Settings, Add, and what
+  `?thread=` makes Preview, Test and Speak do). The editor component is the kit's (§6.2): preference
+  groups (Profile, Text, Examples, Voice block, Behaviour, Static part, Test, Speak a sample,
+  then Reset and Delete as rows) under a hero with the built-in, usage and default chips;
+  changed rows carry the accent dot, the save toast counts them, Ctrl+S saves and leaving with
+  edits asks through the shared guard. The page passes `thread_id` when it was opened from a
+  thread. The dashboard hosts the editor as well as the desktop client (decision 7), which keeps
+  the kit's `ProfilesPanel`. Not done yet: the Static part, Test and Speak groups are always open
+  (no fold), a reset toasts as a save, a failed delete says "Not saved", and the editor is one
+  column at every width.
 - **The voice panel** (the Chat page's voice mode) shows the same profile chip and picker as the
   drawer, writing the thread's `profile_id`. It plays replies in the voice that `voice_resolved`
   reports (§2.3, source `profile` when the profile supplies it), so nothing in the page picks a

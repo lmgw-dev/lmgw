@@ -111,6 +111,7 @@ async fn the_spa_is_served_at_the_root_and_the_api_backs_its_pages() {
         "/audio-lab",
         "/image-lab",
         "/decision-lab",
+        "/documents-lab",
         "/voice-lab",
         "/agents",
         // Both shipped agents, one per run kind: the chat preset and the batch
@@ -1561,11 +1562,7 @@ async fn upstream_models_carries_each_entrys_catalog_facts() {
         .await
         .unwrap();
     // A port that was free a moment ago: nothing answers there at all.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let (closed, _held) = common::refusing_port();
     let gone = store::insert_upstream(
         &state.db,
         &upstream("gone", format!("http://127.0.0.1:{closed}/v1")),

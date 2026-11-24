@@ -1550,11 +1550,8 @@ async fn a_dev_server_that_is_not_running_is_a_502_that_says_what_did_not_answer
     ))
     .await;
     op(&base, "agent_install", json!({ "image": image })).await;
-    // A port nothing is listening on: bind it, read the number, drop it.
-    let dead = {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap().port()
-    };
+    // A port nothing is listening on, held bound so it stays that way.
+    let (dead, _held) = crate::common::refusing_port();
     op(
         &base,
         "agent_dev_url_set",

@@ -3,7 +3,7 @@
 //! (audio model rows) and `lmgw__voice_transcribe` (voice-library clip
 //! transcripts, audio-class gap 5). Their dispatch is `selfadmin/audio.rs`.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, fallback_p, int_p, str_p, strs_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, fallback_p, gpu_pin_p, int_p, str_p, strs_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -311,12 +311,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                          answers only for the other reasons",
                     ),
                 ),
+                ("gpu_pin", gpu_pin_p()),
                 (
                     "clear",
                     str_p(
                         "Field names to reset, comma- or space-separated: 'lazy', \
                          'busy_timeout_ms', 'backend', 'threads', 'extra_run_args', \
-                         'fallback', and on update \
+                         'fallback', 'gpu_pin', and on update \
                          'residency' (forget the learned \
                          residency). A field named here is unset on create too, whatever \
                          value came with it.",

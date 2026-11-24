@@ -179,7 +179,9 @@ async fn a_background_start_blocked_by_the_owner_names_his_model_and_stops_nothi
 
     let why = blocked(guest_start(&g, "p", "jobs").await);
     assert!(why.starts_with("chat/mine ("), "{why}");
-    assert!(why.contains("chat/p needs 10.0 GiB"), "{why}");
+    // Its footprint and its start's margin, in every mode since the device
+    // ledger's WP13.
+    assert!(why.contains("chat/p needs 10.3 GiB"), "{why}");
     assert!(g.stops().is_empty());
     assert_eq!(g.runs(), vec!["mine"]);
 }

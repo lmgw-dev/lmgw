@@ -225,6 +225,7 @@ fn image(mime: &str, data: &str) -> ToolResultBlock {
     ToolResultBlock::Image {
         mime: mime.into(),
         data: data.into(),
+        cache_control: None,
     }
 }
 
@@ -234,6 +235,7 @@ fn tool_result(id: &str, content: Vec<ToolResultBlock>) -> ContentPart {
         name: None,
         content,
         is_error: false,
+        cache_control: None,
     }
 }
 
@@ -252,6 +254,7 @@ fn request(messages: Vec<Message>) -> ChatRequest {
         context_management: None,
         compaction: None,
         thinking_display: None,
+        cache_control: None,
     }
 }
 
@@ -266,6 +269,7 @@ fn tool_media_counts_the_tool_images_that_pass_the_format_check() {
                 ContentPart::Image {
                     mime: "image/png".into(),
                     source: crate::ir::ImageSource::Base64 { data: PNG.into() },
+                    cache_control: None,
                 },
             ],
         },

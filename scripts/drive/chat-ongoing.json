@@ -200,11 +200,11 @@
   "js": "'The deep link /chat?folder=<id>&settings=1 (client-apps design §3.7): a client sends the owner to the folder settings form. The setup wiped every folder first, so the drive\\'s folder is the instance\\'s first.'"
  },
  {
-  "expect": "(async()=>(await (await fetch('/chat/api/folders')).json()).folders.map(f=>f.id).join(',')==='1')()",
-  "label": "the drive's folder is folder 1"
+  "expect": "(async()=>(await (await fetch('/chat/api/folders')).json()).folders.map(f=>f.name).join(',')==='Assistant')()",
+  "label": "the drive's folder is the instance's only one (its id is whatever the database handed out)"
  },
  {
-  "nav": "/chat?folder=1&settings=1"
+  "js": "(async()=>{const f=(await (await fetch('/chat/api/folders')).json()).folders[0];location.href='/chat?folder='+f.id+'&settings=1';return 'folder '+f.id})()"
  },
  {
   "wait": 2

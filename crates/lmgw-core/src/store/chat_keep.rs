@@ -104,8 +104,9 @@ pub async fn insert_kept_chat_thread(
             "INSERT INTO chat_messages
                (thread_id, role, content, reasoning, prompt_tokens, completion_tokens,
                 ir_messages, created_at, kb_refs, context, model, answered_by, voice,
-                images_note, pending_approvals, reasoning_seals, origin)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                images_note, pending_approvals, reasoning_seals, origin, notices)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                     ?18)",
         )
         .bind(thread_id)
         .bind(&m.role)
@@ -128,6 +129,7 @@ pub async fn insert_kept_chat_thread(
         )
         .bind(super::chat_seals::to_column(&m.reasoning_seals))
         .bind(&m.origin)
+        .bind(super::chat_notices::to_column(&m.notices))
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();

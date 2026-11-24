@@ -193,7 +193,7 @@ pub(super) fn MetricsSection(page: RunPage) -> impl IntoView {
                 {move || match m.read.get() {
                     None => view! { <div class="dim lh-loading">"Reading the metrics…"</div> }.into_any(),
                     Some(Err(e)) => view! {
-                        <div class="notice err">{format!("⚠ The metrics did not load: {e}")}</div>
+                        <div class="notice err">{format!("The metrics did not load: {e}")}</div>
                     }
                     .into_any(),
                     Some(Ok(bm)) => {

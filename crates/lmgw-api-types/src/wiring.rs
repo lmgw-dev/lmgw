@@ -142,6 +142,21 @@ pub struct LocalModelDetail {
     /// context isn't a fit's shorter one.
     #[serde(default)]
     pub fit_note: Option<crate::model_find::FitNote>,
+    /// The cards this model may run on (device-ledger design §8); `None`:
+    /// lmgw chooses the card.
+    #[serde(default)]
+    pub gpu_pin: Option<Vec<crate::DeviceId>>,
+    /// The context field's notice (device-ledger design §8.2): while the row
+    /// sets no context on a machine of several cards it may use, that lmgw
+    /// keeps it on one card and what that card holds of its own context
+    /// now. `None` on one card and with a set context.
+    #[serde(default)]
+    pub context_notice: Option<String>,
+    /// Under the command line (device-ledger design §7.1): it shows the
+    /// arguments as written, and where lmgw picks the card when it starts
+    /// the model, this says so and names the card it would pick now.
+    #[serde(default)]
+    pub command_line_note: Option<String>,
 }
 
 /// Where a downloaded weights file came from.

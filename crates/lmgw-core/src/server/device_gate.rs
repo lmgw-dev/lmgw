@@ -173,8 +173,8 @@ pub(super) fn certificate_required(cap: Cap, headers: &HeaderMap) -> Response {
     let refusal = Refusal {
         status: StatusCode::UNAUTHORIZED,
         code: code::CLIENT_CERTIFICATE_REQUIRED,
-        message: "this route needs the device's certificate; pair the device on lmgw's \
-                  Devices card"
+        message: "this route needs the device's certificate; pair the device with Pair a \
+                  device… in lmgw under Usage → Keys & budgets"
             .into(),
     };
     if cap != Cap::Inference {

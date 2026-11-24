@@ -1,20 +1,25 @@
-//! Settings — the KDE System Settings shape (UX plan Phase 3, CFG S3–S10).
+//! Settings — a libadwaita preferences view on the shared split view
+//! (modern-sample.html; `crate::widgets::nav_split`): the categories as a
+//! list pane beside the shown category, whose groups are boxed preference
+//! groups that flow into two columns in a pane over 1000 px. Under 800 px of
+//! pane one shows at a time, the category with a back button. A search box
+//! over the categories shows every setting it matches, under its category;
+//! in a narrow window it lists the matches in the pane instead.
 //!
-//! A rail of categories with a search box over them; the pane shows one
-//! category, or every field the search matches under its category. There is
-//! one draft for the whole page and one Save: [`FormState`] tracks every
-//! field against what the server last said, the foot counts what changed and
-//! where, and Save posts a sparse patch of the changed keys only —
-//! `SettingsFullPatch` and every nested patch are all-`Option`, so any mix of
-//! keys is one valid patch (a refusal refuses all of it, and says so in the
-//! foot until the next save).
+//! There is one draft for the whole page and one save: [`FormState`] tracks
+//! every field against what the server last said, each changed row carries
+//! the accent dot, the categories say how many of theirs changed, and the
+//! save toast offers Discard and Save (Ctrl+S). Save posts a sparse patch of
+//! the changed keys only — `SettingsFullPatch` and every nested patch are
+//! all-`Option`, so any mix of keys is one valid patch (a refusal refuses
+//! all of it, and says so in the toast until the next save).
 //!
 //! The page is table-driven: [`fields`] names each setting once — its patch
 //! path, label, category, group and control — and the same row feeds the
 //! renderer, the search, the dirty counts and the deep links
 //! (`/settings/<cat>#f-<key-with-dashes>`, scrolled to and flashed). Every
 //! category stays mounted and is only hidden, so a search or a category
-//! switch never loses an edit.
+//! switch never loses an edit, and only leaving Settings asks about them.
 //!
 //! Controls that act the moment they are used — the GPU hold, Apply to
 //! running containers, Check now, theme and scale — are never part of the
@@ -26,7 +31,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::{use_location, use_navigate};
+use leptos_router::hooks::{use_location, use_navigate, use_params_map};
 use lmgw_api_types::builds::MAX_BUILD_UPDATE_CHECK_HOURS;
 // The names the gateway's messages point at a setting by: the rail, the
 // cards and the rows that carry them are built from these.
@@ -38,9 +43,10 @@ use crate::catalog::CatalogEntry;
 use crate::live::use_live;
 use crate::ops_state::{class_key, use_ops};
 use crate::scope::Scope;
+use crate::widgets::nav_split::{provide_save_key, NavSplit, SaveKey, SplitConf, SplitState};
 use crate::widgets::{
-    use_dirty_guard, use_slash_focus, use_toasts, Explain, Field, FormState, ImageClass,
-    ImagePicker, Kind, MachineCheck, ModelPicker, PageFrame, PageMode, SaveBar, Section, Select,
+    use_dirty_guard, use_toasts, Explain, FormState, ImageClass, ImagePicker, Kind, MachineCheck,
+    ModelPicker, SaveToast, Select,
 };
 
 /// The machine check card's anchor: `/settings/gpu#machine` (machine-check
@@ -66,6 +72,8 @@ mod chat_media;
 mod chat_profile;
 mod chat_voice;
 mod devices;
+/// Settings → Documents (document-conversion design §8).
+mod documents;
 mod read;
 /// Settings → Network & access → TLS (headless server design §4.7).
 mod tls;
@@ -77,6 +85,10 @@ mod draft;
 mod explain;
 mod forge;
 mod headroom;
+/// The category pane.
+mod list;
+/// The row a setting is drawn in.
+mod prow;
 mod render;
 mod rows;
 mod table;
@@ -85,6 +97,7 @@ pub(super) use draft::href;
 use draft::*;
 use explain::*;
 use forge::*;
+use prow::SetField as Field;
 use render::*;
 use rows::*;
 use table::*;
@@ -109,6 +122,7 @@ fn fields() -> impl Iterator<Item = &'static Def> {
         .chain(REST.iter())
         .chain(chat_voice::CHAT_VOICE.iter())
         .chain(chat_media::CHAT_MEDIA.iter())
+        .chain(documents::DOCUMENTS.iter())
         .chain(realtime::REALTIME.iter())
         .chain(webrtc::WEBRTC.iter())
         .chain(devices::DEVICES.iter())
@@ -140,6 +154,8 @@ struct Page {
     /// `#machine` was asked for: the card scrolls into view once it has
     /// its content (review L10).
     machine_scroll: RwSignal<bool>,
+    /// The router's move to a path (and whether it replaces the entry).
+    go: Callback<(String, bool)>,
 }
 
 impl Page {
@@ -276,8 +292,19 @@ pub fn Settings() -> impl IntoView {
         under,
         settings_written,
         machine_scroll: RwSignal::new(false),
+        go: Callback::new(move |(to, replace): (String, bool)| {
+            navigate(
+                &to,
+                leptos_router::NavigateOptions {
+                    replace,
+                    scroll: false,
+                    ..Default::default()
+                },
+            )
+        }),
     };
     chat_media::provide(page.data);
+    documents::provide();
 
     // Numbers that parse but are out of range, and what the server would
     // refuse across fields — of the fields this save judges only, per key.
@@ -293,14 +320,6 @@ pub fn Settings() -> impl IntoView {
         }
         n
     });
-    let detail = Signal::derive(move || {
-        dirty_by_cat.with(|by| {
-            CATS.iter()
-                .filter_map(|(slug, label, _)| by.get(slug).map(|n| format!("{label} ({n})")))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        })
-    });
     let matches_by_cat = Memo::new(move |_| {
         let mut n: BTreeMap<&'static str, usize> = BTreeMap::new();
         if page.searching() {
@@ -315,7 +334,8 @@ pub fn Settings() -> impl IntoView {
     use_dirty_guard().watch("Settings", Signal::derive(move || dirty_count.get() > 0));
 
     let save = Callback::new(move |()| {
-        if saving.get_untracked() || invalid.get_untracked() > 0 {
+        if saving.get_untracked() || invalid.get_untracked() > 0 || dirty_count.get_untracked() == 0
+        {
             return;
         }
         let Ok(patch) = form.patch() else { return };
@@ -424,27 +444,7 @@ pub fn Settings() -> impl IntoView {
         set_timeout(move || flash(&id), Duration::from_millis(60));
     });
 
-    // The narrow pane's picker for what the rail does.
-    let cat_sel = RwSignal::new(active.get_untracked().to_string());
-    Effect::new(move |_| {
-        let a = active.get().to_string();
-        if cat_sel.get_untracked() != a {
-            cat_sel.set(a);
-        }
-    });
-    Effect::new(move |_| {
-        let v = cat_sel.get();
-        if v != active.get_untracked() {
-            navigate(&format!("/settings/{v}"), Default::default());
-        }
-    });
-    let cat_opts = Signal::derive(|| {
-        CATS.iter()
-            .map(|(s, l, _)| (s.to_string(), l.to_string()))
-            .collect::<Vec<_>>()
-    });
-
-    let sub = move || {
+    let sub = Signal::derive(move || {
         data.with(|d| {
             d.as_ref()
                 .map(|v| {
@@ -456,30 +456,44 @@ pub fn Settings() -> impl IntoView {
                 })
                 .unwrap_or_default()
         })
-    };
-    let search_box = move || {
-        let q_box: NodeRef<leptos::html::Input> = NodeRef::new();
-        use_slash_focus(q_box);
-        view! {
-            <input
-                class="input set-search"
-                type="search"
-                node_ref=q_box
-                data-slash
-                placeholder="Search settings"
-                aria-label="Search settings"
-                title="Search · / focuses, Esc clears"
-                data-untracked=""
-                prop:value=move || query.get()
-                on:input=move |ev| query.set(event_target_value(&ev))
-                on:keydown=move |ev| {
-                    if ev.key() == "Escape" {
-                        query.set(String::new());
-                    }
-                }
-            />
+    });
+
+    // The split: the address names a category, or none (`/settings`: the
+    // category list in a narrow window, Network beside it in a wide one).
+    let params = use_params_map();
+    let picked = Memo::new(move |_| {
+        params.with(|p| {
+            p.get_str("cat")
+                .and_then(|c| CAT_SLUGS.iter().copied().find(|s| *s == c))
+        })
+    });
+    let split = SplitState::new(SPLIT);
+    let narrow = split.narrow;
+    let save_key = provide_save_key();
+    SaveKey::install(save);
+    let refs = crate::widgets::list_pane::ListRefs::new();
+    let open_cat = Callback::new(move |(slug, replace): (&'static str, bool)| {
+        let to = format!("/settings/{slug}");
+        if to != loc.pathname.get_untracked() || !loc.search.get_untracked().is_empty() {
+            page.go.run((to, replace));
         }
-    };
+    });
+    let back = Callback::new(move |()| {
+        let q = loc.search.get_untracked();
+        let q = if q.is_empty() { q } else { format!("?{q}") };
+        page.go.run((format!("/settings{q}"), false));
+        refs.focus_later();
+    });
+    let title = Signal::derive(move || {
+        if page.searching() {
+            "Search results".to_string()
+        } else {
+            CATS.iter()
+                .find(|(s, ..)| *s == active.get())
+                .map_or(String::new(), |(_, l, _)| l.to_string())
+        }
+    });
+    let scrolled = RwSignal::new(false);
     let search_line = move || {
         let q = query.get();
         if q.trim().is_empty() {
@@ -501,90 +515,100 @@ pub fn Settings() -> impl IntoView {
         })
     };
 
-    view! {
-        <PageFrame title="Settings" sub=sub mode=PageMode::Split class="settings">
-            <nav class="split-rail set-rail" aria-label="Settings categories">
-                {search_box}
-                {CATS
-                    .iter()
-                    .map(|(slug, label, _)| {
-                        let slug: &'static str = slug;
-                        let current = move || {
-                            (!page.searching() && active.get() == slug).then_some("page")
-                        };
-                        let dirty = move || dirty_by_cat.with(|m| m.get(slug).copied().unwrap_or(0));
-                        let hits = move || matches_by_cat.with(|m| m.get(slug).copied().unwrap_or(0));
-                        view! {
-                            <a class="rail-item" href=format!("/settings/{slug}") aria-current=current>
-                                <span class="rail-label">{*label}</span>
-                                {move || {
-                                    (dirty() > 0)
-                                        .then(|| {
-                                            view! {
-                                                <span class="count attn" title="unsaved changes here">
-                                                    {dirty()}
-                                                </span>
-                                            }
-                                        })
-                                }}
-                                {move || {
-                                    page.searching()
-                                        .then(|| {
-                                            view! {
-                                                <span
-                                                    class="count"
-                                                    class:zero=move || hits() == 0
-                                                    title="settings matching the search"
-                                                >
-                                                    {hits()}
-                                                </span>
-                                            }
-                                        })
-                                }}
-                            </a>
-                        }
-                    })
-                    .collect_view()}
-            </nav>
-            <div class="split-pane set-pane">
-                <div class="rail-select">
-                    {search_box} <Select value=cat_sel options=cat_opts/>
-                </div>
-                <div class="fill-pane set-scroll">
-                    {search_line}
-                    {move || {
-                        load_err
-                            .get()
-                            .map(|e| {
-                                view! {
-                                    <div class="notice err row">
-                                        "Loading the settings failed: " {e}
-                                        <button class="btn ghost sm" on:click=move |_| load()>
-                                            "Retry"
-                                        </button>
-                                    </div>
-                                }
-                            })
-                    }}
-                    <Show when=move || data.with(Option::is_some)>
-                        {CATS.iter().map(|c| cat_view(c, page)).collect_view()}
-                    </Show>
-                    <Show when=move || data.with(Option::is_none) && load_err.with(Option::is_none)>
-                        <div class="dim">"Loading…"</div>
-                    </Show>
-                </div>
-                <div class="page-foot">
-                    <SaveBar
-                        dirty_count=dirty_count
-                        detail=detail
-                        invalid=invalid
-                        saving=saving
-                        error=save_err
-                        on_save=save
-                        on_discard=discard
-                    />
-                </div>
+    let list = ViewFn::from(move || {
+        view! {
+            <list::CatList
+                page=page
+                query=query
+                picked=picked
+                narrow=narrow
+                refs=refs
+                dirty_by_cat=dirty_by_cat
+                matches_by_cat=matches_by_cat
+                sub=sub
+                open_cat=open_cat
+            />
+            // A narrow window's list hides the detail pane, whose toast
+            // would leave unsaved edits with no Save or Discard in sight.
+            <Show when=move || narrow.get() && picked.with(Option::is_none)>
+                <SaveToast
+                    dirty_count=dirty_count
+                    invalid=invalid
+                    saving=saving
+                    error=save_err
+                    on_save=save
+                    on_discard=discard
+                />
+            </Show>
+        }
+    });
+    let detail = ViewFn::from(move || {
+        view! {
+            <crate::widgets::nav_split::DetailHead
+                narrow=narrow
+                back=back
+                back_label="Back to the categories"
+                title=title
+                scrolled=scrolled
+            />
+            <div
+                class="detail-scroll mdetail-scroll set-scroll"
+                tabindex="-1"
+                on:scroll=move |ev| crate::widgets::nav_split::track_scroll(&ev, scrolled)
+            >
+                {search_line}
+                {move || {
+                    load_err
+                        .get()
+                        .map(|e| {
+                            view! {
+                                <div class="notice err row set-load-err">
+                                    "Loading the settings failed: " {e}
+                                    <button class="btn sm" on:click=move |_| load()>
+                                        "Retry"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
+                <Show when=move || data.with(Option::is_some)>
+                    {CATS.iter().map(|c| cat_view(c, page)).collect_view()}
+                </Show>
+                <Show when=move || data.with(Option::is_none) && load_err.with(Option::is_none)>
+                    <div class="mdetail-empty">"Loading…"</div>
+                </Show>
             </div>
-        </PageFrame>
+            <SaveToast
+                dirty_count=dirty_count
+                invalid=invalid
+                saving=saving
+                error=save_err
+                on_save=save
+                on_discard=discard
+            />
+        }
+    });
+
+    view! {
+        <NavSplit
+            split=split
+            has_sel=Signal::derive(move || picked.with(Option::is_some))
+            save_key=save_key
+            search=refs.search
+            search_off=Signal::derive(move || narrow.get() && picked.with(Option::is_some))
+            list=list
+            detail=detail
+        />
     }
 }
+
+/// The split's bounds: the categories' list is narrower than the Models
+/// list, the breakpoint the same (a 1024 px window at 125 % shows one pane).
+const SPLIT: SplitConf = SplitConf {
+    class: "settings-split",
+    width_key: "settings.list.width",
+    list_width: (210, 24, 300),
+    detail_min: 480,
+    narrow_below: 800.0,
+    handle_label: "Resize the categories",
+};

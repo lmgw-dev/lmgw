@@ -6,10 +6,10 @@
   "js": "(async()=>{const h={method:'POST',headers:{'content-type':'application/json'},body:'null'};await fetch('/labs/api/decision/clear',h);const l=await (await fetch('/labs/api/decision/presets')).json();for(const p of l.presets){await fetch('/labs/api/decision/presets/'+p.id+'/delete',h)}return 'clean'})()"
  },
  {"nav": "/decision-lab"},
- {"until": "document.querySelector('.lab-head .dl-facts .dl-fact') && document.querySelector('.dl-setcard')", "timeout": 20},
+ {"until": "document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact') && document.querySelector('.dl-setcard')", "timeout": 20},
  {"script": "scripts/drive/decision-sets-data.js"},
  {
-  "expect": "document.querySelector('.dl-setname').textContent==='none loaded' && document.querySelectorAll('.dl-setbtns .btn')[1].disabled",
+  "expect": "document.querySelector('.dl-setname').textContent==='No set loaded' && document.querySelectorAll('.dl-setbtns .btn')[1].disabled",
   "label": "no set is loaded, and Update set waits for one"
  },
  {"click": ".dl-toolbar .btn"},
@@ -66,7 +66,7 @@
  {"js": "document.querySelector('.dl-instr').value==='Edited again' && document.querySelector('.menu-pop .menu-item') ? (document.querySelectorAll('.menu-pop .menu-item')[0].click(), 'armed, picked again') : 'loaded'"},
  {"until": "document.querySelector('.dl-instr').value==='Which team should handle this ticket?'", "timeout": 5},
  {
-  "expect": "document.querySelector('.dl-setname').textContent==='drive triage' && document.querySelector('.dl-setedit').textContent==='' && document.querySelector('.lab-head .model-picker').textContent.includes('laya')",
+  "expect": "document.querySelector('.dl-setname').textContent==='drive triage' && document.querySelector('.dl-setedit').textContent==='' && document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('laya')",
   "label": "loading the set replaces the questions and picks its model"
  },
  {"click": ".dl-setbtns .btn", "nth": 2},
@@ -214,7 +214,7 @@
  },
  {"key": "Escape"},
  {"click": ".page-head .actions a"},
- {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"wait": 0.5},
  {"click": ".dl-toolbar .btn"},
  {"wait": 0.3},
@@ -271,7 +271,7 @@
   "expect": "(async()=>{const b=await (await fetch('/decision-lab/api/batches')).json();const u=await (await fetch('/labs/api/decision/usage')).json();return b.batches.length===0 && u.batches===0 && u.runs===0})()",
   "label": "the set run is deleted with its items and runs"
  },
- {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"click": ".dl-setcard .row-menu .btn"},
  {"wait": 0.3},
  {"click": ".menu-pop .menu-item", "nth": 0},
@@ -315,7 +315,7 @@
  },
  {"js": "(async()=>{const r=await fetch('/decision-lab/api/batches/'+window.__long+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'deleted the long run: '+r.status})()"},
  {"nav": "/decision-lab"},
- {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"script": "scripts/drive/decision-sets-data.js"},
  {"click": ".dl-setcard .row-menu .btn"},
  {"wait": 0.3},
@@ -352,7 +352,7 @@
  },
  {"js": "(async()=>{const r=await fetch('/decision-lab/api/batches/'+window.__fail+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'deleted the failing run: '+r.status})()"},
  {"click": ".page-head .actions a"},
- {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"click": ".dl-setcard .row-menu .btn"},
  {"wait": 0.3},
  {"click": ".menu-pop .menu-item", "nth": 0},
@@ -404,7 +404,7 @@
   "expect": "(async()=>{const b=await (await fetch('/decision-lab/api/batches')).json();return !b.batches.some(x=>x.id===window.__many)})()",
   "label": "and its confirm, pressed after the frames, deletes the running run"
  },
- {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-shell > .page-head .dl-facts .dl-fact')", "timeout": 20},
  {"js": "document.querySelector('.dock-rail') ? (document.querySelector('.dock-rail').click(), 'reference opened') : 'reference docked'"},
  {"until": "document.querySelector('.dl-setrow .dl-setrow-acts')", "timeout": 5},
  {"click": ".dl-setrow .dl-setrow-acts .btn", "nth": 1},

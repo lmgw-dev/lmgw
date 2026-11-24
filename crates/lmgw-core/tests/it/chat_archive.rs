@@ -451,6 +451,7 @@ async fn archived_query_lists_archived_newest_first_with_purge_at_and_count() {
         "most-recently-archived first: {resp:#}"
     );
     assert_eq!(resp["archived_count"], 2);
+    assert_eq!(resp["active_count"], 0, "{resp:#}");
     for t in resp["threads"].as_array().unwrap() {
         assert!(t["purge_at"].is_string(), "{t:#}");
     }
@@ -523,7 +524,9 @@ async fn archived_all_lists_active_and_archived_together_pinned_first() {
         .map(|t| t["id"].as_i64().unwrap())
         .collect();
     assert_eq!(ids, vec![pinned, archived, active], "{resp:#}");
+    // Both counts are the stored threads in each state, whatever list was asked.
     assert_eq!(resp["archived_count"], 1);
+    assert_eq!(resp["active_count"], 2, "{resp:#}");
 
     // A value other than the literal "all" is still "archived only".
     let resp: Value = client

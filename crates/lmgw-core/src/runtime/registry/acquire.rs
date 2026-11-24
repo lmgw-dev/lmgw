@@ -68,6 +68,7 @@ impl Registry {
             port,
             map: Mutex::new(HashMap::new()),
             help: Mutex::new(HashMap::new()),
+            draft_simple: Mutex::new(HashMap::new()),
             sdcpp_help: Mutex::new(HashMap::new()),
             owner_waits: AtomicUsize::new(0),
             gpu_lease: Mutex::new(None),
@@ -154,6 +155,9 @@ impl Registry {
                         e.in_flight += 1;
                         e.claims += 1;
                         e.last_used = Instant::now();
+                        // Used: a moved model may be moved again
+                        // (device-ledger design §6.2, D21).
+                        e.moved = false;
                         ownership::claimed_by(e, origin);
                         Decision::Hit {
                             port: e.host_port,
@@ -204,6 +208,29 @@ impl Registry {
                         let now = Instant::now();
                         let generation = next_generation();
                         let staged = self.take_staged(&key);
+                        // A model moved to another card keeps its age
+                        // (device-ledger design §6.2, D21), and its
+                        // warnings say where it came from.
+                        let last_used = staged.moved.as_ref().map_or(now, |m| m.last_used);
+                        // A start no decision stood behind is handed its
+                        // pin's cards (device-ledger design §5.7), and says
+                        // where a row's own split is not passed (§7.2).
+                        let (pinned, pinned_note) = match &staged.charge {
+                            Some(_) => (None, None),
+                            None => match self.pinned_cards(spec.runtime) {
+                                Some((c, n)) => (Some(c), n),
+                                None => (None, None),
+                            },
+                        };
+                        let admission_note = match (&staged.moved, staged.note) {
+                            (Some(m), Some(n)) => Some(format!("{}. {n}", m.note)),
+                            (Some(m), None) => Some(m.note.clone()),
+                            (None, n) => n,
+                        };
+                        let admission_note = match (admission_note, pinned_note) {
+                            (Some(a), Some(b)) => Some(format!("{a}. {b}")),
+                            (a, b) => a.or(b),
+                        };
                         map.insert(
                             key.clone(),
                             Entry {
@@ -214,7 +241,7 @@ impl Registry {
                                 started_at: now,
                                 in_flight: 0,
                                 claims: 0,
-                                last_used: now,
+                                last_used,
                                 stop_timeout: spec.stop_timeout,
                                 phase: phase.clone(),
                                 warnings: Vec::new(),
@@ -228,10 +255,12 @@ impl Registry {
                                 climb: None,
                                 owner: origin,
                                 grant: staged.grant,
-                                admission_note: staged.note,
+                                admission_note,
                                 served: false,
                                 adopted: false,
                                 engine_key: None,
+                                card_charge: staged.charge.or(pinned),
+                                moved: staged.moved.is_some(),
                             },
                         );
                         Decision::Start(StartClaim {
@@ -375,10 +404,30 @@ impl Registry {
         // busy, so we could not read --help" must not be a reason a model
         // cannot start.
         let (runtime, mut warnings) = self.with_sdcpp_caps(spec).await;
-        let runtime: &ModelRuntime = runtime.as_ref().unwrap_or(spec.runtime);
+        // A drafter without a speculative type is started with `draft-simple`
+        // where the image has it (ruling 18); a chat-only step, so never
+        // alongside the image vocabulary above.
+        let drafted = self
+            .with_draft_type(spec.container_prefix, spec.runtime)
+            .await;
+        let runtime: &ModelRuntime = runtime
+            .as_ref()
+            .or(drafted.as_ref())
+            .unwrap_or(spec.runtime);
         // What admission gave a start that fits only partially: sd-server's
         // `--max-vram` in every launch of this entry (`admission_grant.rs`).
         let grant = self.grant_of(of);
+        // What admission charged it on the cards, recorded on the container
+        // so boot adopts it with that charge (device-ledger design §3.3).
+        let card_charge = self.card_charge_of(of);
+        // An audio engine handed its cards numbers them from 0: the class's
+        // device index, which numbers the cards of the whole machine, is not
+        // passed to it (device-ledger design §8.1).
+        let renumbered = match card_charge.as_ref().and_then(|c| c.handed_cards()) {
+            Some(_) => crate::runtime::audio::on_handed_cards(runtime),
+            None => None,
+        };
+        let runtime: &ModelRuntime = renumbered.as_ref().unwrap_or(runtime);
         // What the launcher readies for this start (Podman: lmgw's own CDI
         // spec, made true of this machine before a GPU start, machine-check
         // design §3.6.2). Once per start (again after a fallback to the
@@ -463,6 +512,7 @@ impl Registry {
                     Vec::new(),
                 )
             })?;
+            render.charge = card_charge.clone();
             // A llama-server start lmgw fitted in `--fit`'s place: its
             // placement over the row's, with `--fit off`, recorded on the
             // container so boot adopts it (`argv::llama_fit`).

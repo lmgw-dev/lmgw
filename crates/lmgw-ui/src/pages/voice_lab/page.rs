@@ -13,13 +13,13 @@ use lmgw_api_types::voice_lab::{
 use super::super::lab_frame::{Check, LabFrame, LabView, OwnKeep};
 use super::clone_check::{CloneCard, CloneCheck};
 use super::form::FormCards;
-use super::head::Head;
+use super::head::{Actions, Head, ModelSub};
 use super::library::Library;
 use super::rounds::{RoundsList, SaveState};
 use crate::api;
 use crate::fmt::fmt_bytes;
 use crate::scope::Scope;
-use crate::widgets::{use_toasts, Toasts};
+use crate::widgets::{use_toasts, Ico, Toasts};
 
 /// Where the selected model's facts stand.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -481,6 +481,8 @@ pub fn VoiceLab() -> impl IntoView {
 
     view! {
         <LabFrame
+            title="Voices lab"
+            glyph=Ico::Mic
             persist="voice-lab.library"
             side_label="Voice library"
             side_badge=Signal::derive(move || {
@@ -488,7 +490,9 @@ pub fn VoiceLab() -> impl IntoView {
                 if n == 0 { String::new() } else { n.to_string() }
             })
             side=move || view! { <Library lab=lab/> }
+            model=move || view! { <ModelSub lab=lab/> }
             head=move || view! { <Head lab=lab/> }
+            actions=move || view! { <Actions lab=lab/> }
             form=move || {
                 view! {
                     <FormCards lab=lab/>

@@ -23,7 +23,10 @@ struct Paired {
 }
 
 #[component]
-pub(super) fn LinkStrip(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
+pub(in crate::pages::usage) fn LinkStrip(
+    keys: Src<KeysResponse>,
+    refresh: RwSignal<u32>,
+) -> impl IntoView {
     let toasts = use_toasts();
     let status = RwSignal::new(None::<DevicesStatus>);
     // The status follows the card's refetches: every `keys` frame of

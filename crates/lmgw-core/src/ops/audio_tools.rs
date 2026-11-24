@@ -265,6 +265,9 @@ pub(super) async fn audio_model_get(
         fallback,
         residency,
     } = m.clone();
+    // Its pin, and the card it is on or would go on (device-ledger §8).
+    let (gpu_pin, command_line_note) =
+        super::gpu_pin::read(state, crate::runtime::Class::Audio, &model_id).await;
     Ok(Some(dto::AudioModelDetail {
         id,
         public_name: snap.audio_public_name(&model_id),
@@ -317,6 +320,8 @@ pub(super) async fn audio_model_get(
         residency_note,
         residency_charged_bytes: crate::vram::residency::learned(m, s),
         problems,
+        gpu_pin,
+        command_line_note,
     }))
 }
 

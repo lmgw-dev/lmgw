@@ -250,7 +250,10 @@ pub(super) async fn serve_routed(
             &resolved.reasoning_control(),
             crate::egress::openai_wire::has_reasoning_object(&req.ir),
         ),
-        params_ignored: proxy::params_ignored(route.upstream.protocol, &resolved),
+        params_ignored: proxy::params_ignored(route.upstream.protocol, &resolved)
+            .into_iter()
+            .map(String::from)
+            .collect(),
         // What a refusal on record leaves out of every turn's send; a refusal
         // the run itself meets is read again once a unary run is done.
         params_refused: proxy::reasoning_fit::params_on_record(&state, &route, &resolved),

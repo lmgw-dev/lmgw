@@ -11,7 +11,7 @@ use lmgw_api_types::voice_lab::{
 
 use super::page::{enc, Lab};
 use crate::api;
-use crate::widgets::ConfirmButton;
+use crate::widgets::{AudioPlayer, ConfirmButton};
 
 /// The one save being written at a time, and the session's saves.
 #[derive(Clone, Copy)]
@@ -78,9 +78,9 @@ pub(super) fn RoundsList(lab: Lab) -> impl IntoView {
                 view! {
                     <div class="card result-card">
                         <div class="run-head">
-                            <span class="run-model mono-sm">{p.alias.clone()}</span>
+                            <span class="run-model mono-sm" title=p.alias.clone()>{p.alias.clone()}</span>
                             <span class="spacer"></span>
-                            <span class="chip live">
+                            <span class="chip info">
                                 <i class="dot"></i>
                                 {format!(
                                     "rendering {} {}…",
@@ -156,7 +156,7 @@ fn RoundCard(lab: Lab, round: VoiceRound) -> impl IntoView {
             <div class="run-head">
                 <span class="run-model mono-sm" title=model>{round.alias.clone()}</span>
                 {answered_line(&round).map(|a| view! {
-                    <span class="chip live" title="a configured fallback answered this round">
+                    <span class="chip info" title="a configured fallback answered this round">
                         <i class="dot"></i>
                         {a}
                     </span>
@@ -262,7 +262,7 @@ fn Candidate(lab: Lab, round: VoiceRound, c: VoiceCandidate) -> impl IntoView {
                     </span>
                 })}
             </div>
-            <audio controls preload="none" src=c.url.clone()></audio>
+            <AudioPlayer src=Some(c.url.clone()) preload="none"/>
             <div class="vl-cand-foot">
                 {move || match saved_as() {
                     Some(n) => view! {
@@ -319,7 +319,7 @@ fn Candidate(lab: Lab, round: VoiceRound, c: VoiceCandidate) -> impl IntoView {
                 })}
                 {move || {
                     let e = s.error.get();
-                    (!e.is_empty()).then(|| view! { <div class="notice err">{format!("⚠ {e}")}</div> })
+                    (!e.is_empty()).then(|| view! { <div class="notice err">{e}</div> })
                 }}
             </Show>
         </div>

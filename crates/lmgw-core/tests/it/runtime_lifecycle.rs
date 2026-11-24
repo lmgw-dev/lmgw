@@ -321,6 +321,7 @@ fn chat_runtime(model_id: &str) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 
@@ -373,6 +374,7 @@ fn image_runtime(model_id: &str) -> ModelRuntime {
         }),
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 
@@ -779,6 +781,7 @@ fn audio_runtime(model_id: &str, family: &str) -> ModelRuntime {
         image_model: None,
         sdcpp_caps: None,
         rung: None,
+        gpu_pin: None,
     }
 }
 

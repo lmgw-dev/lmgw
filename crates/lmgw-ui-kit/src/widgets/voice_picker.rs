@@ -67,17 +67,17 @@ impl Voices {
     /// The line under the box: what the list holds, or why there is none.
     pub fn status(&self) -> String {
         match self {
-            Voices::NoModel => "pick a text-to-speech model first".to_string(),
-            Voices::Remote => "a provider's model: type one of its voice names".to_string(),
-            Voices::NotRead => "the model's voices are listed when you open this box".to_string(),
-            Voices::Loading => "reading the model's voices…".to_string(),
+            Voices::NoModel => "Pick a text-to-speech model first".to_string(),
+            Voices::Remote => "A provider's model: type one of its voice names".to_string(),
+            Voices::NotRead => "The model's voices are listed when you open this box".to_string(),
+            Voices::Loading => "Reading the model's voices…".to_string(),
             Voices::Loaded {
                 names,
                 default,
                 untranscribed,
             } => {
                 if names.is_empty() {
-                    return "the model lists no voices — type a clip or voice name".into();
+                    return "The model lists no voices — type a clip or voice name".into();
                 }
                 let shown: Vec<String> = names.iter().take(12).cloned().collect();
                 let more = names.len().saturating_sub(shown.len());
@@ -324,7 +324,7 @@ mod tests {
         assert!(s.contains("and 2 more"), "{s}");
         assert!(s.ends_with("· default v0"), "{s}");
         assert_eq!(loaded.default_voice().as_deref(), Some("v0"));
-        assert!(Voices::NoModel.status().contains("pick"));
+        assert!(Voices::NoModel.status().contains("Pick"));
         assert!(Voices::Remote.status().contains("provider"));
         assert!(Voices::NotRead.status().contains("when you open"));
         let empty = Voices::Loaded {

@@ -11,6 +11,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::page::Lab;
 use crate::fmt::fmt_bytes;
+use crate::widgets::{Ico, Icon};
 
 /// A picked file's text, read whole.
 async fn read_text(file: web_sys::File) -> Result<String, String> {
@@ -78,7 +79,8 @@ pub(super) fn InputPart(lab: Lab) -> impl IntoView {
                             title="Drop the file and paste text instead"
                             on:click=move |_| nr.put_text(String::new(), None)
                         >
-                            "✕ another file or paste"
+                            <Icon ico=Ico::Close/>
+                            "Another file or paste"
                         </button>
                     </div>
                 }

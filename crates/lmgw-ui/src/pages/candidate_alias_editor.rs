@@ -17,7 +17,7 @@
 //! genuine subtlety: `reasoning`'s "toggle/levels, or fixed+enabled" rule,
 //! `candidates::facets::supports`'s own doc comment). Debounced a beat after
 //! the last edit (`debounce`, below) so a pause in typing costs one request,
-//! not one per keystroke — the same idea `local_edit.rs`'s `debounce_key`
+//! not one per keystroke — the same idea the ladder's `debounce_key` (models/detail/local/ladder.rs)
 //! uses for the ladder rung plan. Its `addable` field (every enabled local
 //! chat model not yet a candidate, and which enabled facet each would drop)
 //! is the "add candidate" list's filter, computed once server-side instead
@@ -80,28 +80,6 @@ pub(super) fn blank_candidate_alias() -> CandidateAliasView {
     }
 }
 
-/// The Models page's State cell for a candidate alias (`models.rs`'s
-/// `ModelRow`, the branch for a class with no container of its own): there
-/// is no runtime to show, so this shows what its own derivation last found
-/// instead — a problem count, and `gpu_deferred` deferrals over the last
-/// 24 h (§6, counted from the request log).
-#[component]
-pub(super) fn CandidateStateCell(problems: usize, deferrals_24h: Option<u64>) -> impl IntoView {
-    let cls = if problems > 0 { "chip warn" } else { "chip ok" };
-    let label = if problems > 0 {
-        format!("{problems} problem{}", if problems == 1 { "" } else { "s" })
-    } else {
-        "ok".to_string()
-    };
-    view! {
-        <span class=cls>
-            <span class="dot"></span>
-            {label}
-        </span>
-        <DeferredBadge deferrals_24h=deferrals_24h/>
-    }
-}
-
 /// "N deferred/24h" beside a row's state when background requests for its
 /// name were deferred (`gpu_deferred`) in the last 24 hours — a candidate
 /// alias's (§6), or a local model's asked for with `x-lmgw-background: on`
@@ -122,7 +100,7 @@ pub(super) fn DeferredBadge(deferrals_24h: Option<u64>) -> impl IntoView {
 }
 
 /// Settle a fast-changing value a beat after it stops changing — the same
-/// one-request-per-pause idea `local_edit.rs`'s `debounce_key` uses for the
+/// one-request-per-pause idea the ladder's `debounce_key` uses for the
 /// ladder rung plan, generalised past `Option<String>` since the preview's
 /// draft key is a whole JSON body.
 fn debounce<T: Clone + PartialEq + Send + Sync + 'static>(key: Memo<T>) -> Signal<T> {
@@ -186,7 +164,7 @@ pub fn CandidateAliasEditor(
 }
 
 #[component]
-fn CandidateAliasForm(
+pub(crate) fn CandidateAliasForm(
     c: CandidateAliasView,
     full: RwSignal<Option<ModelsFull>>,
     open: RwSignal<bool>,
@@ -196,6 +174,15 @@ fn CandidateAliasForm(
     let create = c.id == 0;
     // A second save is an update of what the first created (review C-a).
     let saves = Saves::new(c.id);
+    // The list's buttons (add, move, make primary, remove, a drag) fire no
+    // input event: they tell the modal or pane themselves, so closing or
+    // leaving asks about them as it does after typing.
+    let host = super::editor_host::use_editor_host();
+    let touch = move || {
+        if let Some(h) = host {
+            h.touch();
+        }
+    };
     let alias = RwSignal::new(c.alias.clone());
     let candidates = RwSignal::new(c.candidates.clone());
     let background = RwSignal::new(c.background);
@@ -295,6 +282,7 @@ fn CandidateAliasForm(
             return;
         }
         candidates.update(|v| v.push(picked));
+        touch();
         add_pick.set(String::new());
     });
     let add_options = Signal::derive(move || {
@@ -343,6 +331,7 @@ fn CandidateAliasForm(
             }
             v.swap(ai, target as usize);
         });
+        touch();
     };
     let make_primary = move |i: usize| {
         candidates.update(|v| {
@@ -351,6 +340,7 @@ fn CandidateAliasForm(
                 v.swap(0, ai);
             }
         });
+        touch();
     };
     let remove_at = move |ai: usize| {
         candidates.update(|v| {
@@ -358,6 +348,7 @@ fn CandidateAliasForm(
                 v.remove(ai);
             }
         });
+        touch();
     };
     let reorder_alt = move |from: usize, to: usize| {
         candidates.update(|v| {
@@ -368,6 +359,7 @@ fn CandidateAliasForm(
             let item = v.remove(fi);
             v.insert(ti, item);
         });
+        touch();
     };
 
     // A plain binding rather than an inline closure in the `<For each=…>`

@@ -719,7 +719,7 @@ async fn op(
 ) -> Response {
     let ctx = ctx.map(|axum::Extension(c)| c).unwrap_or_default();
     use super::op_names;
-    use crate::ops::{self, patch_from_args};
+    use crate::ops::patch_from_args;
     // The op plane's vocabulary, made explicit (api-docs design §4.7): a name
     // not in one of the four lists is unreachable, whatever the arms below —
     // or the two sibling dispatchers' — might otherwise have answered. Checked
@@ -735,7 +735,7 @@ async fn op(
         // would take a DNS label it cannot have, or the gateway's own address
         // (origins §4.1). The rest render as the flat `op_failed` `ops_result`
         // produces, which is what `Refusal`'s `From<String>` is.
-        return match super::api_agents::op(&st, &name, args).await {
+        return match Box::pin(super::api_agents::op(&st, &name, args)).await {
             Ok(v) => Json(v).into_response(),
             Err(refusal) => refusal.into_response(),
         };
@@ -746,7 +746,14 @@ async fn op(
     // code: an owner row's refusals are `refuse_owner`, not `ops_result`'s
     // flat `400 op_failed` for a malformed argument.
     if op_names::KEY_OPS.contains(&name.as_str()) {
-        return match super::api_settings::key_op(&st, &ctx.principal, &name, args).await {
+        return match Box::pin(super::api_settings::key_op(
+            &st,
+            &ctx.principal,
+            &name,
+            args,
+        ))
+        .await
+        {
             Ok(v) => Json(v).into_response(),
             Err(refusal) => refusal.into_response(),
         };
@@ -754,8 +761,15 @@ async fn op(
     // The account ops (headless server design §5.6): their own codes, and
     // `accounts_switch` answers with a cookie.
     if op_names::ACCOUNT_OPS.contains(&name.as_str()) {
-        return super::accounts::account_op(&st, &ctx, &conn, &headers, &name, Value::Object(args))
-            .await;
+        return Box::pin(super::accounts::account_op(
+            &st,
+            &ctx,
+            &conn,
+            &headers,
+            &name,
+            Value::Object(args),
+        ))
+        .await;
     }
     // The dashboard's settings save, for the same reason: `agent_origin_suffix`
     // has a refusal of its own (`origin_suffix_shadows_gateway`, origins §4.1),
@@ -765,79 +779,109 @@ async fn op(
     // everything else it answers is still the flat `op_failed`.
     if name == "settings_set_full" {
         return match patch_from_args(Some(args)) {
-            Ok(p) => match super::api_settings::settings_set_full(&st, p).await {
+            Ok(p) => match Box::pin(super::api_settings::settings_set_full(&st, p)).await {
                 Ok(v) => Json(v).into_response(),
                 Err(refusal) => refusal.into_response(),
             },
             Err(e) => ops_result(Err(e)),
         };
     }
+    // Split over four functions, each awaited in turn and not nested, so only
+    // one of their poll frames is on the stack at a time (a debug build gives
+    // every arm its own slot: together about three quarters of a megabyte).
+    let args = match Box::pin(op_table_a(st.clone(), name.clone(), args)).await {
+        Ok(done) => return done,
+        Err(args) => args,
+    };
+    let args = match Box::pin(op_table_a2(st.clone(), name.clone(), args)).await {
+        Ok(done) => return done,
+        Err(args) => args,
+    };
+    let args = match Box::pin(op_table_b(st.clone(), name.clone(), args)).await {
+        Ok(done) => return done,
+        Err(args) => args,
+    };
+    Box::pin(op_table_c(st, name, args)).await
+}
+
+/// The op table's first part ([`op`]).
+async fn op_table_a(st: SharedState, name: String, args: Args) -> Result<Response, Args> {
+    use crate::ops::{self, patch_from_args};
     let res = match name.as_str() {
         "upstream_set" => match patch_from_args(Some(args)) {
-            Ok(p) => {
-                ops::backends::to_json(ops::upstream_set(&st, p, ops::RowWriter::Dashboard).await)
-            }
+            Ok(p) => ops::backends::to_json(
+                Box::pin(ops::upstream_set(&st, p, ops::RowWriter::Dashboard)).await,
+            ),
             Err(e) => Err(e),
         },
         "upstream_quota_clear" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::upstream_quota_clear(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::upstream_quota_clear(&st, p)).await),
             Err(e) => Err(e),
         },
         "model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::model_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::model_set(&st, p)).await),
             Err(e) => Err(e),
         },
         "local_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::local_model_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::local_model_set(&st, p)).await),
             Err(e) => Err(e),
         },
         // The candidate-alias editor (candidate-aliases design §6): create,
         // update, delete, enable, disable and the UI-only `preview` dry run
         // all go through the one op, exactly like every other `*_set`.
         "candidate_alias_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::candidate_alias_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::candidate_alias_set(&st, p)).await),
             Err(e) => Err(e),
         },
         "mcp_server_set" => match patch_from_args(Some(args)) {
-            Ok(p) => {
-                ops::backends::to_json(ops::mcp_server_set(&st, p, ops::RowWriter::Dashboard).await)
-            }
+            Ok(p) => ops::backends::to_json(
+                Box::pin(ops::mcp_server_set(&st, p, ops::RowWriter::Dashboard)).await,
+            ),
             Err(e) => Err(e),
         },
         // A pinned field is refused with `setting_pinned`, as the full save
         // refuses it (headless server design §2.2).
         "settings_set" => match patch_from_args(Some(args)) {
-            Ok(p) => return refused(ops::settings_set(&st, p).await),
+            Ok(p) => return Ok(refused(Box::pin(ops::settings_set(&st, p)).await)),
             Err(e) => Err(e),
         },
         "aux_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::aux_model_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::aux_model_set(&st, p)).await),
             Err(e) => Err(e),
         },
         // Ops-level like the image class's (`ops::audio_model_set`), so the
         // dashboard and `lmgw__audio_model_set` post the same patch at the
         // same function.
         "audio_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::audio_model_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::audio_model_set(&st, p)).await),
             Err(e) => Err(e),
         },
         // The image class's CRUD is ops-level rather than web-only
         // (image-generation design §8), so the dashboard and
         // `lmgw__image_model_set` post the same patch at the same function.
         "image_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(ops::image_model_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(ops::image_model_set(&st, p)).await),
             Err(e) => Err(e),
         },
         "model_visibility" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(model_visibility_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(model_visibility_set(&st, p)).await),
             Err(e) => Err(e),
         },
+        _ => return Err(args),
+    };
+    Ok(ops_result(res))
+}
+
+/// The op table's second part, of four ([`op`]).
+async fn op_table_a2(st: SharedState, name: String, args: Args) -> Result<Response, Args> {
+    use crate::ops::{self, patch_from_args};
+    let res = match name.as_str() {
         "alias_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(alias_set(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(alias_set(&st, p)).await),
             Err(e) => Err(e),
         },
         "upstream_set_full" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::backends::to_json(upstream_set_full(&st, p).await),
+            Ok(p) => ops::backends::to_json(Box::pin(upstream_set_full(&st, p)).await),
             Err(e) => Err(e),
         },
 
@@ -878,7 +922,7 @@ async fn op(
             let tier = arg_str(&args, "service_tier").map(str::to_string);
             match rates {
                 Ok(rates) => ops::backends::to_json(
-                    ops::price_set(
+                    Box::pin(ops::price_set(
                         &st,
                         &scope_kind,
                         scope_key.as_deref(),
@@ -886,7 +930,7 @@ async fn op(
                         tier.as_deref(),
                         rates,
                         note.as_deref(),
-                    )
+                    ))
                     .await,
                 ),
                 Err(e) => Err(e),
@@ -896,33 +940,37 @@ async fn op(
         // the op refuses with a `Refusal`, which answers for itself.
         "price_delete" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => {
-                return match ops::price_delete(&st, id).await {
+                return Ok(match Box::pin(ops::price_delete(&st, id)).await {
                     Ok(ack) => ops_result(ops::backends::to_json(Ok(ack))),
                     Err(refusal) => refusal.into_response(),
-                }
+                })
             }
             None => Err("pass id".to_string()),
         },
-        "prices_sync" => return refused(ops::prices_sync(&st).await),
+        "prices_sync" => return Ok(refused(Box::pin(ops::prices_sync(&st)).await)),
         "tool_set" => match (
             arg_str(&args, "name"),
             args.get("enabled").and_then(Value::as_bool),
         ) {
             (Some(name), Some(enabled)) => {
-                ops::backends::to_json(ops::tool_set(&st, name, enabled).await)
+                ops::backends::to_json(Box::pin(ops::tool_set(&st, name, enabled)).await)
             }
             _ => Err("pass name and enabled".to_string()),
         },
-        "update_check" => ops::backends::to_json(super::api_settings::update_check(&st).await),
+        "update_check" => {
+            ops::backends::to_json(Box::pin(super::api_settings::update_check(&st)).await)
+        }
         "job_cancel" => match args.get("id").and_then(Value::as_i64) {
-            Some(id) => ops::backends::to_json(ops::job_cancel(&st, id).await),
+            Some(id) => ops::backends::to_json(Box::pin(ops::job_cancel(&st, id)).await),
             None => Err("pass id".to_string()),
         },
         "response_chain_delete" => {
-            ops::backends::to_json(responses_ops::response_chain_delete(&st, &args).await)
+            ops::backends::to_json(Box::pin(responses_ops::response_chain_delete(&st, &args)).await)
         }
-        "responses_gc" => ops::backends::to_json(responses_ops::responses_gc(&st, &args).await),
-        "upstream_test" => ops::backends::to_json(upstream_test(&st, &args).await),
+        "responses_gc" => {
+            ops::backends::to_json(Box::pin(responses_ops::responses_gc(&st, &args)).await)
+        }
+        "upstream_test" => ops::backends::to_json(Box::pin(upstream_test(&st, &args)).await),
         "hf_add" => {
             let repo = arg_str(&args, "repo").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").unwrap_or("chat").to_string();
@@ -933,17 +981,27 @@ async fn op(
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             ops::backends::to_json(
-                ops::hf_add(
+                Box::pin(ops::hf_add(
                     &st,
                     &repo,
                     file.as_deref(),
                     quant.as_deref(),
                     &target,
                     companions,
-                )
+                ))
                 .await,
             )
         }
+        _ => return Err(args),
+    };
+    Ok(ops_result(res))
+}
+
+/// The op table's second part ([`op`]): split so that no one poll frame holds every arm,
+/// which in a debug build is more of a test thread's 2 MiB stack than the rest of the chain.
+async fn op_table_b(st: SharedState, name: String, args: Args) -> Result<Response, Args> {
+    use crate::ops::{self, patch_from_args};
+    let res = match name.as_str() {
         // Get it (find-a-model design §6, WP5): queue, then set up
         // server-side; shared with `lmgw__model_get`.
         "model_get" => typed(args, |a| ops::model_get(&st, a)).await,
@@ -955,7 +1013,7 @@ async fn op(
             let action = arg_str(&args, "action").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").unwrap_or("chat").to_string();
             let id = args.get("id").and_then(Value::as_i64);
-            ops::backends::to_json(ops::hf_set(&st, &action, id, &target).await)
+            ops::backends::to_json(Box::pin(ops::hf_set(&st, &action, id, &target)).await)
         }
         "container" => {
             let target = arg_str(&args, "target").map(str::to_string);
@@ -967,14 +1025,14 @@ async fn op(
                 .unwrap_or(false);
             let tail = args.get("tail").and_then(Value::as_i64);
             ops::backends::to_json(
-                ops::container(
+                Box::pin(ops::container(
                     &st,
                     target.as_deref(),
                     model.as_deref(),
                     &action,
                     force,
                     tail,
-                )
+                ))
                 .await,
             )
         }
@@ -982,15 +1040,31 @@ async fn op(
         // engaging it stops containers, which a generic settings save must not
         // start doing.
         "hold_set" => match args.get("active").and_then(Value::as_bool) {
-            Some(active) => return refused(ops::hold_set(&st, active).await),
+            Some(active) => return Ok(refused(Box::pin(ops::hold_set(&st, active)).await)),
             None => Err("pass active: true or false".into()),
         },
         // Forget auto headroom's learned growth (per-model containers §4,
-        // "Headroom"): Settings' confirmed button. The answer is what the
-        // headroom is now.
+        // "Headroom"), of one card or of every card (device-ledger design
+        // ruling 10): Settings' confirmed buttons. The answer is what the
+        // headroom is now; the audit line names the card and what was
+        // dropped ([`crate::audit::Detail`]).
         "headroom_forget" => {
-            let res = st.vram.forget_growth(&st.db).await;
-            ops::backends::to_json(res.map(|()| st.vram.headroom_now(&st.snapshot())))
+            let a: dto::HeadroomForgetArgs = match patch_from_args(Some(args)) {
+                Ok(a) => a,
+                Err(e) => return Ok(ops_result(Err(e))),
+            };
+            let snap = st.snapshot();
+            match Box::pin(st.vram.forget_growth(&st.db, &snap, a.card.as_ref())).await {
+                Ok(dropped) => {
+                    let now = st.vram.headroom_now(&st.snapshot());
+                    let mut resp = Json(now).into_response();
+                    resp.extensions_mut().insert(crate::audit::Detail(
+                        crate::vram::headroom::audit_target(a.card.as_ref(), &dropped),
+                    ));
+                    return Ok(resp);
+                }
+                Err(e) => Err(e),
+            }
         }
         // The machine check (machine-check design §4.2): read-only; the
         // fix runs only from the app's own window, never from a route.
@@ -999,11 +1073,41 @@ async fn op(
         // settings for the card this computer has, through the Settings
         // page's own save.
         "machine_settings_fit" => typed(args, |a| crate::machine::settings_fit(&st, a)).await,
-        "audio_catalog" => audio_catalog_op(&st, &args).await,
+        // Settings › Documents (document-conversion design §8): what this
+        // computer can convert, and "Check again". Both only read; the
+        // check runs each tool's version.
+        "doc_tools" => {
+            ops::backends::to_json(Box::pin(crate::extract::convert::doc_tools(&st)).await)
+        }
+        "doc_tools_check" => {
+            ops::backends::to_json(Box::pin(crate::extract::convert::doc_tools_check(&st)).await)
+        }
+        // "Who calls the docling route" (§7.8): summed from the request
+        // log's `convert_calls` records; it only reads.
+        "doc_adapter_usage" => {
+            ops::backends::to_json(crate::extract::convert::calls::adapter_usage(&st).await)
+        }
+        // What the conversion jobs hold on disk and still have queued; it
+        // only reads.
+        "doc_jobs_stored" => {
+            ops::backends::to_json(Ok(crate::extract::convert::jobs::stored(&st).await))
+        }
+        // A model file for converting (the layout model), queued through
+        // the download queue; it loads nothing and switches nothing on.
+        "doc_model_add" => {
+            let id = arg_str(&args, "id").unwrap_or_default();
+            ops::backends::to_json(Box::pin(crate::extract::convert::doc_model_add(&st, id)).await)
+        }
+        "audio_catalog" => Box::pin(audio_catalog_op(&st, &args)).await,
         // Voice-library transcripts by a speech-to-text model
         // (audio-class gap 5); shared with `lmgw__voice_transcribe`.
         "voice_transcribe" => ops::backends::to_json(
-            ops::voice_transcribe(&st, arg_str(&args, "clip"), arg_str(&args, "alias")).await,
+            Box::pin(ops::voice_transcribe(
+                &st,
+                arg_str(&args, "clip"),
+                arg_str(&args, "alias"),
+            ))
+            .await,
         ),
         // The Voices lab's round and save; shared with `lmgw__voice_generate`
         // and `lmgw__voice_sample_save`, and with the lab's own routes.
@@ -1012,60 +1116,83 @@ async fn op(
         // "Add from recipe" for the image class (image-generation design
         // §7.2), the audio catalog's sibling with a compiled-in source.
         // Shared with `lmgw__image_recipes` / `lmgw__image_recipe_add`.
-        "image_recipes" => ops::backends::to_json(ops::image_recipes(&st).await),
+        "image_recipes" => ops::backends::to_json(Box::pin(ops::image_recipes(&st)).await),
         "image_recipe_add" => {
             let key = arg_str(&args, "key").unwrap_or_default();
             ops::backends::to_json(
-                ops::image_recipe_add(&st, key, arg_str(&args, "diffusion_file")).await,
+                Box::pin(ops::image_recipe_add(
+                    &st,
+                    key,
+                    arg_str(&args, "diffusion_file"),
+                ))
+                .await,
             )
         }
         "image_upscaler_add" => {
             let key = arg_str(&args, "key").unwrap_or_default();
-            ops::backends::to_json(ops::image_upscaler_add(&st, key).await)
+            ops::backends::to_json(Box::pin(ops::image_upscaler_add(&st, key)).await)
         }
         "local_model_test" => {
             let model_id = arg_str(&args, "model_id").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").map(String::from);
             ops::backends::to_json(
-                crate::modelinfo::local_model_test(&st, &model_id, target.as_deref()).await,
+                Box::pin(crate::modelinfo::local_model_test(
+                    &st,
+                    &model_id,
+                    target.as_deref(),
+                ))
+                .await,
             )
         }
         // The Backends page (container-builds §15): each op takes its §15
         // argument type and answers with its §15 response type. Cancel is
         // `job_cancel` on the run's job, above.
-        "builds" => ops::backends::to_json(ops::backends::builds(&st).await),
+        "builds" => ops::backends::to_json(Box::pin(ops::backends::builds(&st)).await),
         "build_get" => typed(args, |a| ops::backends::build_get(&st, a)).await,
         "build_set" => {
-            return match patch_from_args(Some(args)) {
-                Ok(a) => refused(ops::backends::build_set(&st, a).await),
+            return Ok(match patch_from_args(Some(args)) {
+                Ok(a) => refused(Box::pin(ops::backends::build_set(&st, a)).await),
                 Err(e) => ops_result(Err(e)),
-            }
+            })
         }
         "build_resolve" => typed(args, |a| ops::backends::build_resolve(&st, a)).await,
         "build_check_merge" => typed(args, |a| ops::backends::build_check_merge(&st, a)).await,
         "build_run" => {
-            return match patch_from_args(Some(args)) {
+            return Ok(match patch_from_args(Some(args)) {
                 Ok(a) => refused(
-                    ops::backends::build_run(&st, a, lmgw_api_types::builds::BuildTrigger::Manual)
-                        .await,
+                    Box::pin(ops::backends::build_run(
+                        &st,
+                        a,
+                        lmgw_api_types::builds::BuildTrigger::Manual,
+                    ))
+                    .await,
                 ),
                 Err(e) => ops_result(Err(e)),
-            }
+            })
         }
         "build_run_log" => typed(args, |a| ops::backends::build_run_log(&st, a)).await,
+        _ => return Err(args),
+    };
+    Ok(ops_result(res))
+}
+
+/// The op table's third part ([`op`]).
+async fn op_table_c(st: SharedState, name: String, args: Args) -> Response {
+    use crate::ops::{self, patch_from_args};
+    let res = match name.as_str() {
         "build_promote" => {
             return match patch_from_args(Some(args)) {
-                Ok(a) => refused(ops::backends::build_promote(&st, a).await),
+                Ok(a) => refused(Box::pin(ops::backends::build_promote(&st, a)).await),
                 Err(e) => ops_result(Err(e)),
             }
         }
         "build_verify" => {
             return match patch_from_args(Some(args)) {
-                Ok(a) => refused(ops::backends::build_verify(&st, a).await),
+                Ok(a) => refused(Box::pin(ops::backends::build_verify(&st, a)).await),
                 Err(e) => ops_result(Err(e)),
             }
         }
-        "build_env" => ops::backends::to_json(ops::backends::build_env(&st).await),
+        "build_env" => ops::backends::to_json(Box::pin(ops::backends::build_env(&st)).await),
         "forge_refs" => typed(args, |a| ops::backends::forge_refs(&st, a)).await,
         "forge_prs" => typed(args, |a| ops::backends::forge_prs(&st, a)).await,
         "forge_pr" => typed(args, |a| ops::backends::forge_pr(&st, a)).await,
@@ -1093,7 +1220,7 @@ async fn op(
         "bench_plan" => typed(args, |a| ops::bench::bench_plan(&st, a)).await,
         "bench_start" => {
             return match patch_from_args(Some(args)) {
-                Ok(a) => refused(ops::bench::bench_start(&st, a).await),
+                Ok(a) => refused(Box::pin(ops::bench::bench_start(&st, a)).await),
                 Err(e) => ops_result(Err(e)),
             }
         }
@@ -1123,7 +1250,11 @@ where
     Fut: std::future::Future<Output = Result<T, String>>,
 {
     let a: A = crate::ops::patch_from_args(Some(args))?;
-    crate::ops::backends::to_json(f(a).await)
+    // Boxed: `op` holds one of these per typed arm, and a debug build gives
+    // each arm's inline future its own slot in the dispatcher's poll frame
+    // (about a megabyte in all, on a test thread's 2 MiB); the box makes each
+    // slot one pointer.
+    crate::ops::backends::to_json(Box::pin(f(a)).await)
 }
 
 /// The two catalog actions of the old Audio page, as one op:

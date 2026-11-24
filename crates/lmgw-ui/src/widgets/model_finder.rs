@@ -16,7 +16,7 @@
 //! file chosen by hand).
 
 use leptos::prelude::*;
-use lmgw_api_types::model_find::{FindAnswer, ModelFind, ModelFindArgs};
+use lmgw_api_types::model_find::{FindAnswer, GetChoice, ModelFind, ModelFindArgs};
 use lmgw_api_types::model_get::{ModelGetDone, ModelGetStarted};
 use lmgw_api_types::RepoFiles;
 
@@ -30,6 +30,7 @@ mod shown;
 mod words;
 
 use crate::scope::Scope;
+use crate::widgets::{Ico, Icon};
 use paging::ListState;
 use shown::Choice;
 
@@ -58,10 +59,17 @@ pub struct ReadyModel {
 #[derive(Debug, Clone, PartialEq)]
 enum Getting {
     Idle,
-    /// `model_get` is on its way.
-    Starting,
-    Running(ModelGetStarted),
-    Done(ModelGetDone),
+    /// `model_get` is on its way. `reads_header`: the file's header was not
+    /// read yet, so lmgw reads it first to know whether Get it asks (WP12),
+    /// which takes a moment on a slow line.
+    Starting {
+        reads_header: bool,
+    },
+    /// No single card holds the file at its full context: the ways Get it
+    /// can set it up, for the person to choose (device-ledger design WP12).
+    Asks(Vec<GetChoice>),
+    Running(Box<ModelGetStarted>),
+    Done(Box<ModelGetDone>),
     Failed(String),
     Canceled,
 }
@@ -364,9 +372,12 @@ pub fn ModelFinder(
 
     view! {
         <div class="mf" class:compact=compact>
+            <div class="mf-main">
             <div class="mf-box">
-                <input
-                    class="input mf-input"
+                <label class="mf-search">
+                    <Icon ico=Ico::Search/>
+                    <input
+                    class="mf-input"
                     type="search"
                     placeholder="A model's name, like qwen 3.6, or a Hugging Face address"
                     aria-label="Model name or Hugging Face address"
@@ -377,7 +388,8 @@ pub fn ModelFinder(
                             submit();
                         }
                     }
-                />
+                    />
+                </label>
                 <button
                     class="btn primary mf-find"
                     disabled=move || {
@@ -414,6 +426,15 @@ pub fn ModelFinder(
                     .into_any(),
                 Found::Answer(a) => view! { <Answered f=f a=*a/> }.into_any(),
             }}
+            </div>
+            {move || {
+                f.found
+                    .with(|x| match x {
+                        Found::Answer(a) => Some(a.notes.clone()),
+                        _ => None,
+                    })
+                    .map(|notes| view! { <AnswerLists f=f notes=notes/> })
+            }}
         </div>
     }
 }
@@ -429,8 +450,8 @@ fn Raw(raw: String) -> impl IntoView {
     }
 }
 
-/// What the search answered: its sentence when it isn't a plain card, the
-/// card, and the two lists.
+/// What the search answered: its sentence when it isn't a plain card, and the
+/// card.
 #[component]
 fn Answered(f: Finder, a: ModelFind) -> impl IntoView {
     let plain_card = a.answer == FindAnswer::Card;
@@ -464,15 +485,6 @@ fn Answered(f: Finder, a: ModelFind) -> impl IntoView {
         .filter(|b| b.near && a.answer != FindAnswer::RateLimited)
         .and_then(|b| b.sentence.clone())
         .map(|s| view! { <p class="mf-line dim">{s}</p> });
-    let notes = (!a.notes.is_empty()).then(|| {
-        let notes = a.notes.clone();
-        view! {
-            <details class="mf-fold mf-notes">
-                <summary>"What lmgw checked on Hugging Face"</summary>
-                <ul>{notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
-            </details>
-        }
-    });
     let card = a
         .card
         .clone()
@@ -481,8 +493,26 @@ fn Answered(f: Finder, a: ModelFind) -> impl IntoView {
         {sentence}
         {near}
         {card}
-        <lists::ChoiceList f=f others=true/>
-        <lists::ChoiceList f=f others=false/>
-        {notes}
+    }
+}
+
+/// The two lists and the fold of what was checked: beside the card in a wide
+/// page, under it in a narrow one.
+#[component]
+fn AnswerLists(f: Finder, notes: Vec<String>) -> impl IntoView {
+    let notes = (!notes.is_empty()).then(|| {
+        view! {
+            <details class="mf-fold mf-notes">
+                <summary>"What lmgw checked on Hugging Face"</summary>
+                <ul>{notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
+            </details>
+        }
+    });
+    view! {
+        <div class="mf-side">
+            <lists::ChoiceList f=f others=true/>
+            <lists::ChoiceList f=f others=false/>
+            {notes}
+        </div>
     }
 }

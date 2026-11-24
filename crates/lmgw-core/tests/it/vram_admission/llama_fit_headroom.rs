@@ -1,6 +1,6 @@
 //! The second review of the llama-fit branch (2026-11-11), end to end, on a
 //! card where other programs hold more now than their 7-day minimum and auto
-//! headroom has learned a growth:
+//! headroom keeps a floor and learned room (WP13):
 //!
 //! - A: a fitted row's target is sized to what the card can give it now —
 //!   other programs' use now, lmgw's own models counted as room — and the
@@ -9,8 +9,9 @@
 //!   (lmgw's idle model evicted), not by the fallback;
 //! - B: a row that cannot adapt waits for and evicts lmgw's own models for the
 //!   growth, and once none is left starts where it fits beside other
-//!   programs' use now with its margin, warned with the growth; a real
-//!   shortfall still waits, and says what holds the card;
+//!   programs' use now with its margin, warned with the growth (or beside
+//!   the floor alone, its margin given up too); a real shortfall still
+//!   waits, and says what holds the card;
 //! - C: an adopted llama-server whose holding the driver reads keeps no
 //!   first-prompt margin; one nothing was read of keeps it;
 //! - D: a token count does not clear the first-prompt margin; a chat does.
@@ -29,16 +30,21 @@ const MIB: u64 = 1024 * 1024;
 const TOTAL: u64 = 1024 * MIB;
 /// What other programs hold at rest: the 7-day minimum.
 const AT_REST: u64 = 16 * MIB;
-/// What they hold now.
-const NOW: u64 = 100 * MIB;
-/// The largest growth learned.
+/// What they hold now: with a llama-server's margin beside a start, 117 MiB
+/// of the card is left for it.
+const NOW: u64 = 580 * MIB;
+/// The learned room: the most other programs held less what they hold now
+/// as the readings have it (at rest: no reading was taken since).
 const GROWTH: u64 = 200 * MIB;
+/// The floor: the fixture's `headroom_mb`.
+const FLOOR: u64 = 4 * MIB;
 
 /// A day of readings: at rest at [`AT_REST`], one hour that rose by
 /// [`GROWTH`] — auto headroom learned, with a growth.
 fn learned(f: &Fixture) {
     let now = now_hour();
     f.state.vram.seed_outside_hours(
+        &card_id(0),
         (0..24)
             .map(|h| OutsideHour {
                 hour: now - h,
@@ -58,7 +64,10 @@ async fn card() -> Fixture {
     learned(&f);
     let snap = f.state.snapshot();
     let h = f.state.vram.headroom_now(&snap);
-    assert!(h.learned_in_use && h.bytes == GROWTH, "{h:?}");
+    assert!(
+        h.room_bytes == GROWTH && h.bytes == GROWTH + FLOOR,
+        "the floor and the learned room: {h:?}"
+    );
     f
 }
 
@@ -106,13 +115,15 @@ async fn a_fitted_target_is_sized_to_outside_use_now_and_admits() {
     let ctx: u64 = flag(&a, "--ctx-size").unwrap().parse().unwrap();
     assert_eq!(g.llama.and_then(|p| p.ctx), Some(ctx));
     assert!(
-        g.bytes + LLAMA_MARGIN <= TOTAL - NOW,
-        "fits beside other programs' use now with its margin: {g:?}"
+        g.bytes + LLAMA_MARGIN + FLOOR <= TOTAL - NOW,
+        "fits beside other programs' use now with the floor and its margin: {g:?}"
     );
     let w = warned(&f, "fit-model", CONTEXT_FITTED);
     assert!(
-        w.contains(GROWTH_LET_GO) && w.contains("200 MiB on "),
-        "the growth and when it was seen: {w}"
+        w.contains(GROWTH_LET_GO)
+            && w.contains("up to 200 MiB more GPU memory than they hold now")
+            && w.contains("(they held 216 MiB on "),
+        "the room and when they held their most: {w}"
     );
 }
 
@@ -154,7 +165,7 @@ async fn a_non_adapting_row_starts_once_nothing_of_lmgws_is_left() {
     assert_eq!(f.stops(), vec!["chat-model".to_string()], "evicted for it");
     let w = warned(&f, "pinned", GROWTH_LET_GO);
     assert!(
-        w.contains("200 MiB on ") && w.contains("chat/pinned"),
+        w.contains("up to 200 MiB more") && w.contains("chat/pinned"),
         "{w}"
     );
     assert_eq!(
@@ -163,9 +174,10 @@ async fn a_non_adapting_row_starts_once_nothing_of_lmgws_is_left() {
     );
 
     // Other programs now hold so much that it does not fit beside them
-    // even with its margin alone: a wait, as before, that names it.
+    // even with the floor alone, its margin given up too: a wait, as
+    // before, that names it.
     let f = card().await;
-    f.attribute(TOTAL - LLAMA_MARGIN);
+    f.attribute(TOTAL - FLOOR);
     set_queue_timeout(&f, 1).await;
     add_row(&f, "pinned", pinned).await;
     let resp = chat_with(&f, "pinned").await;

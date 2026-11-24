@@ -11,7 +11,7 @@
 //! send — while the rest of the stream is still read for the speech (§6.5:
 //! aborting the fetch at `done` would stop the speech).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use futures::future::{select, Either, FutureExt};
@@ -148,17 +148,32 @@ pub(super) async fn run_turn(
 
     // Only the thread on screen scrolls: the owner may be reading another.
     let here = move || current_id.try_get_untracked().flatten() == Some(tid);
-    let a_content = target.content;
-    let a_reasoning = target.reasoning;
-    let a_tools = target.tools;
-    let a_files = target.attachments;
-    let a_streaming = target.streaming;
-    let a_tokens = target.tokens;
-    let a_db_id = target.db_id;
-    let a_context = target.context;
-    let (a_model, a_answered_by, a_unsaved) = (target.model, target.answered_by, target.unsaved);
-    let a_images_note = target.images_note;
-    let a_gpu_setup = target.gpu_setup;
+    // The bubble the turn writes into: its own, or the copy kept of it when
+    // the page that showed it went mid-turn (`chat_inflight::keep_live`),
+    // which a page opened again shows. Once the text is done `live` is
+    // empty, and what the turn still says (its speech frames) goes to the
+    // last bubble found there: the page's own may have gone with its page.
+    let bubble = {
+        let last = Rc::new(RefCell::new(target.clone()));
+        move || {
+            let key = last.borrow().key;
+            let found = live
+                .try_with_value(|l| {
+                    l.as_ref()
+                        .filter(|(t, m)| *t == tid && m.key == key)
+                        .map(|(_, m)| m.clone())
+                })
+                .flatten();
+            match found {
+                Some(m) => {
+                    *last.borrow_mut() = m.clone();
+                    m
+                }
+                None => last.borrow().clone(),
+            }
+        }
+    };
+    let bubble2 = bubble.clone();
 
     let t0 = js_sys::Date::now();
     let first_at = Rc::new(Cell::new(None::<f64>));
@@ -184,6 +199,7 @@ pub(super) async fn run_turn(
         if !any_event2.replace(true) {
             on_accept();
         }
+        let m = bubble2();
         match ev {
             ChatEvent::Turn(id) => on_turn(id),
             ChatEvent::Delta(text) => {
@@ -191,7 +207,7 @@ pub(super) async fn run_turn(
                     first_at2.set(Some(js_sys::Date::now()));
                 }
                 delta_count2.set(delta_count2.get() + 1);
-                a_content.update(|c| c.push_str(&text));
+                m.content.update(|c| c.push_str(&text));
                 if here() {
                     scroll_down(false);
                 }
@@ -200,13 +216,13 @@ pub(super) async fn run_turn(
                 if first_at2.get().is_none() {
                     first_at2.set(Some(js_sys::Date::now()));
                 }
-                a_reasoning.update(|r| r.push_str(&text));
+                m.reasoning.update(|r| r.push_str(&text));
                 if here() {
                     scroll_down(false);
                 }
             }
             ChatEvent::Tool(step) => {
-                apply_tool_frame(a_tools, a_files, &step);
+                apply_tool_frame(m.tools, m.attachments, &step);
                 if here() {
                     scroll_down(false);
                 }
@@ -217,7 +233,7 @@ pub(super) async fn run_turn(
             } => {
                 usage_seen2.set((prompt_tokens, completion_tokens));
                 if let (Some(p), Some(c)) = (prompt_tokens, completion_tokens) {
-                    a_tokens.set(Some((p, c)));
+                    m.tokens.set(Some((p, c)));
                 }
             }
             ChatEvent::Stats(t) => {
@@ -232,7 +248,7 @@ pub(super) async fn run_turn(
                 s.ttft_ms = prev.ttft_ms;
                 stats.set(Some((tid, s)));
             }
-            ChatEvent::Retrieval(c) => a_context.set(Some(c)),
+            ChatEvent::Retrieval(c) => m.context.set(Some(c)),
             ChatEvent::Stop => {}
             ChatEvent::Error { message: msg, code } => {
                 failed2.set(true);
@@ -245,12 +261,12 @@ pub(super) async fn run_turn(
                 } else if code.as_deref() == Some(super::chat_machine::GPU_SETUP) {
                     // The model could not start on the graphics card: a
                     // card of its own, with the host's fix (WP8b).
-                    a_gpu_setup.set(Some(msg));
+                    m.gpu_setup.set(Some(msg));
                     if here() {
                         scroll_down(false);
                     }
                 } else {
-                    a_content.update(|c| {
+                    m.content.update(|c| {
                         if !c.is_empty() {
                             c.push_str("\n\n");
                         }
@@ -261,12 +277,22 @@ pub(super) async fn run_turn(
                     }
                 }
             }
+            // Not a failure: the turn goes on without the label's tools. Its
+            // own block above the reply's text (`MsgView`), stored with it.
+            ChatEvent::Notice(n) => {
+                // One per label and code, as the server keeps them.
+                m.notices
+                    .update(|v| lmgw_api_types::chat_frames::LabelNotice::merge_into(v, n));
+                if here() {
+                    scroll_down(false);
+                }
+            }
             ChatEvent::Superseded => {
                 superseded2.set(true);
                 // Not a failure: a newer turn or a rewrite of the history
                 // took the thread over. The reply stops with a note.
                 if !continuing {
-                    a_content.update(|c| {
+                    m.content.update(|c| {
                         if !c.is_empty() {
                             c.push_str("\n\n");
                         }
@@ -280,23 +306,23 @@ pub(super) async fn run_turn(
                 if continuing {
                     toasts.warn(msg);
                 } else {
-                    a_unsaved.set(true);
+                    m.unsaved.set(true);
                 }
             }
             ChatEvent::Done(done) => {
-                chat_approvals::settle_done(a_tools, &done);
+                chat_approvals::settle_done(m.tools, &done);
                 let fin = Finished::from_done(&done);
                 match fin.id {
-                    Some(id) => a_db_id.set(Some(id)),
+                    Some(id) => m.db_id.set(Some(id)),
                     // A refused save: the bubble is not a row, and must not
                     // look like one (its actions would answer 404).
-                    None if Finished::refused(&done) && !continuing => a_unsaved.set(true),
+                    None if Finished::refused(&done) && !continuing => m.unsaved.set(true),
                     None => {}
                 }
                 if fin.model.is_some() {
-                    a_model.set(fin.model);
-                    a_answered_by.set(fin.answered_by);
-                    a_images_note.set(fin.images_note);
+                    m.model.set(fin.model);
+                    m.answered_by.set(fin.answered_by);
+                    m.images_note.set(fin.images_note);
                 }
                 let (up, uc) = usage_seen2.get();
                 let saved = done.saved.as_ref();
@@ -356,7 +382,7 @@ pub(super) async fn run_turn(
                     },
                 )));
                 if done.aborted && !continuing && !superseded2.get() {
-                    a_content.update(|c| c.push_str(" ⏹"));
+                    m.content.update(|c| c.push_str(" ⏹"));
                 }
                 if let Some(s) = &speech2 {
                     s.text_done();
@@ -365,7 +391,7 @@ pub(super) async fn run_turn(
                     }
                 }
             }
-            ChatEvent::Voice(frame) => match chat_media::regain_alias(&frame, a_tools) {
+            ChatEvent::Voice(frame) => match chat_media::regain_alias(&frame, m.tools) {
                 Some(alias) if speech2.is_none() => voice.status.reloading(&alias),
                 _ => voice.turn_frame(speech2.as_deref(), &frame),
             },
@@ -394,11 +420,12 @@ pub(super) async fn run_turn(
             }
         },
     };
-    a_streaming.set(false);
+    let reply = bubble();
+    reply.streaming.set(false);
     streaming.set(None);
     // A call the stream left running (a Stop mid-picture, a failure) has no
     // result coming: its live pane goes.
-    chat_media::settle(a_tools);
+    chat_media::settle(reply.tools);
     // Nor is its model still downloading or loading for it.
     voice.turn_ended();
     env.own.bump();

@@ -144,6 +144,7 @@ impl Outcome {
                 _ => ToolResultBlock::Image {
                     mime: f.mime.clone(),
                     data,
+                    cache_control: None,
                 },
             });
         }
@@ -156,8 +157,8 @@ impl Outcome {
             .inline_blocks()
             .into_iter()
             .map(|b| match b {
-                ToolResultBlock::Text { text } => json!({"type": "text", "text": text}),
-                ToolResultBlock::Image { mime, data } => {
+                ToolResultBlock::Text { text, .. } => json!({"type": "text", "text": text}),
+                ToolResultBlock::Image { mime, data, .. } => {
                     json!({"type": "image", "data": data, "mimeType": mime})
                 }
                 ToolResultBlock::Audio { mime, data } => {

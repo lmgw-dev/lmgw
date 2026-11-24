@@ -123,7 +123,7 @@ pub(super) fn validate_kv_unified(params: &crate::config::LlamaParams) -> Result
 /// hoist the flag into the typed field on *every* row at every load, not
 /// only a ladder's, which is exactly the side effect the first version of
 /// this fix (review finding 12) had and the review asked to revert.
-fn effective_spec_type<'a>(
+pub(crate) fn effective_spec_type<'a>(
     params: &'a crate::config::LlamaParams,
     args: &'a [String],
 ) -> Option<&'a str> {
@@ -136,10 +136,15 @@ fn effective_spec_type<'a>(
 /// Whether the row names a draft model at all, from the typed field or a
 /// freeform `--model-draft`/`-md` in `args` (finding S5, same reasoning as
 /// [`effective_spec_type`]). Rule 6 only needs "is one set", never the path
-/// itself.
-fn effective_draft_path_is_set(params: &crate::config::LlamaParams, args: &[String]) -> bool {
+/// itself. `--spec-draft-model` is the build-newer name of `--model-draft`
+/// (`-md` is canonicalized to the latter by `flag_value`), so it counts too.
+pub(crate) fn effective_draft_path_is_set(
+    params: &crate::config::LlamaParams,
+    args: &[String],
+) -> bool {
     params.draft_gguf_path.is_some()
         || crate::runtime::argv::flag_value(args, "model-draft").is_some()
+        || crate::runtime::argv::flag_value(args, "spec-draft-model").is_some()
 }
 
 pub(super) async fn validate_ladder(

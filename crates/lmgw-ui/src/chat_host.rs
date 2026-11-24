@@ -3,8 +3,8 @@
 //! `/chat?t=<id>` in the address bar, links to the dashboard's own pages,
 //! hands the Chat the shell's stream as its live updates (D1), the
 //! realtime socket of the page's own origin and the machine check's
-//! surfaces (machine-check design D177), and serves the Chat's assets from
-//! the root. The transport is `fetch` (nothing to provide) and the preview
+//! surfaces (machine-check design D177) and the window buttons for its
+//! header bars, and serves the Chat's assets from the root. The transport is `fetch` (nothing to provide) and the preview
 //! the sandboxed `srcdoc` frame, except in a debug build's test host
 //! (`crate::test_host`).
 
@@ -15,7 +15,8 @@ use leptos_router::hooks::use_query_map;
 use lmgw_api_types::chat_feed::FeedHold;
 use lmgw_api_types::VramStatus;
 use lmgw_chat_ui::{
-    provide_chat_host, ChatAddress, ChatHost, ChatLive, ChatLocation, ChatVoice, PreviewFrame,
+    provide_chat_host, ChatAddress, ChatHost, ChatLive, ChatLocation, ChatVoice, ChatWindow,
+    PreviewFrame,
 };
 use wasm_bindgen::JsValue;
 
@@ -113,8 +114,34 @@ pub fn ChatRoute() -> impl IntoView {
             host.machine = Some(crate::widgets::machine_check::chat_slot());
         }
     }
+    host.window = Some(window_buttons());
     provide_chat_host(host);
-    view! { <lmgw_chat_ui::Chat/> }
+    // The Chat's own heads are the page's header bars (`data-window-header`),
+    // with the shell's window buttons in them.
+    view! {
+        <div class="chat-route">
+            <lmgw_chat_ui::Chat/>
+        </div>
+    }
+}
+
+/// The shell's window buttons in the Chat's heads, as every page's header
+/// bar has them (`widgets::page::HeadBar`): the start ones only while the
+/// sidebar is the icon rail, whose head has no room for them; nothing
+/// without the shell's own frame.
+fn window_buttons() -> ChatWindow {
+    use crate::frame::{End, WindowButtons};
+    let rail = expect_context::<crate::shell::SidebarState>().rail;
+    ChatWindow {
+        start: ViewFn::from(move || {
+            view! {
+                <Show when=move || rail.get()>
+                    <WindowButtons end=End::Start/>
+                </Show>
+            }
+        }),
+        end: ViewFn::from(|| view! { <WindowButtons end=End::End/> }),
+    }
 }
 
 #[cfg(test)]

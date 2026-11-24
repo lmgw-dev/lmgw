@@ -1,6 +1,6 @@
 [
  {
-  "js": "'No sideways scrollbars in the app window, in both engines with html.tauri set (its classic scrollbars show a bar for any overflow): an agent\\'s Definition manifest editor wraps its long description lines and is as tall as its wrapped text (nothing clipped, also after a 3000-character line is typed into it and taken out again, never saved; each check waits until the editor has read the same for 5 animation frames, as it is fitted on frames and Broadway WebKit draws an idle page seldom), the Devices card on /usage/keys and every Settings category fit their pane (the keys table gives up its Spend vs budget column where its card is under 800px, and then fits its card too: 720 and 819 px, with the column hidden, and 2560 px with it shown), and a status chip that carries a sentence (the device listener\\'s or a WebRTC group\\'s error) wraps inside its row. The agents are folder-chat, mail-labeler and docs-librarian (an instance without one fails its expects). Read-only. Run: scripts/ui-drive.py scripts/drive/hbars.json --block-writes --dsf 1.25 --token-file <dir>.token --base http://<addr>, or scripts/webkit-check.py --backend broadway --zoom 1.25 --timeout 1500 --drive scripts/drive/hbars.json --token-file <dir>.token --base http://<addr>.'"
+  "js": "'No sideways scrollbars in the app window, in both engines with html.tauri set (its classic scrollbars show a bar for any overflow): an agent\\'s Definition manifest editor wraps its long description lines and is as tall as its wrapped text (nothing clipped, also after a 3000-character line is typed into it and taken out again, never saved; each check waits until the editor has read the same for 5 animation frames, as it is fitted on frames and Broadway WebKit draws an idle page seldom), the Keys list, its status page and a device\\'s detail on /usage/keys (720 to 2560 px; the narrow ones one pane at a time) and every Settings category fit their pane, and a status chip that carries a sentence (the device listener\\'s or a WebRTC group\\'s error) wraps inside its row. The agents are folder-chat, mail-labeler and docs-librarian (an instance without one fails its expects). Read-only. Run: scripts/ui-drive.py scripts/drive/hbars.json --block-writes --dsf 1.25 --token-file <dir>.token --base http://<addr>, or scripts/webkit-check.py --backend broadway --zoom 1.25 --timeout 1500 --drive scripts/drive/hbars.json --token-file <dir>.token --base http://<addr>.'"
  },
  {
   "size": "900x1200"
@@ -309,151 +309,196 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.devices-card'), __hbars()]",
-  "label": "/usage/keys 900x1200"
+  "size": "900x1200"
  },
  {
-  "expect": "__fits('.devices-card') && __chips()",
-  "label": "/usage/keys 900x1200: the Devices card fits, its status chip wraps inside it"
- },
- {
-  "size": "1024x700"
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
  },
  {
   "wait": 0.6
  },
  {
-  "js": "[__m('.devices-card'), __hbars()]",
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
+  "label": "/usage/keys 900x1200"
+ },
+ {
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 900x1200: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
+ },
+ {
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 900x1200 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 900x1200: a device's detail fits its pane"
+ },
+ {
+  "size": "1024x700"
+ },
+ {
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
   "label": "/usage/keys 1024x700"
  },
  {
-  "expect": "__fits('.devices-card') && __chips()",
-  "label": "/usage/keys 1024x700: the Devices card fits, its status chip wraps inside it"
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 1024x700: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
+ },
+ {
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 1024x700 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 1024x700: a device's detail fits its pane"
  },
  {
   "size": "1440x900"
  },
  {
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
+ },
+ {
   "wait": 0.6
  },
  {
-  "js": "[__m('.devices-card'), __hbars()]",
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
   "label": "/usage/keys 1440x900"
  },
  {
-  "expect": "__fits('.devices-card') && __chips()",
-  "label": "/usage/keys 1440x900: the Devices card fits, its status chip wraps inside it"
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 1440x900: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
  },
  {
-  "shot": "usage_keys"
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
  },
  {
-  "js": "(() => {\n  const card = () => document.querySelector('.card:has(> table.keys-table)');\n  window.__keys = () => { const c = card(); const cells = [...c.querySelectorAll('.col-spend')];\n    return { card: c.clientWidth, sw: c.scrollWidth, cells: cells.length,\n      shown: cells.filter(e => getComputedStyle(e).display !== 'none').length }; };\n  window.__keysFit = () => { const k = __keys(); return k.sw <= k.card + 1; };\n  window.__keysFitOrNarrow = () => { const k = __keys(); return k.card < 573 || k.sw <= k.card + 1; };\n  window.__spendRule = () => { const k = __keys(); return k.cells > 0 && k.shown === (k.card < 800 ? 0 : k.cells); };\n  window.__spendHidden = () => { const k = __keys(); return k.cells > 0 && k.shown === 0; };\n  window.__spendShown = () => { const k = __keys(); return k.cells > 0 && k.shown === k.cells; };\n  return 'keys helpers';\n})()"
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 1440x900 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 1440x900: a device's detail fits its pane"
+ },
+ {
+  "shot": "usage_keys_1440"
  },
  {
   "size": "720x900"
  },
  {
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
+ },
+ {
   "wait": 0.6
  },
  {
-  "js": "[__keys(), __hbars()]",
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
   "label": "/usage/keys 720x900"
  },
  {
-  "shot": "usage_keys_720"
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 720x900: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
  },
  {
-  "expect": "__keysFitOrNarrow()",
-  "label": "/usage/keys 720x900: the keys table fits its card without a sideways scroll (not asserted for a card under 573px, the hidden table's own width: WebKit's 720 and 819 px windows are 576 and 655 CSS px)"
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
  },
  {
-  "expect": "__spendHidden()",
-  "label": "/usage/keys 720x900: the Spend vs budget column is hidden"
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 720x900 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 720x900: a device's detail fits its pane"
  },
  {
   "size": "819x900"
  },
  {
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
+ },
+ {
   "wait": 0.6
  },
  {
-  "js": "[__keys(), __hbars()]",
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
   "label": "/usage/keys 819x900"
+ },
+ {
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 819x900: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
+ },
+ {
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 819x900 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 819x900: a device's detail fits its pane"
  },
  {
   "shot": "usage_keys_819"
  },
  {
-  "expect": "__keysFitOrNarrow()",
-  "label": "/usage/keys 819x900: the keys table fits its card without a sideways scroll (not asserted for a card under 573px, the hidden table's own width: WebKit's 720 and 819 px windows are 576 and 655 CSS px)"
- },
- {
-  "expect": "__spendHidden()",
-  "label": "/usage/keys 819x900: the Spend vs budget column is hidden"
- },
- {
-  "size": "900x1200"
- },
- {
-  "wait": 0.6
- },
- {
-  "js": "[__keys(), __hbars()]",
-  "label": "/usage/keys 900x1200"
- },
- {
-  "shot": "usage_keys_900"
- },
- {
-  "expect": "__keysFit()",
-  "label": "/usage/keys 900x1200: the keys table fits its card without a sideways scroll"
- },
- {
-  "expect": "__spendRule()",
-  "label": "/usage/keys 900x1200: the Spend vs budget column is hidden under a card of 800px and shown from it"
- },
- {
-  "size": "1024x700"
- },
- {
-  "wait": 0.6
- },
- {
-  "js": "[__keys(), __hbars()]",
-  "label": "/usage/keys 1024x700"
- },
- {
-  "shot": "usage_keys_1024"
- },
- {
-  "expect": "__keysFit()",
-  "label": "/usage/keys 1024x700: the keys table fits its card without a sideways scroll"
- },
- {
-  "expect": "__spendRule()",
-  "label": "/usage/keys 1024x700: the Spend vs budget column is hidden under a card of 800px and shown from it"
- },
- {
   "size": "2560x1400"
  },
  {
+  "js": "history.replaceState(null, '', '/usage/keys'); dispatchEvent(new PopStateEvent('popstate')); 'status'"
+ },
+ {
   "wait": 0.6
  },
  {
-  "js": "[__keys(), __hbars()]",
+  "js": "[__m('.mdetail-scroll'), __m('.mlist'), __hbars()]",
   "label": "/usage/keys 2560x1400"
  },
  {
-  "shot": "usage_keys_2560"
+  "expect": "(__m('.mdetail-scroll').length === 0 || __fits('.mdetail-scroll')) && __fits('.mlist') && __chips()",
+  "label": "/usage/keys 2560x1400: the list and the status page (the device link strip) fit their panes, its status chip wraps inside it"
  },
  {
-  "expect": "__keysFit()",
-  "label": "/usage/keys 2560x1400: the keys table fits its card without a sideways scroll"
+  "js": "(() => { let inDev = false; for (const e of document.querySelectorAll('.mlist > *')) { if (e.classList.contains('list-head')) inDev = e.firstChild.textContent === 'Devices'; else if (inDev && e.classList.contains('lrow')) { e.click(); return e.dataset.key; } } return 'no device'; })()"
  },
  {
-  "expect": "__spendShown()",
-  "label": "/usage/keys 2560x1400: the Spend vs budget column is shown"
+  "wait": 0.6
+ },
+ {
+  "js": "[__m('.mdetail-scroll'), __hbars()]",
+  "label": "/usage/keys 2560x1400 device"
+ },
+ {
+  "expect": "__fits('.mdetail-scroll')",
+  "label": "/usage/keys 2560x1400: a device's detail fits its pane"
  },
  {
   "size": "900x1200"
@@ -468,11 +513,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -486,11 +531,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -504,11 +549,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -531,11 +576,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/network 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/network 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -549,11 +594,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/network 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/network 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -567,11 +612,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/network 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/network 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -591,11 +636,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/retention 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/retention 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -609,11 +654,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/retention 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/retention 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -627,11 +672,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/retention 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/retention 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -651,11 +696,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/usage-cost 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/usage-cost 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -669,11 +714,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/usage-cost 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/usage-cost 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -687,11 +732,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/usage-cost 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/usage-cost 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -711,11 +756,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/gpu 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/gpu 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -729,11 +774,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/gpu 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/gpu 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -747,11 +792,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/gpu 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/gpu 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -771,11 +816,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/runtimes 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/runtimes 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -789,11 +834,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/runtimes 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/runtimes 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -807,11 +852,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/runtimes 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/runtimes 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -831,11 +876,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/backends 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/backends 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -849,11 +894,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/backends 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/backends 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -867,11 +912,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/backends 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/backends 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -891,11 +936,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/chat 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/chat 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -909,11 +954,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/chat 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/chat 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -927,11 +972,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/chat 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/chat 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -951,11 +996,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/realtime 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/realtime 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -969,11 +1014,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/realtime 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/realtime 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -987,11 +1032,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/realtime 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/realtime 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -1014,11 +1059,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/agents 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/agents 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -1032,11 +1077,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/agents 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/agents 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -1050,11 +1095,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/agents 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/agents 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -1074,11 +1119,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/docs 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/docs 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -1092,11 +1137,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/docs 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/docs 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -1110,11 +1155,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/docs 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/docs 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -1134,11 +1179,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/tokens 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/tokens 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -1152,11 +1197,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/tokens 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/tokens 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -1170,11 +1215,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/tokens 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/tokens 1440x600: the settings pane does not scroll sideways"
  },
  {
@@ -1194,11 +1239,11 @@
   "wait": 0.5
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/appearance 900x1200"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/appearance 900x1200: the settings pane does not scroll sideways"
  },
  {
@@ -1212,11 +1257,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/appearance 1024x700"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/appearance 1024x700: the settings pane does not scroll sideways"
  },
  {
@@ -1230,11 +1275,11 @@
   "wait": 0.6
  },
  {
-  "js": "[__m('.fill-pane.set-scroll'), __hbars()]",
+  "js": "[__m('.set-scroll'), __hbars()]",
   "label": "/settings/appearance 1440x600"
  },
  {
-  "expect": "__fits('.fill-pane.set-scroll')",
+  "expect": "__fits('.set-scroll')",
   "label": "/settings/appearance 1440x600: the settings pane does not scroll sideways"
  },
  {

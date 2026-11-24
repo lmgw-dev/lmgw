@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from compat_live import classify, report, rules_chat, rules_errors, rules_messages, rules_responses, sse  # noqa: E402
+from compat_live import caching, classify, report, rules_chat, rules_errors, rules_messages, rules_responses, sse  # noqa: E402
 from compat_live.common import redact  # noqa: E402
 
 
@@ -148,6 +148,52 @@ class Messages(unittest.TestCase):
         self.assertEqual(rules_messages.check_stream(ev), [])
         self.assertEqual(rules_messages.assemble(ev)["content"],
                          [{"type": "compaction", "content": "Summary.", "encrypted_content": "e"}])
+
+
+class PromptCache(unittest.TestCase):
+    def test_prefix_is_long_and_deterministic(self):
+        p = caching.prefix()
+        self.assertEqual(p, caching.prefix())
+        self.assertGreaterEqual(len(p), caching.MIN_PREFIX_TOKENS * caching.CHARS_PER_TOKEN)
+
+    def test_a_route_that_ignores_the_marks_is_named(self):
+        self.assertTrue(caching.ignores_cache_control("cache_control,tools.eager_input_streaming"))
+        self.assertTrue(caching.ignores_cache_control("top_k, cache_control"))
+        self.assertFalse(caching.ignores_cache_control("tools.cache_control_x"))
+        self.assertFalse(caching.ignores_cache_control(""))
+        self.assertFalse(caching.ignores_cache_control(None))
+
+    def test_judge(self):
+        wrote = {"input_tokens": 9, "cache_creation_input_tokens": 6000, "cache_read_input_tokens": 0}
+        read = {"input_tokens": 9, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6000}
+        self.assertEqual(caching.judge(wrote, read), [])
+        self.assertEqual(caching.judge(read, read), [], "another cell wrote it a moment before")
+        none = {"input_tokens": 6009}
+        self.assertEqual([r for r, _ in caching.judge(none, none)], ["cache.first", "cache.read"])
+        self.assertEqual([r for r, _ in caching.judge(wrote, wrote)], ["cache.read"])
+        # Streamed: message_start shows the input, or the cell fails.
+        self.assertEqual(caching.judge(wrote, read, [wrote, read]), [])
+        zeros = {"input_tokens": 0, "output_tokens": 0}
+        self.assertEqual([r for r, _ in caching.judge(wrote, read, [zeros, read])], ["cache.message_start"])
+
+    def test_judge_one_hour(self):
+        hour = {"input_tokens": 9, "cache_creation_input_tokens": 6000, "cache_read_input_tokens": 0,
+                "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 6000}}
+        five = {"input_tokens": 9, "cache_creation_input_tokens": 6000, "cache_read_input_tokens": 0,
+                "cache_creation": {"ephemeral_5m_input_tokens": 6000, "ephemeral_1h_input_tokens": 0}}
+        read = {"input_tokens": 9, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6000}
+        self.assertEqual(caching.judge(hour, read, one_hour=True), [])
+        self.assertEqual(caching.judge(read, read, one_hour=True), [], "another cell wrote it")
+        self.assertEqual([r for r, _ in caching.judge(five, read, one_hour=True)], ["cache.ttl"])
+        self.assertEqual(caching.judge(five, read), [], "the 5-minute scenario does not ask")
+
+    def test_prefix_label_makes_another_text(self):
+        self.assertNotEqual(caching.prefix(), caching.prefix(label="one-hour fixture"))
+
+    def test_assemble_keeps_message_start_usage(self):
+        got = rules_messages.assemble(anthropic_stream([]))
+        self.assertEqual(got["_start_usage"], {"input_tokens": 5, "output_tokens": 1})
+        self.assertEqual(got["usage"], {"input_tokens": 5, "output_tokens": 7})
 
 
 RESP = {"id": "resp_1", "object": "response", "created_at": 1, "model": "m", "status": "completed",

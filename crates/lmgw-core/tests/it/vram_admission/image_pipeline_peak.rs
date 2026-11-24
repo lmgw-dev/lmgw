@@ -293,14 +293,9 @@ pub(super) struct ScriptedGpu {
 
 impl GpuProbe for ScriptedGpu {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
-        let used = *self.used.lock().unwrap();
-        Ok(vec![GpuMemory {
-            index: 0,
-            name: "ScriptedGPU".into(),
-            total_bytes: self.total,
-            used_bytes: used,
-            free_bytes: self.total.saturating_sub(used),
-        }])
+        let mut m = Machine::one_card("ScriptedGPU", self.total);
+        m.unlisted(0, *self.used.lock().unwrap());
+        Ok(m.devices())
     }
 
     fn source(&self) -> String {

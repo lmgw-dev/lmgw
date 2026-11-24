@@ -71,7 +71,9 @@ PY
   # dependencies' features differently and builds the binary cold.
   bin=$(cargo nextest list --workspace --message-format json 2>/dev/null |
     python3 -c "import json,sys; print(json.load(sys.stdin)['rust-suites']['lmgw-core::it']['binary-path'])")
-  frozen="$out/it-$$"
+  # Beside the original (target/debug/deps): the copy finds lmgw's document
+  # reader where the test binary does (`reader::own_dirs`, one level up).
+  frozen="$(dirname "$bin")/it-hunt-$$"
   # The copies run in the background, where a non-interactive shell's Ctrl-C
   # does not reach them: they end with the script, however it ends.
   pids=()
@@ -85,7 +87,7 @@ PY
   for r in $(seq "$rounds"); do
     pids=()
     for c in $(seq "$copies"); do
-      (cd crates/lmgw-core && exec nice -n 10 taskset -c "$cpus" timeout "$budget" "../../$frozen" \
+      (cd crates/lmgw-core && exec nice -n 10 taskset -c "$cpus" timeout "$budget" "$frozen" \
         --exact "$test" --test-threads 1) >"$logs/$r-$c.log" 2>&1 &
       pids+=($!)
     done

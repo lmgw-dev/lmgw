@@ -31,6 +31,8 @@ use std::io::{Cursor, Read, Seek};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+use super::office_media::{Collector, OfficeMedia};
+
 /// The most an office archive may expand to, in bytes: the sum of its entries'
 /// declared uncompressed sizes, and the [`Budget`] of decompressed bytes read
 /// plus text produced, per archive.
@@ -99,6 +101,10 @@ pub enum OfficeError {
         crate::hf::fmt_bytes(MAX_UNCOMPRESSED_BYTES)
     )]
     TooLarge { what: String },
+    /// The step was told to stop (its file's deadline passed, or its
+    /// request went away: `convert::pool::stop`); nobody reads the result.
+    #[error("the read was stopped: its file's deadline passed or its request went away")]
+    Stopped,
 }
 
 /// One unit of the output: a whole document, a slide, or a sheet.
@@ -155,26 +161,47 @@ pub fn extract(format: OfficeFormat, bytes: &[u8]) -> Result<OfficeText, OfficeE
     extract_within(format, bytes, &mut Budget::new())
 }
 
+/// [`extract`] with the pictures the document references, each a marker
+/// paragraph in its part's markdown where it was ([`super::office_media`]).
+/// Spreadsheets give none (their drawings are not read yet).
+pub fn extract_with_media(
+    format: OfficeFormat,
+    bytes: &[u8],
+) -> Result<(OfficeText, OfficeMedia), OfficeError> {
+    let mut c = Collector::default();
+    let text = extract_collecting(format, bytes, &mut Budget::new(), Some(&mut c))?;
+    Ok((text, c.out))
+}
+
 /// [`extract`] against a given budget (tests use a small one).
 pub(crate) fn extract_within(
     format: OfficeFormat,
     bytes: &[u8],
     budget: &mut Budget,
 ) -> Result<OfficeText, OfficeError> {
+    extract_collecting(format, bytes, budget, None)
+}
+
+fn extract_collecting(
+    format: OfficeFormat,
+    bytes: &[u8],
+    budget: &mut Budget,
+    media: Option<&mut Collector>,
+) -> Result<OfficeText, OfficeError> {
     let parts = match format {
         OfficeFormat::Docx => vec![Part {
             heading: None,
-            body: docx(bytes, budget)?,
+            body: docx(bytes, budget, media)?,
         }],
-        OfficeFormat::Pptx => pptx(bytes, budget)?,
+        OfficeFormat::Pptx => pptx(bytes, budget, media)?,
         OfficeFormat::Odt => vec![Part {
             heading: None,
-            body: odf(bytes, "odt", false, budget)?
+            body: odf(bytes, "odt", false, budget, media)?
                 .into_iter()
                 .next()
                 .unwrap_or_default(),
         }],
-        OfficeFormat::Odp => odf(bytes, "odp", true, budget)?
+        OfficeFormat::Odp => odf(bytes, "odp", true, budget, media)?
             .into_iter()
             .enumerate()
             .map(|(i, body)| Part {
@@ -283,9 +310,21 @@ pub(crate) fn read_entry_limited<R: Read + Seek>(
         Err(e) => return Err(OfficeError::Archive("zip", e.to_string())),
     };
     let mut out = Vec::new();
-    file.take(limit.saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(|e| OfficeError::Archive("zip", format!("{name}: {e}")))?;
+    let mut src = file.take(limit.saturating_add(1));
+    // A MiB at a time, so a step told to stop does not inflate the rest of
+    // a large entry first (`convert::pool::stop`).
+    loop {
+        if crate::extract::convert::pool::stop::stopped() {
+            return Err(OfficeError::Stopped);
+        }
+        let n = (&mut src)
+            .take(1 << 20)
+            .read_to_end(&mut out)
+            .map_err(|e| OfficeError::Archive("zip", format!("{name}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+    }
     if out.len() as u64 > limit {
         return Err(OfficeError::TooLarge {
             what: format!("the entry '{name}'"),
@@ -362,7 +401,14 @@ pub(super) fn walk_xml(
     reader.config_mut().expand_empty_elements = true;
     let bad = |e: &dyn std::fmt::Display| OfficeError::Xml(part.to_string(), e.to_string());
     let mut buf = Vec::new();
+    let mut events: u32 = 0;
     loop {
+        // A step told to stop ends here (`convert::pool::stop`), asked every
+        // 4,096 events.
+        events = events.wrapping_add(1);
+        if events.is_multiple_of(4096) && crate::extract::convert::pool::stop::stopped() {
+            return Err(OfficeError::Stopped);
+        }
         match reader.read_event_into(&mut buf).map_err(|e| bad(&e))? {
             Event::Start(e) => {
                 let mut attrs = Vec::new();
@@ -415,6 +461,8 @@ enum Block {
     Heading(u8, String),
     Item(usize, String),
     Table(String),
+    /// A picture's marker paragraph (`office_media`), when collecting.
+    Picture(u32),
 }
 
 #[derive(Default)]
@@ -440,6 +488,11 @@ struct Doc {
     /// Bytes of finished tables already spent against the budget when each
     /// closed, so the text total that is spent at the end leaves them out.
     tables_spent: u64,
+    /// Pictures are collected: the text's own `U+FFFC` is dropped, so only
+    /// the reader writes markers (`office_media`).
+    collecting: bool,
+    /// Pictures met inside the open paragraph or table, written after it.
+    pending: Vec<u32>,
 }
 
 impl Doc {
@@ -462,7 +515,30 @@ impl Doc {
 
     fn push(&mut self, s: &str) {
         if self.depth > 0 {
-            self.para.push_str(s);
+            if self.collecting && s.contains(super::office_media::MARK) {
+                self.para
+                    .extend(s.chars().filter(|c| *c != super::office_media::MARK));
+            } else {
+                self.para.push_str(s);
+            }
+        }
+    }
+
+    /// Picture `id` is referenced here: after the open paragraph or table,
+    /// else now.
+    fn picture(&mut self, id: u32) {
+        if self.depth > 0 || !self.tables.is_empty() {
+            self.pending.push(id);
+        } else {
+            self.blocks.push(Block::Picture(id));
+        }
+    }
+
+    /// The pictures waiting for their paragraph or table to close.
+    fn flush_pictures(&mut self) {
+        if self.depth == 0 && self.tables.is_empty() {
+            self.blocks
+                .extend(self.pending.drain(..).map(Block::Picture));
         }
     }
 
@@ -488,6 +564,7 @@ impl Doc {
         let text = std::mem::take(&mut self.para);
         let text = text.trim();
         if text.is_empty() {
+            self.flush_pictures();
             return;
         }
         if let Some(cell) = self.tables.last_mut().and_then(|t| t.cell.as_mut()) {
@@ -502,6 +579,7 @@ impl Doc {
             (None, Some(l)) => Block::Item(l, text.to_string()),
             _ => Block::Para(text.to_string()),
         });
+        self.flush_pictures();
     }
 
     fn table_start(&mut self) {
@@ -590,12 +668,16 @@ impl Doc {
                 self.blocks.push(Block::Table(md));
             }
         }
+        self.flush_pictures();
         Ok(())
     }
 
     /// The blocks as markdown, paragraphs `sep` apart (list items always one
     /// line apart from each other).
-    fn finish(self, sep: &str) -> String {
+    fn finish(mut self, sep: &str) -> String {
+        // Pictures of a paragraph or table the XML never closed.
+        self.blocks
+            .extend(self.pending.drain(..).map(Block::Picture));
         let mut out = String::new();
         let mut prev_item = false;
         for b in self.blocks {
@@ -603,6 +685,7 @@ impl Doc {
                 Block::Para(t) | Block::Table(t) => (t, false),
                 Block::Heading(l, t) => (format!("{} {t}", "#".repeat(l as usize)), false),
                 Block::Item(l, t) => (format!("{}- {t}", "  ".repeat(l.min(8))), true),
+                Block::Picture(id) => (super::office_media::marker(id), false),
             };
             if !out.is_empty() {
                 out.push_str(if item && prev_item { "\n" } else { sep });
@@ -728,15 +811,33 @@ fn heading_level(name: &str) -> Option<u8> {
     rest.parse::<u8>().ok().filter(|l| (1..=9).contains(l))
 }
 
-fn docx(bytes: &[u8], budget: &mut Budget) -> Result<String, OfficeError> {
+/// The collector's look at token `t`: a picture that closes is written
+/// where it was ([`Doc::picture`]).
+fn collect(media: &mut Option<&mut Collector>, t: &Tok, doc: &mut Doc) {
+    if let Some(id) = media.as_deref_mut().and_then(|m| m.look(t)) {
+        doc.picture(id);
+    }
+}
+
+fn docx(
+    bytes: &[u8],
+    budget: &mut Budget,
+    mut media: Option<&mut Collector>,
+) -> Result<String, OfficeError> {
     let mut zip = open_zip(bytes, "docx")?;
     check_archive(&mut zip)?;
     let doc_xml = read_entry(&mut zip, "docx", "word/document.xml", budget)?;
     let styles = read_entry_if_present(&mut zip, "word/styles.xml", budget)?
         .map(|s| docx_heading_styles(&s))
         .unwrap_or_default();
+    if let Some(m) = media.as_deref_mut() {
+        m.out.part_paths.push("word/document.xml".to_string());
+    }
 
-    let mut doc = Doc::default();
+    let mut doc = Doc {
+        collecting: media.is_some(),
+        ..Doc::default()
+    };
     let (mut in_t, mut in_ppr, mut skip) = (false, false, 0usize);
     walk_xml(&doc_xml, "word/document.xml", |t| {
         if skip > 0 {
@@ -747,6 +848,7 @@ fn docx(bytes: &[u8], budget: &mut Budget) -> Result<String, OfficeError> {
             }
             return Ok(());
         }
+        collect(&mut media, &t, &mut doc);
         match t {
             // The VML fallback of a DrawingML choice repeats its text.
             Tok::Start(e) if e.name == "Fallback" => skip = 1,
@@ -803,17 +905,35 @@ fn docx(bytes: &[u8], budget: &mut Budget) -> Result<String, OfficeError> {
 // pptx
 // ---------------------------------------------------------------------------
 
-fn pptx(bytes: &[u8], budget: &mut Budget) -> Result<Vec<Part>, OfficeError> {
+fn pptx(
+    bytes: &[u8],
+    budget: &mut Budget,
+    mut media: Option<&mut Collector>,
+) -> Result<Vec<Part>, OfficeError> {
     let mut zip = open_zip(bytes, "pptx")?;
     check_archive(&mut zip)?;
     let slides = pptx_slide_paths(&mut zip, budget)?;
+    if let Some(m) = media.as_deref_mut() {
+        if let Some(pres) = read_entry_if_present(&mut zip, "ppt/presentation.xml", budget)? {
+            walk_xml(&pres, "ppt/presentation.xml", |t| {
+                if let Tok::Start(e) = t {
+                    m.page_size(&e);
+                }
+                Ok(())
+            })?;
+        }
+    }
     let mut parts = Vec::new();
     for (i, path) in slides.iter().enumerate() {
         let xml = read_entry_if_present(&mut zip, path, budget)?.ok_or(OfficeError::Missing(
             "pptx",
             "slide part named by the presentation",
         ))?;
-        let (body, spent) = pptx_slide(&xml, path, budget)?;
+        if let Some(m) = media.as_deref_mut() {
+            m.part = i;
+            m.out.part_paths.push(path.clone());
+        }
+        let (body, spent) = pptx_slide(&xml, path, budget, media.as_deref_mut())?;
         budget.spend(
             (body.len() as u64).saturating_sub(spent),
             &format!("the extracted text of '{path}'"),
@@ -882,8 +1002,16 @@ fn pptx_slide_paths(zip: &mut Zip<'_>, budget: &mut Budget) -> Result<Vec<String
     Ok(numbered.into_iter().map(|(_, n)| n).collect())
 }
 
-fn pptx_slide(xml: &[u8], part: &str, budget: &mut Budget) -> Result<(String, u64), OfficeError> {
-    let mut doc = Doc::default();
+fn pptx_slide(
+    xml: &[u8],
+    part: &str,
+    budget: &mut Budget,
+    mut media: Option<&mut Collector>,
+) -> Result<(String, u64), OfficeError> {
+    let mut doc = Doc {
+        collecting: media.is_some(),
+        ..Doc::default()
+    };
     let (mut in_t, mut skip) = (false, 0usize);
     walk_xml(xml, part, |t| {
         if skip > 0 {
@@ -894,6 +1022,7 @@ fn pptx_slide(xml: &[u8], part: &str, budget: &mut Budget) -> Result<(String, u6
             }
             return Ok(());
         }
+        collect(&mut media, &t, &mut doc);
         match t {
             Tok::Start(e) if e.name == "Fallback" => skip = 1,
             Tok::Start(e) => match e.name.as_str() {
@@ -933,12 +1062,28 @@ fn odf(
     what: &'static str,
     by_page: bool,
     budget: &mut Budget,
+    mut media: Option<&mut Collector>,
 ) -> Result<Vec<String>, OfficeError> {
     let mut zip = open_zip(bytes, what)?;
     check_archive(&mut zip)?;
     let xml = read_entry(&mut zip, what, "content.xml", budget)?;
+    if let Some(m) = media.as_deref_mut() {
+        if let Some(styles) = read_entry_if_present(&mut zip, "styles.xml", budget)? {
+            walk_xml(&styles, "styles.xml", |t| {
+                if let Tok::Start(e) = t {
+                    m.page_size(&e);
+                }
+                Ok(())
+            })?;
+        }
+    }
 
-    let mut docs: Vec<Doc> = vec![Doc::default()];
+    let collecting = media.is_some();
+    let new_doc = || Doc {
+        collecting,
+        ..Doc::default()
+    };
+    let mut docs: Vec<Doc> = vec![new_doc()];
     let (mut list_depth, mut skip, mut pages_seen) = (0usize, 0usize, 0usize);
     walk_xml(&xml, "content.xml", |t| {
         if skip > 0 {
@@ -950,6 +1095,7 @@ fn odf(
             return Ok(());
         }
         let doc = docs.last_mut().expect("one doc at least");
+        collect(&mut media, &t, doc);
         match t {
             // Comments, tracked deletions and speaker notes are not the text.
             Tok::Start(e)
@@ -962,7 +1108,10 @@ fn odf(
                     // The first page fills the doc that is already there.
                     pages_seen += 1;
                     if pages_seen > 1 {
-                        docs.push(Doc::default());
+                        docs.push(new_doc());
+                    }
+                    if let Some(m) = media.as_deref_mut() {
+                        m.part = pages_seen - 1;
                     }
                 }
                 "h" => {

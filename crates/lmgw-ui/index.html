@@ -44,5 +44,10 @@
        release build's names are dropped by wasm-opt. -->
   <link data-trunk rel="rust" data-wasm-opt="z" data-no-demangle>
 </head>
+<!-- The dashboard draws its own header bars (data-window-header) once the
+     WASM has mounted. Until one is visible, and if the WASM never mounts, the
+     desktop shell's window-frame script (LMGW_WINDOW=csd,
+     src-tauri/src/window_chrome/page.js) shows its fallback strip with the
+     window buttons. -->
 <body></body>
 </html>

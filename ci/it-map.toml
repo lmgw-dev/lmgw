@@ -175,7 +175,7 @@ why = "serves the OpenAPI document"
 [[map]]
 paths = ["crates/lmgw-core/src/web/api_knowledge.rs", "crates/lmgw-core/src/knowledge/*",
          "crates/lmgw-core/migrations_knowledge/*"]
-modules = ["knowledge", "knowledge_", "chat_knowledge", "realtime_chat_thread"]
+modules = ["knowledge", "knowledge_", "chat_knowledge", "realtime_chat_thread", "documents_media", "documents_media_"]
 why = "the knowledge bases and their users"
 
 [[map]]
@@ -212,7 +212,8 @@ paths = ["crates/lmgw-core/src/pricing.rs", "crates/lmgw-core/src/pricing/*",
          "crates/lmgw-core/src/proxy/unanswered.rs", "crates/lmgw-core/src/proxy/embeddings.rs",
          "crates/lmgw-core/src/proxy/legacy.rs", "crates/lmgw-core/src/web/chat.rs",
          "crates/lmgw-core/src/web/chat/stopped.rs"]
-modules = ["budget_floors", "usage_service_tier", "responses_native", "chat_live", "agent_stopped_rows"]
+modules = ["budget_floors", "usage_service_tier", "responses_native", "chat_live", "agent_stopped_rows",
+           "anthropic_message_start", "anthropic_request_id"]
 why = "budget lower bounds for unpriced rows and the unpriced refusal (openai egress design §13, decision 24): the tier floor, budget_unpriced, the cut, stopped and hung-up answers' local counts"
 
 [[map]]
@@ -432,13 +433,26 @@ paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
 modules = ["egress_adapters", "ingress_roundtrip", "ingress_tool_results", "e2e_proxy",
            "count_compat", "responses_api", "responses_key_ref", "anthropic_beta",
            "chat_replay_shapes", "stream_usage", "gemini_signatures", "systemone",
-           "mcp_tasks::thread::goldens", "structured_output"]
+           "mcp_tasks::thread::goldens", "structured_output", "anthropic_prompt_caching",
+           "anthropic_message_start", "anthropic_request_id"]
 why = "the protocol adapters"
 
 [[map]]
 paths = ["crates/lmgw-core/src/extract/*"]
-modules = ["chat_attach_", "chat_attachments", "knowledge", "knowledge_"]
+modules = ["chat_attach_", "chat_attachments", "knowledge", "knowledge_", "documents_media", "documents_media_"]
 why = "attachments and knowledge bases read files through it"
+
+[[map]]
+paths = ["crates/lmgw-core/src/extract/*", "crates/lmgw-core/src/server/documents.rs",
+         "crates/lmgw-core/src/server/documents/*",
+         "crates/lmgw-api-types/src/documents/*"]
+modules = ["documents_convert", "documents_layout_model", "documents_model_", "documents_media", "documents_media_"]
+why = "POST /v1/documents/convert converts through it"
+
+[[map]]
+paths = ["crates/lmgw-doc-reader/*"]
+modules = ["documents_convert", "docling_serve", "documents_media", "documents_media_"]
+why = "the reader executable the conversion starts for HTML, EPUB, e-mail, .xls and pictures"
 
 [[map]]
 paths = ["crates/lmgw-core/src/gguf.rs", "crates/lmgw-core/src/gguf/*",
@@ -743,3 +757,8 @@ paths = ["crates/lmgw-core/src/web/chat_feed.rs", "crates/lmgw-core/src/net/publ
 modules = ["chat_feed::hello::hello_names_the_public_url_or_the_serving_tls_listener_to_other_devices",
            "chat_feed::hello::hello_names_the_dashboard_to_this_computer_and_to_others_off_loopback"]
 why = "a device hello's dashboard_url (headless server design §4.3, D42): the public URL, else the TLS listener while one serves, else bind_addr's rule; this computer keeps the plain loopback"
+
+[[map]]
+paths = ["crates/lmgw-core/src/server/models_page.rs", "crates/lmgw-core/src/server/models_page/*"]
+modules = ["models_paging"]
+why = "Anthropic's paging of GET /v1/models"

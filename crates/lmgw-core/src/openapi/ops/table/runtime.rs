@@ -1,6 +1,7 @@
 //! `ops-runtime`: the per-model container runtime, the GPU hold, the
-//! machine check (machine-check design §4.2), and background jobs (api-docs
-//! design §4.7).
+//! machine check (machine-check design §4.2), the document tools found on
+//! this computer (document-conversion design §7.5), and background jobs
+//! (api-docs design §4.7).
 
 use lmgw_api_types as dto;
 
@@ -47,21 +48,25 @@ pub(super) const OPS: &[OpDoc] = &[
     OpDoc {
         name: "headroom_forget",
         tag: TAG,
-        summary: "Forget the headroom's learned growth of other programs' GPU memory",
+        summary: "Forget the headroom's readings of other programs' GPU memory",
         description: Some(
-            "Deletes every reading auto headroom learned from (`vram_outside_hours`), in memory \
-             and stored: auto uses the fixed `headroom_mb` until it has watched the card for \
-             `hours_needed` hours again. For a growth a one-off taught, such as a game run \
-             without the hold. The answer is the headroom as it is now (`HeadroomNow`).",
+            "Auto headroom is kept per graphics card from the readings of other programs' GPU \
+             memory there. With `card` (a card's id, as `HeadroomNow.cards` lists it) only that \
+             card's readings are deleted, in memory and stored: until its next reading that card \
+             keeps the whole `headroom_mb` as its floor and no learned room; the other cards keep \
+             theirs. Without `card` every card's readings go. For a most a one-off taught, such \
+             as a game run without the hold, or a card that changed hands. A card that is \
+             neither listed nor has readings is refused. The audit log names the card and the \
+             figure that was dropped. The answer is the headroom as it is now (`HeadroomNow`).",
         ),
         tool: None,
-        args: OpArgs::NoArgs,
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::HeadroomForgetArgs>()),
         response: Resp::Json(|g| g.root_schema_for::<dto::HeadroomNow>()),
         writes: true,
         reveals_secret: false,
         confirm_note: Some(
-            "forgets every reading of other programs' GPU memory; auto headroom uses the fixed \
-             value until it has learned again",
+            "forgets the readings of other programs' GPU memory, of one card or of every card; \
+             auto headroom keeps the whole fixed value on that card until its next reading",
         ),
         deprecated: false,
         example: None,
@@ -123,6 +128,113 @@ pub(super) const OPS: &[OpDoc] = &[
              and the models' own ones that follow them, then stops the running models whose \
              settings changed",
         ),
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "doc_tools",
+        tag: TAG,
+        summary: "What this computer can convert to text, and what installing a tool would add",
+        description: None,
+        tool: Some("lmgw__doc_tools"),
+        args: OpArgs::NoArgs,
+        response: Resp::Json(|g| g.root_schema_for::<dto::documents::DocCaps>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "doc_jobs_stored",
+        tag: TAG,
+        summary: "What background document conversions hold on disk and still have queued",
+        description: Some(
+            "Settings > Retention shows it beside the retention of conversion jobs (document \
+             conversion design §7.3): jobs with files in the data dir, the bytes those take \
+             (uploads of running jobs, converted text of ended ones until the retention removes \
+             them), jobs running now and the files of running jobs that have no outcome yet. \
+             Jobs keep their uploads on disk while queued, so this is where a queue that grows \
+             shows.",
+        ),
+        tool: Some("lmgw__doc_jobs_stored"),
+        args: OpArgs::NoArgs,
+        response: Resp::Json(|g| g.root_schema_for::<dto::documents::jobs::JobsStored>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "doc_adapter_usage",
+        tag: TAG,
+        summary: "Who calls the docling-serve-compatible routes, and what they send",
+        description: Some(
+            "Summed per key from the convert_calls records beside the request log (document \
+             conversion §7.8): requests, files, last seen, the /v1/convert/* routes with \
+             counts, each docling option set with its value and outcome (honoured, mapped, \
+             not_yet, refused; the ones other than honoured first), and the hosts of http \
+             sources. Option values are kept for enum-like options only; free text, addresses, \
+             headers, prompts, file names and content are never recorded. The records follow \
+             the request log's retention, so the summary needs no store of its own.",
+        ),
+        tool: Some("lmgw__doc_adapter_usage"),
+        args: OpArgs::NoArgs,
+        response: Resp::Json(|g| {
+            g.root_schema_for::<dto::documents::adapter_usage::AdapterUsage>()
+        }),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "doc_model_add",
+        tag: TAG,
+        summary: "Download a model file document conversion can use",
+        description: Some(
+            "Queues one of the model files doc_tools lists under models (today the layout \
+             model, id 'layout': docling's heron layout model as its own ONNX export, \
+             Apache-2.0, about 163 MiB) into the folder aux model files go into, at \
+             <owner>/<repo>/<file>, through the download queue: it shows on the Downloads \
+             page, and hf_downloads with its id follows it. The file is taken at the commit \
+             lmgw pins; the hub's listing must name the pinned SHA-256 or nothing is queued, \
+             and the gateway checks the bytes against it again before the first load. A file \
+             already there or already on its way is not queued again. A download loads \
+             nothing and switches nothing on: settings_set documents_onnx_layout=true does, \
+             once the file is here. Refused when the aux models dir is not configured.",
+        ),
+        tool: Some("lmgw__doc_model_add"),
+        args: OpArgs::Tool,
+        response: Resp::Json(|g| g.root_schema_for::<dto::documents::models::DocModelAddResult>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "doc_tools_check",
+        tag: TAG,
+        summary: "Check the optional document tools again",
+        description: Some(
+            "Settings › Documents' Check again: every optional tool (poppler, tesseract, \
+             pandoc, ffmpeg, LibreOffice) is looked up on PATH (lmgw's own document reader \
+             where lmgw installs it, never on PATH) and, where found, run for its \
+             version (and, by tool, its language packs, audio decoders or installed parts) in \
+             a private empty working directory, each run stopped after TOOL_PROBE_TIMEOUT \
+             (10 s), which a failed probe's message names. A check that began after this call \
+             is joined rather than run twice. The answer is the same as doc_tools'. It only \
+             reads: nothing is installed or stored.",
+        ),
+        tool: None,
+        args: OpArgs::NoArgs,
+        response: Resp::Json(|g| g.root_schema_for::<dto::documents::DocCaps>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
         deprecated: false,
         example: None,
     },

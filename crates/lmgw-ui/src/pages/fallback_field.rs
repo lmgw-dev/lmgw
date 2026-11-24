@@ -126,12 +126,12 @@ pub(super) struct Saves {
     /// The field's value, once [`FallbackField`] is drawn: which fallback
     /// a save's notes speak of.
     field: StoredValue<Option<RwSignal<String>>>,
-    modal: Option<lmgw_ui_kit::widgets::modal::ModalState>,
+    modal: Option<super::editor_host::EditorHost>,
 }
 
 impl Saves {
     /// For a row of `id` (0: a create), with the notes a create handed it
-    /// ([`Self::carry`]). Inside a modal, when there is one.
+    /// ([`Self::carry`]). In its modal or the Models pane, when there is one.
     pub(super) fn new(id: i64) -> Self {
         let carried = CARRIED.with_borrow_mut(|c| {
             c.take_if(|(row, _)| id > 0 && *row == id)
@@ -142,7 +142,7 @@ impl Saves {
             notes: RwSignal::new(carried),
             error: RwSignal::new(None),
             field: StoredValue::new(None),
-            modal: crate::widgets::use_modal(),
+            modal: super::editor_host::use_editor_host(),
         }
     }
 
@@ -196,7 +196,7 @@ impl Saves {
     /// changes, and they hold for as long as that fallback is the one —
     /// picked away and back without a save between, too). Whether the form
     /// may close: nothing left to read for the fallback it saved. When it
-    /// stays open the modal is told the form is saved, so closing it does
+    /// stays open its modal (or pane) is told the form is saved, so closing it does
     /// not ask about changes.
     pub(super) fn answered(&self, id: i64, notes: Vec<String>) -> bool {
         if id > 0 {
@@ -372,7 +372,13 @@ pub(super) fn FallbackField(
                     .get()
                     .map(|e| view! { <div class="field-err" role="alert">{e}</div> })
             }}
-            <div class="fallback-chain mono-sm">{chain}</div>
+            <div
+                class="fallback-chain"
+                class:mono-sm=move || !value.get().trim().is_empty()
+                class:dim=move || value.get().trim().is_empty()
+            >
+                {chain}
+            </div>
             {move || {
                 saves
                     .notes_for(&value.get())

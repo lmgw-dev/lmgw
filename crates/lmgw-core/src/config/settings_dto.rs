@@ -74,6 +74,7 @@ impl From<&VramSettings> for dto::VramSettingsDto {
             enabled: v.enabled,
             headroom_mode: v.headroom_mode,
             headroom_mb: v.headroom_mb,
+            keep_free: v.keep_free.clone(),
             budget_mb: v.budget_mb,
             queue_timeout_seconds: v.queue_timeout_seconds,
             load_timeout_seconds: v.load_timeout_seconds,

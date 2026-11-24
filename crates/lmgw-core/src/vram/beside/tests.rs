@@ -11,11 +11,15 @@ fn resident(class: Class, model: &str, estimated: u64, pending: Option<u64>) -> 
         model: model.into(),
         state: "ready".into(),
         estimated_bytes: estimated,
+        charge: crate::vram::CardCharge::over(Vec::new(), estimated),
         in_flight: 0,
         idle_seconds: Some(0),
         peak_extra_bytes: None,
         pending_bytes: pending,
         note: None,
+        cards: Vec::new(),
+        generation: None,
+        kept_bytes: 0,
     }
 }
 

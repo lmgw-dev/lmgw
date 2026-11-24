@@ -321,7 +321,7 @@ pub(super) fn SamplingFields(draft: SamplingDraft, error: Memo<Option<String>>) 
                 <label title=hint>{label}</label>
                 <input
                     class="input mono"
-                    placeholder="model default"
+                    placeholder="Default"
                     title=hint
                     prop:value=move || sig.get()
                     on:input=move |ev| sig.set(event_target_value(&ev))
@@ -350,7 +350,7 @@ pub(super) fn SamplingFields(draft: SamplingDraft, error: Memo<Option<String>>) 
                 <textarea
                     class="input ta mono"
                     rows="2"
-                    placeholder="model default"
+                    placeholder="Default"
                     prop:value=move || stop.get()
                     on:input=move |ev| stop.set(event_target_value(&ev))
                 ></textarea>

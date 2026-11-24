@@ -47,13 +47,11 @@ pub fn OperationDoc(op: Operation, components: Value) -> impl IntoView {
                     move || {
                         view! {
                             <h4 class="sv-h">"Parameters"</h4>
-                            <table class="data kv-table sv-params">
-                                <tbody>
-                                    <For each=move || params.clone() key=|p| p.to_string() let:p>
-                                        {render_param_row(p)}
-                                    </For>
-                                </tbody>
-                            </table>
+                            <div class="sv-params">
+                                <For each=move || params.clone() key=|p| p.to_string() let:p>
+                                    {render_param_row(p)}
+                                </For>
+                            </div>
                         }
                     }
                 })}
@@ -138,16 +136,15 @@ fn render_param_row(p: Value) -> impl IntoView {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     view! {
-        <tr>
-            <td class="mono-sm">
-                {name}
-                {required.then(|| view! { <span class="sv-req">" required"</span> })}
-                {wildcard.then(|| view! { <span class="dim">" (wildcard)"</span> })}
-            </td>
-            <td class="dim">{loc}</td>
-            <td class="dim">{ty}</td>
-            <td class="dim wrap">{description}</td>
-        </tr>
+        <div class="sv-param">
+            <div class="sv-param-line">
+                <code class="mono-sm">{name}</code>
+                <span class="dim">" \u{b7} " {loc} " \u{b7} " {ty}</span>
+                {required.then(|| view! { <span class="sv-req">"required"</span> })}
+                {wildcard.then(|| view! { <span class="dim">"(wildcard)"</span> })}
+            </div>
+            {(!description.is_empty()).then(|| view! { <p class="sv-param-desc">{description}</p> })}
+        </div>
     }
 }
 

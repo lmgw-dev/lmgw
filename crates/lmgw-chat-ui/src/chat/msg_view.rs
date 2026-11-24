@@ -24,12 +24,12 @@ pub(crate) fn MsgView(
     let reasoning = m.reasoning;
     let tools = m.tools;
     let streaming = m.streaming;
-    let tokens = m.tokens;
     let attachments = m.attachments;
     let kb_refs = m.kb_refs;
     let context = m.context;
-    let (model, answered_by, unsaved) = (m.model, m.answered_by, m.unsaved);
+    let unsaved = m.unsaved;
     let images_note = m.images_note;
+    let notices = m.notices;
     let gpu_setup = m.gpu_setup;
     let voice = m.voice;
     let origin = m.origin;
@@ -43,11 +43,15 @@ pub(crate) fn MsgView(
     let media_settled =
         Signal::derive(move || db_id.get().is_some() && !streaming.get() && !unsaved.get());
     // The rendered markdown is written from an effect rather than through
-    // `inner_html`, so highlighting and the toolbar always run on the DOM this
-    // pass produced — no ordering race between two effects over one element.
+    // `inner_html` (and node by node, `morph`), so highlighting and the
+    // toolbar always run on the DOM this pass produced — no ordering race
+    // between two effects over one element.
     // Re-runs per streamed token (highlight only) and once more when the
     // message settles, which is when the toolbar and auto-detection happen.
     let md_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    // What the last write left: each top-level node and the HTML it was
+    // made from (`morph`).
+    let md_made = StoredValue::new_local(morph::Made::default());
     Effect::new(move |_| {
         let Some(el) = md_ref.get() else { return };
         let html = md_to_html(&content.get());
@@ -57,7 +61,9 @@ pub(crate) fn MsgView(
             _ => html,
         });
         let html = voice.with(|v| chat_voice::spoken_html(html, v.as_ref(), &role));
-        el.set_inner_html(&html);
+        // Only what changed: a whole new subtree per token moved the
+        // transcript pane in WebKitGTK (`morph`).
+        md_made.update_value(|made| morph::write(&el, &html, made));
         decorate_code(&el, !streaming.get());
     });
     if m.role == "user" {
@@ -114,9 +120,22 @@ pub(crate) fn MsgView(
                 data-mid=move || db_id.get().map(|i| i.to_string())
             >
                 <RetrievalView ctx=context/>
+                // The attached labels that offered the turn no tools: their
+                // own block, never in the reply's text, and kept with it.
+                <Show when=move || !notices.with(Vec::is_empty)>
+                    <div class="msg-notices">
+                        <For
+                            each=move || notices.get()
+                            key=|n| (n.server_label.clone(), n.code.as_str(), n.message.clone())
+                            let:n
+                        >
+                            <div class="notice warn msg-notice" role="status">{n.message}</div>
+                        </For>
+                    </div>
+                </Show>
                 <Show when=move || !reasoning.get().is_empty()>
                     <details class="reasoning">
-                        <summary class="dim">"thinking"</summary>
+                        <summary>"Thinking"</summary>
                         <div class="reasoning-body">{move || reasoning.get()}</div>
                     </details>
                 </Show>
@@ -150,19 +169,6 @@ pub(crate) fn MsgView(
                     <span class="caret"></span>
                 </Show>
                 <chat_voice::SpokenReply voice=voice/>
-                {move || {
-                    tokens
-                        .get()
-                        .map(|(p, c)| {
-                            view! {
-                                <div class="dim mini-note">{format!("{p} → {c} tokens")}</div>
-                            }
-                        })
-                }}
-                {move || {
-                    answer_label(model.get().as_deref(), answered_by.get().as_deref())
-                        .map(|l| view! { <div class="dim mini-note msg-answered-by">{l}</div> })
-                }}
                 {move || {
                     images_note
                         .get()

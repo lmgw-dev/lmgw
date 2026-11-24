@@ -3,102 +3,186 @@
    It names no asset path of any host: the fonts the --sans/--mono tokens name
    are the host's @font-face (or the desktop's own families). */
 
-/* ---------- tokens: dark (default) ---------- */
+/* ---------- tokens: dark (default) ----------
+   The modern desktop language (docs/design/ui-rebuild/modern-sample.html, the
+   contract: keep the two in sync when tokens change): a sidebar in its own
+   tone, a view and a pane a little darker, cards a little lighter, quiet
+   greys and the Breeze blue. The older names stay the vocabulary every rule
+   (and the Chat, and Kai) speaks; the mockup's names are beside them where
+   the role is new.
+     --bg0 sidebar · --bg1 view (lists) · --pane detail and page background
+     --surface card · --surface-hi popover, raised
+     --border, --border-strong solid hairlines (charts, legacy rules);
+     --divider, --card-line, --hover, --select, --ctl, --ctl-hover, --field
+     are translucent, so they read on whatever tone they sit on.
+   The desktop palette (app.css) replaces the stepped neutrals with the
+   desktop's own (src-tauri/src/desktop_palette/ramp.rs reads this block and
+   its test fails when the steps no longer rebuild it). */
 :root {
-  /* native controls (checkboxes, file buttons, a <select>'s popup, form
-     scrollbars) drawn for the theme, not white on graphite */
+  /* native controls (a <select>'s popup, form scrollbars) drawn for the
+     theme, not white on graphite */
   color-scheme: dark;
-  --bg0: #16191C;          /* window base / sidebar */
-  --bg1: #1C2024;          /* content background */
-  --surface: #23272C;      /* cards, inputs */
-  --surface-hi: #2B3036;   /* hover / raised */
-  --border: #333940;
-  --border-strong: #454D56;
-  --text: #E2E6EA;
-  --text-2: #98A2AC;
-  --text-3: #6A737D;
-  --accent: #3DAEE9;       /* interactive accent — links, primary, focus, active nav */
-  --accent-hi: #5CBDF2;
-  --accent-ink: #10161C;   /* text on accent fills */
-  --accent-bg: rgba(61,174,233,.13);
-  --amber: #E8A33D;        /* liveness — streaming, downloads, pulse, dirty state */
-  --amber-bg: rgba(232,163,61,.13);
-  --ok: #41B25D;
-  --ok-bg: rgba(65,178,93,.13);
-  --err: #E5534B;
-  --err-bg: rgba(229,83,75,.12);
-  --shadow: 0 1px 2px rgba(0,0,0,.25), 0 4px 16px rgba(0,0,0,.18);
-  --sans: "Plex Sans", system-ui, sans-serif;
-  --mono: "Plex Mono", monospace;
+  --bg0: #2a2d31;          /* sidebar, the window's own tone */
+  --bg1: #1e2023;          /* view: lists, the page under a pane */
+  --pane: #222428;         /* content pane: pages, detail */
+  --surface: #2c2f33;      /* cards, boxed groups */
+  --surface-hi: #33363b;   /* popovers, menus, dialogs */
+  --border: #35383d;
+  --border-strong: #464a50;
+  --text: #e9ebee;
+  --text-2: #a6acb3;
+  --text-3: #737a82;
+  --accent: #3daee9;       /* interactive accent: links, suggested, focus, switches */
+  --accent-hi: #5cbdf2;
+  --accent-ink: #08131c;   /* text on accent fills */
+  --accent-bg: rgba(61,174,233,.18);
+  --amber: #e8a33d;        /* a warning; the machine check's run pulse */
+  --amber-bg: rgba(232,163,61,.14);
+  --ok: #4cc26b;
+  --ok-bg: rgba(76,194,107,.14);
+  --err: #f0625a;
+  --err-bg: rgba(240,98,90,.14);
+  /* the mockup's roles */
+  --warn: var(--amber);
+  --accent-soft: var(--accent-bg);
+  --hover: rgba(255,255,255,.055);
+  --select: rgba(255,255,255,.10);
+  --divider: rgba(255,255,255,.07);
+  --card-line: rgba(255,255,255,.06);
+  --ctl: rgba(255,255,255,.08);
+  --ctl-hover: rgba(255,255,255,.13);
+  --ctl-on: rgba(255,255,255,.16);  /* the picked part of a toggle group */
+  --field: rgba(255,255,255,.07);
+  --focus: rgba(61,174,233,.55);
+  --popover: var(--surface-hi);
+  --well: #191b1e;         /* code, logs, previews: sunk below the card */
+  --pop-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 10px 30px rgba(0,0,0,.45);
+  --toast: #3a3d42;
+  --toast-ink: #f1f3f5;
+  --knob: #ffffff;         /* a switch's knob */
+  --shadow: 0 0 0 1px rgba(0,0,0,.5), 0 6px 24px rgba(0,0,0,.35);
+  --card-shadow: none;
+  /* type: Adwaita Sans for the interface, Adwaita Mono for code and data
+     (bundled by the host, crates/lmgw-ui/assets/fonts) */
+  --sans: "Adwaita Sans", system-ui, sans-serif;
+  --mono: "Adwaita Mono", monospace;
+  /* shape */
+  --r-win: 14px;           /* the window's corners (CSD) */
+  --r-item: 8px;           /* buttons, fields, rows */
+  --r-box: 12px;           /* cards, boxed groups, popovers */
+  --head-h: 48px;          /* every header bar */
   /* syntax tokens (highlight.js), tuned to the palette above */
-  --code-cmt: #6A737D; --code-key: #6CBCF2; --code-tag: #E5786E;
-  --code-attr: #94BEE8; --code-str: #94C87E; --code-num: #E8A33D;
-  --code-fn: #94BEE8; --code-type: #58C4BE; --code-meta: #98A2AC;
+  --code-cmt: #737a82; --code-key: #6cbcf2; --code-tag: #e5786e;
+  --code-attr: #94bee8; --code-str: #94c87e; --code-num: #e8a33d;
+  --code-fn: #94bee8; --code-type: #58c4be; --code-meta: #a6acb3;
   /* chart tokens (usage-analytics design §6.3). Six categorical slots in a
      fixed order, assigned per entity and never by rank; validated against
      --surface in both themes. `hue_for()` is for chips, never for a chart. */
   --c1: #0486D3; --c2: #D57700; --c3: #009D9E;
   --c4: #875CC6; --c5: #5B9D2C; --c6: #CF5291;
-  --c-other: #6A737D;      /* the folded tail — a real series, not a 7th hue */
-  --seq0: #262C33;         /* an empty ordinal cell: one step off surface */
+  --c-other: #6A737D;      /* the folded tail: a real series, not a 7th hue */
+  --seq0: #303338;         /* an empty ordinal cell: one step off surface */
   --seq1: #375F80; --seq2: #3674A5; --seq3: #3089CB;
   --seq4: #3F9FE8; --seq5: #60B6FA;
-  --grid: #2E343A;         /* hairline, SOLID, recessive — dashing means projection */
+  --grid: #373a3f;         /* hairline, SOLID, recessive: dashing means projection */
 }
 [data-theme="light"] {
   color-scheme: light;
-  --bg0: #E8EAEC;
-  --bg1: #F3F4F5;
-  --surface: #FBFCFC;
-  --surface-hi: #FFFFFF;
-  --border: #D3D8DC;
-  --border-strong: #B4BCC2;
-  --text: #21262B;
-  --text-2: #5A646D;
-  --text-3: #87919A;
-  --accent: #1F6DAD;
-  --accent-hi: #185A91;
-  --accent-ink: #FFFFFF;
-  --accent-bg: rgba(31,109,173,.10);
-  --amber: #B45309;
-  --amber-bg: rgba(180,83,9,.10);
-  --ok: #1E7E3E;
-  --ok-bg: rgba(30,126,62,.12);
-  --err: #C03B32;
-  --err-bg: rgba(192,59,50,.10);
-  --shadow: 0 1px 2px rgba(25,30,36,.08), 0 4px 14px rgba(25,30,36,.07);
-  --code-cmt: #87919A; --code-key: #1F6DAD; --code-tag: #C03B32;
+  --bg0: #ebecee;
+  --bg1: #ffffff;
+  --pane: #f7f8f9;
+  --surface: #ffffff;
+  --surface-hi: #f0f1f3;   /* raised and hovered fills; popovers are white */
+  --border: #e2e4e7;
+  --border-strong: #c9cdd2;
+  --text: #1f2328;
+  --text-2: #5e6670;
+  --text-3: #8a929b;
+  --accent: #2b7bc0;
+  --accent-hi: #1067ab;
+  --accent-ink: #ffffff;
+  --accent-bg: rgba(43,123,192,.13);
+  --amber: #9a540a;
+  --amber-bg: rgba(154,84,10,.12);
+  --ok: #1f8a43;
+  --ok-bg: rgba(31,138,67,.12);
+  --err: #c63b32;
+  --err-bg: rgba(198,59,50,.10);
+  --hover: rgba(0,0,0,.04);
+  --select: rgba(0,0,0,.075);
+  --divider: rgba(0,0,0,.08);
+  --card-line: rgba(0,0,0,.09);
+  --ctl: rgba(0,0,0,.06);
+  --ctl-hover: rgba(0,0,0,.10);
+  --ctl-on: #ffffff;
+  --field: rgba(0,0,0,.055);
+  --focus: rgba(43,123,192,.5);
+  --popover: #ffffff;
+  --well: #f0f1f3;
+  --pop-shadow: 0 0 0 1px rgba(0,0,0,.10), 0 10px 30px rgba(20,30,40,.18);
+  --toast: #2b2e33;
+  --toast-ink: #f1f3f5;
+  --shadow: 0 0 0 1px rgba(0,0,0,.08), 0 6px 20px rgba(20,30,40,.14);
+  --card-shadow: 0 1px 2px rgba(0,0,0,.04);
+  --code-cmt: #8a929b; --code-key: #2b7bc0; --code-tag: #c63b32;
   --code-attr: #33608D; --code-str: #3E7A35; --code-num: #935108;
-  --code-fn: #33608D; --code-type: #0E6F74; --code-meta: #5A646D;
+  --code-fn: #33608D; --code-type: #0E6F74; --code-meta: #5e6670;
   /* light is *selected*, not flipped: its own validated steps */
   --c1: #0077C7; --c2: #CF7100; --c3: #009192;
   --c4: #7541B8; --c5: #4A8B10; --c6: #C43783;
   --c-other: #87919A;
-  --seq0: #EFF2F4;
+  --seq0: #eff2f4;
   --seq1: #CFE3F4; --seq2: #A9CDEC; --seq3: #78B0DF;
   --seq4: #4590CE; --seq5: #1F6DAD;
-  --grid: #E4E8EB;
+  --grid: #e4e8eb;
 }
 
-/* ---------- density ---------- */
-.density-dense { --ctl-h: 28px; --fs: 13px; --fs-sm: 12px; --pad: 10px; --gap: 8px;
-                 --card-r: 10px; --row-h: 32px; }
+/* ---------- density ----------
+   One component set; the tokens live on :root, so every surface (a split page,
+   a modal, the shell) gets the dense set without opting in. Dense is the
+   default (every admin page); .density-airy overrides it for the Chat's
+   transcript, and .density-dense on an element resets a dense island inside
+   an airy one. */
+:root, .density-dense { --ctl-h: 32px; --fs: 13.5px; --fs-sm: 12.5px; --pad: 12px; --gap: 8px;
+                 --card-r: var(--r-box); --row-h: 36px; }
 .density-airy  { --ctl-h: 36px; --fs: 14px; --fs-sm: 13px; --pad: 18px; --gap: 14px;
-                 --card-r: 14px; --row-h: 44px; }
+                 --card-r: 14px; --row-h: 48px; }
 
+
+/* ---------- icons (widgets/icon.rs) ----------
+   Monochrome symbolic strokes in the text colour. */
+svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
+  stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+/* A flat icon button: a background only under the pointer. */
+.icon-btn { width: 34px; height: 34px; flex: none; display: inline-grid; place-items: center;
+  padding: 0; border: 0; border-radius: var(--r-item); background: none; color: var(--text);
+  cursor: pointer; }
+.icon-btn:hover:not(:disabled) { background: var(--hover); }
+.icon-btn:active:not(:disabled), .icon-btn[aria-expanded="true"] { background: var(--select); }
+.icon-btn:disabled { opacity: .4; cursor: default; }
+svg.i.menu-btn-ico, .btn svg.i.menu-btn-ico { width: 12px; height: 12px; margin-right: -2px; }
+svg.i.menu-btn-lead, .btn svg.i.menu-btn-lead { margin-left: -2px; }
+.icon-btn.sm { width: 28px; height: 28px; border-radius: 7px; }
+.icon-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* A dropdown's arrow: a chevron drawn by a mask, whatever the markup says
+   ("▾" stays as the text for anything that reads it). */
+.select-arrow { flex: none; display: inline-block; width: 14px; height: 14px; font-size: 0;
+  color: var(--text-2); background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat; }
 
 /* A two-step destructive action (ConfirmButton). The armed pair replaces the
    button in place, so a nowrap actions cell simply grows by it. */
 .confirm { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
 
 /* ---------- forms (widgets/form.rs) ----------
-   A field says it is changed (the amber rule of the dirty state, drawn in the
-   gap so nothing shifts) and why it is wrong, inline. */
+   A field says it is changed (the accent dot after its label, the dirty
+   mark of every row) and why it is wrong, inline. */
 .field-unit { color: var(--text-3); font-weight: 400; }
 .field-unit::before { content: " · "; }
-.field.dirty, .check-line.dirty { position: relative; }
-:is(.field, .check-line).dirty::before { content: ""; position: absolute; left: -7px;
-  top: 1px; bottom: 1px; width: 2px; border-radius: 2px; background: var(--amber); }
+.field.dirty > label::after, .check-line.dirty::after, .prow.dirty .prow-title::after {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); margin-left: 7px; vertical-align: middle; }
 .field.invalid :is(.input, .select-btn) { border-color: var(--err); }
 .field-err { margin-top: 4px; font-size: 11.5px; color: var(--err); }
 /* A stored value nothing judges (Settings): amber, dashed — not the dirty
@@ -108,7 +192,7 @@
 .save-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
   font-size: var(--fs-sm); min-height: var(--ctl-h); }
 .save-bar .spacer { flex: 1; }
-.save-bar.dirty .save-state b { color: var(--amber); font-weight: 600; }
+.save-bar.dirty .save-state b { color: var(--accent); font-weight: 600; }
 .save-bar .save-state { color: var(--text-2); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; min-width: 0; }
 .save-invalid, .save-err { color: var(--err); }
@@ -116,12 +200,12 @@
   white-space: nowrap; }
 /* An explanation folded to its first sentence. */
 .explain { font-size: 12px; color: var(--text-2); margin-top: 6px; }
-.explain > summary { cursor: pointer; list-style: none; line-height: 1.45; }
+.explain > summary { cursor: pointer; list-style: none; line-height: 1.45; padding-left: 18px; }
 .explain > summary::-webkit-details-marker { display: none; }
-.explain > summary::before { content: "▸ "; color: var(--text-3); font-size: 10px; }
-.explain[open] > summary::before { content: "▾ "; }
+.explain > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px;
+  border-radius: 4px; }
 .explain > summary:hover { color: var(--text); }
-.explain-body { margin: 4px 0 0 14px; line-height: 1.45; }
+.explain-body { margin: 4px 0 0 18px; line-height: 1.45; }
 .dirty-q { margin: 0; }
 
 /* ---------- section (widgets/section.rs) ----------
@@ -132,15 +216,49 @@
   margin-bottom: 8px; min-width: 0; }
 .sec.closed > .sec-head { margin-bottom: 0; }
 .sec-toggle { display: inline-flex; align-items: center; gap: 6px; border: 0;
-  background: none; padding: 0; cursor: pointer; color: var(--text-3);
-  font: 600 11px var(--sans); letter-spacing: .09em; text-transform: uppercase;
-  white-space: nowrap; flex: none; }
+  background: none; padding: 0 0 0 2px; cursor: pointer; color: var(--text);
+  font: 600 13px var(--sans); white-space: nowrap; flex: none; }
 .sec-toggle:hover:not(:disabled) { color: var(--text); }
+.sec-toggle:hover:not(:disabled) .caret-icon { color: var(--text); }
 .sec-toggle:disabled { cursor: default; }
 .sec-toggle:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-/* ▸ pointing down when open */
-.caret-icon { display: inline-block; font-size: 9px; color: var(--text-3); }
+  outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+/* One disclosure marker: a chevron-right drawn by a mask (the markup keeps its
+   "▸" text, as .select-arrow keeps "▾"), pointing down when open. */
+:root { --chev-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E"); }
+/* The notice's leading icons: a warning triangle and a circle with a bar. */
+:root { --warn-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4 21 19.5H3z'/%3E%3Cpath d='M12 10v4.5M12 17v.4'/%3E%3C/svg%3E");
+  --err-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Cpath d='M12 7.5v5M12 15.8v.4'/%3E%3C/svg%3E"); }
+.caret-icon { display: inline-block; width: 12px; height: 12px; font-size: 0; flex: none;
+  background: currentColor; color: var(--text-2); transition: transform .12s;
+  -webkit-mask: var(--chev-mask) center / contain no-repeat;
+  mask: var(--chev-mask) center / contain no-repeat; }
+:is(.explain, .mc-fold, .cat-fam, .cat-opts, .chat-gpu-setup-said, .req-card, .lab-details,
+    .mf-fold, .chain-json, .wiz-err, .login-fold, .snippets, .bk-pull-log, .vl-prov,
+    .dl-rel-table, .pf-part, .voice-timing, .kb-ctx, .fs-fold) > summary { list-style: none; }
+:is(.explain, .mc-fold, .cat-fam, .cat-opts, .chat-gpu-setup-said, .req-card, .lab-details,
+    .mf-fold, .chain-json, .wiz-err, .login-fold, .snippets, .bk-pull-log, .vl-prov,
+    .dl-rel-table, .pf-part, .voice-timing, .kb-ctx, .fs-fold) > summary::-webkit-details-marker {
+  display: none; }
+:is(.explain, .mc-fold, .cat-fam, .cat-opts, .chat-gpu-setup-said, .req-card, .lab-details,
+    .mf-fold, .chain-json, .wiz-err, .login-fold, .snippets, .bk-pull-log, .vl-prov,
+    .dl-rel-table, .pf-part, .voice-timing, .kb-ctx, .fs-fold) > summary::before {
+  content: ""; display: inline-block; flex: none; width: 12px; height: 12px; margin-right: 6px;
+  vertical-align: -1px; background: currentColor; color: var(--text-2); transition: transform .12s;
+  -webkit-mask: var(--chev-mask) center / contain no-repeat;
+  mask: var(--chev-mask) center / contain no-repeat; }
+/* the chevron hangs left of a wrapping explanation */
+.explain > summary::before { margin-left: -18px; }
+:is(.explain, .mc-fold, .cat-fam, .cat-opts, .chat-gpu-setup-said, .req-card, .lab-details,
+    .mf-fold, .chain-json, .wiz-err, .login-fold, .snippets, .bk-pull-log, .vl-prov,
+    .dl-rel-table, .pf-part, .voice-timing, .kb-ctx, .fs-fold)[open] > summary::before {
+  transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .caret-icon,
+  :is(.explain, .mc-fold, .cat-fam, .cat-opts, .chat-gpu-setup-said, .req-card, .lab-details,
+      .mf-fold, .chain-json, .wiz-err, .login-fold, .snippets, .bk-pull-log, .vl-prov,
+      .dl-rel-table, .pf-part, .voice-timing, .kb-ctx, .fs-fold) > summary::before {
+    transition: none; } }
 .sec:not(.closed) > .sec-head .caret-icon { transform: rotate(90deg); }
 .sec-head .count { margin-left: 0; }
 .sec-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis;
@@ -151,35 +269,51 @@
 /* toasts */
 /* Errors stay until dismissed, so the stack can grow: it keeps inside the
    window and scrolls, and past a few toasts offers to clear itself. */
-.toast-host { position: fixed; right: 16px; bottom: 16px; z-index: 100;
-  display: flex; flex-direction: column; gap: 8px; max-width: 380px;
-  max-height: calc(100vh - 72px); overflow-y: auto; }
+/* At the bottom, centred under the content, as libadwaita's: dark pills
+   whatever the theme, a dot in the kind's colour before the words. */
+.toast-host { position: fixed; left: calc(50% + var(--toast-shift, 0px)); bottom: var(--toast-bottom, 20px);
+  transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; width: max-content; max-width: min(520px, 90vw);
+  max-height: calc(100vh - 72px); overflow-y: auto; pointer-events: none; }
+/* Only the pills catch the pointer: what is around them stays clickable. */
+.toast-host > * { pointer-events: auto; }
+/* --toast-bottom is the page's bottom reserve (the Chat's composer sets it). */
 /* Above a page's save foot, not over its Save: the "saved" toast of one save
    must not stand on the button of the next. */
-body:has(.page-foot) .toast-host { bottom: 64px; }
-.toast-clear { align-self: flex-end; border: 1px solid var(--border-strong); border-radius: 999px;
-  background: var(--surface-hi); color: var(--text-2); font: 500 12px var(--sans);
-  padding: 3px 10px; cursor: pointer; box-shadow: var(--shadow); }
-.toast-clear:hover { color: var(--text); }
-.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
-  border-radius: 12px; background: var(--surface-hi); border: 1px solid var(--border);
-  box-shadow: var(--shadow); font-size: 13px; }
+body:has(.page-foot) .toast-host { bottom: max(64px, var(--toast-bottom, 0px)); }
+/* And above a shown save toast (a pane's floating pill, 22px up). */
+body:has(.save-toast.show) .toast-host { bottom: max(76px, var(--toast-bottom, 0px)); }
+/* --toast-shift moves the host beside an app's sidebar; the app sets it. */
+.toast-clear { align-self: center; border: 0; border-radius: 999px;
+  background: var(--toast); color: var(--toast-ink); font: 500 12px var(--sans);
+  padding: 4px 12px; cursor: pointer; box-shadow: 0 6px 24px rgba(0,0,0,.3); opacity: .9; }
+.toast-clear:hover { opacity: 1; }
+.toast { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 16px;
+  min-height: 40px; border-radius: 20px; background: var(--toast); color: var(--toast-ink);
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); font-size: 13.5px; line-height: 1.35; }
+.toast::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: #4cc26b; }
 /* A message wraps inside the host's width, however long its words: a 64-hex
    ID or a path must not widen the toast past the host, which would then
    scroll sideways and cut the message's start off. `anywhere` (unlike
    `break-word`) also lowers the text's min-content width, which is what lets
    the flex item shrink at all. */
 .toast { overflow-wrap: anywhere; }
-.toast.ok { border-color: var(--ok); }
-.toast.warn { border-color: var(--amber); }
-.toast.err { border-color: var(--err); }
-.toast-x { border: 0; background: none; color: var(--text-3); cursor: pointer;
-  margin-left: auto; font-size: 12px; flex-shrink: 0; }
-.toast-x:hover { color: var(--text); }
+/* The toast is dark in both themes: the kinds take the dark theme's hues. */
+.toast.warn::before { background: #e8a33d; }
+.toast.err::before { background: #f0625a; }
+.toast-x { flex: none; width: 26px; height: 26px; margin-left: auto; padding: 0; border: 0;
+  border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.08);
+  color: var(--toast-ink); cursor: pointer; }
+.toast-x:hover { background: rgba(255,255,255,.16); }
+.toast-x svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
 
-.copy-btn { border: 0; background: none; color: var(--text-3); cursor: pointer;
-  font-size: 12px; padding: 2px 4px; border-radius: 5px; }
-.copy-btn:hover { color: var(--accent); background: var(--accent-bg); }
+.copy-btn { color: var(--text-3); margin-block: -4px; }
+.copy-btn:hover:not(:disabled) { color: var(--accent); background: var(--accent-bg); }
+.copy-btn svg.i { width: 15px; height: 15px; }
+/* the cross of a confirm's cancel and of a filter chip */
+.chip-x { display: inline-grid; place-items: center; }
+.chip-x svg.i, .btn.confirm-cancel svg.i, .ip-btn svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
 
 /* ---------- modal (widgets/modal.rs) ----------
    A column: head and foot stay put, the body is the one scroller. The UA caps
@@ -187,9 +321,10 @@ body:has(.page-foot) .toast-host { bottom: 64px; }
    sets its own bounds, so the dialog must not add a second scroller. */
 dialog.modal { border: 0; padding: 0; background: none; max-width: none;
   max-height: none; overflow: visible; }
-dialog.modal::backdrop { background: rgba(0,0,0,.45); }
-.modal-panel { display: flex; flex-direction: column; background: var(--surface);
-  border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+dialog.modal:focus { outline: none; }
+dialog.modal::backdrop { background: rgba(0,0,0,.4); }
+.modal-panel { display: flex; flex-direction: column; background: var(--popover);
+  border: 0; border-radius: 14px; box-shadow: var(--pop-shadow);
   min-width: min(420px, 94vw); max-width: min(820px, 94vw);
   max-height: calc(100vh - 32px); color: var(--text); }
 /* A wide editor is as tall as its content, up to the window (a short one is
@@ -200,14 +335,15 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .modal-panel.full { width: 94vw; max-width: none; }
 .modal-panel.wide:has(> .modal-body.fill), .modal-panel.full { height: calc(100vh - 32px); }
 .modal-head { flex: none; display: flex; align-items: center; justify-content: space-between;
-  gap: 10px; padding: 14px 18px 10px; }
+  gap: 10px; min-height: var(--head-h); padding: 6px 8px 6px 18px; }
 .modal-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
 .modal-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px 18px 16px; }
+.modal-body > .pref-group:last-child { margin-bottom: 0; }
 /* fill: the body holds one flexing pane (a fill-pane, a preview frame) */
 .modal-body.fill { overflow: hidden; display: flex; flex-direction: column; }
 .modal-body.fill > :not(.fill-pane) { flex: none; }
 .modal-foot { flex: none; display: flex; align-items: center; justify-content: flex-end;
-  flex-wrap: wrap; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--border); }
+  flex-wrap: wrap; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--divider); }
 /* destructive actions sit apart, at the far left */
 .modal-foot .foot-danger { margin-right: auto; display: inline-flex; gap: 8px; }
 /* a ModalFooter rendered outside any modal: a plain right-aligned row */
@@ -236,10 +372,10 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
    (top/bottom/left/max-height inline). The top layer is above every card,
    table scroller and modal, so nothing clips it. The UA gives [popover] an
    inset and margin that would centre it; both are cleared here. */
-.pop { position: fixed; inset: auto; margin: 0; padding: 4px; overflow: hidden;
-  display: flex; flex-direction: column; background: var(--surface-hi);
-  color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px;
-  box-shadow: var(--shadow); font: 400 var(--fs, 13px) var(--sans);
+.pop { position: fixed; inset: auto; margin: 0; padding: 6px; overflow: hidden;
+  display: flex; flex-direction: column; background: var(--popover);
+  color: var(--text); border: 0; border-radius: var(--r-box);
+  box-shadow: var(--pop-shadow); font: 400 var(--fs, 13.5px) var(--sans);
   /* It inherits from where it sits in the DOM (an actions cell is right-
      aligned, an eyebrow uppercase), not from where it is drawn. */
   text-align: left; text-transform: none; letter-spacing: normal;
@@ -250,24 +386,29 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .pop-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; outline: none;
   display: flex; flex-direction: column; }
 .pop-filter { flex: none; display: flex; align-items: center; gap: 8px; padding: 2px 2px 6px; }
-.pop-filter .input { flex: 1; height: 26px; }
+.pop-filter .input { flex: 1; height: 30px; }
 .pop-count { font: 500 11px var(--mono); color: var(--text-3); white-space: nowrap; }
 .pop-empty { padding: 8px 10px; color: var(--text-3); font-size: var(--fs-sm, 12px); }
 
 /* custom select (WebKitGTK can't style native popups) */
 .select { position: relative; display: inline-block; }
 .select-btn { display: inline-flex; align-items: center; justify-content: space-between;
-  gap: 8px; cursor: pointer; text-align: left; }
+  gap: 8px; cursor: pointer; text-align: left; padding-right: 8px; }
 .select-btn > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
-.select-arrow { color: var(--text-3); font-size: 10px; }
+.select-arrow { color: var(--text-3); }
 /* One highlight for the pointer and the keyboard alike: `.active` follows
    whichever moved last. */
-.select-opt { flex: none; color: var(--text); padding: 6px 10px; border-radius: 6px;
-  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.select-opt.active { background: var(--surface); }
-.select-opt.sel { color: var(--accent); background: var(--accent-bg); }
-.select-opt.sel.active { box-shadow: inset 0 0 0 1px var(--accent); }
+/* The picked option carries the accent tick in a column of its own, as a
+   libadwaita menu does. */
+.select-opt { flex: none; position: relative; color: var(--text); padding: 7px 10px 7px 32px;
+  min-height: 32px; border-radius: 7px; cursor: pointer; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.select-opt.active { background: var(--hover); }
+.select-opt.sel::before { content: ""; position: absolute; left: 13px; top: 50%; width: 4px;
+  height: 8px; margin-top: -6px; border: solid var(--accent); border-width: 0 2px 2px 0;
+  transform: rotate(45deg); }
+.select-opt.sel { font-weight: 500; }
 
 /* ---------- model picker (widgets/model_picker.rs) ----------
    A Select-shaped button that says where the model is served from, and a
@@ -282,6 +423,9 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
    ellipsized to nothing in a narrow box, and the name is cut only when it
    alone is longer than the box. The label is in the title, and in the pop. */
 .mp-btn > .mp-val:has(+ .mp-src) { flex: 0 0 auto; max-width: calc(100% - 18px); }
+.mp-val.mp-empty { display: block; }
+/* an empty picker says "pick a model" in the text face, not as a model id */
+.model-picker .mp-btn > .mp-val.mp-empty { font-family: var(--sans); font-size: inherit; }
 .mp-btn > .mp-src { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mp-src.warn { color: var(--amber); }
 /* the source's identity swatch, the model-chip convention */
@@ -291,8 +435,8 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .mp-pop { width: min(560px, 92vw); padding: 0; }
 .mp { gap: 0; }
 .mp-top { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 6px;
-  border-bottom: 1px solid var(--border); }
-.mp-q { width: 100%; height: 28px; }
+  border-bottom: 1px solid var(--divider); }
+.mp-q { width: 100%; height: 32px; }
 .mp-facets { display: flex; flex-wrap: wrap; gap: 4px; }
 .mp-facets .facet { height: 22px; padding: 0 8px; }
 .mp-count { font: 500 11px var(--mono); color: var(--text-3); }
@@ -301,25 +445,23 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .mp-list { padding: 4px; }
 /* group heads stay at the top of the list while their rows scroll under */
 .mp-head { flex: none; position: sticky; top: -4px; z-index: 1; display: flex;
-  align-items: center; gap: 6px; padding: 6px 8px 4px; margin: 0 -4px; cursor: pointer;
-  background: var(--surface-hi); color: var(--text-3); font: 600 10.5px var(--sans);
-  letter-spacing: .08em; text-transform: uppercase; }
+  align-items: center; gap: 6px; padding: 8px 8px 4px; margin: 0 -4px; cursor: pointer;
+  background: var(--popover); color: var(--text-3); font: 600 12px var(--sans); }
 .mp-head:hover, .mp-head.active { color: var(--text); }
 .mp-head[aria-expanded="true"] .caret-icon { transform: rotate(90deg); }
 .mp-head .count { margin-left: 0; letter-spacing: 0; text-transform: none; }
 .mp-note { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-3); }
-.mp-row { flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 8px;
-  border-radius: 6px; cursor: pointer; min-width: 0; }
-.mp-row.active { background: var(--surface); }
-.mp-row.sel { background: var(--accent-bg); }
-.mp-row.sel .mp-id { color: var(--accent); }
-.mp-row.sel.active { box-shadow: inset 0 0 0 1px var(--accent); }
+.mp-row { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  min-height: 30px; border-radius: 7px; cursor: pointer; min-width: 0; }
+.mp-row.active { background: var(--hover); }
+.mp-row.sel { background: var(--select); }
+.mp-row.sel .mp-id { font-weight: 600; }
 .mp-row.off { opacity: .5; cursor: default; }
 .mp-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--mono); font-size: var(--fs-sm); color: var(--text); }
 .mp-meta { flex: none; display: inline-flex; align-items: center; gap: 6px;
   font: 400 11px var(--mono); color: var(--text-3); }
-.mp-badge { padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 4px;
+.mp-badge { padding: 0 4px; border: 1px solid transparent; background: var(--ctl); border-radius: 4px;
   font-size: 10px; line-height: 14px; }
 .mp-ctx { min-width: 4ch; text-align: right; }
 .mp-price { color: var(--text-2); }
@@ -343,19 +485,21 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
   flex-direction: column; overflow: hidden; }
 .dock-main > * { flex: 1 1 auto; min-height: 0; }
 .dock-side { flex: none; width: var(--side-w, clamp(220px, 24cqi, 360px)); min-height: 0;
-  display: flex; flex-direction: column; background: var(--bg0); }
-.dock.left > .dock-side, .dock.left > .dock-rail { border-right: 1px solid var(--border); }
-.dock.right > .dock-side, .dock.right > .dock-rail { border-left: 1px solid var(--border); }
-.dock-head { flex: none; display: flex; align-items: center; gap: 6px; height: 34px;
-  padding: 0 4px 0 12px; border-bottom: 1px solid var(--border); }
+  display: flex; flex-direction: column; background: var(--bg1); }
+.dock.left > .dock-side, .dock.left > .dock-rail { border-right: 1px solid var(--divider); }
+.dock.right > .dock-side, .dock.right > .dock-rail { border-left: 1px solid var(--divider); }
+.dock-head { flex: none; display: flex; align-items: center; gap: 6px; height: 38px;
+  padding: 0 4px 0 14px; }
 .dock-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font: 600 10.5px var(--sans); letter-spacing: .09em; text-transform: uppercase;
-  color: var(--text-3); }
+  font: 600 12.5px var(--sans); color: var(--text-2); }
 .dock-head .count { margin-left: 0; }
-.dock-fold { margin-left: auto; flex: none; width: 26px; height: 26px; border: 0;
-  border-radius: 6px; background: none; color: var(--text-3); cursor: pointer;
-  font-size: 13px; }
-.dock-fold:hover { color: var(--text); background: var(--surface); }
+.dock-fold { margin-left: auto; flex: none; width: 28px; height: 28px; border: 0;
+  border-radius: 7px; background: none; color: var(--text-2); cursor: pointer;
+  display: grid; place-items: center; }
+.dock-fold:hover { color: var(--text); background: var(--hover); }
+/* the panel's own actions (head_actions), before the fold button */
+.dock-actions { margin-left: auto; flex: none; display: flex; align-items: center; gap: 2px; }
+.dock-actions + .dock-fold { margin-left: 0; }
 /* Rows ellipsize rather than widen the panel; hidden is the guard for a
    rounding pixel, which the app's classic scrollbars would show as a bar. */
 .dock-body { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
@@ -383,16 +527,16 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
   -webkit-user-select: none; }
 .dock.resizing iframe { pointer-events: none; }
 .dock-rail { flex: none; width: 28px; display: flex; flex-direction: column;
-  align-items: center; gap: 8px; padding: 8px 0; border: 0; background: var(--bg0);
-  color: var(--text-2); cursor: pointer; font: 600 10.5px var(--sans);
-  letter-spacing: .09em; text-transform: uppercase; }
-.dock-rail:hover, .dock-rail[aria-expanded="true"] { color: var(--text); background: var(--surface); }
-.dock-glyph { font-size: 13px; letter-spacing: 0; color: var(--text-3); }
+  align-items: center; gap: 8px; padding: 8px 0; border: 0; background: var(--bg1);
+  color: var(--text-2); cursor: pointer; font: 600 12px var(--sans); }
+.dock-rail:hover, .dock-rail[aria-expanded="true"] { color: var(--text); background: var(--hover); }
+.dock-glyph { display: grid; place-items: center; color: var(--text-3); }
+.dock-fold svg.i, .dock-glyph svg.i { width: 16px; height: 16px; }
 .dock-rail-label, .dock-rail .count { writing-mode: vertical-rl; white-space: nowrap; }
-.dock-rail .count { margin: 0; padding: 7px 0; letter-spacing: 0; text-transform: none; }
+.dock-rail .count { margin: 0; padding: 7px 0; }
 /* the look over a main pane that has no room for the panel beside it */
 .dock.peek > .dock-side { position: absolute; top: 0; bottom: 0; z-index: 4;
-  box-shadow: var(--shadow); }
+  box-shadow: var(--pop-shadow); }
 .dock.left.peek > .dock-side { left: 28px; }
 .dock.right.peek > .dock-side { right: 28px; }
 /* a drawer has no rail: it lies over the main pane from the split's edge */
@@ -416,13 +560,13 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .tool-pick { display: inline-flex; align-items: center; gap: 6px; }
 .tool-pick .ask-tick { font-size: 11.5px; }
 /* A small segmented switch (the approval rule's; the Chat's PDF Text | Pages). */
-.seg-mini { display: inline-flex; border: 1px solid var(--border); border-radius: 5px;
-  overflow: hidden; flex: none; }
+.seg-mini { display: inline-flex; border: 0; border-radius: 6px; background: var(--ctl);
+  padding: 1px; gap: 1px; overflow: hidden; flex: none; }
 .seg-mini .seg-btn { border: 0; background: none; color: var(--text-2); font-size: 11px;
   padding: 0 7px; height: 18px; cursor: pointer; }
-.seg-mini .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
+.seg-mini .seg-btn { border-radius: 5px; }
 .seg-mini .seg-btn:hover { color: var(--text); }
-.seg-mini .seg-btn.on { background: var(--accent-bg); color: var(--accent); }
+.seg-mini .seg-btn.on { background: var(--ctl-on); color: var(--text); }
 
 
 /* Running text folded to its first --lines lines (widgets/clamp.rs). The
@@ -434,3 +578,198 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
 .clamp.open { display: block; -webkit-line-clamp: none; overflow: visible; }
 .clamp-more { flex: none; padding: 0; font-size: var(--fs-sm); color: var(--accent); }
 .clamp-more:hover { color: var(--accent); text-decoration: underline; }
+
+
+/* ---------- preference groups and rows (widgets/prefs.rs) ----------
+   libadwaita's boxed lists: a heading, a sentence, a box of rows. A row is
+   a title (and a subtitle) with its control at the end, 52px at least; the
+   rows part by hairlines. A dirty row's title carries the accent dot (the
+   forms rule above). */
+.pref-group { margin: 0 0 22px; break-inside: avoid; }
+.pref-head { display: flex; align-items: center; gap: 8px; margin: 0 0 7px 2px; min-height: 20px; }
+.pref-head h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.pref-count { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.pref-suffix { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+.pref-desc { font-size: 12.5px; color: var(--text-2); margin: -3px 0 8px 2px; line-height: 1.45; }
+.boxed { background: var(--surface); border-radius: var(--r-box);
+  box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); overflow: hidden; }
+.prow { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+  font-size: 14px; }
+.prow + .prow { border-top: 1px solid var(--divider); }
+.prow-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.prow-title { font-size: 14px; }
+.prow-sub { font-size: 12.5px; color: var(--text-2); line-height: 1.4; }
+/* a request field's wire name after the title (WireName): secondary detail */
+.prow-title .fname { font: normal 400 11px var(--mono); color: var(--text-3);
+  overflow-wrap: break-word; }
+.prow-title i.fname { display: block; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%; }
+/* a block row's own controls fill it */
+.prow-block { flex: 1 1 100%; min-width: 0; }
+.prow-end { flex: none; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.prow-value { flex: none; color: var(--text-2); font-size: 13.5px; max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow-value.mono { font-family: var(--mono); font-size: 12.5px; }
+/* a sentence wraps to the right; ids and paths (mono) keep the one-line ellipsis */
+.prow-value:not(.mono) { white-space: normal; overflow-wrap: break-word; text-align: right; }
+.prow.action { cursor: pointer; }
+.prow.action:hover { background: var(--hover); }
+.prow.action:active { background: var(--select); }
+.prow.action:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.prow.off { opacity: .55; cursor: default; }
+.prow.off:hover { background: none; }
+.prow.danger .prow-title { color: var(--err); }
+.prow-chevron { color: var(--text-3); }
+/* A dropdown in a row is flat until hovered (libadwaita's combo row). */
+.prow.combo .select-btn { background: none; max-width: 270px; }
+.prow.combo .select-btn:hover:not(:disabled) { background: var(--hover); }
+/* a model picker at the end of a row is flat like its combo neighbours; one
+   stacked under the title keeps the filled field */
+.prow:not(.stack) > .prow-end .mp-btn { background: none; }
+.prow:not(.stack) > .prow-end .mp-btn:hover:not(:disabled) { background: var(--hover); }
+
+/* the switch */
+.switch { flex: none; position: relative; width: 42px; height: 24px; padding: 0; border: 0;
+  border-radius: 12px; background: var(--ctl-hover); cursor: pointer;
+  transition: background-color .15s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--knob); box-shadow: 0 1px 2px rgba(0,0,0,.3);
+  transition: left .15s; }
+.switch.on { background: var(--accent); }
+.switch.on::after { left: 21px; }
+.switch:disabled { opacity: .5; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
+
+/* the spin button: the field, its unit, − and + */
+.spin { display: flex; align-items: center; gap: 4px; flex: none; }
+.spin-field { width: 96px; height: 32px; border-radius: var(--r-item); border: 0;
+  background: var(--field); color: var(--text); text-align: right; padding: 0 10px;
+  font: 400 14px var(--sans); font-variant-numeric: tabular-nums; outline: none; }
+.spin-field:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.spin-unit { color: var(--text-3); font-size: 12.5px; min-width: 24px; }
+.spin-btn { width: 30px; height: 30px; flex: none; border: 0; padding: 0; border-radius: 50%;
+  background: var(--ctl); color: var(--text); display: grid; place-items: center; cursor: pointer; }
+.spin-btn:hover:not(:disabled) { background: var(--ctl-hover); }
+.spin-btn:disabled { opacity: .4; cursor: default; }
+.spin-btn svg.i { width: 13px; height: 13px; stroke-width: 2.2; }
+/* Typed text a row refuses: said under its title, the field outlined. A
+   spin never moves what was typed to its bound. */
+.prow-err { font-size: 12px; color: var(--err); line-height: 1.4; overflow-wrap: anywhere; }
+.spin-field.invalid, .prow.invalid :is(.prow-entry, .prow-area) {
+  outline: 2px solid color-mix(in srgb, var(--err) 70%, transparent); outline-offset: -1px; }
+.spin-field::placeholder, .prow-entry::placeholder, .prow-area::placeholder { color: var(--text-3); }
+
+/* rows of typed text (widgets/prefs/entry.rs): the field at the row's end,
+   or, `stack`, under the title across the row */
+.prow.entry .prow-end { flex: 1 1 200px; min-width: 0; max-width: 340px; justify-content: flex-end; }
+.prow-entry { flex: 1 1 auto; min-width: 0; width: 100%; height: 32px; border: 0;
+  border-radius: var(--r-item); background: var(--field); color: var(--text);
+  padding: 0 10px; font: 400 14px var(--sans); outline: none; }
+.prow-entry.mono, .prow-area.mono { font: 400 12.5px var(--mono); }
+.prow-entry:focus, .prow-area:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+/* a row with a description wraps its field under the words when the row
+   itself is narrow; wider rows keep one distribution, so the fields of a
+   group line up */
+.prow.entry:has(.prow-sub):not(.stack) { flex-wrap: wrap; row-gap: 8px; container-type: inline-size; }
+@container (width < 500px) {
+  .prow.entry:has(.prow-sub):not(.stack) > .prow-text { flex-basis: 100%; }
+  /* .entry twice: a page rule that caps the field (the lab forms) is as specific as this one */
+  .prow.entry.entry:has(.prow-sub):not(.stack) > .prow-end { flex: 1 1 100%; max-width: none; }
+}
+.prow.stack { flex-wrap: wrap; row-gap: 8px; padding-block: 10px 12px; }
+.prow.stack > .prow-text { flex-basis: 100%; }
+.prow.stack > .prow-end { flex: 1 1 100%; max-width: none; }
+.prow-extra { flex-basis: 100%; font-size: 12.5px; color: var(--text-2); margin-top: -6px; }
+.prow-extra.prow-after { margin-top: 0; }
+.prow-area { flex: 1 1 100%; min-height: 76px; resize: vertical; border: 0;
+  border-radius: var(--r-item); background: var(--field); color: var(--text);
+  padding: 8px 10px; font: 400 13.5px/1.45 var(--sans); outline: none; }
+
+/* ---------- state dots and the two-line list row ---------- */
+.dot { display: inline-block; width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--text-3); }
+.dot.run { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.dot.stop { background: none; box-shadow: inset 0 0 0 1.5px var(--text-3); }
+.dot.cloud { background: none; box-shadow: inset 0 0 0 1.5px var(--accent); }
+.dot.err { background: var(--err); }
+.dot.warn { background: var(--amber); }
+.dot.busy { background: var(--accent); }
+.lrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px;
+  padding: 8px 10px 9px; border-radius: var(--r-item); cursor: pointer; }
+.lrow:hover { background: var(--hover); }
+.lrow.sel { background: var(--select); }
+/* The selection takes the accent's tint while its list has the focus. */
+:focus-within > .lrow.sel, .lrow.sel:focus-visible { background: var(--accent-soft); }
+.lrow-name { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.lrow-name.quiet { color: var(--text-2); }
+.lrow-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  color: var(--text-2); white-space: nowrap; }
+svg.i.lrow-state-ico { width: 12px; height: 12px; }
+.lrow-state:empty { display: none; }
+.lrow-state-wrap { display: inline-flex; align-items: center; }
+.lrow-meta { grid-column: 1 / -1; font-size: 12.5px; color: var(--text-2); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrow.off :is(.lrow-name, .lrow-meta) { color: var(--text-3); }
+/* with an icon before the name, the icon spans both lines */
+.lrow.has-ico { grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; }
+.lrow-ico { align-self: center; width: 18px; height: 18px; color: var(--text-2); }
+.lrow.has-ico:has(> .lrow-meta) > .lrow-ico { grid-row: 1 / span 2; }
+.lrow.has-ico > .lrow-meta { grid-column: 2 / -1; }
+.lrow.sel .lrow-ico { color: var(--text); }
+/* A list's group heading, sticky over its rows. */
+.list-head { position: sticky; top: 0; z-index: 1; display: flex; gap: 6px;
+  padding: 12px 10px 5px; font-size: 12px; font-weight: 600; color: var(--text-3);
+  background: inherit; }
+.list-head .n { font-weight: 400; }
+
+/* ---------- the save toast (widgets/prefs.rs SaveToast) ----------
+   A dark pill at the bottom of its pane while something is unsaved; the
+   pane positions it (position: relative on the pane). */
+.save-toast { position: absolute; left: 50%; bottom: 22px; z-index: 5;
+  transform: translate(-50%, 16px); opacity: 0; pointer-events: none;
+  display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 18px;
+  border-radius: 22px; width: max-content; max-width: calc(100% - 32px);
+  background: var(--toast); color: var(--toast-ink);
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); font-size: 13.5px; white-space: nowrap;
+  transition: transform .18s ease, opacity .18s ease; }
+.save-toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.save-toast .btn { height: 30px; border-radius: 999px; background: rgba(255,255,255,.1);
+  color: var(--toast-ink); }
+.save-toast .btn:hover:not(:disabled) { background: rgba(255,255,255,.17); }
+.save-toast .btn.suggested { background: var(--accent); color: var(--accent-ink); }
+.save-toast-err { max-width: 60ch; white-space: normal; overflow-wrap: anywhere;
+  line-height: 1.3; padding: 3px 0; color: #f0625a; }
+@media (prefers-reduced-motion: reduce) { .save-toast { transition: none; } }
+
+/* ---------- the detail flow ----------
+   A detail page's groups in one column of 660px, or, in a pane wider than
+   1000px, in two balanced columns (a container query on the scroller), so
+   a wide window shows more instead of a gutter. `.detail-hero` spans both. */
+.detail-scroll { container-type: inline-size; }
+.detail-flow { max-width: 660px; margin: 0 auto; padding: 8px 28px 96px; }
+@container (min-width: 1000px) {
+  .detail-flow { max-width: 1180px; columns: 2; column-gap: 28px; }
+  .detail-flow > .detail-hero { column-span: all; }
+}
+.detail-hero { display: flex; gap: 14px; align-items: flex-start; margin: 6px 0 22px; }
+.detail-hero .glyph { width: 44px; height: 44px; flex: none; border-radius: 11px;
+  display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.detail-hero .glyph svg.i { width: 22px; height: 22px; }
+.detail-hero h1 { font-size: 20px; font-weight: 600; margin: 0 0 3px; line-height: 1.2;
+  overflow-wrap: anywhere; }
+.detail-hero .hero-text { min-width: 0; }
+.detail-hero .sub { color: var(--text-2); font-size: 13px; }
+.detail-hero .chips { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+
+/* audio player (widgets/audio_player.rs): play/pause, scrubber and time on a
+   field-tone row; the browser's own controls are not used */
+.audio-player { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 520px;
+  height: 36px; padding: 0 8px 0 2px; border-radius: var(--r-item); background: var(--field); }
+.audio-scrub { flex: 1 1 auto; min-width: 60px; accent-color: var(--accent); border-radius: 999px; }
+.audio-player.failed .icon-btn:disabled { color: var(--err); opacity: 1; }
+.audio-scrub:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.audio-time { flex: none; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.audio-player.failed .audio-scrub { display: none; }
+.audio-player.failed .audio-time { flex: 1 1 auto; min-width: 0; color: var(--err);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

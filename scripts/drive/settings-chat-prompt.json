@@ -13,7 +13,7 @@
   "label": "the box shows the built-in prompt"
  },
  {
-  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'built-in')",
+  "expect": "[...document.querySelectorAll('.prow-tag')].some(e => e.textContent === 'built-in')",
   "label": "tagged built-in"
  },
  {
@@ -33,7 +33,7 @@
   "wait": 0.2
  },
  {
-  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'your own')",
+  "expect": "[...document.querySelectorAll('.prow-tag')].some(e => e.textContent === 'your own')",
   "label": "an edit is your own"
  },
  {
@@ -50,11 +50,11 @@
   "wait": 0.2
  },
  {
-  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'built-in')",
+  "expect": "[...document.querySelectorAll('.prow-tag')].some(e => e.textContent === 'built-in')",
   "label": "Reset puts the built-in back"
  },
  {
-  "expect": "!document.querySelector('.save-bar .count.attn') || document.querySelector('.save-bar')?.textContent.includes('0')",
+  "expect": "!document.querySelector('.save-toast.show')",
   "label": "nothing unsaved after reset"
  },
  {

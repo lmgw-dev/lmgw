@@ -3,9 +3,9 @@
 #
 # Usage: scripts/release.sh <X.Y.Z> [notes-file]
 #
-# Sets the version in Cargo.toml ([workspace.package]), src-tauri/tauri.conf.json and
-# Cargo.lock, commits "release X.Y.Z" on main and tags that commit. The tag's message becomes
-# the GitHub release notes, Markdown with wrapped lines joined (ci/unwrap-notes.awk): the
+# Sets the version in Cargo.toml ([workspace.package]), src-tauri/tauri.conf.json,
+# packaging/arch/PKGBUILD (pkgrel back to 1) and Cargo.lock, commits "release X.Y.Z" on
+# main and tags that commit. The tag's message becomes the GitHub release notes, Markdown with wrapped lines joined (ci/unwrap-notes.awk): the
 # notes file when given, else git opens your editor. When the tree already carries the
 # version (the first release), it only tags. Then publish:
 #   git push origin main vX.Y.Z    GitLab: a private build X.Y.Z+<pipeline> of main, the RPM
@@ -13,8 +13,9 @@
 #   scripts/publish-github.sh --ref vX.Y.Z -F <message> --tag vX.Y.Z
 #                                  GitHub: one squashed commit with the tag's tree, and the tag
 #                                  on it (.github/workflows/release.yml builds the release: the
-#                                  RPM and latest.json, then the Windows installer, which its
-#                                  publish-windows job adds to the release and to latest.json)
+#                                  RPM and latest.json, then the Windows installer and the Arch
+#                                  package, which its publish-windows and publish-arch jobs add
+#                                  to the release and to latest.json)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,8 +36,12 @@ if [[ "$current" != "$version" ]]; then
     cur="${current//./\\.}"
     sed -i -E "s/^version = \"$cur\"/version = \"$version\"/" Cargo.toml
     sed -i -E "s/(\"version\"[[:space:]]*:[[:space:]]*)\"$cur\"/\1\"$version\"/" src-tauri/tauri.conf.json
+    sed -i -E "s/^pkgver=$cur\$/pkgver=$version/; s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
+    grep -qx "pkgver=$version" packaging/arch/PKGBUILD \
+        || die "packaging/arch/PKGBUILD did not take pkgver=$version (its pkgver was not $current)"
     cargo update --workspace --offline --quiet
-    git commit -q -m "release $version" -- Cargo.toml Cargo.lock src-tauri/tauri.conf.json
+    git commit -q -m "release $version" -- Cargo.toml Cargo.lock src-tauri/tauri.conf.json \
+        packaging/arch/PKGBUILD
 fi
 
 if [[ -n "$notes" ]]; then

@@ -7,8 +7,13 @@
 //! text out, every failure a visible error. [`extract`] is the one-call
 //! convenience; a caller that needs more (PDF page classification, page
 //! images, per-sheet parts) uses the submodules directly.
+//!
+//! [`convert`] is document conversion's capability table and the detection
+//! of the optional tools it uses (document-conversion design §4).
 
+pub mod convert;
 pub mod office;
+pub mod office_media;
 mod office_ods;
 mod office_sheet;
 mod office_xlsx;
@@ -68,8 +73,10 @@ pub enum ExtractError {
 }
 
 /// Extract the text of `bytes`, which [`sniff`] called `what`. Images and
-/// audio have none ([`ExtractError::NoText`]). Office parsing runs in
-/// `spawn_blocking`; PDFs go through `pdftotext` (needs poppler-utils).
+/// audio have none ([`ExtractError::NoText`]). Office parsing runs on a
+/// blocking thread with a slot of the tool pool ([`convert::pool`]); PDFs go
+/// through `pdftotext` (needs poppler-utils, an optional package: without it
+/// a PDF is [`PdfError::ToolMissing`]).
 pub async fn extract(what: &Sniffed, bytes: Bytes) -> Result<Extracted, ExtractError> {
     match what.kind {
         Kind::Text => String::from_utf8(bytes.to_vec())
@@ -80,7 +87,9 @@ pub async fn extract(what: &Sniffed, bytes: Bytes) -> Result<Extracted, ExtractE
             let format = what
                 .office_format()
                 .ok_or(ExtractError::NoText("unrecognised office"))?;
-            let text = tokio::task::spawn_blocking(move || office::extract(format, &bytes))
+            // A native reader takes a slot of the tool pool, as a tool run
+            // does (document-conversion design §7.7).
+            let text = convert::pool::blocking(move || office::extract(format, &bytes))
                 .await
                 .map_err(|e| ExtractError::Interrupted(e.to_string()))??;
             Ok(Extracted::Office(text))

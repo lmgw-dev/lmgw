@@ -27,6 +27,10 @@ mod device_gate;
 /// The device listener (device link design §4): its TLS accept, its serving
 /// loop, and what runs it from the `devices` settings.
 pub mod device_listener;
+/// The docling-serve-compatible routes (document-conversion design §7.4).
+pub mod docling;
+/// `POST /v1/documents/convert` (document-conversion design §7.1).
+pub mod documents;
 /// The device listener's face (device link design §4.6).
 mod face;
 /// Proxy mode (headless server design §4.5): a trusted proxy's forwarded
@@ -41,6 +45,8 @@ mod listeners;
 /// its listener and the names it covers.
 pub mod main_tls;
 pub use listeners::{bind, bind_tls, run, serve, serve_with, BoundTls};
+mod models_page;
+pub(crate) use models_page::ModelsPageQuery;
 mod stop;
 use background::background_or_400;
 pub use background::BACKGROUND_HEADER;
@@ -100,6 +106,33 @@ fn build_router_for(state: SharedState, via: Via) -> Router {
         // §5.2): a thin adapter onto the universal counter below.
         .route("/messages/count_tokens", post(messages_count_tokens))
         .route("/count_tokens", post(count_tokens))
+        // Document conversion (document-conversion design §7.1): files in,
+        // their text out, bounded by `max_body_mb` like the rest of this
+        // group, multipart or JSON.
+        .route("/documents/convert", post(documents::convert))
+        // Its async jobs (§7.3).
+        .route(
+            "/documents/jobs/{id}",
+            get(documents::jobs_routes::get).delete(documents::jobs_routes::delete),
+        )
+        .route(
+            "/documents/jobs/{id}/result",
+            get(documents::jobs_routes::result),
+        )
+        // The docling-serve-compatible routes (document-conversion design
+        // §7.4): a thin adapter onto the same conversion, bounded by
+        // `max_body_mb` like the native route.
+        .route("/convert/file", post(docling::convert_file))
+        .route("/convert/file/async", post(docling::convert_file_async))
+        .route("/convert/source", post(docling::convert_source))
+        .route("/convert/source/async", post(docling::convert_source_async))
+        .route("/convert/source/batch", post(docling::convert_source_batch))
+        .route("/status/poll/{task_id}", get(docling::tasks::poll))
+        .route("/status/ws/{task_id}", get(docling::tasks::ws))
+        .route("/result/{task_id}", get(docling::tasks::result))
+        .route("/chunk/{*rest}", post(docling::not_yet))
+        .route("/capabilities", get(docling::not_yet))
+        .route("/clear/{*rest}", get(docling::not_yet))
         .route("/models", get(list_models))
         // A single model's object. Wildcard capture, not `{id}`: a
         // passthrough id carries its upstream prefix and the provider's own
@@ -192,6 +225,9 @@ fn build_router_for(state: SharedState, via: Via) -> Router {
         // llama.cpp's `/tokenize` (api-docs design §5.3), at the root where
         // llama.cpp clients look for it; it declares its own capability.
         .merge(crate::proxy::tokenize::routes(&state))
+        // docling-serve's `/health`, `/ready` and `/version`, at the root
+        // where its clients look for them (document-conversion design §7.4.1).
+        .merge(docling::root_routes(&state))
         // The device listener's own routes (device link design §4.6): on
         // its face only, a 404 on the plain listener's (`gate`).
         .merge(crate::devices::routes(&state))
@@ -341,6 +377,27 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/v1/messages", Cap::Inference),
     ("POST", "/v1/messages/count_tokens", Cap::Inference),
     ("POST", "/v1/count_tokens", Cap::Inference),
+    ("POST", "/v1/documents/convert", Cap::Inference),
+    ("GET", "/v1/documents/jobs/{id}", Cap::Inference),
+    ("DELETE", "/v1/documents/jobs/{id}", Cap::Inference),
+    ("GET", "/v1/documents/jobs/{id}/result", Cap::Inference),
+    // docling-serve's routes (document-conversion design §7.4.1): the
+    // convert and task routes are `Inference`; `/health`, `/ready` and
+    // `/version` are `Public` at the root, registered in `server/docling.rs`.
+    ("POST", "/v1/convert/file", Cap::Inference),
+    ("POST", "/v1/convert/file/async", Cap::Inference),
+    ("POST", "/v1/convert/source", Cap::Inference),
+    ("POST", "/v1/convert/source/async", Cap::Inference),
+    ("POST", "/v1/convert/source/batch", Cap::Inference),
+    ("GET", "/v1/status/poll/{task_id}", Cap::Inference),
+    ("GET", "/v1/status/ws/{task_id}", Cap::Inference),
+    ("GET", "/v1/result/{task_id}", Cap::Inference),
+    ("POST", "/v1/chunk/{*rest}", Cap::Inference),
+    ("GET", "/v1/capabilities", Cap::Inference),
+    ("GET", "/v1/clear/{*rest}", Cap::Inference),
+    ("GET", "/health", Cap::Public),
+    ("GET", "/ready", Cap::Public),
+    ("GET", "/version", Cap::Public),
     // llama.cpp's own route, at the root (api-docs design §5.3) — registered
     // in `proxy/tokenize.rs`, not with the `/v1` groups.
     ("POST", "/tokenize", Cap::Inference),
@@ -596,6 +653,8 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/image-lab/api/groups", Cap::Admin),
     ("POST", "/image-lab/api/groups/edit", Cap::Admin),
     ("POST", "/image-lab/api/groups/{id}/run", Cap::Admin),
+    ("POST", "/documents-lab/api/groups", Cap::Admin),
+    ("POST", "/documents-lab/api/groups/{id}/run", Cap::Admin),
     ("GET", "/voice-lab/api/model", Cap::Admin),
     ("GET", "/voice-lab/api/sentences", Cap::Admin),
     ("POST", "/voice-lab/api/sentences", Cap::Admin),
@@ -859,6 +918,11 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     let st = state.clone();
     tokio::spawn(async move { crate::machine::boot(&st).await });
 
+    // The optional document tools (document-conversion design §4.3): a
+    // version run of each found one, spawned so it never holds up the start.
+    let st = state.clone();
+    tokio::spawn(async move { crate::extract::convert::tools::boot(&st).await });
+
     // Agent-container reconciliation and the run-dir sweep (container-runtime
     // §6.4), beside the model runtime's boot and for the same reasons. Here
     // rather than in `AppState::init`: both act on `container_prefix`, and a
@@ -905,7 +969,7 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     tokio::spawn(async move { crate::vram::peak::run(st).await });
 
     // The outside-use sampler auto headroom learns from (`vram::headroom`):
-    // one attribution reading every 30 s.
+    // one attribution reading every second (`headroom::SAMPLE_INTERVAL`).
     let st = state.clone();
     tokio::spawn(async move { crate::vram::headroom::run(st).await });
 
@@ -985,6 +1049,10 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
                 Err(e) => tracing::warn!("job pruning failed: {e}"),
             }
             chat_upkeep(&st).await;
+            // Ended async conversion jobs past their retention, and docling
+            // results fetched more than five minutes ago (document-conversion
+            // design §7.3).
+            crate::extract::convert::jobs::sweep::upkeep(&st).await;
             // Transfers between devices (device transfers design §7, §8):
             // expiry, a device that went, the ended rows' retention, stray
             // files.
@@ -1217,7 +1285,9 @@ pub(crate) async fn body_limit_mw(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
     if let Some(n) = declared.filter(|&n| n > max_bytes) {
-        let refusal = body_limit_response(req.headers(), max_mb);
+        // The conversion's says what base64 does to a JSON body's files.
+        let refusal = documents::declared_too_large(&req, max_mb)
+            .unwrap_or_else(|| body_limit_response(req.headers(), max_mb));
         // Windows resets a connection closed with bytes unread, which loses
         // the refusal: there the body is drained first, within a budget.
         #[cfg(windows)]
@@ -1832,7 +1902,8 @@ fn wants_anthropic(req: &Request) -> bool {
 
 /// `GET /v1/models` — aggregates enabled aliases, public local models, and
 /// expose-all upstream catalogs (§6). Served OpenAI-shaped unless the caller
-/// identifies as an Anthropic SDK via `anthropic-version`.
+/// identifies as an Anthropic SDK via `anthropic-version`, which gets
+/// Anthropic's paging too (`models_page`).
 ///
 /// Each object carries `context_length`, per-token `pricing` (Kilo/OpenRouter
 /// shape: `{prompt, completion}` USD/token, `"0"` for local models),
@@ -1851,12 +1922,20 @@ async fn list_models(State(state): State<SharedState>, req: Request) -> Response
             .for_each(|e| crate::realtime::advertise::advertise(e, calls));
     }
     if wants_anthropic(&req) {
-        let data: Vec<Value> = models.iter().map(anthropic_model_object).collect();
+        // Anthropic's own paging (`limit`, `after_id`, `before_id`); the
+        // OpenAI shape below has none.
+        let ids: Vec<&str> = models.iter().map(|e| e.name.as_str()).collect();
+        let page = match models_page::page_of(req.uri(), &ids) {
+            Ok(p) => p,
+            Err(e) => return (e.http_status(), Json(e.to_anthropic_json())).into_response(),
+        };
+        let shown = &models[page.start..page.end];
+        let data: Vec<Value> = shown.iter().map(anthropic_model_object).collect();
         Json(json!({
             "data": data,
-            "has_more": false,
-            "first_id": null,
-            "last_id": null,
+            "has_more": page.has_more,
+            "first_id": shown.first().map(|e| e.name.as_str()),
+            "last_id": shown.last().map(|e| e.name.as_str()),
             "lmgw": lmgw_block(),
         }))
         .into_response()

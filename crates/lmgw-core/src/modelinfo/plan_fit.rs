@@ -17,6 +17,7 @@
 //! before: nothing here touches the disk. A fit on the card
 //! ([`super::fit`]) searches the same footprints with [`largest_fitting`].
 
+use lmgw_api_types::model_find::FitCard;
 use serde_json::{Map, Value};
 
 use crate::config::Snapshot;
@@ -43,16 +44,24 @@ pub struct Card {
 }
 
 impl Card {
-    /// The card of this install, or `None` while admission has nothing to
+    /// The card of this install — on a machine of several the one with the
+    /// most room for lmgw, where a plan's model goes (device-ledger design
+    /// §5.3), named beside it — or `None` while admission has nothing to
     /// measure against.
-    pub(super) async fn of(state: &SharedState, snap: &Snapshot) -> Option<Self> {
-        let g = state.vram.group_capacity(state, snap).await?;
-        Some(Self {
-            capacity: g.capacity,
-            headroom: g.headroom,
-            budget: snap.settings.vram.budget_mb > 0,
-            admission: snap.settings.vram.enabled,
-        })
+    pub(super) async fn of(
+        state: &SharedState,
+        snap: &Snapshot,
+    ) -> Option<(Self, Option<FitCard>)> {
+        let g = state.vram.on_card_now(state, snap, None).await?;
+        Some((
+            Self {
+                capacity: g.capacity,
+                headroom: g.headroom,
+                budget: snap.settings.vram.budget_mb > 0,
+                admission: snap.settings.vram.enabled,
+            },
+            g.card,
+        ))
     }
 
     pub fn fits(&self, fp: &Footprint) -> bool {
@@ -74,6 +83,8 @@ pub struct Sizer {
     pub instead: &'static str,
     /// The row is planned on the CPU: nothing on the card.
     pub on_cpu: bool,
+    /// The plan's parameters it sizes with.
+    pub(crate) params: Map<String, Value>,
 }
 
 enum SizerKind {
@@ -95,6 +106,14 @@ impl Sizer {
     /// types and speculative decoding, as admission charges a chat row
     /// ([`crate::vram::plan::chat`]).
     pub fn chat(files: &PlanFiles, params: &Map<String, Value>) -> Self {
+        Self::chat_row(files, params, &[])
+    }
+
+    /// [`Self::chat`] for a row with its own llama-server arguments
+    /// `args` (Fit again): sized with them, as admission sizes the row
+    /// (`Shape::of` reads flags such as `--cache-type-k` or `--n-cpu-moe`
+    /// from them too).
+    pub fn chat_row(files: &PlanFiles, params: &Map<String, Value>, args: &[String]) -> Self {
         use crate::config::LlamaParams;
 
         let text = |k: &str| params.get(k).and_then(Value::as_str);
@@ -110,7 +129,7 @@ impl Sizer {
         // The plan's parameters are a row's typed fields by name.
         let planned: LlamaParams =
             serde_json::from_value(Value::Object(params.clone())).unwrap_or_default();
-        let shape = Shape::of(&planned, &[]);
+        let shape = Shape::of(&planned, args);
         let draft = match &shape.second {
             Second::Draft { path, .. } => Some(
                 files
@@ -125,6 +144,7 @@ impl Sizer {
                 files: Box::new(ChatFiles {
                     files: files.gguf_files(&companions),
                     draft,
+                    projector: text("mmproj_path").is_some_and(|p| !p.is_empty()),
                 }),
                 shape: Box::new(shape),
             },
@@ -132,6 +152,7 @@ impl Sizer {
             ctx,
             instead: "run it on the CPU (n_gpu_layers 0)",
             on_cpu,
+            params: params.clone(),
         }
     }
 
@@ -162,7 +183,13 @@ impl Sizer {
             ctx,
             instead: "run it on the CPU (backend=cpu), where it takes no VRAM",
             on_cpu,
+            params: params.clone(),
         }
+    }
+
+    /// A chat plan's sizer (not an aux one's).
+    pub fn is_chat(&self) -> bool {
+        matches!(self.kind, SizerKind::Chat { .. })
     }
 
     /// The footprint at `c` tokens of context.
@@ -214,9 +241,22 @@ pub(super) async fn warning(state: &SharedState, snap: &Snapshot, sizer: &Sizer)
     if sizer.on_cpu {
         return None;
     }
-    let card = Card::of(state, snap).await?;
+    let (card, which) = Card::of(state, snap).await?;
     let ctx = sizer.ctx?;
-    over_card(&card, ctx, sizer.instead, |c| sizer.at(c))
+    let on = On {
+        card: which.as_ref(),
+        splits: matches!(sizer.kind, SizerKind::Chat { .. }),
+    };
+    over_card(&card, on, ctx, sizer.instead, |c| sizer.at(c))
+}
+
+/// Which card a plan is checked against, on a computer with several
+/// (device-ledger design §10), and whether the row is a chat row lmgw may
+/// split over several cards with its context set (§4.3).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct On<'a> {
+    pub card: Option<&'a FitCard>,
+    pub splits: bool,
 }
 
 /// What the search over the contexts `1..=ctx` found ([`largest_fitting`]).
@@ -234,6 +274,27 @@ pub enum Search {
 /// context of 0 is read as 1). `at` grows with the context (KV cache,
 /// attention mask) and never shrinks, so a bisection finds it.
 pub fn largest_fitting(card: &Card, ctx: u64, at: impl Fn(u64) -> Footprint) -> Search {
+    largest_fitting_by(ctx, at, |fp| card.fits(fp))
+}
+
+/// A fit test as [`largest_fitting_by`] asks it.
+struct Fits<F: Fn(&Footprint) -> bool>(F);
+
+impl<F: Fn(&Footprint) -> bool> Fits<F> {
+    fn fits(&self, fp: &Footprint) -> bool {
+        (self.0)(fp)
+    }
+}
+
+/// [`largest_fitting`] by `fits`, whatever decides it: a row's own split
+/// kept on its pin is held when each card holds its part
+/// (`CardsNow::own_fits`).
+pub fn largest_fitting_by(
+    ctx: u64,
+    at: impl Fn(u64) -> Footprint,
+    fits: impl Fn(&Footprint) -> bool,
+) -> Search {
+    let card = Fits(fits);
     let ctx = ctx.max(1);
     if card.fits(&at(ctx)) {
         return Search::All;
@@ -260,6 +321,7 @@ pub fn largest_fitting(card: &Card, ctx: u64, at: impl Fn(u64) -> Footprint) -> 
 /// `instead` names what else can be done, besides a smaller context.
 pub(super) fn over_card(
     card: &Card,
+    on: On<'_>,
     ctx: u64,
     instead: &str,
     at: impl Fn(u64) -> Footprint,
@@ -282,16 +344,32 @@ pub(super) fn over_card(
         }
         t
     };
-    let of = if card.budget {
-        format!(
+    let of = match (card.budget, on.card) {
+        (true, _) => format!(
             "the declared GPU memory budget, {} ({})",
             fmt_bytes(card.capacity),
             crate::config::BUDGET_LABEL
-        )
-    } else {
-        format!("the GPU's total memory ({})", fmt_bytes(card.capacity))
+        ),
+        (false, Some(c)) => format!(
+            "the total memory of {}, the one of this computer's {} graphics cards with the \
+             most room for lmgw ({})",
+            c.named(),
+            c.of,
+            fmt_bytes(card.capacity)
+        ),
+        (false, None) => format!("the GPU's total memory ({})", fmt_bytes(card.capacity)),
     };
-    let outcome = if card.admission {
+    let outcome = if card.admission && on.card.is_some() && on.splits {
+        // A chat row that sets its context is split over the fewest cards
+        // that hold it, where its engine can (device-ledger design §4.3).
+        "no single card holds it: lmgw splits it over the fewest cards that hold it together \
+         where its engine image can (--tensor-split), and refuses it where they do not"
+            .to_string()
+    } else if card.admission && on.card.is_some() {
+        "admission will refuse to load it (\"no eviction can make it fit\"): lmgw keeps this \
+         kind of model on one card"
+            .to_string()
+    } else if card.admission {
         "admission will refuse to load it (\"no eviction can make it fit\")".to_string()
     } else {
         format!(
@@ -353,13 +431,13 @@ mod tests {
             admission: false,
             ..card()
         };
-        let w = over_card(&off, 262_144, "set backend=cpu", vl8b).unwrap();
+        let w = over_card(&off, On::default(), 262_144, "set backend=cpu", vl8b).unwrap();
         assert!(
             w.contains("admission is off") && !w.contains("will refuse"),
             "{w}"
         );
         assert!(w.contains("largest ctx_size that fits"), "{w}");
-        let on = over_card(&card(), 262_144, "set backend=cpu", vl8b).unwrap();
+        let on = over_card(&card(), On::default(), 262_144, "set backend=cpu", vl8b).unwrap();
         assert!(on.contains("will refuse"), "{on}");
     }
 
@@ -367,17 +445,20 @@ mod tests {
     #[test]
     fn a_zero_context_is_read_as_one() {
         let huge = |ctx| Footprint::new(30 * GIB, ctx * 1024, Some(ctx), None);
-        let w = over_card(&card(), 0, "set backend=cpu", huge).unwrap();
+        let w = over_card(&card(), On::default(), 0, "set backend=cpu", huge).unwrap();
         assert!(
             w.contains("ctx_size 1,") || w.contains("ctx_size 1 "),
             "{w}"
         );
-        assert!(over_card(&card(), 0, "x", vl8b).is_none());
+        assert!(over_card(&card(), On::default(), 0, "x", vl8b).is_none());
     }
 
     #[test]
     fn a_row_that_fits_says_nothing() {
-        assert_eq!(over_card(&card(), 32_768, "set backend=cpu", vl8b), None);
+        assert_eq!(
+            over_card(&card(), On::default(), 32_768, "set backend=cpu", vl8b),
+            None
+        );
     }
 
     /// A plan refused at the trained context, with the estimate,
@@ -385,7 +466,7 @@ mod tests {
     /// context left as it is.
     #[test]
     fn a_row_over_the_card_names_the_largest_context_that_fits() {
-        let w = over_card(&card(), 262_144, "set backend=cpu", vl8b).unwrap();
+        let w = over_card(&card(), On::default(), 262_144, "set backend=cpu", vl8b).unwrap();
         assert!(w.contains("ctx_size 262144"), "{w}");
         assert!(w.contains("41.5 GiB"), "the estimate: {w}");
         assert!(w.contains("compute buffer 512 MiB"), "{w}");
@@ -412,7 +493,7 @@ mod tests {
             budget: true,
             ..card()
         };
-        let w = over_card(&budget, 8192, "offload fewer layers", huge).unwrap();
+        let w = over_card(&budget, On::default(), 8192, "offload fewer layers", huge).unwrap();
         assert!(
             w.contains("No ctx_size fits") && w.contains("GPU memory budget"),
             "{w}"

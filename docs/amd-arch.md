@@ -12,15 +12,56 @@ values; none of it needs a code change.
 
 ---
 
-## 1. Install (there is no Arch package)
+## 1. Install
 
-CI builds an RPM, so on Arch you build from source. Tauri v2's Linux
-dependencies plus the Rust toolchain:
+Every release after 0.7.0 carries an Arch package next to the RPM, and
+`latest.json` lists it under `arch`. The in-app updater does not install it yet
+(it installs RPMs only), so you update by installing each release's package
+yourself. Bring the
+system up to date first (Arch supports no partial upgrades, and a stale package
+database makes pacman fetch versions the mirrors no longer have), then install
+it:
+
+```sh
+sudo pacman -Syu
+sudo pacman -U ./lmgw-*-x86_64.pkg.tar.zst
+```
+
+It pulls in `podman` (which brings `passt`, §2), `polkit`, the webview
+libraries and the GStreamer plugins the webview needs for chat voice and audio
+playback. The document tools (`poppler`, `tesseract`, `tesseract-data-osd`, the
+RPM's recommendations) are optional dependencies. If the upgrade brought a new kernel,
+reboot before the first model starts: rootless Podman cannot load `tun` and
+`overlay` for a kernel whose modules are gone.
+
+### Building the package yourself
+
+Each release tag's `packaging/arch/PKGBUILD` is that release's own recipe and
+builds that tag, with the trunk and tauri-cli releases CI pins. The first tag
+that has one is the release after 0.7.0; v0.7.0 has none. The PKGBUILD on `main`
+names the last release, whose tag may predate it, so check out the release tag
+you want:
+
+```sh
+sudo pacman -S --needed base-devel git rust rust-wasm
+git clone https://github.com/lmgw-dev/lmgw && cd lmgw
+git checkout vX.Y.Z
+cd packaging/arch && makepkg -si
+```
+
+The release profile links with fat LTO in one codegen unit, which peaks at
+about 5 GiB for the final `lmgw` crate. On an 8 GiB laptop, close the browser
+and build with `CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_LTO=thin makepkg -si`.
+
+### Building from a checkout
+
+For a development tree without packaging, Tauri v2's Linux dependencies plus
+the Rust toolchain:
 
 ```sh
 sudo pacman -S --needed base-devel git curl wget file openssl pkgconf \
                         webkit2gtk-4.1 gtk3 libsoup3 librsvg \
-                        libappindicator-gtk3 rustup
+                        libayatana-appindicator rustup
 rustup default stable
 rustup target add wasm32-unknown-unknown       # the dashboard is a Leptos WASM app
 cargo install tauri-cli --version '^2.0' --locked
@@ -54,8 +95,10 @@ default — every URL below assumes that.
 **Updates.** The in-app updater installs an RPM with `pkexec dnf`, which your
 machine does not have. lmgw checks for this: the background poll will not
 open a dialog it cannot act on, and the tray's "Check for Updates…" tells you a
-version exists and that you have to rebuild. `git pull && cargo tauri build` is
-the update path. Turn the check off entirely in **Settings → Tokens & updates** if you
+version exists and that you have to update yourself. Its text points at a
+rebuild or the AppImage and does not name the Arch package yet. To update, install
+the new release's package with `pacman -U`, or rebuild (`makepkg -si` for the
+package, `git pull && cargo tauri build` for a checkout). Turn the check off entirely in **Settings → Tokens & updates** if you
 would rather not hear about it.
 
 **Webview.** The `__NV_DISABLE_EXPLICIT_SYNC=1` workaround lmgw sets is for an
@@ -292,9 +335,12 @@ Two knobs if that is not the number you want:
   laptop where you also want to run a browser, declaring e.g. `12288` is more
   honest than letting lmgw plan against every page the kernel would hand out.
   `0` means "use the measurement".
-* **`Headroom · MiB`** is what stays free above the GGUF-derived estimate
-  (compute buffers, the driver's context, fragmentation — none of it derivable
-  from the file). Raise it if loads still OOM.
+* **Settings → GPU → Admission → Floor per card** (MiB) is what stays free for
+  other programs beside lmgw's models; a model still starting gets a margin of
+  its own on top (compute buffers, the driver's context — none of it derivable
+  from the file), which lmgw gives up last, only where nothing else fits
+  beside the floor. On an APU, where other programs' use is your RAM, set it in
+  `fixed` mode, or set the card to **Always** an amount under **Each card**.
 
 If you want a bigger GTT ceiling than the kernel's default, that is a boot
 parameter, not an lmgw setting: `amdgpu.gttsize=<MiB>` (and on newer kernels

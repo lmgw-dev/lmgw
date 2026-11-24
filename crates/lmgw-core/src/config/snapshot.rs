@@ -38,6 +38,9 @@ pub struct Snapshot {
     /// [`crate::runtime::descriptor::model_runtimes`] derive all four classes'
     /// runtime descriptors from one `Snapshot`.
     pub image_models: Vec<ImageModel>,
+    /// Each row's pin (device-ledger design §8, migration 0111): the cards
+    /// it may run on, by class and model id; a row without one is absent.
+    pub gpu_pins: HashMap<(crate::runtime::Class, String), Vec<lmgw_api_types::DeviceId>>,
     pub api_keys: Vec<ApiKey>,
     /// Price sheets (usage-analytics §2.2). On the snapshot because pricing
     /// happens on the logging path of every request; a DB round trip per

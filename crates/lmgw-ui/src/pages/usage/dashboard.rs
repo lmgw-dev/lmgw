@@ -208,7 +208,7 @@ pub fn Usage() -> impl IntoView {
     });
 
     let key_options = Signal::derive(move || {
-        let mut v = vec![(String::new(), "all keys".to_string())];
+        let mut v = vec![(String::new(), "All keys".to_string())];
         if let Some(k) = keys.data.get() {
             v.extend(k.keys.iter().map(|k| (k.id.to_string(), k.name.clone())));
         }
@@ -307,11 +307,11 @@ pub fn Usage() -> impl IntoView {
                     value=bucket
                     options=Signal::derive(move || {
                         vec![
-                            (String::new(), format!("{} buckets (auto)", win.get().bucket)),
-                            ("hour".into(), "hour buckets".into()),
-                            ("day".into(), "day buckets".into()),
-                            ("week".into(), "week buckets".into()),
-                            ("month".into(), "month buckets".into()),
+                            (String::new(), format!("{} buckets (auto)", crate::labels::capitalise(&win.get().bucket))),
+                            ("hour".into(), "Hour buckets".into()),
+                            ("day".into(), "Day buckets".into()),
+                            ("week".into(), "Week buckets".into()),
+                            ("month".into(), "Month buckets".into()),
                         ]
                     })
                 />
@@ -319,11 +319,11 @@ pub fn Usage() -> impl IntoView {
                     value=group_sel
                     options=Signal::derive(|| {
                         vec![
-                            ("alias".to_string(), "by alias".to_string()),
-                            ("key".into(), "by key".into()),
-                            ("upstream".into(), "by upstream".into()),
-                            ("class".into(), "by class".into()),
-                            ("none".into(), "not grouped".into()),
+                            ("alias".to_string(), "By alias".to_string()),
+                            ("key".into(), "By key".into()),
+                            ("upstream".into(), "By upstream".into()),
+                            ("class".into(), "By class".into()),
+                            ("none".into(), "Not grouped".into()),
                         ]
                     })
                 />
@@ -331,18 +331,18 @@ pub fn Usage() -> impl IntoView {
                     value=class
                     options=Signal::derive(|| {
                         vec![
-                            (String::new(), "all classes".to_string()),
-                            ("chat".into(), "chat".into()),
-                            ("aux".into(), "aux (embed/rerank/decision)".into()),
-                            ("audio".into(), "audio".into()),
-                            ("image".into(), "image".into()),
-                            ("tool".into(), "tool".into()),
+                            (String::new(), "All classes".to_string()),
+                            ("chat".into(), "Chat".into()),
+                            ("aux".into(), "Aux (embed/rerank/decision)".into()),
+                            ("audio".into(), "Audio".into()),
+                            ("image".into(), "Image".into()),
+                            ("tool".into(), "Tool".into()),
                         ]
                     })
                 />
                 <Select value=key_id options=key_options/>
                 <span class="spacer"></span>
-                <span class="chip live" title="the current bucket grows as requests land">
+                <span class="chip info" title="the current bucket grows as requests land">
                     <span class="dot"></span>
                     "live"
                 </span>
@@ -507,12 +507,26 @@ fn bump_current(r: &mut UsageSeriesResponse, row: &RequestRow, group_by: &str) {
 /// The three Usage views, each its own route. Keys and prices are policy, not
 /// a lens on the window: they ignore the filter row, so they do not sit under
 /// it, and neither tab pays for the chart fetches.
+///
+/// `compact`: the short words, for the Keys list's narrow pane (its own
+/// title counts the keys; an unpriced count stays on Prices).
 #[component]
-pub(super) fn UsageTabs(keys: Src<KeysResponse>, prices: Src<PricesResponse>) -> impl IntoView {
+pub(super) fn UsageTabs(
+    keys: Src<KeysResponse>,
+    prices: Src<PricesResponse>,
+    #[prop(optional)] compact: bool,
+) -> impl IntoView {
     let tabs = Signal::derive(move || {
         let charts = NavTab::new("Charts", "/usage").exact();
-        let mut k = NavTab::new("Keys & budgets", "/usage/keys");
-        if let Some(n) = keys.data.with(|d| d.as_ref().map(|d| d.keys.len())) {
+        let mut k = NavTab::new(
+            if compact { "Keys" } else { "Keys & budgets" },
+            "/usage/keys",
+        );
+        if let Some(n) = keys
+            .data
+            .with(|d| d.as_ref().map(|d| d.keys.len()))
+            .filter(|_| !compact)
+        {
             k = k.count(grouped(n as u64));
         }
         let mut p = NavTab::new("Prices", "/usage/prices");
@@ -522,9 +536,13 @@ pub(super) fn UsageTabs(keys: Src<KeysResponse>, prices: Src<PricesResponse>) ->
         }) {
             // An unpriced model is spend no total can include: waiting on
             // the owner, so it is amber.
-            p = if unpriced > 0 {
+            p = if unpriced > 0 && compact {
+                p.count(format!("{unpriced} unpriced")).tone(Tone::Attn)
+            } else if unpriced > 0 {
                 p.count(format!("{} · {unpriced} unpriced", grouped(n as u64)))
                     .tone(Tone::Attn)
+            } else if compact {
+                p
             } else {
                 p.count(grouped(n as u64))
             };

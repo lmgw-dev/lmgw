@@ -15,20 +15,22 @@
 //! Windows 11's base surface as the content background: WinUI's
 //! `SolidBackgroundFillColorBase`, `#202020` dark and `#F3F3F3` light, what
 //! Mica falls back to with transparency off and what Settings' pages are.
-//! WebView2 has no Mica here, so the solid fallback is the surface. The
-//! sidebar is the step below it and the cards the steps above, which lands
-//! within a few levels of Windows' own: dark `#191919` (Explorer's panes),
-//! cards `#272727` (Settings' `#2B2B2B`), borders `#393939` (Explorer's
-//! `#383838`); light `#E9E9E9`, cards `#FBFBFB` (Settings' and WinUI's card
-//! over the base). Measured on Windows 11 build 26100, 2026-11-11.
+//! WebView2 has no Mica here, so the solid fallback is the surface. Since
+//! the modern design (2026-11-15) the view is the darkest tone in the dark
+//! theme, so the sidebar is the step above it, `#2D2D2D`, with cards
+//! `#2F2F2F` and borders `#383838` (Explorer's `#383838`); in the light
+//! theme the sidebar is the step below, `#E0E0E0`, and cards are the base
+//! itself (their hairline sets them apart). The earlier steps landed on
+//! Windows' own panes (`#191919`, Explorer's); measured on Windows 11 build
+//! 26100, 2026-11-11.
 //!
-//! The sidebar is the exception to "the step below the content": it is the
+//! The sidebar is the exception to "the steps off the content": it is the
 //! title bar's colour, so the two read as one L. Rather than guess DWM's
 //! colour the shell sets it: `DWMWA_CAPTION_COLOR` (Windows 11, build 22000
 //! and up) is given the sidebar's colour, the same for the active and the
 //! inactive window, and `DWMWA_TEXT_COLOR` the black or white that reads on
-//! it. That colour is the step below the content (the `#191919` and
-//! `#E9E9E9` above), or, with "Show accent colour on title bars and window
+//! it. That colour is the sidebar's step off the content (the `#2D2D2D`
+//! and `#E0E0E0` above), or, with "Show accent colour on title bars and window
 //! borders" on (`HKCU\Software\Microsoft\Windows\DWM\ColorPrevalence`), the
 //! accent DWM would paint (`DWM\AccentColor`); the sidebar's text and icons
 //! then take the colours that read on it, and the panes stay as they are.
@@ -62,7 +64,7 @@ const CAPTION_TEXT_ON_DARK: Rgb = [0xff, 0xff, 0xff];
 const CAPTION_TEXT_ON_LIGHT: Rgb = [0x00, 0x00, 0x00];
 
 /// The bundled palette's text on accent fills (kit.css `--accent-ink`).
-const INK_DARK: Rgb = [0x10, 0x16, 0x1c];
+const INK_DARK: Rgb = [0x08, 0x13, 0x1c];
 const INK_LIGHT: Rgb = [0xff, 0xff, 0xff];
 
 /// The least contrast of text on an accent fill (WCAG AA, body text).
@@ -629,23 +631,24 @@ mod tests {
         let t = theme(None, true);
         let d = colours(t, true);
         assert_eq!(d["bg1"], "#202020");
-        assert_eq!(d["bg0"], "#191919");
-        // The sidebar is the title bar's colour: the step below the content.
-        assert_eq!(d["sidebar"], "#191919");
-        assert_eq!(d["title-inactive"], "#191919");
+        assert_eq!(d["bg0"], "#2d2d2d");
+        // The sidebar is the title bar's colour: the step above the content
+        // in the dark theme (the view is the darkest tone).
+        assert_eq!(d["sidebar"], "#2d2d2d");
+        assert_eq!(d["title-inactive"], "#2d2d2d");
         assert!(d.get("sidebar-ink").is_none());
-        assert_eq!(d["surface"], "#272727");
-        assert_eq!(d["surface-hi"], "#303030");
-        assert_eq!(d["border"], "#393939");
-        assert_eq!(d["border-strong"], "#4d4d4d");
+        assert_eq!(d["surface"], "#2f2f2f");
+        assert_eq!(d["surface-hi"], "#363636");
+        assert_eq!(d["border"], "#383838");
+        assert_eq!(d["border-strong"], "#4a4a4a");
         let l = colours(t, false);
         assert_eq!(l["bg1"], "#f3f3f3");
-        assert_eq!(l["bg0"], "#e9e9e9");
-        assert_eq!(l["sidebar"], "#e9e9e9");
-        assert_eq!(l["surface"], "#fbfbfb");
-        assert_eq!(l["surface-hi"], "#ffffff");
-        assert_eq!(l["border"], "#d7d7d7");
-        assert_eq!(l["border-strong"], "#bababa");
+        assert_eq!(l["bg0"], "#e0e0e0");
+        assert_eq!(l["sidebar"], "#e0e0e0");
+        assert_eq!(l["surface"], "#f3f3f3");
+        assert_eq!(l["surface-hi"], "#e5e5e5");
+        assert_eq!(l["border"], "#d8d8d8");
+        assert_eq!(l["border-strong"], "#c1c1c1");
         assert_eq!(l["accent"], "#0067c0");
         assert_eq!(l["accent-bg"], "rgba(0,103,192,.10)");
     }
@@ -683,7 +686,7 @@ mod tests {
         assert_eq!(sidebar(t, false), DEFAULT_LIGHT);
         // The panes' own base stays; the sidebar differs, so it has inks.
         let c = colours(t, false);
-        assert_eq!(c["bg0"], "#e9e9e9");
+        assert_eq!(c["bg0"], "#e0e0e0");
         assert_eq!(c["sidebar"], "#ffffff");
         assert!(c.contains_key("sidebar-ink"));
         // The accent still wins where the attribute is missing.

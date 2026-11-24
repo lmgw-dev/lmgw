@@ -11,9 +11,7 @@
  {
   "wait": 1
  },
- {
-  "click": ".thread-tools button[title^='New folder']"
- },
+ {"click": ".chat-list-more button"}, {"wait": 0.3}, {"click": ".menu-item[title^='New folder']"},
  {
   "wait": 0.8
  },
@@ -110,7 +108,7 @@
   "wait": 1.2
  },
  {
-  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const t=(await j('/chat/api/threads/'+id)).thread;return t.folder_id===1&&t.model_alias==='fake-echo'&&t.system_prompt==='You are terse.'&&t.top_k===40})()",
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const t=(await j('/chat/api/threads/'+id)).thread;return t.folder_id!==null&&t.model_alias==='fake-echo'&&t.system_prompt==='You are terse.'&&t.top_k===40})()",
   "label": "New chat here starts from the folder's defaults"
  },
  {
@@ -154,10 +152,16 @@
   "label": "regenerating a user message answers it again"
  },
  {
-  "click": ".thread-tools .row .btn"
+  "js": "'New chat from an open thread files into that thread\\'s folder (99d7886f), so the unfiled thread is made through the API and opened.'"
  },
  {
-  "wait": 1
+  "js": "(async()=>{const r=await fetch('/chat/api/threads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model_alias:'fake-echo',kind:'chat'})});const t=await r.json();return 'unfiled '+t.id+' '+t.folder_id})()"
+ },
+ {
+  "js": "(async()=>{const t=(await (await fetch('/chat/api/threads')).json()).threads.find(x=>x.folder_id===null);location.href='/chat?t='+t.id;return 'opening '+t.id})()"
+ },
+ {
+  "wait": 2
  },
  {
   "click": ".composer-input"
@@ -236,7 +240,7 @@
  },
  {
   "click": ".thread-row:not(.nested) .menu-pop .menu-item",
-  "nth": 1
+  "nth": 2
  },
  {
   "wait": 0.6

@@ -1187,6 +1187,7 @@ fn assert_nested_shapes(v: &Value) {
             ("headroom", "object"),
             ("headroom_mb", "int"),
             ("headroom_mode", "string"),
+            ("keep_free", "object"),
         ],
     );
 }

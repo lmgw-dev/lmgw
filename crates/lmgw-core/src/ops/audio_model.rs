@@ -90,6 +90,12 @@ pub struct AudioPatch {
     /// learned residency, so the row is charged at its on-disk size until a
     /// request teaches it again.
     clear: Option<String>,
+    /// The cards this model may run on (device-ledger design §8), by their
+    /// ids as `GET /api/vram` lists them (`devices[].id`, `GPU-<uuid>` for an
+    /// NVIDIA card): one card, it runs there or not at all; several, lmgw
+    /// chooses among them. Omitted: as it is. `clear: "gpu_pin"` (or an
+    /// empty list): lmgw chooses the card.
+    gpu_pin: Option<Vec<String>>,
 }
 
 fn check_task(task: &str) -> Result<(), String> {
@@ -194,6 +200,14 @@ pub async fn audio_model_set(
     st: &SharedState,
     p: AudioPatch,
 ) -> Result<dto::AudioModelSaved, String> {
+    let pin = super::gpu_pin::patched(&p.action, &p.gpu_pin, p.clear.as_deref());
+    let saved = audio_model_save(st, p).await?;
+    super::gpu_pin::write(st, crate::runtime::Class::Audio, saved.id, pin).await?;
+    Ok(saved)
+}
+
+/// [`audio_model_set`] without the pin (device-ledger design §8).
+async fn audio_model_save(st: &SharedState, p: AudioPatch) -> Result<dto::AudioModelSaved, String> {
     use crate::store;
     // From the snapshot the checks read to the commit (§14.2).
     let routing = st.routing_write().await;

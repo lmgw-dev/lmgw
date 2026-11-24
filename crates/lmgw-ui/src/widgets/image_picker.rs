@@ -295,7 +295,7 @@ fn row_chip(s: &Suggestion) -> Option<(&'static str, &'static str)> {
         }
         (_, Some(BuildRunStatus::Unverified)) => Some(("chip warn ip-chip", "not GPU-verified")),
         (_, Some(BuildRunStatus::Broken)) => Some(("chip err ip-chip", "broken")),
-        (_, Some(BuildRunStatus::Running)) => Some(("chip live ip-chip", "building")),
+        (_, Some(BuildRunStatus::Running)) => Some(("chip info ip-chip", "building")),
         (_, Some(BuildRunStatus::Failed | BuildRunStatus::Canceled)) => {
             Some(("chip err ip-chip", "failed"))
         }
@@ -988,7 +988,7 @@ pub fn ImagePicker(
         list.images.with(Option::is_none).then(|| {
             view! {
                 <div class="ip-status dim" title=err>
-                    "couldn't list local images"
+                    "Couldn't list local images"
                 </div>
             }
             .into_any()
@@ -1095,7 +1095,7 @@ pub fn ImagePicker(
                 <Show when=move || clearable && !text.with(String::is_empty)>
                     <button
                         type="button"
-                        class="btn ghost sm ip-btn"
+                        class="icon-btn sm ip-btn"
                         title="Clear: inherit the class default"
                         aria-label="Clear"
                         tabindex="-1"
@@ -1108,12 +1108,12 @@ pub fn ImagePicker(
                             focus_input();
                         }
                     >
-                        "✕"
+                        <lmgw_ui_kit::widgets::Icon ico=lmgw_ui_kit::widgets::Ico::Close/>
                     </button>
                 </Show>
                 <button
                     type="button"
-                    class="btn ghost sm ip-btn"
+                    class="icon-btn sm ip-btn"
                     title="Local images"
                     aria-label="Show local images"
                     tabindex="-1"
@@ -1130,7 +1130,7 @@ pub fn ImagePicker(
                         focus_input();
                     }
                 >
-                    "▾"
+                    <span class="select-arrow" aria-hidden="true">"▾"</span>
                 </button>
             </div>
             {status_line}

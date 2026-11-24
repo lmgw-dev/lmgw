@@ -270,6 +270,41 @@ impl PolicyGate {
         Ok(())
     }
 
+    /// Expiry and the tokens-per-minute window as it stands, for one model
+    /// call that is **part of** a request the gate already counted: a page
+    /// of a document conversion (document-conversion design §7.5). The
+    /// conversion is the request the key made, so the call is not counted
+    /// into the requests-per-minute window and that window is not asked (a
+    /// key at its rpm limit by this very request still has its pages read,
+    /// as a `/v1/responses` run's turns are); the tokens the call uses are
+    /// folded in by its row ([`Self::note_tokens`]), and once the window is
+    /// full the next call is refused here. Takes no slot and writes
+    /// nothing.
+    pub fn check_call(
+        &self,
+        key: &ApiKey,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), GatewayError> {
+        usable(key, now_utc)?;
+        let limit = key.policy.tpm_limit;
+        if limit <= 0 {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let mut m = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let st = m.entry(key.id).or_insert_with(|| KeyState::new(now));
+        st.roll(now);
+        if st.tokens >= limit {
+            return Err(GatewayError::KeyRate {
+                key: key.described(),
+                limit_kind: "tokens/minute",
+                limit,
+                retry_after: st.retry_after(now),
+            });
+        }
+        Ok(())
+    }
+
     /// Whether the gate keeps any window for `key_id` — what a test reads
     /// to see that a deleted key got none (`proxy::recording`).
     #[cfg(test)]
@@ -657,6 +692,38 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    /// A call inside a counted request: the tokens window and the expiry
+    /// are asked, the requests window is neither asked nor counted.
+    #[test]
+    fn a_call_inside_a_request_meets_the_token_window_and_the_expiry_only() {
+        let gate = Arc::new(PolicyGate::default());
+        let k = key(KeyPolicy {
+            rpm_limit: 1,
+            tpm_limit: 1000,
+            ..Default::default()
+        });
+        let now = chrono::Utc::now();
+        let _request = gate.admit(&k, now).unwrap();
+        // The request itself filled the rpm window; its calls go on.
+        for _ in 0..3 {
+            gate.check_call(&k, now).unwrap();
+        }
+        assert!(gate.admit(&k, now).is_err(), "no call was counted as one");
+        gate.note_tokens(k.id, 999);
+        gate.check_call(&k, now).unwrap();
+        gate.note_tokens(k.id, 1);
+        let e = gate.check_call(&k, now).unwrap_err();
+        assert_eq!((e.kind(), e.http_status().as_u16()), ("key_rate", 429));
+        assert!(e.to_string().contains("tokens/minute"), "{e}");
+
+        let expired = key(KeyPolicy {
+            expires_at: Some("2001-01-01".into()),
+            ..Default::default()
+        });
+        let e = gate.check_call(&expired, now).unwrap_err();
+        assert_eq!(e.kind(), "key_expired");
     }
 
     #[test]

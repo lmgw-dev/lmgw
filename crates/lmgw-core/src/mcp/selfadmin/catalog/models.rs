@@ -3,7 +3,7 @@
 //! image-model rows plus the load smoke test.
 
 use crate::mcp::selfadmin::{
-    bool_p, enum_p, fallback_p, int_p, ladder_p, num_p, str_p, strs_p, Builtin,
+    bool_p, enum_p, fallback_p, gpu_pin_p, int_p, ladder_p, num_p, str_p, strs_p, Builtin,
 };
 
 pub(super) fn tools() -> Vec<Builtin> {
@@ -315,6 +315,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                          source \"owner\".",
                     ),
                 ),
+                ("gpu_pin", gpu_pin_p()),
                 (
                     "ladder",
                     ladder_p(
@@ -347,9 +348,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "Field names to reset to unset, comma-separated (e.g. \
                          'spec_type,draft_gguf_path'). Needed because omitting a field means \
-                         'leave unchanged'. 'fallback' removes the row's fallback. 'ladder' \
-                         resets the row to not-a-ladder \
-                         — the base's own gguf_path/ctx_size are untouched.",
+                         'leave unchanged'. 'fallback' removes the row's fallback. 'gpu_pin' \
+                         removes its pin, so lmgw picks the card. 'ladder' resets the row to \
+                         not-a-ladder — the base's own gguf_path/ctx_size are untouched.",
                     ),
                 ),
             ],
@@ -517,12 +518,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                          model that answers /v1/systemone for a decision row",
                     ),
                 ),
+                ("gpu_pin", gpu_pin_p()),
                 (
                     "clear",
                     str_p(
                         "Field names to reset to unset, comma-separated: 'extra_args', \
                          'extra_run_args', 'image', 'fallback', 'ctx_size', 'ubatch_size', \
-                         'batch_size', 'mmproj_path', 'backend', 'threads'.",
+                         'batch_size', 'mmproj_path', 'backend', 'threads', 'gpu_pin'.",
                     ),
                 ),
             ],
@@ -658,6 +660,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 ("fallback", fallback_p("an image model")),
+                ("gpu_pin", gpu_pin_p()),
                 (
                     "capabilities_override",
                     str_p(
@@ -694,7 +697,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "Field names to reset to unset, comma-separated: 'args', 'modes', \
                          'extra_run_args', 'image', 'fallback', 'capabilities_override', \
-                         'prompt_style', 'preview_mode'. \
+                         'prompt_style', 'preview_mode', 'gpu_pin'. \
                          Not 'files': a row with no files names no pipeline.",
                     ),
                 ),

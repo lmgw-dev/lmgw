@@ -177,6 +177,12 @@ pub struct ImageModelPatch {
     /// `preview_mode`. Not `files` — a row with no files names no pipeline,
     /// so emptying it could only ever be refused.
     pub clear: Option<String>,
+    /// The cards this model may run on (device-ledger design §8), by their
+    /// ids as `GET /api/vram` lists them (`devices[].id`, `GPU-<uuid>` for an
+    /// NVIDIA card): one card, it runs there or not at all; several, lmgw
+    /// chooses among them. Omitted: as it is. `clear: "gpu_pin"` (or an
+    /// empty list): lmgw chooses the card.
+    pub gpu_pin: Option<Vec<String>>,
 }
 
 impl ImageModelPatch {
@@ -229,7 +235,8 @@ impl ImageModelPatch {
                 | "fallback"
                 | "capabilities_override"
                 | "prompt_style"
-                | "preview_mode" => {}
+                | "preview_mode"
+                | "gpu_pin" => {}
                 "files" => {
                     return Err(
                         "clear: 'files' is not clearable — a row with no files names no \
@@ -491,6 +498,17 @@ fn merged_map(
 /// audio tools list the rows and aliases that serve them (chat-media-tools
 /// design §3.2).
 pub async fn image_model_set(
+    state: &SharedState,
+    p: ImageModelPatch,
+) -> Result<dto::ImageModelSaved, String> {
+    let pin = super::gpu_pin::patched(&p.action, &p.gpu_pin, p.clear.as_deref());
+    let saved = image_model_save(state, p).await?;
+    super::gpu_pin::write(state, crate::runtime::Class::Image, saved.id, pin).await?;
+    Ok(saved)
+}
+
+/// [`image_model_set`] without the pin (device-ledger design §8).
+async fn image_model_save(
     state: &SharedState,
     p: ImageModelPatch,
 ) -> Result<dto::ImageModelSaved, String> {
@@ -970,6 +988,8 @@ pub(super) async fn image_model_get(
             (k.clone(), ok)
         })
         .collect();
+    // Its pin, and the card it is on or would go on (device-ledger §8).
+    let (gpu_pin, command_line_note) = super::gpu_pin::read(state, Class::Image, &m.model_id).await;
     Ok(Some(dto::ImageModelDetail {
         id: m.id,
         model_id: m.model_id.clone(),
@@ -1039,5 +1059,7 @@ pub(super) async fn image_model_get(
             .await
             .into_iter()
             .collect(),
+        gpu_pin,
+        command_line_note,
     }))
 }

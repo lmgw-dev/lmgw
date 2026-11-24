@@ -37,12 +37,14 @@ use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{
     self, NewAlias, NewAuxModel, NewCandidateAlias, NewLocalModel, NewUpstream,
 };
-use lmgw_core::vram::{GpuMemory, GpuProbe, ProcessMemory};
+use lmgw_core::vram::nvml::DeviceProcesses;
+use lmgw_core::vram::{GpuMemory, GpuProbe};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::audiocpp_options::{self, Served};
+use super::fake_machine::Machine;
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -218,9 +220,22 @@ impl World {
         json!(rows)
     }
 
-    fn used(&self) -> u64 {
-        let own: u64 = self.loaded.iter().filter_map(|m| self.size.get(m)).sum();
-        own + self.outside
+    /// What is on the card now, as the shared fake machine holds it: each
+    /// loaded container's process at its size (one without a PID as memory
+    /// in use no list shows), and the program outside lmgw.
+    fn machine(&self, total: u64) -> Machine {
+        let mut m = Machine::one_card("FakeGPU", total);
+        for id in &self.loaded {
+            let size = self.size.get(id).copied();
+            match self.pids.get(id) {
+                Some(&pid) => m.hold(0, pid, size),
+                None => m.unlisted(0, size.unwrap_or(0)),
+            };
+        }
+        if self.outside > 0 {
+            m.hold(0, OUTSIDE_PID, Some(self.outside));
+        }
+        m
     }
 }
 
@@ -231,14 +246,7 @@ struct FakeGpu {
 
 impl GpuProbe for FakeGpu {
     fn devices(&self) -> Result<Vec<GpuMemory>, String> {
-        let used = self.world.lock().unwrap().used();
-        Ok(vec![GpuMemory {
-            index: 0,
-            name: "FakeGPU".into(),
-            total_bytes: self.total,
-            used_bytes: used,
-            free_bytes: self.total.saturating_sub(used),
-        }])
+        Ok(self.world.lock().unwrap().machine(self.total).devices())
     }
 
     fn source(&self) -> String {
@@ -253,29 +261,12 @@ impl GpuProbe for FakeGpu {
         }
     }
 
-    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
+    fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<DeviceProcesses>, String> {
         let w = self.world.lock().unwrap();
         if !w.attribution {
             return Err("FakeGPU lists no processes".into());
         }
-        let mut out: Vec<ProcessMemory> = w
-            .loaded
-            .iter()
-            .filter_map(|m| {
-                Some(ProcessMemory {
-                    pid: *w.pids.get(m)?,
-                    bytes: w.size.get(m).copied(),
-                })
-            })
-            .collect();
-        if w.outside > 0 {
-            out.push(ProcessMemory {
-                pid: OUTSIDE_PID,
-                bytes: Some(w.outside),
-            });
-        }
-        out.sort_by_key(|p| p.pid);
-        Ok(out)
+        Ok(w.machine(self.total).processes())
     }
 }
 

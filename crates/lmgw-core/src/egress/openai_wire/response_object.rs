@@ -144,6 +144,7 @@ pub(crate) fn parse_responses_usage(v: Option<&Value>) -> Usage {
         completion_tokens: u.get("output_tokens").and_then(Value::as_u64),
         cached_input_tokens: detail("input_tokens_details", "cached_tokens"),
         cache_write_tokens: detail("input_tokens_details", "cache_write_tokens"),
+        cache_write_1h_tokens: None,
         reasoning_tokens: detail("output_tokens_details", "reasoning_tokens"),
     }
 }
@@ -170,6 +171,7 @@ mod tests {
                 completion_tokens: Some(40),
                 cached_input_tokens: Some(100),
                 cache_write_tokens: Some(8),
+                cache_write_1h_tokens: None,
                 reasoning_tokens: Some(30),
             }
         );

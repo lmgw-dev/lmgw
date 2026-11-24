@@ -54,6 +54,7 @@ fn room(free: u64, others_hold: bool, fallback: bool) -> Room {
     Room {
         free,
         headroom: GIB,
+        floor: GIB,
         others_hold,
         fallback,
         cards: Some(1),
@@ -152,4 +153,51 @@ fn a_row_the_card_holds_whole_gets_no_placement() {
     let fp = fit_to_card(row(&[]), card(64 * GIB, GIB), Some(1));
     assert!(fp.llama.as_ref().unwrap().target.is_whole());
     assert!(whole(&target(), &fp, room(60 * GIB, false, false)).is_none());
+}
+
+/// A row whose least fits the card beside the floor but not beside the
+/// floor and its margin is no longer too large (WP13, owner 2026-11-17: the
+/// too-large test reads no margin): it waits while lmgw's own models could
+/// be waited for, and once nothing is left its least goes ahead beside the
+/// floor alone, a fallback or not, its margin given up last.
+#[test]
+fn a_least_that_fits_beside_the_floor_alone_starts_last() {
+    let least = {
+        let fp = row(&[]);
+        let l = fp.llama.as_ref().unwrap();
+        l.sizer.charge(&l.sizer.minimum())
+    };
+    let (floor, margin, now) = (GIB, 327 * MIB, 256 * MIB);
+    let total = least + floor + now + 100 * MIB;
+    let c = Card {
+        total,
+        avail: total - now,
+        margin: floor + margin,
+        structural: floor + now,
+    };
+    let fp = fit_to_card(row(&[]), c, Some(1));
+    let l = fp.llama.as_ref().unwrap();
+    assert!(l.fits_card, "not too large: {l:?}");
+    assert_eq!(l.target, l.sizer.minimum(), "its least");
+    let room = |others_hold: bool| Room {
+        free: c.avail,
+        headroom: floor + margin,
+        floor,
+        others_hold,
+        fallback: true,
+        cards: Some(1),
+    };
+    // Admission's decision (`partial::decide`), not this module's step.
+    let decide = super::super::decide;
+    assert!(decide(&target(), &fp, room(true)).is_none(), "it waits");
+    let Some(Grant::Partial(g)) = decide(&target(), &fp, room(false)) else {
+        panic!("its least, beside the floor alone");
+    };
+    assert_eq!(g.llama, Some(l.sizer.minimum()));
+    assert_eq!(g.bytes, fp.total_bytes);
+    assert!(
+        g.warning.contains("plus 1.0 GiB headroom"),
+        "said beside the floor it keeps: {}",
+        g.warning
+    );
 }

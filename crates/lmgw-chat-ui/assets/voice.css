@@ -1,7 +1,10 @@
 /* The Chat's voice styles (chat-voice design §2.2, §2.4, §5, §6.5, §9-§12):
    the Voice settings section, the composer's voice menu and devices, dictation
    and read-aloud, and voice mode's realtime panel. Loaded after app.css, whose
-   tokens they use (WP11 UI review NIT 11: kept together, out of app.css). */
+   tokens they use (WP11 UI review NIT 11: kept together, out of app.css). In
+   the modern design (docs/design/ui-rebuild/plan.md "Chat"): tones, not
+   borders; the panel is a rounded card in the composer's column (--chat-col,
+   chat.css), its chips and state in the controls' tone. */
 
 /* ===== Chat voice (chat-voice §2.2): the Voice section of a thread's
    settings and of a folder's defaults. Its fields nest inside one .field,
@@ -25,31 +28,31 @@
 .composer-voice-menu svg.vm-caret { width: 7px; height: 7px; stroke-width: 1.4; }
 .composer-voice-menu.on { color: var(--accent); }
 .composer-voice-menu.warn { color: var(--amber); }
-.vm-read { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.vm-read { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--divider); }
 .vm-switch { display: flex; align-items: center; gap: 10px; width: 100%; padding: 4px 0;
   border: 0; background: none; color: var(--text); font: inherit; text-align: left;
   cursor: pointer; }
 .vm-switch:disabled { cursor: default; opacity: .6; }
 .vm-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
   border-radius: 4px; }
-.vm-track { flex: none; position: relative; width: 30px; height: 16px; border-radius: 999px;
-  background: var(--surface-hi); border: 1px solid var(--border-strong); }
-.vm-track i { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px;
-  border-radius: 50%; background: var(--text-2); transition: left .12s; }
-.vm-switch[aria-checked="true"] .vm-track { background: var(--accent-bg);
-  border-color: var(--accent); }
-.vm-switch[aria-checked="true"] .vm-track i { left: 16px; background: var(--accent); }
+/* the kit's switch (kit.css .switch), at the menu's size */
+.vm-track { flex: none; position: relative; width: 34px; height: 20px; border-radius: 10px;
+  background: var(--ctl-hover); }
+.vm-track i { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--knob, #fff); box-shadow: 0 1px 2px rgba(0,0,0,.3);
+  transition: left .12s; }
+.vm-switch[aria-checked="true"] .vm-track { background: var(--accent); }
+.vm-switch[aria-checked="true"] .vm-track i { left: 17px; }
 @media (prefers-reduced-motion: reduce) { .vm-track i { transition: none; } }
 .pop.voice-dev-pop { padding: 10px 12px; width: min(440px, 92vw); overflow-y: auto; }
 .voice-dev { display: flex; flex-direction: column; gap: 14px; }
 .voice-dev .notice { margin: 0; }
 .vd-section { display: flex; flex-direction: column; gap: 6px; }
-.vd-head { font-size: 11px; font-weight: 600; color: var(--text-3);
-  text-transform: uppercase; letter-spacing: .05em; }
+.vd-head { font-size: 12px; font-weight: 600; color: var(--text-3); }
 .vd-list { display: flex; flex-direction: column; gap: 1px; max-height: 180px; overflow-y: auto; }
 .vd-opt { display: flex; align-items: center; gap: 8px; width: 100%; border: 0;
   background: none; font: inherit; text-align: left; }
-.vd-opt:hover:not(:disabled):not(.sel) { background: var(--surface); }
+.vd-opt:hover:not(:disabled):not(.sel) { background: var(--hover); }
 .vd-opt:disabled { cursor: default; opacity: .75; }
 .vd-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .vd-tag { flex: none; font: 500 10.5px var(--mono); color: var(--text-3); }
@@ -57,7 +60,7 @@
 .vd-test .btn { flex: none; }
 .vd-note { font-size: 12px; overflow-wrap: anywhere; }
 .vd-note.warn { color: var(--amber); }
-.vu { flex: 1; height: 6px; min-width: 60px; border-radius: 999px; background: var(--surface);
+.vu { flex: 1; height: 6px; min-width: 60px; border-radius: 999px; background: var(--ctl);
   overflow: hidden; }
 .vu i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px;
   transition: width 60ms linear; }
@@ -70,9 +73,9 @@
 .echo-warn .link-btn { font-size: 12px; color: var(--amber); text-decoration: underline; }
 .echo-modes { display: flex; flex-direction: column; gap: 2px; width: 100%; }
 .echo-mode { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px;
-  border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit;
+  border: 0; border-radius: 7px; background: none; color: var(--text); font: inherit;
   text-align: left; cursor: pointer; }
-.echo-mode:hover { background: var(--surface); }
+.echo-mode:hover { background: var(--hover); }
 .echo-mode.sel { background: var(--accent-bg); }
 .echo-mode.sel .echo-mode-name { color: var(--accent); }
 .echo-mode-hint { font-size: 12px; color: var(--text-3); }
@@ -88,12 +91,12 @@
 /* The speech-to-text is off this machine: a small cloud on the microphone. */
 .composer-mic svg.mark-cloud { position: absolute; top: 3px; right: 1px; width: 11px;
   height: 11px; stroke-width: 1.5; }
-.composer-mic.rec { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+.composer-mic.rec { color: var(--err); background: var(--err-bg); }
 .composer-mic.busy { color: var(--accent); }
 .composer-mic.warn:not(.rec) { color: var(--amber); }
 .voice-status { flex: none; display: flex; flex-wrap: wrap; align-items: center;
-  gap: 4px 12px; width: 100%; max-width: calc(110ch + 44px); margin: 0 auto;
-  padding: 2px 22px 0; font-size: 12px; color: var(--text-2); }
+  gap: 4px 12px; width: 100%; max-width: calc(var(--chat-col, 760px) + 2 * var(--chat-side, 22px));
+  margin: 0 auto; padding: 2px var(--chat-side, 22px) 0; font-size: 12px; color: var(--text-2); }
 .vs-rec { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
 .vs-rec.on { color: var(--text); }
 .vs-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
@@ -122,11 +125,12 @@
   font-size: 11px; padding: 0; min-width: 24px; min-height: 24px; margin: -5px -4px;
   display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; }
 .vs-x:hover { opacity: 1; }
+.vs-x svg.i { width: 12px; height: 12px; stroke-width: 2.2; }
 @media (prefers-reduced-motion: reduce) {
   .vs-rec.on .vs-dot, .vs-note.busy::before { animation: none; }
 }
 .msg-actions .msg-act.msg-speak.on { color: var(--accent); background: var(--accent-bg); }
-.msg-actions .msg-act.msg-speak.warn:not(.on) { color: var(--amber); }
+.msg-actions .msg-act.msg-speak.warn:not(.on) { color: var(--text-3); }
 .voice-badge { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
   font-size: 11px; color: var(--text-3); }
 .msg-item-user .voice-badge { align-self: flex-end; }
@@ -144,12 +148,12 @@
 .msg-unheard .unheard-text { border-left: 2px dashed var(--border-strong); padding-left: 10px;
   font-style: italic; }
 .msg-unheard .unheard-text, .msg-unheard .unheard-text * { color: var(--text-2); }
-.unheard-mark { display: inline-block; font-size: 10.5px; text-transform: uppercase;
-  letter-spacing: .05em; border: 1px dashed var(--border-strong); border-radius: 5px;
+.unheard-mark { display: inline-block; font-size: 11px;
+  border: 1px dashed var(--border-strong); border-radius: 999px;
   padding: 0 6px; margin-bottom: 2px; }
 .cue-chip { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 7px;
-  border-radius: 999px; color: var(--text-2); background: var(--surface-hi);
-  border: 1px solid var(--border); font-style: italic; vertical-align: 1px; }
+  border-radius: 999px; color: var(--text-2); background: var(--ctl);
+  font-style: italic; vertical-align: 1px; }
 
 /* ===== Chat voice mode (chat-voice §9, WP9): the realtime panel in the
    composer's place, ported from the owner's visualisation sample. The
@@ -169,16 +173,17 @@
   --rt-think-deep: #163E5A; --rt-think: #5AA9D6; --rt-think-hi: #CFE6F4;
   --rt-idle-deep: #1E2A35; --rt-idle: #4F6476; --rt-idle-hi: #9DB0C0;
   --rt-user-deep: #6E420C; --rt-user: #E8A33D; --rt-user-hi: #FFE0AE;
-  background: var(--rt-panel-bg); border: 1px solid var(--border); border-radius: 14px;
+  background: var(--rt-panel-bg); border-radius: 20px;
   overflow: hidden; display: flex; flex-direction: column;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
+  box-shadow: 0 0 0 1px var(--card-line), var(--card-shadow); }
 /* Focused on entry so its keys act (tabindex -1, never in the Tab order):
    a container, its controls keep their own rings. */
 .rt-panel:focus { outline: none; }
-.rt-dock { flex: none; width: 100%; max-width: calc(110ch + 44px); margin-inline: auto;
-  padding: 10px 22px 16px; display: flex; flex-direction: column; }
+.rt-dock { flex: none; width: 100%; max-width: calc(var(--chat-col, 760px) + 2 * var(--chat-side, 22px));
+  margin-inline: auto; padding: 8px var(--chat-side, 22px) 16px; display: flex;
+  flex-direction: column; }
 .rt-stage { position: relative; flex: none; background: var(--rt-bg); }
-[data-theme="light"] .rt-stage { margin: 8px 8px 0; border-radius: 10px 10px 0 0; overflow: hidden; }
+[data-theme="light"] .rt-stage { margin: 8px 8px 0; border-radius: 14px 14px 0 0; overflow: hidden; }
 .rt-viz { position: relative; height: 184px; }
 .rt-viz canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .rt-viz-failed { position: absolute; left: 12px; right: 12px; bottom: 10px; margin: 0;
@@ -201,7 +206,7 @@
    newest words win */
 .rt-caption { height: 26px; padding: 0 18px; display: flex; align-items: center;
   justify-content: center; overflow: hidden; background: var(--rt-bg); }
-[data-theme="light"] .rt-caption { margin: 0 8px; border-radius: 0 0 10px 10px; }
+[data-theme="light"] .rt-caption { margin: 0 8px; border-radius: 0 0 14px 14px; }
 .rt-caption .cap-inner { display: flex; gap: 8px; align-items: baseline; max-width: 100%;
   white-space: nowrap; font-size: 13.5px; color: var(--rt-fg); }
 .rt-caption .cap-clip { min-width: 0; overflow: hidden; display: flex; justify-content: flex-end; }
@@ -217,15 +222,15 @@
 .rt-caption .cap-tag { flex: none; font: 500 10.5px var(--mono); color: var(--rt-user);
   background: rgba(232,163,61,.13); padding: 1px 6px; border-radius: 999px; }
 .rt-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
-.rt-chip { border: 1px solid var(--border); background: none; color: var(--text-2);
+.rt-chip { border: 0; background: var(--ctl); color: var(--text-2);
   font: 400 12px var(--mono); cursor: default; max-width: 34ch; }
 button.rt-chip { cursor: pointer; }
-button.rt-chip:hover { border-color: var(--border-strong); color: var(--text); }
+button.rt-chip:hover { background: var(--ctl-hover); color: var(--text); }
 .rt-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .rt-chip .rt-chip-k { font: 500 10px var(--sans); letter-spacing: .05em; color: var(--text-3); }
 .rt-chip .rt-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rt-chip .rt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
-.rt-chip.warn { color: var(--amber); border-color: rgba(232,163,61,.35); background: var(--amber-bg); }
+.rt-chip.warn { color: var(--amber); background: var(--amber-bg); }
 .rt-chip.warn .rt-chip-k { color: inherit; opacity: .8; }
 .rt-chip .rt-served { color: var(--amber); }
 .rt-chip svg.rt-cloud { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor;
@@ -233,7 +238,7 @@ button.rt-chip:hover { border-color: var(--border-strong); color: var(--text); }
 .rt-chip.rt-admin { font-family: var(--sans); font-weight: 500; }
 .rt-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 8px 10px 8px 12px; }
-.rt-controls .state-chip { color: var(--text-2); background: var(--surface-hi);
+.rt-controls .state-chip { color: var(--text-2); background: var(--ctl);
   transition: color .25s, background-color .25s; }
 .rt-controls .state-chip[data-s="listening"], .rt-controls .state-chip[data-s="interrupted"] {
   color: var(--amber); background: var(--amber-bg); }
@@ -246,9 +251,9 @@ button.rt-chip:hover { border-color: var(--border-strong); color: var(--text); }
 .rt-stop .ico { fill: currentColor; stroke: none; }
 .rt-leave .ico { fill: currentColor; stroke: none; }
 .rt-mute .slash { display: none; }
-.rt-mute.on { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+.rt-mute.on { color: var(--err); background: var(--err-bg); }
 .rt-mute.on .slash { display: inline; }
-.rt-talk.on { color: var(--amber); border-color: var(--amber); background: var(--amber-bg); }
+.rt-talk.on { color: var(--amber); background: var(--amber-bg); }
 .rt-mode .seg-btn { padding: 0 11px; height: 24px; font-size: var(--fs-sm); }
 .rt-mode .seg-btn:disabled { opacity: .5; cursor: default; }
 .rt-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;

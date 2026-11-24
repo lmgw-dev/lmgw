@@ -19,7 +19,7 @@ use lmgw_api_types::{McpServersResponse, ToolInventory};
 use crate::widgets::tool_picker::{
     from_patterns, scope_groups, to_patterns, ScopeGroup, ScopeToolPicker, Selection, ThreadMcp,
 };
-use crate::widgets::{ModelPicker, Select};
+use crate::widgets::{Ico, Icon, ModelPicker, Select};
 
 /// The lines of an alias scope, split into models (no `*`) and globs.
 pub(super) fn alias_split(patterns: &str) -> (Vec<String>, String) {
@@ -89,7 +89,7 @@ impl ScopeState {
     }
 
     /// The signals alone, without the effect that follows `groups`.
-    fn bare() -> Self {
+    pub(super) fn bare() -> Self {
         Self {
             scope_mode: RwSignal::new("all".into()),
             models: RwSignal::new(Vec::new()),
@@ -176,6 +176,19 @@ impl ScopeState {
         }
     }
 
+    /// A stored tool list as [`Self::tool_patterns`] would write it back
+    /// once split over the groups loaded now: what an unchanged picker
+    /// says, so a form compares like with like (tracked).
+    pub fn tool_patterns_of(&self, raw: &str) -> String {
+        match self.groups.get() {
+            Some(groups) => {
+                let (picked, adv) = from_patterns(raw, &groups);
+                to_patterns(&picked, &groups, &adv)
+            }
+            None => raw.to_string(),
+        }
+    }
+
     /// Both scopes at their defaults — nothing to send at creation.
     pub fn is_default(&self) -> bool {
         untrack(|| {
@@ -190,9 +203,9 @@ impl ScopeState {
 fn mode_options() -> Signal<Vec<(String, String)>> {
     Signal::derive(|| {
         vec![
-            ("all".to_string(), "all".to_string()),
-            ("allow".into(), "allow only…".into()),
-            ("deny".into(), "deny…".into()),
+            ("all".to_string(), "All".to_string()),
+            ("allow".into(), "Allow only…".into()),
+            ("deny".into(), "Deny…".into()),
         ]
     })
 }
@@ -223,9 +236,40 @@ fn Advanced(
     }
 }
 
-/// Which model aliases the key may ask for.
+/// The mode row both editors start with: its title and sentence, and the
+/// mode's dropdown at its end.
 #[component]
-pub(super) fn AliasScopeEditor(state: ScopeState, disabled: Signal<bool>) -> impl IntoView {
+fn ModeRow(
+    title: &'static str,
+    #[prop(into)] sub: Signal<String>,
+    mode: RwSignal<String>,
+    disabled: Signal<bool>,
+    dirty: Option<Signal<bool>>,
+) -> impl IntoView {
+    view! {
+        <div class="prow combo scope-mode" class:dirty=move || dirty.is_some_and(|d| d.get())>
+            <div class="prow-text">
+                <span class="prow-title">{title}</span>
+                <span class="prow-sub">{move || sub.get()}</span>
+            </div>
+            <div class="prow-end">
+                <Select value=mode disabled=disabled options=mode_options()/>
+            </div>
+        </div>
+    }
+}
+
+/// Which model aliases the key may ask for: the mode as a row, and while it
+/// narrows, a row with the picked models, the picker and the globs. Rows of
+/// a boxed group, wherever it is placed.
+#[component]
+pub(super) fn AliasScopeEditor(
+    state: ScopeState,
+    disabled: Signal<bool>,
+    /// The scope differs from what is stored: the row's accent dot.
+    #[prop(optional, into)]
+    dirty: Option<Signal<bool>>,
+) -> impl IntoView {
     let ScopeState {
         scope_mode,
         models,
@@ -245,18 +289,25 @@ pub(super) fn AliasScopeEditor(state: ScopeState, disabled: Signal<bool>) -> imp
         });
         add.set(String::new());
     });
+    let sub = Signal::derive(move || {
+        match scope_mode.get().as_str() {
+            "allow" => "Only the models picked below",
+            "deny" => "Every model but those picked below",
+            _ => "Every model alias the gateway serves",
+        }
+        .to_string()
+    });
     view! {
-        <div class="row" style="margin-top:10px">
-            <span class="lbl">"aliases"</span>
-            <Select value=scope_mode disabled=disabled options=mode_options()/>
-        </div>
+        <ModeRow title="Model aliases" sub=sub mode=scope_mode disabled=disabled dirty=dirty/>
         <Show when=move || scope_mode.get() != "all">
+            <div class="prow stack block scope-pick">
+            <div class="prow-block">
             <div class="scope-chips">
                 <For each=move || models.get() key=|m| m.clone() let:m>
                     <span class="chip filter-chip mono">
                         {m.clone()}
                         <button
-                            class="btn ghost"
+                            class="chip-x"
                             aria-label=format!("Remove {m}")
                             disabled=move || disabled.get()
                             on:click={
@@ -264,7 +315,7 @@ pub(super) fn AliasScopeEditor(state: ScopeState, disabled: Signal<bool>) -> imp
                                 move |_| models.update(|l| l.retain(|x| x != &m))
                             }
                         >
-                            "×"
+                            <Icon ico=Ico::Close/>
                         </button>
                     </span>
                 </For>
@@ -282,6 +333,8 @@ pub(super) fn AliasScopeEditor(state: ScopeState, disabled: Signal<bool>) -> imp
             </div>
             <ModelPicker value=add empty_label="Add a model…" allow_custom=true disabled=disabled/>
             <Advanced text=alias_adv placeholder="one glob per line — claude-*, qwen*" disabled=disabled/>
+            </div>
+            </div>
         </Show>
     }
 }
@@ -293,6 +346,9 @@ pub(super) fn ToolScopeEditor(
     state: ScopeState,
     inventory: Signal<Option<Result<ToolInventory, String>>>,
     disabled: Signal<bool>,
+    /// The scope differs from what is stored: the row's accent dot.
+    #[prop(optional, into)]
+    dirty: Option<Signal<bool>>,
 ) -> impl IntoView {
     let ScopeState {
         tool_mode,
@@ -336,12 +392,19 @@ pub(super) fn ToolScopeEditor(
     };
     let group_sig: Signal<Vec<ScopeGroup>> =
         Signal::derive(move || groups.get().unwrap_or_default());
+    let sub = Signal::derive(move || {
+        match tool_mode.get().as_str() {
+            "allow" => "Only the tools ticked below, on /mcp and in a /v1/responses run",
+            "deny" => "Every tool but those ticked below",
+            _ => "Every MCP tool the gateway serves on /mcp",
+        }
+        .to_string()
+    });
     view! {
-        <div class="row" style="margin-top:10px">
-            <span class="lbl">"tools"</span>
-            <Select value=tool_mode disabled=disabled options=mode_options()/>
-        </div>
+        <ModeRow title="MCP tools" sub=sub mode=tool_mode disabled=disabled dirty=dirty/>
         <Show when=move || tool_mode.get() != "all">
+            <div class="prow stack block scope-pick">
+            <div class="prow-block">
             {move || match groups.get() {
                 Some(_) => {
                     view! {
@@ -397,6 +460,8 @@ pub(super) fn ToolScopeEditor(
                 }
                 None => view! { <div class="mini-note dim">"Loading tools…"</div> }.into_any(),
             }}
+            </div>
+            </div>
         </Show>
     }
 }

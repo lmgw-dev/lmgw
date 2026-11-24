@@ -227,10 +227,7 @@ async fn failures_say_whether_the_server_answered() {
     assert!(old.to_string().starts_with("HTTP 404"), "{old}");
 
     // A port nothing listens on reaches nothing.
-    let gone = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+    let (gone, _held) = crate::refusing_port::refusing_port();
     let none = probe(container_request(&http, gone), t).await.unwrap_err();
     assert!(matches!(none, PropsFailure::Unreachable(_)), "{none:?}");
 }

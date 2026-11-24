@@ -9,6 +9,8 @@ use leptos::prelude::*;
 
 /// A tool source's `require_approval` as the tool picker edits it.
 pub mod approval_rule;
+/// The audio player row: Play/Pause, a scrubber and the time.
+pub mod audio_player;
 /// Running text folded to its first lines, with "more".
 pub mod clamp;
 /// A destructive action that takes two clicks.
@@ -17,12 +19,17 @@ pub mod confirm;
 pub mod dirty_guard;
 /// Forms that know what changed: FormState, Field, SaveBar, Explain.
 pub mod form;
+/// Monochrome symbolic icons.
+pub mod icon;
 /// The `<dialog>` modal: sizes, a pinned foot, a guard on unsaved input.
 pub mod modal;
 /// The model picker over the shared catalog.
 pub mod model_picker;
 /// A panel in the top layer, anchored to a button: never clipped.
 pub mod popover;
+/// Boxed preference groups and their rows, the two-line list row, the save
+/// toast.
+pub mod prefs;
 /// The "⋯" row menu: a row's secondary actions in a popover.
 pub mod row_menu;
 /// A collapsible page section with its count and folded summary.
@@ -36,14 +43,21 @@ pub mod tool_picker;
 /// A voice of a text-to-speech model, offered the model's voice list.
 pub mod voice_picker;
 
+pub use audio_player::AudioPlayer;
 pub use clamp::ClampText;
 pub use confirm::ConfirmButton;
 pub use dirty_guard::DirtyGuardHost;
 pub use dirty_guard::{use_dirty_guard, DirtyGuard};
 pub use form::{flatten, use_touched, Explain, Field, FormState, Kind, SaveBar};
+pub use icon::{Ico, Icon};
 pub use modal::{use_modal, Modal, ModalFooter, ModalSize};
 pub use model_picker::ModelPicker;
 pub use popover::Popover;
+pub use prefs::{
+    ActionRow, ComboRow, Dot, EntryRow, InfoRow, ListRow, NumberRow, PrefGroup, SaveToast, Spin,
+    SpinButton, SpinError, SpinRow, StackRow, StateChip, StateDot, Switch, SwitchRow, TextRow,
+    WireName,
+};
 pub use row_menu::{MenuItem, RowMenu};
 pub use section::Section;
 pub use slash::use_slash_focus;
@@ -86,7 +100,22 @@ pub struct Toasts {
     next_id: RwSignal<u64>,
 }
 
+impl Default for Toasts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Toasts {
+    /// An empty stack. [`ToastHost`] makes the one the app shows and
+    /// provides it; a test of a form that holds one makes its own.
+    pub fn new() -> Self {
+        Self {
+            list: RwSignal::new(Vec::new()),
+            next_id: RwSignal::new(0),
+        }
+    }
+
     pub fn ok(&self, msg: impl Into<String>) {
         self.push(ToastKind::Ok, msg.into());
     }
@@ -162,10 +191,7 @@ const DISMISS_ALL_FROM: usize = 3;
 /// Install the toast context and render the overlay. Mounted once in `App`.
 #[component]
 pub fn ToastHost() -> impl IntoView {
-    let toasts = Toasts {
-        list: RwSignal::new(Vec::new()),
-        next_id: RwSignal::new(0),
-    };
+    let toasts = Toasts::new();
     provide_context(toasts);
     listen_downloads(toasts);
     if let Ok(Some(store)) = window().session_storage() {
@@ -194,7 +220,7 @@ pub fn ToastHost() -> impl IntoView {
                         title="Dismiss"
                         on:click=move |_| toasts.list.update(|l| l.retain(|x| x.id != t.id))
                     >
-                        "✕"
+                        <Icon ico=Ico::Close/>
                     </button>
                 </div>
             </For>
@@ -261,15 +287,22 @@ pub fn CopyBtn(
     let copied = RwSignal::new(false);
     view! {
         <button
-            class="copy-btn"
+            class="icon-btn sm copy-btn"
             title=title
+            aria-label=title
             on:click=move |_| {
                 let _ = window().navigator().clipboard().write_text(&text);
                 copied.set(true);
                 set_timeout(move || copied.set(false), std::time::Duration::from_secs(2));
             }
         >
-            {move || if copied.get() { "✓" } else { "⧉" }}
+            {move || {
+                if copied.get() {
+                    view! { <Icon ico=Ico::Check/> }
+                } else {
+                    view! { <Icon ico=Ico::Copy/> }
+                }
+            }}
         </button>
     }
 }

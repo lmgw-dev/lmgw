@@ -312,7 +312,12 @@ async fn a_server_that_ignores_its_stdin_closing_is_stopped_with_its_container()
         command: "sh",
         args: &["-c", &script],
         extra: &[],
-        timeout_ms: 4_000,
+        // The grace each stop waits out in full (the server ignores its stop
+        // signal too) and the handshake's bound: 2 s is ten times the
+        // handshake on an idle machine (0.2 s, 2026-11-20), and each stop
+        // takes the grace plus rmcp's own wait for the attached client
+        // (~3 s).
+        timeout_ms: 2_000,
         autostart: true,
     };
     let id = server(&state, &label, spec).await;

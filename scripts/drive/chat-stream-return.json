@@ -1,0 +1,152 @@
+[
+ {
+  "js": "'A reply in flight survives leaving the Chat: send, leave for Settings while the model still reads its prompt, come back, and the thread shows the turn as in flight (its bubble streaming, Stop), then its tokens live; leave and come back again mid-stream, and the end lands in the same bubble, stored; then a Continue of it, left and come back to while the model reads its prompt, shows the reply once. Needs the mock with a slow prefill (ECHO=1 PREFILL_DELAY=5 STREAM_DELAY=0.5 scripts/mock-openai.py PORT) and the fake-echo alias (scripts/chat-actions-setup.sh); scripts/chat-drives.sh starts both. Writes one thread and its two messages.'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(() => { localStorage.removeItem('lmgw.streamReturn.tid'); fetch('/chat/api/threads', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({model_alias: 'fake-echo', kind: 'chat'})}).then(r => r.json()).then(t => localStorage.setItem('lmgw.streamReturn.tid', String(t.id))); return 'creating a thread'; })()"
+ },
+ {
+  "until": "localStorage.getItem('lmgw.streamReturn.tid')",
+  "timeout": 15,
+  "label": "a thread of its own"
+ },
+ {
+  "js": "(location.assign('/chat?t=' + localStorage.getItem('lmgw.streamReturn.tid')), 'opening it')"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "until": "new URLSearchParams(location.search).get('t') === localStorage.getItem('lmgw.streamReturn.tid') && !!document.querySelector('.composer-input') && document.querySelectorAll('.chat-col .msg-item').length === 0",
+  "timeout": 15,
+  "label": "the empty thread is open"
+ },
+ {
+  "js": "(() => { const ta = document.querySelector('.composer-input'); ta.value = 'one two three four five six seven eight nine ten'; ta.dispatchEvent(new Event('input', {bubbles: true})); return 'typed'; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { document.querySelector('.composer-send.primary').click(); return 'sent'; })()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-send[aria-label=\"Stop\"]')",
+  "timeout": 10,
+  "label": "the turn is under way"
+ },
+ {
+  "js": "(() => { [...document.querySelectorAll('a[href=\"/settings\"]')].find(a => a.checkVisibility()).click(); return 'to Settings, in the app (a go step would wait for the stream to end)'; })()"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.getElementById('chat-scroll')",
+  "label": "the Chat page is gone"
+ },
+ {
+  "js": "(() => { history.pushState(null, '', '/chat?t=' + localStorage.getItem('lmgw.streamReturn.tid')); dispatchEvent(new PopStateEvent('popstate')); return 'back to the thread'; })()"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !!l.querySelector('.caret') && !!document.querySelector('.composer-send[aria-label=\"Stop\"]'); })()",
+  "timeout": 5,
+  "label": "back while the model reads its prompt: the reply shows as in flight (its bubble streaming, Stop)"
+ },
+ {
+  "expect": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return document.querySelectorAll('.chat-col .msg-assistant').length === 1 && l.querySelector('.md').textContent.trim() === '' && document.querySelectorAll('.chat-col .msg-item-user').length === 1; })()",
+  "label": "one question and one reply bubble, the reply with no words yet"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !!l.querySelector('.caret') && l.querySelector('.md').textContent.includes('Echo: one'); })()",
+  "timeout": 20,
+  "label": "its tokens stream in live"
+ },
+ {
+  "js": "(() => { [...document.querySelectorAll('a[href=\"/settings\"]')].find(a => a.checkVisibility()).click(); return 'to Settings, in the app (a go step would wait for the stream to end)'; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(() => { history.pushState(null, '', '/chat?t=' + localStorage.getItem('lmgw.streamReturn.tid')); dispatchEvent(new PopStateEvent('popstate')); return 'back to the thread'; })()"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !!l.querySelector('.caret') && l.querySelector('.md').textContent.includes('Echo: one') && document.querySelectorAll('.chat-col .msg-assistant').length === 1; })()",
+  "timeout": 5,
+  "label": "left and back again mid-stream: still streaming, the words so far kept"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !l.querySelector('.caret') && !!l.dataset.mid && l.querySelector('.md').textContent.trim() === 'Echo: one two three four five six seven eight nine ten' && !!document.querySelector('.composer-send[aria-label=\"Send\"]'); })()",
+  "timeout": 60,
+  "label": "the end lands in the same bubble, stored (its id), and Send is back"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-assistant').length === 1 && document.querySelectorAll('.chat-col .msg-item-user').length === 1",
+  "label": "no bubble twice"
+ },
+ {
+  "expect": "(async () => { const d = await (await fetch('/chat/api/threads/' + localStorage.getItem('lmgw.streamReturn.tid'))).json(); const a = d.messages.filter(m => m.role === 'assistant'); return a.length === 1 && a[0].content === 'Echo: one two three four five six seven eight nine ten'; })()",
+  "label": "the stored reply is the whole one"
+ },
+ {
+  "js": "'A Continue of the stored reply, left and come back to while the model reads its prompt: the reply is one bubble, streaming, never the stored reply and its live bubble side by side.'"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Continue\"]",
+  "nth": 0
+ },
+ {
+  "until": "!!document.querySelector('.composer-send[aria-label=\"Stop\"]')",
+  "timeout": 10,
+  "label": "the Continue is under way"
+ },
+ {
+  "js": "(() => { [...document.querySelectorAll('a[href=\"/settings\"]')].find(a => a.checkVisibility()).click(); return 'to Settings mid-Continue'; })()"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.getElementById('chat-scroll')",
+  "label": "the Chat page is gone"
+ },
+ {
+  "js": "(() => { history.pushState(null, '', '/chat?t=' + localStorage.getItem('lmgw.streamReturn.tid')); dispatchEvent(new PopStateEvent('popstate')); return 'back to the thread'; })()"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !!l.querySelector('.caret') && !!document.querySelector('.composer-send[aria-label=\"Stop\"]'); })()",
+  "timeout": 5,
+  "label": "back mid-Continue: the reply shows as in flight"
+ },
+ {
+  "expect": "(() => { const a = document.querySelectorAll('.chat-col .msg-assistant'); return a.length === 1 && document.querySelectorAll('.chat-col [data-mid=\"' + a[0].dataset.mid + '\"]').length === 1 && a[0].querySelector('.md').textContent.trim() === 'Echo: one two three four five six seven eight nine ten'; })()",
+  "label": "the continued reply once (one bubble, its id once), its text so far kept"
+ },
+ {
+  "until": "(() => { const l = (() => { const a = [...document.querySelectorAll('.chat-col .msg-assistant')]; return a[a.length - 1] || null; })(); return !!l && !l.querySelector('.caret') && l.querySelector('.md').textContent.trim() === 'Echo: one two three four five six seven eight nine ten…and then some more words.' && !!document.querySelector('.composer-send[aria-label=\"Send\"]'); })()",
+  "timeout": 60,
+  "label": "the continuation lands in the same bubble"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-assistant').length === 1 && document.querySelectorAll('.chat-col .msg-item-user').length === 1",
+  "label": "no bubble twice after the Continue"
+ },
+ {
+  "expect": "(async () => { const d = await (await fetch('/chat/api/threads/' + localStorage.getItem('lmgw.streamReturn.tid'))).json(); const a = d.messages.filter(m => m.role === 'assistant'); return a.length === 1 && a[0].content === 'Echo: one two three four five six seven eight nine ten…and then some more words.'; })()",
+  "label": "the stored reply is the continued one"
+ },
+ {
+  "go": "/knowledge"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!!document.querySelector('.page')",
+  "label": "other pages still work (a wasm panic would have killed them)"
+ }
+]

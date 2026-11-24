@@ -296,7 +296,7 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
             // window and opens in the system browser, which is the one view
             // of the app that no framing rule can spoil (§4.9).
             <a
-                class="btn ghost sm"
+                class="btn flat sm"
                 href=base.clone()
                 target="_blank"
                 title="open the app on its own origin, outside this window"
@@ -312,7 +312,7 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
                 disabled=move || busy.get() || dev_active || starting || !enabled
                 on:click=move |_| press(true)
                 title=if !enabled {
-                    "this agent is disabled; enable it on the catalog before its app can start"
+                    "this agent is disabled; enable it (the header's menu, or the Run tab) before its app can start"
                 } else if dev_active {
                     "this agent is served from its dev_url; no container is started for it"
                 } else if starting {
@@ -323,7 +323,11 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
             >
                 "Start"
             </button>
-            <button class="btn ghost sm" disabled=move || busy.get() on:click=move |_| press(false)>
+            <button
+                class="btn flat sm"
+                disabled=move || busy.get()
+                on:click=move |_| press(false)
+            >
                 "Stop"
             </button>
         </div>
@@ -450,7 +454,7 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
                         "Use dev server"
                     </button>
                     <button
-                        class="btn ghost sm"
+                        class="btn flat sm"
                         disabled=move || busy.get() || !dev_active
                         on:click=move |_| set_dev(true)
                     >
@@ -493,7 +497,7 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
                         prop:value=move || log_lines.get()
                         on:input=move |ev| log_lines.set(event_target_value(&ev))
                     />
-                    <button class="btn ghost sm" disabled=move || log_busy.get() on:click=fetch_log.clone()>
+                    <button class="btn flat sm" disabled=move || log_busy.get() on:click=fetch_log.clone()>
                         "Read"
                     </button>
                 </div>
@@ -524,9 +528,8 @@ pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
             view! {
                 <div class="fill-pane">
                     <div class="empty">
-                        "This agent is disabled, so its app does not start. Enable it on "
-                        <a href="/agents">"Agents"</a>
-                        " to open it here."
+                        "This agent is disabled, so its app does not start. Enable it in the "
+                        "header's menu, or on the Run tab, to open it here."
                     </div>
                 </div>
             }

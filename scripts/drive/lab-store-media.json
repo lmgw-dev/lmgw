@@ -6,15 +6,15 @@
   "js": "(async()=>{for(const lab of ['image','audio']){await fetch('/labs/api/'+lab+'/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});const l=await (await fetch('/labs/api/'+lab+'/presets')).json();for(const p of l.presets){await fetch('/labs/api/'+lab+'/presets/'+p.id+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'})}}return 'cleared'})()"
  },
  {"nav": "/image-lab"},
- {"until": "document.querySelector('.lab-head .mp-btn') && document.querySelector('.lab-head .mp-btn').textContent.includes('z-image-turbo')", "timeout": 20},
+ {"until": "document.querySelector('.lab-shell > .page-head .mp-btn') && document.querySelector('.lab-shell > .page-head .mp-btn').textContent.includes('z-image-turbo')", "timeout": 20},
  {
-  "expect": "document.querySelector('.results-note').textContent.startsWith('newest first · kept') && document.querySelector('.results-list .empty').textContent.includes('kept on the server until you delete it') && document.querySelector('.lp-card')",
-  "label": "image: the results are the kept history, and the form has a presets card"
+  "expect": "document.querySelector('.results-note').textContent.startsWith('newest first · kept') && document.querySelector('.results-list .empty').textContent.includes('kept on the server until you delete it') && document.querySelector('.lab-shell > .page-head .lp-btn')",
+  "label": "image: the results are the kept history, and the header has the presets button"
  },
- {"js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a red fox in a snowy pine forest at dawn, photograph');set(document.querySelector('.seed-row input'),'42');return 'form filled'})()"},
+ {"js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a red fox in a snowy pine forest at dawn, photograph');set([...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input'),'42');return 'form filled'})()"},
  {"wait": 0.3},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group img') && !document.querySelector('.lab-results .chip.live')", "timeout": 300},
+ {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group img') && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 300},
  {
   "expect": "(async()=>{const i=document.querySelector('.il-group img');if(!i.complete)await new Promise(r=>{i.onload=r;i.onerror=r});return i.getAttribute('src').startsWith('/labs/api/artifacts/') && i.naturalWidth===1024 && document.querySelector('.il-group .dl-title').textContent==='a red fox in a snowy pine forest at dawn, photograph'})()",
   "label": "image: the generation lands as a kept group, its picture served from the lab store"
@@ -24,6 +24,8 @@
   "label": "image: the size line names the file"
  },
  {"shot": "image-kept"},
+ {"click": ".lab-shell > .page-head .lp-btn"},
+ {"until": "document.querySelector('.lp-pop .lp-name')", "timeout": 5},
  {"js": "(()=>{const n=document.querySelector('.lp-name');n.value='fox at dawn';n.dispatchEvent(new Event('input',{bubbles:true}));return 'named'})()"},
  {"wait": 0.2},
  {"click": ".lp-save"},
@@ -31,16 +33,15 @@
   "until": "(async()=>{const l=await (await fetch('/labs/api/image/presets?kind=image_prompt')).json();return l.presets.length===1 && l.presets[0].name==='fox at dawn' && l.presets[0].body.prompt.includes('red fox') && l.presets[0].body.seed==='42'})()",
   "timeout": 10
  },
- {"js": "(()=>{const t=document.querySelector('.lab-form textarea.ta');t.value='something else entirely';t.dispatchEvent(new Event('input',{bubbles:true}));const s=document.querySelector('.seed-row input');s.value='';s.dispatchEvent(new Event('input',{bubbles:true}));return 'changed'})()"},
+ {"key": "Escape"},
+ {"js": "(()=>{const t=document.querySelector('.lab-form textarea.ta');t.value='something else entirely';t.dispatchEvent(new Event('input',{bubbles:true}));const s=[...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input');s.value='';s.dispatchEvent(new Event('input',{bubbles:true}));return 'changed'})()"},
  {"wait": 0.2},
- {"click": ".lp-select .select-btn"},
- {"wait": 0.3},
- {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('fox at dawn')).click(), 'picked'"},
- {"wait": 0.3},
- {"click": ".lp-load"},
+ {"click": ".lab-shell > .page-head .lp-btn"},
+ {"until": "document.querySelector('.lp-pop .lp-load')", "timeout": 5},
+ {"js": "[...document.querySelectorAll('.lp-pop .lp-load')].find(e=>e.textContent.includes('fox at dawn')).click(), 'loaded'"},
  {"wait": 0.3},
  {
-  "expect": "document.querySelector('.lab-form textarea.ta').value==='a red fox in a snowy pine forest at dawn, photograph' && document.querySelector('.seed-row input').value==='42'",
+  "expect": "document.querySelector('.lab-form textarea.ta').value==='a red fox in a snowy pine forest at dawn, photograph' && [...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input').value==='42'",
   "label": "image: a saved prompt preset loads back into the form"
  },
  {"nav": "/image-lab"},
@@ -53,13 +54,13 @@
  {"click": ".il-group .row-menu-btn"},
  {"wait": 0.3},
  {
-  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Open in form|Export as JSONL|Export as CSV|Delete'",
-  "label": "image: the card's menu: Open in form, Export, Delete"
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Open in form|Save picture\u2026|Delete'",
+  "label": "image: the card's menu: Open in form, Save picture, Delete (the exports are the results head's)"
  },
  {"click": ".menu-pop .menu-item", "nth": 0},
  {"wait": 0.5},
  {
-  "expect": "document.querySelector('.lab-form textarea.ta').value==='a red fox in a snowy pine forest at dawn, photograph' && document.querySelector('.seed-row input').value==='42' && document.querySelector('.lab-form pre.preset').textContent.includes('red fox')",
+  "expect": "document.querySelector('.lab-form textarea.ta').value==='a red fox in a snowy pine forest at dawn, photograph' && [...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input').value==='42' && document.querySelector('.lab-form pre.preset').textContent.includes('red fox')",
   "label": "image: Open in form puts the kept prompt and seed back"
  },
  {
@@ -68,22 +69,22 @@
  },
  {"click": ".il-group .row-menu-btn"},
  {"wait": 0.3},
- {"click": ".menu-pop .menu-item", "nth": 3},
+ {"click": ".menu-pop .menu-item", "nth": 2},
  {"wait": 0.3},
- {"click": ".menu-pop .menu-item", "nth": 3},
+ {"click": ".menu-pop .menu-item", "nth": 2},
  {"until": "document.querySelectorAll('.il-group').length===0 && document.querySelector('.results-list .empty')", "timeout": 10},
  {
   "expect": "(async()=>{const u=await (await fetch('/labs/api/image/usage')).json();return u.groups===0 && u.artifact_files===0})()",
   "label": "image: Delete takes the group and its file"
  },
  {
-  "js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a lighthouse on a cliff at night, long exposure');set(document.querySelector('.seed-row input'),'7');set([...document.querySelectorAll('.lab-form .field')].find(f=>f.querySelector('label')&&f.querySelector('label').textContent.startsWith('Steps')).querySelector('input'),'40');return 'form filled'})()"
+  "js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a lighthouse on a cliff at night, long exposure');set([...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input'),'7');set([...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Steps')).querySelector('input'),'40');return 'form filled'})()"
  },
  {"wait": 0.3},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip.live')", "timeout": 30},
+ {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip[data-state=running]')", "timeout": 30},
  {
-  "expect": "(async()=>{const p=await (await fetch('/labs/api/image/groups')).json();const g=p.groups[0];return p.total===1 && g.runs.length===0 && g.in_flight===true && document.querySelector('.il-group .dl-title').textContent==='a lighthouse on a cliff at night, long exposure' && document.querySelector('.il-group .chip.live').textContent.includes('rendering')})()",
+  "expect": "(async()=>{const p=await (await fetch('/labs/api/image/groups')).json();const g=p.groups[0];return p.total===1 && g.runs.length===0 && g.in_flight===true && document.querySelector('.il-group .dl-title').textContent==='a lighthouse on a cliff at night, long exposure' && document.querySelector('.il-group .chip[data-state=running]').textContent.includes('rendering')})()",
   "label": "image: the group is in front from its creation, its card rendering with Stop, the server saying in flight"
  },
  {"click": ".il-group .row-menu-btn"},
@@ -99,11 +100,11 @@
  {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.trim()==='image/z-image-turbo').click(), 'filtered'"},
  {"wait": 0.8},
  {
-  "expect": "(async()=>{const p=await (await fetch('/labs/api/image/groups?model=image%2Fz-image-turbo')).json();return p.groups[0].in_flight===true && document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip.live') && ![...document.querySelectorAll('.il-group .chip')].some(c=>c.textContent.includes('stopped'))})()",
+  "expect": "(async()=>{const p=await (await fetch('/labs/api/image/groups?model=image%2Fz-image-turbo')).json();return p.groups[0].in_flight===true && document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip[data-state=running]') && ![...document.querySelectorAll('.il-group .chip')].some(c=>c.textContent.includes('stopped'))})()",
   "label": "image: a history reload during the generation shows the group in flight, never stopped"
  },
  {"shot": "image-in-flight"},
- {"until": "document.querySelectorAll('.il-group img').length===1 && !document.querySelector('.lab-results .chip.live')", "timeout": 300},
+ {"until": "document.querySelectorAll('.il-group img').length===1 && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 300},
  {
   "expect": "(async()=>{const i=document.querySelector('.il-group img');if(!i.complete)await new Promise(r=>{i.onload=r;i.onerror=r});const g=(await (await fetch('/labs/api/image/groups')).json()).groups[0];return i.getAttribute('src').startsWith('/labs/api/artifacts/') && i.naturalWidth>0 && g.in_flight===false && g.runs[0].http_status===200 && /1 run · 1 file/.test(document.querySelector('.results-note').textContent)})()",
   "label": "image: then its picture lands in its card, counted once"
@@ -116,15 +117,15 @@
   "js": "(async()=>{const r=await fetch('/labs/api/image/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'cleared '+r.status})()"
  },
  {"nav": "/image-lab"},
- {"until": "document.querySelector('.lab-head .mp-btn') && document.querySelector('.lab-head .mp-btn').textContent.includes('z-image-turbo') && document.querySelector('.lab-form textarea.ta')", "timeout": 20},
- {"js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a paper boat on a pond, soft light');set(document.querySelector('.seed-row input'),'3');set([...document.querySelectorAll('.lab-form .field')].find(f=>f.querySelector('label')&&f.querySelector('label').textContent.startsWith('Steps')).querySelector('input'),'40');return 'form filled'})()"},
+ {"until": "document.querySelector('.lab-shell > .page-head .mp-btn') && document.querySelector('.lab-shell > .page-head .mp-btn').textContent.includes('z-image-turbo') && document.querySelector('.lab-form textarea.ta')", "timeout": 20},
+ {"js": "(()=>{const set=(el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}))};set(document.querySelector('.lab-form textarea.ta'),'a paper boat on a pond, soft light');set([...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Seed')).querySelector('input'),'3');set([...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent.startsWith('Steps')).querySelector('input'),'40');return 'form filled'})()"},
  {"wait": 0.3},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip.live')", "timeout": 30},
+ {"until": "document.querySelectorAll('.il-group').length===1 && document.querySelector('.il-group .chip[data-state=running]')", "timeout": 30},
  {"click": ".results-head .confirm .btn"},
  {"wait": 0.3},
  {"click": ".results-head .confirm .btn", "nth": 0},
- {"until": "document.querySelector('.lab-results .notice.warn') && document.querySelector('.il-group img') && !document.querySelector('.lab-results .chip.live')", "timeout": 300},
+ {"until": "document.querySelector('.lab-results .notice.warn') && document.querySelector('.il-group img') && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 300},
  {"expect": "(async()=>{const i=document.querySelector('.il-group img');if(!i.complete)await new Promise(r=>{i.onload=r;i.onerror=r});const u=await (await fetch('/labs/api/image/usage')).json();return u.groups===0 && document.querySelectorAll('.il-group').length===1 && i.naturalWidth>0 && document.querySelector('.lab-results .notice.warn').textContent.startsWith('not kept')})()", "label": "image: a generation that lands after a Clear keeps its picture on a card above the history, saying it was not kept"},
  {"click": ".il-group .row-menu-btn"},
  {"wait": 0.3},
@@ -132,20 +133,22 @@
  {"key": "Escape"},
  {"shot": "image-cleared-while-running"},
  {"nav": "/audio-lab"},
- {"until": "document.querySelector('.lab-head .mp-btn')", "timeout": 20},
+ {"until": "document.querySelector('.lab-shell > .page-head .mp-btn')", "timeout": 20},
  {"wait": 0.5},
- {"click": ".lab-head .mp-btn"},
+ {"click": ".lab-shell > .page-head .mp-btn"},
  {"wait": 0.3},
  {"type": "kokoro"},
  {"wait": 0.3},
  {"key": "Enter"},
  {"wait": 0.5},
  {
-  "expect": "document.querySelector('.lab-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta') && document.querySelector('.lp-card') && document.querySelector('.results-note').textContent.startsWith('newest first · kept')",
-  "label": "audio: kokoro's speech panel, its presets card, and the kept history"
+  "expect": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta') && document.querySelector('.lab-shell > .page-head .lp-btn') && document.querySelector('.results-note').textContent.startsWith('newest first · kept')",
+  "label": "audio: kokoro's speech panel, its presets button, and the kept history"
  },
  {"js": "(()=>{const t=document.querySelector('.lab-form textarea.ta');t.value='Hello from the lab store. This clip is kept as a file.';t.dispatchEvent(new Event('input',{bubbles:true}));return 'text'})()"},
  {"wait": 0.2},
+ {"click": ".lab-shell > .page-head .lp-btn"},
+ {"until": "document.querySelector('.lp-pop .lp-name')", "timeout": 5},
  {"js": "(()=>{const n=document.querySelector('.lp-name');n.value='store hello';n.dispatchEvent(new Event('input',{bubbles:true}));return 'named'})()"},
  {"wait": 0.2},
  {"click": ".lp-save"},
@@ -153,29 +156,28 @@
   "until": "(async()=>{const l=await (await fetch('/labs/api/audio/presets?kind=audio_settings')).json();return l.presets.length===1 && l.presets[0].body.speech.input.startsWith('Hello from the lab store') && l.presets[0].body.speech.model==='audio/kokoro' && l.presets[0].body.pcm.rate==='24000'})()",
   "timeout": 10
  },
+ {"key": "Escape"},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.al-group').length===1 && document.querySelector('.al-group audio') && !document.querySelector('.lab-results .chip.live')", "timeout": 180},
+ {"until": "document.querySelectorAll('.al-group').length===1 && document.querySelector('.al-group audio') && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 180},
  {
   "expect": "(async()=>{const a=document.querySelector('.al-group audio');const src=a.getAttribute('src');const r=await fetch(src);const b=await r.arrayBuffer();return src.startsWith('/labs/api/artifacts/') && r.headers.get('content-type')==='audio/wav' && b.byteLength>44 && document.querySelector('.al-group .al-title').textContent.startsWith('Hello from the lab store')})()",
   "label": "audio: the speech lands as a kept run, the clip played from the lab store"
  },
  {
-  "expect": "(async()=>{const u=await (await fetch('/labs/api/audio/usage')).json();return u.groups===1 && u.artifact_files===1 && /1 run · 1 file · [\\d.]+ kB/.test(document.querySelector('.results-note').textContent)})()",
+  "expect": "(async()=>{const u=await (await fetch('/labs/api/audio/usage')).json();return u.groups===1 && u.artifact_files===1 && /1 run · 1 file · [\\d.]+ (KiB|MiB)/.test(document.querySelector('.results-note').textContent)})()",
   "label": "audio: the size line names the file"
  },
  {"shot": "audio-kept"},
  {"js": "(()=>{document.querySelector('.al-group audio').__kept=1;window.__gets=0;const f=window.fetch;window.fetch=(...a)=>{const u=String((a[0]&&a[0].url)||a[0]);if(u.includes('/labs/api/artifacts/'))window.__gets++;return f(...a)};return 'marked'})()"},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.al-group').length===2 && document.querySelectorAll('.al-group audio').length===2 && !document.querySelector('.lab-results .chip.live')", "timeout": 180},
+ {"until": "document.querySelectorAll('.al-group').length===2 && document.querySelectorAll('.al-group audio').length===2 && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 180},
  {"expect": "[...document.querySelectorAll('.al-group audio')].filter(a=>a.__kept).length===1 && window.__gets===0", "label": "audio: a kept clip's player is not rebuilt, nor its file fetched again, while another run starts and lands"},
  {"js": "(async()=>{const g=(await (await fetch('/labs/api/audio/groups')).json()).groups[0];const r=await fetch('/labs/api/audio/groups/'+g.id+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'deleted the second run '+r.status})()"},
  {"js": "(()=>{const t=document.querySelector('.lab-form textarea.ta');t.value='other words';t.dispatchEvent(new Event('input',{bubbles:true}));return 'changed'})()"},
  {"wait": 0.2},
- {"click": ".lp-select .select-btn"},
- {"wait": 0.3},
- {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('store hello')).click(), 'picked'"},
- {"wait": 0.3},
- {"click": ".lp-load"},
+ {"click": ".lab-shell > .page-head .lp-btn"},
+ {"until": "document.querySelector('.lp-pop .lp-load')", "timeout": 5},
+ {"js": "[...document.querySelectorAll('.lp-pop .lp-load')].find(e=>e.textContent.includes('store hello')).click(), 'loaded'"},
  {"wait": 0.3},
  {
   "expect": "document.querySelector('.lab-form textarea.ta').value==='Hello from the lab store. This clip is kept as a file.'",
@@ -193,13 +195,13 @@
  {"click": ".al-group .row-menu-btn", "nth": 0},
  {"wait": 0.3},
  {
-  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Open in form|Export as JSONL|Export as CSV|Delete'",
-  "label": "audio: the card's menu: Open in form, Export, Delete"
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).filter((t,i,a)=>a.length===3&&(i===0?t==='Open in form':i===2?t==='Delete':true)).length===3",
+  "label": "audio: the card's menu: Open in form, a save item, Delete (the exports are the results head's)"
  },
  {"click": ".menu-pop .menu-item", "nth": 0},
- {"until": "document.querySelector('.al-file') && document.querySelector('.al-file').textContent==='file: kept-clip.wav'", "timeout": 10},
+ {"until": "(()=>{const r=[...document.querySelectorAll('.lab-form .prow')].find(r=>r.querySelector('.prow-title')&&r.querySelector('.prow-title').textContent==='File');return !!r && !!r.querySelector('.prow-sub') && r.querySelector('.prow-sub').textContent==='kept-clip.wav'})()", "timeout": 10},
  {
-  "expect": "document.querySelector('.lab-head .model-picker').textContent.includes('canary') && document.querySelector('.action-note').textContent.startsWith('POST /v1/audio/transcriptions')",
+  "expect": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('canary') && document.querySelector('.action-note').textContent.startsWith('POST /v1/audio/transcriptions')",
   "label": "audio: Open in form puts the model, the task and the kept upload back"
  },
  {"click": ".al-group .row-menu-btn", "nth": 1},
@@ -207,14 +209,14 @@
  {"click": ".menu-pop .menu-item", "nth": 0},
  {"wait": 0.5},
  {
-  "expect": "document.querySelector('.lab-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta').value==='Hello from the lab store. This clip is kept as a file.'",
+  "expect": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta').value==='Hello from the lab store. This clip is kept as a file.'",
   "label": "audio: Open in form on the speech run puts kokoro and its text back"
  },
  {"click": ".al-group .row-menu-btn", "nth": 0},
  {"wait": 0.3},
- {"click": ".menu-pop .menu-item", "nth": 3},
+ {"click": ".menu-pop .menu-item", "nth": 2},
  {"wait": 0.3},
- {"click": ".menu-pop .menu-item", "nth": 3},
+ {"click": ".menu-pop .menu-item", "nth": 2},
  {"until": "document.querySelectorAll('.al-group').length===1", "timeout": 10},
  {
   "expect": "(async()=>{const u=await (await fetch('/labs/api/audio/usage')).json();return u.groups===1 && u.artifact_files===1})()",
@@ -233,7 +235,7 @@
   "label": "audio: Clear empties the lab"
  },
  {
-  "until": "document.querySelector('.lab-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta')",
+  "until": "document.querySelector('.lab-shell > .page-head .model-picker').textContent.includes('kokoro') && document.querySelector('.lab-form textarea.ta')",
   "timeout": 10
  },
  {
@@ -241,14 +243,14 @@
  },
  {"wait": 0.2},
  {"click": ".action-bar .btn.primary"},
- {"until": "document.querySelectorAll('.al-group').length===1 && document.querySelector('.al-group .chip.live')", "timeout": 30},
+ {"until": "document.querySelectorAll('.al-group').length===1 && document.querySelector('.al-group .chip[data-state=running]')", "timeout": 30},
  {
   "expect": "(async()=>{const g=(await (await fetch('/labs/api/audio/groups')).json()).groups[0];return g.in_flight===true && g.runs.length===0 && document.querySelector('.al-group .dl-status .btn.danger').textContent.trim()==='Stop'})()",
   "label": "audio: the group is in front from its creation, its card the live run with Stop, the server saying in flight"
  },
  {"wait": 1.0},
  {"click": ".al-group .dl-status .btn.danger"},
- {"until": "document.querySelector('.al-group .chip.warn') && !document.querySelector('.lab-results .chip.live')", "timeout": 30},
+ {"until": "document.querySelector('.al-group .chip.warn') && !document.querySelector('.lab-results .chip[data-state=running]')", "timeout": 30},
  {
   "expect": "(async()=>{const g=(await (await fetch('/labs/api/audio/groups')).json()).groups[0];return g.in_flight===false && g.runs.length===0 && document.querySelector('.al-group .chip.warn').textContent.includes('stopped — nothing came back')})()",
   "label": "audio: a Stop during an offline synthesis settles its group once it is no longer in flight: stopped, nothing came back (kokoro cannot stream)"

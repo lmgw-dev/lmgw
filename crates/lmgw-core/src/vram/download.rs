@@ -200,7 +200,8 @@ impl VramScheduler {
             alias: alias.to_string(),
             model: target.model_id.clone(),
             class: target.class,
-            needs: 0,
+            // Its footprint is read at admission, after the download.
+            needs: super::CardCharge::none(),
             since: Instant::now(),
             stage: words(image, 0, None),
             phase: Some(first),

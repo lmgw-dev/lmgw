@@ -318,6 +318,10 @@ pub use audio_models::*;
 
 mod image_models;
 pub use image_models::*;
+mod gpu_pin;
+pub use gpu_pin::*;
+mod vram_engine;
+pub use vram_engine::*;
 mod vram_outside;
 pub use vram_outside::*;
 
@@ -366,6 +370,14 @@ pub mod mcp_tasks;
 
 mod request_logs;
 pub use request_logs::*;
+
+// Async document-conversion jobs and what conversion callers send
+// (document-conversion design §7.3, §7.8).
+mod convert_calls;
+pub use convert_calls::*;
+/// Addressed as `store::convert_jobs::…`: its names (`get_job`,
+/// `finish_job`, `JobRow`) are the background jobs' too.
+pub mod convert_jobs;
 
 mod agent_catalog;
 pub use agent_catalog::*;
@@ -499,6 +511,9 @@ mod chat_approval_floor;
 
 mod chat_seals;
 pub use chat_seals::ReplySeal;
+
+mod chat_notices;
+pub use chat_notices::merged as merged_notices;
 
 mod seal_key;
 pub use seal_key::{seal_key, SEAL_KEY};

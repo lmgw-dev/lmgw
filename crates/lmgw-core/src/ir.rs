@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 mod anthropic_block;
+pub mod cache;
+pub mod cache_writes;
 mod call_id;
 pub mod compaction;
 mod items;
@@ -17,6 +19,7 @@ pub use anthropic_block::{
     ignored_in_messages, ignored_names, left_out_for, AnthropicBlock, AnthropicSent, BlockEvent,
     ToolText,
 };
+pub use cache::CacheControl;
 pub use call_id::{
     call_id_with_signature, split_call_id, wire_call_id, wire_call_ids_in_messages_body,
     wire_call_ids_in_responses_body, THOUGHT_SIGNATURE_MARKER, THOUGHT_SIGNATURE_TEXT_MARKER,
@@ -78,10 +81,16 @@ pub enum ContentPart {
         citations: Vec<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         citations_scope: Option<Signer>,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         mime: String,
         source: ImageSource,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Audio input. OpenAI chat's `input_audio` is the only client shape that
     /// carries this — Anthropic has no audio block, so this part never comes
@@ -100,6 +109,9 @@ pub enum ContentPart {
         id: String,
         name: String,
         args: serde_json::Value,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Tool output fed back into the conversation.
     ToolResult {
@@ -109,6 +121,9 @@ pub enum ContentPart {
         name: Option<String>,
         content: Vec<ToolResultBlock>,
         is_error: bool,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// The reasoning / "thinking" trace of an assistant turn, replayed so a
     /// reasoning model sees what it was thinking earlier in the conversation
@@ -149,9 +164,7 @@ pub enum ContentPart {
     /// refusal of its own writes it there (the OpenAI chat ingress's
     /// `refusal`, the Responses ingress's `refusal` part); every other wire,
     /// and every replay of the turn to an upstream, carries it as text.
-    Refusal {
-        text: String,
-    },
+    Refusal { text: String },
     /// Anthropic's `compaction` block ([`compaction`]): its summary and
     /// every other field verbatim, so it goes back to Anthropic as it came.
     /// Every other egress is sent the conversation as Anthropic makes of it
@@ -202,6 +215,7 @@ impl ContentPart {
             text: s.into(),
             citations: Vec::new(),
             citations_scope: None,
+            cache_control: None,
         }
     }
 
@@ -218,6 +232,7 @@ impl ContentPart {
             text: text.into(),
             citations,
             citations_scope,
+            cache_control: None,
         }
     }
 
@@ -294,6 +309,9 @@ impl ContentPart {
 pub enum ToolResultBlock {
     Text {
         text: String,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Structured output: MCP `structuredContent`, or a tool whose result is
     /// JSON rather than prose. Gemini takes this verbatim.
@@ -304,6 +322,9 @@ pub enum ToolResultBlock {
     Image {
         mime: String,
         data: String,
+        /// Its Anthropic prompt-caching mark, verbatim ([`cache`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Audio {
         mime: String,
@@ -331,7 +352,10 @@ pub enum ToolResultBlock {
 
 impl ToolResultBlock {
     pub fn text(s: impl Into<String>) -> Self {
-        Self::Text { text: s.into() }
+        Self::Text {
+            text: s.into(),
+            cache_control: None,
+        }
     }
 
     /// A single text block — the shape every caller that has only a string
@@ -392,11 +416,11 @@ pub fn flatten_tool_result(blocks: &[ToolResultBlock]) -> (String, Vec<String>) 
     let mut notes: Vec<String> = Vec::new();
     for b in blocks {
         match b {
-            ToolResultBlock::Text { text } => parts.push(text.clone()),
+            ToolResultBlock::Text { text, .. } => parts.push(text.clone()),
             ToolResultBlock::Json { value } => {
                 parts.push(serde_json::to_string(value).unwrap_or_else(|_| "null".into()))
             }
-            ToolResultBlock::Image { mime, data } => {
+            ToolResultBlock::Image { mime, data, .. } => {
                 parts.push(tool_image_placeholder(mime, data, TEXT_ONLY_SLOT));
                 notes.push(tool_image_note(mime, data));
             }
@@ -453,8 +477,19 @@ impl Message {
         }
     }
 
-    /// Concatenated text of all `Text` parts.
+    /// Concatenated text of all `Text` parts, for a slot that takes one
+    /// text: a system message's joined by a blank line, as a Messages
+    /// client's `system` blocks were joined until each became a part of its
+    /// own (gateway design §6.1, 2026-11-12), every other role's by a line
+    /// break. The OpenAI-shaped ingresses join a system message's text
+    /// parts into one ([`Self::with_system_text_joined`]), so what their
+    /// system text renders as is the same as before.
     pub fn joined_text(&self) -> String {
+        let sep = if self.role == Role::System {
+            "\n\n"
+        } else {
+            "\n"
+        };
         self.content
             .iter()
             .filter_map(|p| match p {
@@ -465,7 +500,7 @@ impl Message {
                 _ => None,
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join(sep)
     }
 
     /// Concatenated text of all `Reasoning` parts — the trace as protocols
@@ -503,6 +538,16 @@ pub struct ToolDef {
     /// which takes each upstream's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
+    /// Every other key of a Messages client's tool object, verbatim
+    /// (gateway design §6.1, 2026-11-12): its `cache_control` ([`cache`]),
+    /// `eager_input_streaming`, `input_examples`, a field Anthropic adds
+    /// next; all but `name`, `description`, `input_schema`, `strict` and
+    /// the implied `"type": "custom"`. Only the Anthropic egress writes
+    /// them back onto the tool; every other route names them in
+    /// `x-lmgw-params-ignored` ([`cache::ignored_names`]). Empty for every
+    /// other ingress.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub anthropic_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -802,6 +847,12 @@ pub struct ChatRequest {
     /// `x-lmgw-params-ignored` ([`Self::fields_ignored`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_display: Option<serde_json::Value>,
+    /// A Messages request's top-level `cache_control`, verbatim: automatic
+    /// prompt caching, Anthropic placing the breakpoint itself ([`cache`]).
+    /// Only the Anthropic egress sends it; every other route names it in
+    /// `x-lmgw-params-ignored` ([`Self::fields_ignored`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -819,23 +870,28 @@ impl ChatRequest {
     /// `compaction` on every route but an Anthropic one (which sends both),
     /// and `thinking.display` wherever it does
     /// not go out — off an Anthropic route, and on one beside an off, whose
-    /// types take no `display`. `control` is the send's final reasoning
-    /// control, after the fit (§5.6).
+    /// types take no `display`. Off an Anthropic route also the prompt
+    /// caching marks, `cache_control` once, and a tool's other Anthropic
+    /// fields, `tools.<key>` ([`cache::ignored_names`]). `control` is the
+    /// send's final reasoning control, after the fit (§5.6).
     pub fn fields_ignored(
         &self,
         protocol: crate::config::Protocol,
         control: &ReasoningControl,
-    ) -> Vec<&'static str> {
+    ) -> Vec<String> {
         let anthropic = protocol == crate::config::Protocol::Anthropic;
         let mut out = Vec::new();
         if self.context_management.is_some() && !anthropic {
-            out.push("context_management");
+            out.push("context_management".to_string());
         }
         if self.compaction.is_some() && !anthropic {
-            out.push("compaction");
+            out.push("compaction".to_string());
         }
         if self.thinking_display.is_some() && !(anthropic && control.takes_display()) {
-            out.push("thinking.display");
+            out.push("thinking.display".to_string());
+        }
+        if !anthropic {
+            out.extend(cache::ignored_names(self));
         }
         out
     }
@@ -964,6 +1020,13 @@ pub struct Usage {
     /// GPT-5.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    /// Subset of `cache_write_tokens` written with the 1-hour TTL, which
+    /// Anthropic bills at 2x the input rate where a 5-minute write is 1.25x
+    /// (`usage.cache_creation.ephemeral_1h_input_tokens`, [`cache_writes`]).
+    /// `Some` only when the upstream reported the split (`Some(0)` is a real
+    /// value: every write was a 5-minute one), `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
     /// Reasoning tokens, when the provider breaks them out. **Informational
     /// only**: they are a subset of `completion_tokens`, so pricing them again
     /// would double-charge a thinking model.
@@ -1030,6 +1093,7 @@ impl Usage {
         if other.prompt_tokens.is_some() {
             self.cached_input_tokens = other.cached_input_tokens;
             self.cache_write_tokens = other.cache_write_tokens;
+            self.cache_write_1h_tokens = other.cache_write_1h_tokens;
         }
         if other.reasoning_tokens.is_some() {
             self.reasoning_tokens = other.reasoning_tokens;
@@ -1055,6 +1119,9 @@ impl Usage {
         }
         if let Some(v) = other.cache_write_tokens {
             self.cache_write_tokens = Some(self.cache_write_tokens.unwrap_or(0) + v);
+        }
+        if let Some(v) = other.cache_write_1h_tokens {
+            self.cache_write_1h_tokens = Some(self.cache_write_1h_tokens.unwrap_or(0) + v);
         }
         if let Some(v) = other.reasoning_tokens {
             self.reasoning_tokens = Some(self.reasoning_tokens.unwrap_or(0) + v);

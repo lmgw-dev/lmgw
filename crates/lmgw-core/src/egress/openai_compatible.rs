@@ -200,7 +200,7 @@ impl Egress for OpenaiCompatibleEgress {
 /// and the fallback is the common case here: no open-weights model's name is
 /// known to tiktoken, and the knowledge bases ask for a count on each limit
 /// lookup.
-pub(super) fn tiktoken_count(model: &str, text: &str) -> (u64, bool) {
+pub(crate) fn tiktoken_count(model: &str, text: &str) -> (u64, bool) {
     let (n, guessed) = match tiktoken_rs::bpe_for_model(model) {
         Ok(bpe) => (bpe.encode_ordinary(text).len(), false),
         Err(_) => {

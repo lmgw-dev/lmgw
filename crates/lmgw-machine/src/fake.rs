@@ -6,7 +6,7 @@
 //! two reads — the libraries on disk moving to a new driver version while the
 //! kernel module stays, say — through the same shared handle.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -62,6 +62,9 @@ struct State {
     spaces: BTreeMap<PathBuf, Space>,
     calls: Vec<Call>,
     next_ino: u64,
+    /// Paths whose `stat` answers "Permission denied" though they are
+    /// there ([`FakeFacts::deny`]).
+    denied: BTreeSet<PathBuf>,
 }
 
 /// The mtime every node gets unless a test sets one: 2026-01-01 00:00 UTC.
@@ -199,6 +202,14 @@ impl FakeFacts {
                 ino,
             },
         );
+        self
+    }
+
+    /// `path` is there, and `stat` on it fails with "Permission denied": a
+    /// device node an SELinux type keeps the process from.
+    pub fn deny(&self, path: impl AsRef<Path>) -> &Self {
+        let path = normalize(path.as_ref());
+        self.st().denied.insert(path);
         self
     }
 
@@ -522,6 +533,12 @@ impl Facts for FakeFacts {
 
     fn stat(&self, path: &Path) -> io::Result<Meta> {
         let st = self.st();
+        if st.denied.contains(&normalize(path)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{}: Permission denied", path.display()),
+            ));
+        }
         let at = Self::resolve(&st, path, true)?;
         st.nodes
             .get(&at)

@@ -9,9 +9,8 @@ use super::api;
 use super::fields::seg_btn;
 use super::model::{self, Form, Turn};
 use crate::scope::Scope;
-use crate::widgets::form::Field;
 use crate::widgets::model_picker::ModelPicker;
-use crate::widgets::section::Section;
+use crate::widgets::{ActionRow, AudioPlayer, PrefGroup, StackRow, TextRow};
 
 /// What Show fetched, and the draft it was fetched for.
 #[derive(Clone)]
@@ -87,12 +86,19 @@ pub(super) fn StaticPart(
         })
     };
     view! {
-        <Section title="Static part" default_open=false>
-            <div class="pf-try-bar">
+        <PrefGroup
+            title="Static part"
+            desc="Show assembles the system messages this draft produces. Count adds the tokens on the chosen model; counting on a local model loads it."
+        >
+            <ActionRow title="Show the messages" sub="The static part, the text turn and the voice turn as this draft assembles them.">
                 <button type="button" class="btn sm" disabled=move || busy.get() on:click=move |_| run(false)>
                     "Show"
                 </button>
+            </ActionRow>
+            <StackRow title="Count on" sub="Counting on a local model loads it.">
                 <ModelPicker value=count_model tasks=&["chat"] empty_label="pick a model".to_string() />
+            </StackRow>
+            <ActionRow title="Count tokens" sub="The same, with the tokens on the model above.">
                 <button
                     type="button"
                     class="btn sm"
@@ -102,16 +108,22 @@ pub(super) fn StaticPart(
                 >
                     "Count"
                 </button>
-            </div>
-            <div class="field-hint">
-                "Show assembles the system messages this draft produces. Count adds the tokens on the chosen model; counting on a local model loads it."
-            </div>
-            {move || err.get().map(|e| view! { <div class="field-err" role="alert">{e}</div> })}
-            {move || stale().then(|| view! { <div class="field-warn">"Edited since — show again."</div> })}
-            {move || part("Static part (persona, length rule, examples)", Turn::Static)}
-            {move || part("Text turn", Turn::Text)}
-            {move || part("Voice turn", Turn::Voice)}
-        </Section>
+            </ActionRow>
+            {move || {
+                let any = err.with(Option::is_some) || shown.with(Option::is_some);
+                any.then(|| {
+                    view! {
+                        <StackRow>
+                            {move || err.get().map(|e| view! { <div class="prow-err" role="alert">{e}</div> })}
+                            {move || stale().then(|| view! { <div class="pf-warn">"Edited since — show again."</div> })}
+                            {move || part("Static part (persona, length rule, examples)", Turn::Static)}
+                            {move || part("Text turn", Turn::Text)}
+                            {move || part("Voice turn", Turn::Voice)}
+                        </StackRow>
+                    }
+                })
+            }}
+        </PrefGroup>
     }
 }
 
@@ -152,28 +164,22 @@ pub(super) fn TestPanel(
         });
     };
     view! {
-        <Section title="Test" default_open=false>
-            <div class="field-grid" style="--field-min:220px">
-                <Field label="Model" hint="One call with this draft; nothing is stored.">
-                    <ModelPicker value=model tasks=&["chat"] empty_label="pick a model".to_string() />
-                </Field>
-                <Field label="As">
-                    <div class="seg" role="group" aria-label="Turn kind">
-                        {seg_btn("Text", Signal::derive(move || !voice.get()), move || voice.set(false))}
-                        {seg_btn("Voice", Signal::derive(move || voice.get()), move || voice.set(true))}
-                    </div>
-                </Field>
-                <Field label="Message" wide=true>
-                    <textarea
-                        class="input ta"
-                        rows="3"
-                        placeholder="Something this profile should handle…"
-                        prop:value=move || text.get()
-                        on:input=move |ev| text.set(event_target_value(&ev))
-                    ></textarea>
-                </Field>
-            </div>
-            <div class="pf-try-bar">
+        <PrefGroup title="Test" desc="One call with this draft; nothing is stored.">
+            <StackRow title="Model">
+                <ModelPicker value=model tasks=&["chat"] empty_label="pick a model".to_string() />
+            </StackRow>
+            <ActionRow title="As">
+                <div class="seg" role="group" aria-label="Turn kind">
+                    {seg_btn("Text", Signal::derive(move || !voice.get()), move || voice.set(false))}
+                    {seg_btn("Voice", Signal::derive(move || voice.get()), move || voice.set(true))}
+                </div>
+            </ActionRow>
+            <TextRow
+                title="Message"
+                value=text
+                placeholder="Something this profile should handle…"
+            />
+            <ActionRow title="Run the test" sub="Sends the message once on the model above.">
                 <button
                     type="button"
                     class="btn primary sm"
@@ -184,47 +190,53 @@ pub(super) fn TestPanel(
                 >
                     {move || if busy.get() { "Running…" } else { "Run test" }}
                 </button>
-            </div>
-            {move || err.get().map(|e| view! { <div class="field-err" role="alert">{e}</div> })}
+            </ActionRow>
             {move || {
-                answer
-                    .get()
-                    .map(|a| {
-                        let timing = model::timing_line(a.first_token_ms, a.reasoning_ms, a.total_ms);
-                        let usage = match (a.usage.prompt_tokens, a.usage.completion_tokens) {
-                            (Some(p), Some(c)) => Some(format!("{p} prompt · {c} completion tokens")),
-                            (Some(p), None) => Some(format!("{p} prompt tokens")),
-                            (None, Some(c)) => Some(format!("{c} completion tokens")),
-                            _ => None,
-                        };
-                        view! {
-                            <div class="pf-answer">
-                                <pre class="pf-pre pf-reply">{a.reply.clone()}</pre>
-                                <div class="pf-meta">
-                                    {timing} {usage.map(|u| format!(" · {u}"))}
-                                    {a.answered_by.clone().map(|b| format!(" · answered by {b}"))}
-                                </div>
-                                {a.reasoning_note
-                                    .clone()
-                                    .map(|n| view! { <div class="field-hint">{n}</div> })}
-                                {(!a.reasoning.is_empty())
-                                    .then(|| {
-                                        view! {
-                                            <details class="pf-part">
-                                                <summary>"Reasoning"</summary>
-                                                <pre class="pf-pre">{a.reasoning.clone()}</pre>
-                                            </details>
-                                        }
-                                    })}
-                                <details class="pf-part">
-                                    <summary>"System message sent"</summary>
-                                    <pre class="pf-pre">{a.system.clone()}</pre>
-                                </details>
-                            </div>
-                        }
-                    })
+                let any = err.with(Option::is_some) || answer.with(Option::is_some);
+                any.then(|| {
+                    view! {
+                        <StackRow>
+                            {move || err.get().map(|e| view! { <div class="prow-err" role="alert">{e}</div> })}
+                            {move || answer.get().map(answer_view)}
+                        </StackRow>
+                    }
+                })
             }}
-        </Section>
+        </PrefGroup>
+    }
+}
+
+/// A test's reply, what it took and the folds behind it.
+fn answer_view(a: TestAnswer) -> impl IntoView {
+    let timing = model::timing_line(a.first_token_ms, a.reasoning_ms, a.total_ms);
+    let usage = match (a.usage.prompt_tokens, a.usage.completion_tokens) {
+        (Some(p), Some(c)) => Some(format!("{p} prompt · {c} completion tokens")),
+        (Some(p), None) => Some(format!("{p} prompt tokens")),
+        (None, Some(c)) => Some(format!("{c} completion tokens")),
+        _ => None,
+    };
+    view! {
+        <div class="pf-answer">
+            <pre class="pf-pre pf-reply">{a.reply.clone()}</pre>
+            <div class="pf-meta">
+                {timing} {usage.map(|u| format!(" · {u}"))}
+                {a.answered_by.clone().map(|b| format!(" · answered by {b}"))}
+            </div>
+            {a.reasoning_note.clone().map(|n| view! { <div class="pf-note">{n}</div> })}
+            {(!a.reasoning.is_empty())
+                .then(|| {
+                    view! {
+                        <details class="pf-part">
+                            <summary>"Reasoning"</summary>
+                            <pre class="pf-pre">{a.reasoning.clone()}</pre>
+                        </details>
+                    }
+                })}
+            <details class="pf-part">
+                <summary>"System message sent"</summary>
+                <pre class="pf-pre">{a.system.clone()}</pre>
+            </details>
+        </div>
     }
 }
 
@@ -295,15 +307,15 @@ pub(super) fn SpeakPanel(
         });
     };
     view! {
-        <Section title="Speak a sample" default_open=false>
-            <Field
-                label="Text"
-                hint="Starts as the last test reply, else the first example's reply. Spoken with this draft's voice, on the default output."
-                wide=true
+        <PrefGroup title="Speak a sample">
+            <StackRow
+                title="Text"
+                sub="Starts as the last test reply, else the first example's reply. Spoken with this draft's voice, on the default output."
             >
                 <textarea
-                    class="input ta"
+                    class="prow-area"
                     rows="3"
+                    aria-label="Text to speak"
                     prop:value=move || text.get()
                     on:input=move |ev| {
                         let t = event_target_value(&ev);
@@ -311,8 +323,8 @@ pub(super) fn SpeakPanel(
                         text.set(t);
                     }
                 ></textarea>
-            </Field>
-            <div class="pf-try-bar">
+            </StackRow>
+            <ActionRow title="Speak" sub="Plays it once the voice has it.">
                 <button
                     type="button"
                     class="btn primary sm"
@@ -321,12 +333,25 @@ pub(super) fn SpeakPanel(
                 >
                     {move || if busy.get() { "Speaking…" } else { "Speak" }}
                 </button>
-            </div>
-            {move || err.get().map(|e| view! { <div class="field-err" role="alert">{e}</div> })}
+            </ActionRow>
             {move || {
-                url.get()
-                    .map(|u| view! { <audio class="pf-audio" controls=true autoplay=true src=u></audio> })
+                let any = err.with(Option::is_some) || url.with(Option::is_some);
+                any.then(|| {
+                    view! {
+                        <StackRow>
+                            {move || err.get().map(|e| view! { <div class="prow-err" role="alert">{e}</div> })}
+                            {move || {
+                                url.get()
+                                    .map(|u| {
+                                        view! {
+                                            <AudioPlayer src=Some(u) autoplay=true label="The spoken sample"/>
+                                        }
+                                    })
+                            }}
+                        </StackRow>
+                    }
+                })
             }}
-        </Section>
+        </PrefGroup>
     }
 }

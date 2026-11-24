@@ -891,6 +891,24 @@ fn verdict(items: &[MachineItem], b: &Basis, fit: fit::Outcome) -> (MachineVerdi
             .map(|i| i.sentence.clone())
             .unwrap_or_default()
     };
+    // A missing toolkit is named by its item; the headline stays general.
+    let toolkit_headline = || {
+        let missing = items.iter().any(|i| {
+            i.id == MachineItemId::CardForModels
+                && matches!(
+                    i.cause,
+                    Some(
+                        lmgw_api_types::machine::MachineCause::ToolkitMissing
+                            | lmgw_api_types::machine::MachineCause::ToolkitOtherProvider { .. }
+                    )
+                )
+        });
+        if missing {
+            "One piece is missing so models can use the graphics card.".to_string()
+        } else {
+            sentence(MachineItemId::CardForModels)
+        }
+    };
     match card {
         Card::None => (
             MachineVerdict::CloudOnly,
@@ -915,10 +933,7 @@ fn verdict(items: &[MachineItem], b: &Basis, fit: fit::Outcome) -> (MachineVerdi
                     sentence(MachineItemId::CardForModels),
                 )
             } else if toolkit == Some(Toolkit12::Steps) {
-                (
-                    MachineVerdict::NeedsSteps,
-                    sentence(MachineItemId::CardForModels),
-                )
+                (MachineVerdict::NeedsSteps, toolkit_headline())
             } else if podman_problem {
                 (
                     MachineVerdict::NeedsSteps,
@@ -930,10 +945,7 @@ fn verdict(items: &[MachineItem], b: &Basis, fit: fit::Outcome) -> (MachineVerdi
                     sentence(MachineItemId::SettingsFit),
                 )
             } else if toolkit == Some(Toolkit12::Fixable) {
-                (
-                    MachineVerdict::NeedsFix,
-                    sentence(MachineItemId::CardForModels),
-                )
+                (MachineVerdict::NeedsFix, toolkit_headline())
             } else if fit == fit::Outcome::Switch {
                 (
                     MachineVerdict::NeedsFix,

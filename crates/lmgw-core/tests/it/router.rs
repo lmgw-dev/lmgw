@@ -48,6 +48,7 @@ fn snapshot(ups: Vec<Upstream>, aliases: Vec<ModelAlias>) -> Snapshot {
         aux_models: vec![],
         audio_models: vec![],
         image_models: vec![],
+        gpu_pins: Default::default(),
         prices: vec![],
         api_keys: vec![],
         settings: Default::default(),

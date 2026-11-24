@@ -179,7 +179,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                  background, plans the file on disk, fits it to the graphics card and creates \
                  the row: when the card fits a shorter conversation than the model's trained \
                  context, the row takes the largest that fits and keeps a note of the fit (an \
-                 aux row is planned again at that context, its ubatch and batch with it). A row \
+                 aux row is planned again at that context, its ubatch and batch with it). Where \
+                 no single card holds the file at its full context but a split over several \
+                 cards, or (a mixture-of-experts model) its experts kept in RAM, would, lmgw \
+                 does not choose: without 'layout' the answer is 'choices' (each a layout with \
+                 its context, the GiB on each card, whether there is room now and a sentence), \
+                 nothing is downloaded, and you call again with the person's choice as \
+                 'layout'. A row \
                  that already serves the file is the answer instead of a second one: then \
                  row_id is set, nothing is queued and there is no get. It never starts the \
                  model. The answer has the get_id (lmgw__model_get_status reads how it stands \
@@ -227,6 +233,18 @@ pub(super) fn tools() -> Vec<Builtin> {
                          is refused, naming that upstream.",
                     ),
                 ),
+                (
+                    "layout",
+                    enum_p(
+                        "How to set it up where no single card holds its full context, as the \
+                         person chose from the 'choices' an answer without it gave: 'split' \
+                         over several cards at the full context, 'one_card' at the largest \
+                         context one card holds, 'experts_in_ram' (a mixture-of-experts model) \
+                         at the full context with every layer's experts in RAM. Leave it out \
+                         the first time; a file one card holds needs none.",
+                        &["one_card", "split", "experts_in_ram"],
+                    ),
+                ),
             ],
             required: &["repo", "file"],
         },
@@ -235,9 +253,10 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "How one Get it stands (the get_id lmgw__model_get answered): running, done, \
-                 failed or canceled; a running get's stage (downloading, paused, setting up, \
-                 ready) with each file that waits and why (waiting: metered, not_started, or \
-                 other with the download's note) and its bytes so far; every file's download row; a \
+                 failed or canceled; a running get's stage (downloading, paused, waiting \
+                 for the engine, setting up, ready) with each file that waits and why \
+                 (waiting: metered, not_started, or other with the download's note) and its \
+                 bytes so far; every file's download row; a \
                  failed get's sentence, which says what to do; and a finished get's result: \
                  the row it created or found (row_id, model_id, the name it answers to on /v1), \
                  its context, the fit and the note, and the next step. Poll it after \
@@ -302,6 +321,23 @@ pub(super) fn tools() -> Vec<Builtin> {
                 str_p("Upscaler key from upscalers.shipped, e.g. 'realesrgan-x4plus'."),
             )],
             required: &["key"],
+        },
+        Builtin {
+            name: "lmgw__doc_model_add",
+            writes: true,
+            description:
+                "Download a model file document conversion can use (models of \
+                 lmgw__doc_tools; today 'layout', docling's layout model, Apache-2.0, about \
+                 163 MiB, which runs on the processor) into the aux models dir. Then: \
+                 lmgw__hf_downloads ids=[<its download id>] until it says 'done'. The download \
+                 loads nothing and switches nothing on: lmgw__settings_set \
+                 documents_onnx_layout=true switches the layout model on once its file is \
+                 here. A file already there or already downloading is not queued again.",
+            props: vec![(
+                "id",
+                str_p("Model id from models of lmgw__doc_tools, e.g. 'layout'."),
+            )],
+            required: &["id"],
         },
         Builtin {
             name: "lmgw__hf_set",

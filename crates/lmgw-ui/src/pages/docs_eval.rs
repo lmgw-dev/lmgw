@@ -22,9 +22,12 @@ use lmgw_api_types::{
 };
 use serde_json::json;
 
-use crate::widgets::{use_toasts, ConfirmButton, Modal, ModalFooter, Select};
+use crate::widgets::{
+    use_toasts, ComboRow, ConfirmButton, EntryRow, Modal, ModalFooter, NumberRow, PrefGroup,
+    TextRow,
+};
 
-use super::docs::{start_job, use_docs, CorpusJobLine};
+use super::docs::{start_job, use_docs, CorpusJobRow};
 
 #[component]
 pub fn EvalDashboard() -> impl IntoView {
@@ -180,70 +183,79 @@ pub fn EvalDashboard() -> impl IntoView {
     };
     let n_pill = |n: Option<usize>| n.map(|n| view! { <span class="count">{n}</span> });
 
+    let latest = move || {
+        state
+            .selected_corpus()
+            .map(|c| {
+                let score = super::docs::score_words(&c, 3);
+                let best = match c.eval_best {
+                    Some(b) => format!("best ever {b:.3}"),
+                    None => "no best yet".into(),
+                };
+                match c.eval_at {
+                    Some(at) => format!("{score} · {best} · {at}"),
+                    None => format!("{score} · {best}"),
+                }
+            })
+            .unwrap_or_else(|| "no corpus picked".into())
+    };
+    let k_err = Signal::derive(move || {
+        k.with(|t| {
+            let t = t.trim();
+            (!t.is_empty() && t.parse::<u32>().is_err())
+                .then(|| format!("\u{201c}{t}\u{201d} is not a whole number"))
+        })
+    });
+
     view! {
-        <div class="card eval-head">
-            <div class="row">
-                <div class="field">
-                    <label>"Corpus"</label>
-                    <Select value=state.selected options=corpus_opts placeholder="pick a corpus"/>
+        <div class="fill-pane docs-scroll">
+        <div class="docs-flow">
+        <PrefGroup
+            title="Evaluation"
+            suffix=move || {
+                view! {
+                    <button
+                        type="button"
+                        class="btn suggested pill"
+                        disabled=move || corpus_id.get().is_none()
+                        title=move || if corpus_id.get().is_none() { "Pick a corpus first" } else { "" }
+                        on:click=run
+                    >
+                        "Run eval"
+                    </button>
+                }
+            }
+        >
+            <ComboRow title="Corpus" value=state.selected options=corpus_opts placeholder="pick a corpus"/>
+            <div class="prow eval-latest">
+                <div class="prow-text">
+                    <span class="prow-title">"Latest"</span>
+                    <span class="prow-sub">{latest}</span>
                 </div>
-                <div class="field">
-                    <label title="empty = the configured default">"hit@k depth"</label>
-                    <input
-                        class="input mono w-num"
-                        placeholder="default"
-                        prop:value=move || k.get()
-                        on:input=move |ev| k.set(event_target_value(&ev))
-                    />
-                </div>
-                <span class="spacer"></span>
-                <button class="btn primary" on:click=run>
-                    "Run eval"
-                </button>
+                {move || {
+                    state
+                        .selected_corpus()
+                        .filter(|c| c.eval_regression)
+                        .map(|_| {
+                            view! {
+                                <span class="chip warn">
+                                    <span class="dot"></span>
+                                    "regression"
+                                </span>
+                            }
+                        })
+                }}
             </div>
-            {move || {
-                state
-                    .selected_corpus()
-                    .map(|c| {
-                        let score = match c.eval_score {
-                            Some(s) => match c.eval_k {
-                                Some(k) => format!("hit@{k} {s:.3}"),
-                                None => format!("hit rate {s:.3}"),
-                            },
-                            None => "never measured".into(),
-                        };
-                        let best = match c.eval_best {
-                            Some(b) => format!("best ever {b:.3}"),
-                            None => "no best yet".into(),
-                        };
-                        view! {
-                            <div class="row eval-latest">
-                                <span class="dim">"Latest"</span>
-                                <span class="mono-sm">{score}</span>
-                                <span class="dim">"·"</span>
-                                <span class="mono-sm">{best}</span>
-                                {c
-                                    .eval_at
-                                    .clone()
-                                    .map(|at| {
-                                        view! { <span class="dim mono-sm">{at}</span> }
-                                    })}
-                                {c
-                                    .eval_regression
-                                    .then(|| {
-                                        view! {
-                                            <span class="chip warn">
-                                                <span class="dot"></span>
-                                                "regression"
-                                            </span>
-                                        }
-                                    })}
-                            </div>
-                            <CorpusJobLine id=c.id/>
-                        }
-                    })
-            }}
-        </div>
+            {move || state.selected_corpus().map(|c| view! { <CorpusJobRow id=c.id/> })}
+            <NumberRow
+                title="hit@k depth"
+                sub="Empty: the configured default"
+                value=k
+                placeholder="default"
+                error=k_err
+                wire="k"
+            />
+        </PrefGroup>
 
         <div class="docs-strip">
             <div class="seg">
@@ -263,7 +275,7 @@ pub fn EvalDashboard() -> impl IntoView {
             <span class="spacer"></span>
             <Show when=move || view_.get() == "golden">
                 <button
-                    class="btn ghost"
+                    class="btn"
                     disabled=move || corpus_id.get().is_none()
                     on:click=move |_| {
                         editing
@@ -280,22 +292,26 @@ pub fn EvalDashboard() -> impl IntoView {
                 </button>
             </Show>
             <Show when=move || view_.get() == "candidates">
-                <label class="lab-label" for="eval-sample">"Chunks to sample"</label>
-                <input
-                    id="eval-sample"
-                    class="input mono w-num"
-                    prop:value=move || sample.get()
-                    on:input=move |ev| sample.set(event_target_value(&ev))
-                />
-                <label class="lab-label" for="eval-per-chunk">"Questions each"</label>
-                <input
-                    id="eval-per-chunk"
-                    class="input mono w-num"
-                    prop:value=move || per_chunk.get()
-                    on:input=move |ev| per_chunk.set(event_target_value(&ev))
-                />
+                <label class="eval-num">
+                    "Chunks to sample"
+                    <input
+                        class="spin-field"
+                        inputmode="numeric"
+                        prop:value=move || sample.get()
+                        on:input=move |ev| sample.set(event_target_value(&ev))
+                    />
+                </label>
+                <label class="eval-num">
+                    "Questions each"
+                    <input
+                        class="spin-field"
+                        inputmode="numeric"
+                        prop:value=move || per_chunk.get()
+                        on:input=move |ev| per_chunk.set(event_target_value(&ev))
+                    />
+                </label>
                 <button
-                    class="btn ghost"
+                    class="btn"
                     disabled=move || corpus_id.get().is_none()
                     on:click=generate
                 >
@@ -305,7 +321,8 @@ pub fn EvalDashboard() -> impl IntoView {
         </div>
 
         <Show when=move || view_.get() == "golden">
-            <div class="fill-pane hug card pad0">
+            <div class="boxed eval-table">
+                <div class="table-scroll">
                 <table class="data">
                     <thead>
                         <tr>
@@ -345,6 +362,7 @@ pub fn EvalDashboard() -> impl IntoView {
                         }}
                     </tbody>
                 </table>
+                </div>
                 <Show when=move || {
                     golden.get().is_some_and(|g| g.is_ok_and(|g| g.golden_queries.is_empty()))
                 }>
@@ -357,7 +375,8 @@ pub fn EvalDashboard() -> impl IntoView {
         </Show>
 
         <Show when=move || view_.get() == "candidates">
-            <div class="fill-pane hug card pad0">
+            <div class="boxed eval-table">
+                <div class="table-scroll">
                 <table class="data">
                     <thead>
                         <tr>
@@ -406,6 +425,7 @@ pub fn EvalDashboard() -> impl IntoView {
                         }}
                     </tbody>
                 </table>
+                </div>
                 <Show when=move || {
                     candidates.get().is_some_and(|c| c.is_ok_and(|c| c.candidates.is_empty()))
                 }>
@@ -419,7 +439,8 @@ pub fn EvalDashboard() -> impl IntoView {
         </Show>
 
         <Show when=move || view_.get() == "history">
-            <div class="fill-pane hug card pad0">
+            <div class="boxed eval-table">
+                <div class="table-scroll">
                 <table class="data">
                     <thead>
                         <tr>
@@ -461,6 +482,7 @@ pub fn EvalDashboard() -> impl IntoView {
                         }}
                     </tbody>
                 </table>
+                </div>
                 <Show when=move || {
                     history.get().is_some_and(|h| h.is_ok_and(|h| h.eval_runs.is_empty()))
                 }>
@@ -469,6 +491,8 @@ pub fn EvalDashboard() -> impl IntoView {
             </div>
         </Show>
 
+        </div>
+        </div>
         <GoldenEditor editing=editing on_saved=bump/>
     }
 }
@@ -630,7 +654,7 @@ fn CandidateRow(
             <tr class="detail-row">
                 <td colspan="4">
                     <div class="mini-head">"The section this question should find"</div>
-                    <pre class="preset">{payload.clone()}</pre>
+                    <pre class="kb-excerpt-text eval-pre">{payload.clone()}</pre>
                 </td>
             </tr>
         </Show>
@@ -674,9 +698,9 @@ fn RunRow(r: EvalRunRow) -> impl IntoView {
             <tr class="detail-row">
                 <td colspan="6">
                     <div class="mini-head">"Measured under"</div>
-                    <pre class="preset">{params.clone()}</pre>
+                    <pre class="kb-excerpt-text eval-pre">{params.clone()}</pre>
                     <div class="mini-head" style="margin-top:8px">"Per-query breakdown"</div>
-                    <pre class="preset">{report.clone()}</pre>
+                    <pre class="kb-excerpt-text eval-pre">{report.clone()}</pre>
                 </td>
             </tr>
         </Show>
@@ -783,39 +807,35 @@ fn GoldenForm(
         });
     };
 
+    let no_save = move || saving.get();
     view! {
-        <div class="wiz">
-            <div class="field">
-                <label>"Query"</label>
-                <input
-                    class="input"
-                    style="width:100%"
+        <div class="docs-dialog">
+            <PrefGroup>
+                <EntryRow
+                    title="Query"
+                    value=query
                     placeholder="how do I add a middleware layer?"
-                    prop:value=move || query.get()
-                    on:input=move |ev| query.set(event_target_value(&ev))
+                    wide=true
+                    wire="query"
                 />
-            </div>
-            <div class="field">
-                <label>"Expected chunk ids · one per line, copied from the corpus browser"</label>
-                <textarea
-                    class="input mono ta"
-                    prop:value=move || expected.get()
-                    on:input=move |ev| expected.set(event_target_value(&ev))
-                ></textarea>
-            </div>
-            <div class="field" style="max-width:200px">
-                <label>"Origin"</label>
-                <Select value=origin options=origin_opts/>
-            </div>
+                <TextRow
+                    mono=true
+                    title="Expected chunks"
+                    sub="Chunk ids, one per line, copied from the corpus browser"
+                    value=expected
+                    wire="expected_chunk_ids"
+                />
+                <ComboRow title="Origin" value=origin options=origin_opts wire="origin"/>
+            </PrefGroup>
             {move || error.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
-            <ModalFooter>
-                <button class="btn ghost" on:click=move |_| open.set(false)>
-                    "Cancel"
-                </button>
-                <button class="btn primary" disabled=move || saving.get() on:click=save>
-                    {move || if saving.get() { "Saving…" } else { "Save" }}
-                </button>
-            </ModalFooter>
         </div>
+        <ModalFooter>
+            <button class="btn" on:click=move |_| open.set(false)>
+                "Cancel"
+            </button>
+            <button class="btn suggested pill" disabled=no_save on:click=save>
+                {move || if saving.get() { "Saving…" } else { "Save" }}
+            </button>
+        </ModalFooter>
     }
 }

@@ -77,6 +77,7 @@ fn ir_usage() -> Usage {
         completion_tokens: Some(12),
         cached_input_tokens: Some(4),
         cache_write_tokens: None,
+        cache_write_1h_tokens: None,
         reasoning_tokens: Some(5),
     }
 }
@@ -405,6 +406,7 @@ fn a_whole_response_reads_text_calls_reasoning_usage_and_tier() {
                 id: "call_1".into(),
                 name: "f".into(),
                 args: json!({"a": 1}),
+                cache_control: None
             },
         ]
     );
@@ -529,6 +531,7 @@ fn a_real_stream_reads_whole() {
             completion_tokens: Some(94),
             cached_input_tokens: Some(0),
             cache_write_tokens: Some(0),
+            cache_write_1h_tokens: None,
             reasoning_tokens: Some(73),
         })
     );

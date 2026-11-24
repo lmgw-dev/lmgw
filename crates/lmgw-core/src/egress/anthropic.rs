@@ -7,17 +7,20 @@ use crate::config::{Protocol, Upstream};
 use crate::egress::{finish_from_anthropic_at, CountPlan, Egress, EgressStreamDecoder};
 use crate::error::GatewayError;
 use crate::ir::{
-    flatten_tool_result, wire_call_id, AnthropicBlock, AnthropicSent, BlockEvent, ChatRequest,
-    Compaction, CompactionEvent, Completion, ContentPart, FinishReason, ImageSource, Params,
-    ReasoningControl, Role, Signer, StreamDelta, ToolChoice, ToolResultBlock, Usage,
+    flatten_tool_result, wire_call_id, AnthropicBlock, AnthropicSent, BlockEvent, CacheControl,
+    ChatRequest, Compaction, CompactionEvent, Completion, ContentPart, FinishReason, ImageSource,
+    Params, ReasoningControl, Role, Signer, StreamDelta, ToolChoice, ToolResultBlock, Usage,
 };
 use crate::sse::SseEvent;
 use left_out::LeftOut;
 
+mod cache;
 mod compaction;
 mod left_out;
 pub mod structured;
 mod thinking;
+pub(crate) mod usage;
+use usage::parse_usage;
 
 /// Why an audio part cannot go to the Anthropic API: it has no block for
 /// one. A heard voice turn's responder reads it as lmgw's own refusal of
@@ -97,49 +100,56 @@ fn with_betas(
 /// Anthropic is the only upstream protocol whose tool-result slot takes a block
 /// array, so images pass through natively here instead of becoming a
 /// placeholder. Everything it has no block type for (JSON, audio, resources)
-/// falls back to text via [`flatten_tool_result`], which is lossless for those
-/// kinds — they are text-representable, unlike a binary image. A verbatim
-/// block (a `document`, a `search_result`, a Files API image) goes as the
-/// client wrote it, a block and not its text.
+/// becomes a `text` block of its own with the text [`flatten_tool_result`]
+/// gives for that one block, which is lossless for those kinds — they are
+/// text-representable, unlike a binary image. A verbatim block (a `document`,
+/// a `search_result`, a Files API image) goes as the client wrote it, a block
+/// and not its text. Every IR block is one Anthropic block and is never merged
+/// with a neighbour: Anthropic's cache is a byte-prefix match, so the bytes of
+/// a result must not depend on which block the client's mark sits on in a
+/// given turn. A block's cache mark goes on the block it is sent as. A block
+/// whose text is empty is left out (Anthropic refuses an empty text block).
 fn tool_result_blocks_json(blocks: &[ToolResultBlock]) -> Vec<Value> {
     let mut out = Vec::new();
-    // Consecutive text-representable blocks are flattened together so a result
-    // of three text blocks stays one text block, as it was before.
-    let mut pending: Vec<ToolResultBlock> = Vec::new();
-    let flush = |pending: &mut Vec<ToolResultBlock>, out: &mut Vec<Value>| {
-        if pending.is_empty() {
-            return;
-        }
-        let (text, _) = flatten_tool_result(pending);
-        pending.clear();
-        if !text.is_empty() {
-            out.push(json!({"type": "text", "text": text}));
-        }
-    };
     for b in blocks {
         match b {
-            ToolResultBlock::Image { mime, data } => {
-                flush(&mut pending, &mut out);
-                out.push(json!({
+            ToolResultBlock::Image {
+                mime,
+                data,
+                cache_control,
+            } => {
+                let mut block = json!({
                     "type": "image",
                     "source": {"type": "base64", "media_type": mime, "data": data},
-                }));
+                });
+                CacheControl::mark(&mut block, cache_control.as_ref());
+                out.push(block);
             }
-            ToolResultBlock::AnthropicBlock(b) => {
-                flush(&mut pending, &mut out);
-                out.push(b.block.clone());
+            ToolResultBlock::AnthropicBlock(b) => out.push(b.block.clone()),
+            other => {
+                let (text, mark) = match other {
+                    ToolResultBlock::Text {
+                        text,
+                        cache_control,
+                    } => (text.clone(), cache_control.as_ref()),
+                    _ => (flatten_tool_result(std::slice::from_ref(other)).0, None),
+                };
+                if !text.is_empty() {
+                    let mut block = json!({"type": "text", "text": text});
+                    CacheControl::mark(&mut block, mark);
+                    out.push(block);
+                }
             }
-            other => pending.push(other.clone()),
         }
     }
-    flush(&mut pending, &mut out);
     out
 }
 
 /// The Anthropic blocks of `parts`, for the row whose scope `row` names: a
 /// signature, verbatim block or citation lmgw read from an answer at another
 /// scope is left out, and `left_out` counts it ([`crate::ir::signer`],
-/// [`AnthropicSent`], which `x-lmgw-params-ignored` names by too).
+/// [`AnthropicSent`], which `x-lmgw-params-ignored` names by too). Each
+/// part's cache mark goes on its block ([`crate::ir::cache`]).
 fn content_blocks(
     parts: &[ContentPart],
     row: &Signer,
@@ -163,39 +173,62 @@ fn content_blocks(
                 text,
                 citations,
                 citations_scope,
+                cache_control,
             } => match AnthropicSent::of(p, row) {
-                AnthropicSent::Whole => out.push(text_block(text, citations)),
+                AnthropicSent::Whole => {
+                    let mut block = text_block(text, citations);
+                    CacheControl::mark(&mut block, cache_control.as_ref());
+                    out.push(block);
+                }
                 AnthropicSent::TextOnly(text) => {
-                    out.push(text_block(text, &[]));
+                    let mut block = text_block(text, &[]);
+                    CacheControl::mark(&mut block, cache_control.as_ref());
+                    out.push(block);
                     left_out.citations(citations_scope.as_ref());
                 }
                 AnthropicSent::Nothing if !citations.is_empty() => left_out.textless(),
                 AnthropicSent::Nothing => {}
             },
-            ContentPart::Image { mime, source } => out.push(match source {
-                ImageSource::Base64 { data } => json!({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": mime, "data": data},
-                }),
-                ImageSource::Url { url } => json!({
-                    "type": "image",
-                    "source": {"type": "url", "url": url},
-                }),
-            }),
+            ContentPart::Image {
+                mime,
+                source,
+                cache_control,
+            } => {
+                let mut block = match source {
+                    ImageSource::Base64 { data } => json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": mime, "data": data},
+                    }),
+                    ImageSource::Url { url } => json!({
+                        "type": "image",
+                        "source": {"type": "url", "url": url},
+                    }),
+                };
+                CacheControl::mark(&mut block, cache_control.as_ref());
+                out.push(block);
+            }
             ContentPart::Audio { .. } => {
                 return Err(GatewayError::Unsupported(NO_AUDIO_BLOCK.into()));
             }
-            ContentPart::ToolUse { id, name, args } => {
+            ContentPart::ToolUse {
+                id,
+                name,
+                args,
+                cache_control,
+            } => {
                 // A Gemini signature stays with Gemini (gateway design §7.1).
-                out.push(json!({
+                let mut block = json!({
                     "type": "tool_use", "id": wire_call_id(id), "name": name,
                     "input": crate::ir::object_call_args(args),
-                }));
+                });
+                CacheControl::mark(&mut block, cache_control.as_ref());
+                out.push(block);
             }
             ContentPart::ToolResult {
                 id,
                 content,
                 is_error,
+                cache_control,
                 ..
             } => {
                 let mut block = json!({
@@ -206,6 +239,7 @@ fn content_blocks(
                 if *is_error {
                     block["is_error"] = json!(true);
                 }
+                CacheControl::mark(&mut block, cache_control.as_ref());
                 out.push(block);
             }
             // An OpenAI seal never goes to Anthropic (openai egress design
@@ -420,7 +454,8 @@ pub(crate) fn apply_display(body: &mut Map<String, Value>, display: Option<&Valu
 /// The keys of a Messages body that `/v1/messages/count_tokens` takes: what
 /// shapes the prompt, none of the sampling or the cap. `context_management`
 /// is one: the count answers with the input after the edits, and the input
-/// before them beside it.
+/// before them beside it. So is the top-level `cache_control`, which the
+/// count request's schema takes too.
 const COUNTED_KEYS: &[&str] = &[
     "model",
     "system",
@@ -430,6 +465,7 @@ const COUNTED_KEYS: &[&str] = &[
     "thinking",
     "output_config",
     "context_management",
+    "cache_control",
 ];
 
 /// The `/v1/messages/count_tokens` body for `ir` as the send would render
@@ -469,8 +505,9 @@ fn request_body(
         "max_tokens".into(),
         json!(params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).max(floor)),
     );
-    if let Some(system) = ir.system_text() {
-        body.insert("system".into(), json!(system));
+    // The client's string, or its blocks with their cache marks.
+    if let Some(system) = cache::system(ir) {
+        body.insert("system".into(), system);
     }
     body.insert(
         "messages".into(),
@@ -497,22 +534,7 @@ fn request_body(
         tracing::debug!("dropping presence/frequency penalty and seed for anthropic egress");
     }
     if !ir.tools.is_empty() {
-        let tools: Vec<Value> = ir
-            .tools
-            .iter()
-            .map(|t| {
-                let mut tool = json!({
-                    "name": t.name,
-                    "input_schema": t.parameters,
-                });
-                // The key is left out when there is no description: Anthropic
-                // expects a string there, never null.
-                if let Some(d) = &t.description {
-                    tool["description"] = json!(d);
-                }
-                tool
-            })
-            .collect();
+        let tools: Vec<Value> = ir.tools.iter().map(cache::tool).collect();
         body.insert("tools".into(), Value::Array(tools));
         if let Some(tc) = &ir.tool_choice {
             let v = match tc {
@@ -539,9 +561,10 @@ fn request_body(
 }
 
 /// The client's own top-level keys in the body, as it sent them:
-/// `context_management` and `compaction`, which go out verbatim. The test
-/// watcher reads them too ([`super::watch::Built::passthrough`]): they are
-/// beta fields the pinned non-beta schema does not have.
+/// `context_management`, `compaction` and `cache_control` (automatic prompt
+/// caching), which go out verbatim. The test watcher reads them too
+/// ([`super::watch::Built::passthrough`]): the first two are beta fields
+/// the pinned non-beta schema does not have.
 fn verbatim_keys(ir: &ChatRequest) -> Map<String, Value> {
     let mut keys = Map::new();
     if let Some(cm) = &ir.context_management {
@@ -549,6 +572,9 @@ fn verbatim_keys(ir: &ChatRequest) -> Map<String, Value> {
     }
     if let Some(c) = &ir.compaction {
         keys.insert("compaction".into(), c.clone());
+    }
+    if let Some(c) = &ir.cache_control {
+        keys.insert("cache_control".into(), c.clone());
     }
     keys
 }
@@ -743,6 +769,7 @@ fn parse_answer(body: &[u8], scope: &Signer) -> Result<Completion, GatewayError>
                         .unwrap_or_default()
                         .to_string(),
                     args: b.get("input").cloned().unwrap_or(json!({})),
+                    cache_control: None,
                 }),
                 // With the scope that answered ([`Compaction::scope`]).
                 Some(crate::ir::compaction::BLOCK_TYPE) => {
@@ -797,37 +824,6 @@ fn citations(block: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-fn parse_usage(v: Option<&Value>) -> Usage {
-    match v {
-        Some(u) => {
-            let n = |k: &str| u.get(k).and_then(Value::as_u64);
-            let cache_read = n("cache_read_input_tokens");
-            let cache_write = n("cache_creation_input_tokens");
-            // Anthropic's three input counters are **disjoint**: `input_tokens`
-            // excludes both cache counters. The IR's `prompt_tokens` is the
-            // total with cache included (see `ir::Usage`), so they are summed
-            // here — otherwise the same conversation reports a different input
-            // size depending on which wire shape the client speaks, and a
-            // cache-heavy turn looks 10x cheaper than it was.
-            let input = n("input_tokens");
-            let prompt_tokens = match (input, cache_read, cache_write) {
-                (None, None, None) => None,
-                _ => Some(input.unwrap_or(0) + cache_read.unwrap_or(0) + cache_write.unwrap_or(0)),
-            };
-            Usage {
-                prompt_tokens,
-                completion_tokens: n("output_tokens"),
-                cached_input_tokens: cache_read,
-                cache_write_tokens: cache_write,
-                // Thinking tokens are inside `output_tokens` and Anthropic
-                // publishes no separate counter for them.
-                reasoning_tokens: None,
-            }
-        }
-        None => Usage::default(),
-    }
 }
 
 #[derive(Default)]
@@ -1006,7 +1002,7 @@ impl EgressStreamDecoder for AnthropicDecoder {
                 }
                 // The iterations verbatim, ahead of the usage that counts
                 // their compaction entries in.
-                let top = parse_usage(v.get("usage"));
+                let top = usage::with_start_split(parse_usage(v.get("usage")), &self.start_usage);
                 if let Some(it) = compaction::carried(v.get("usage"), &top, Some(&self.start_usage))
                 {
                     out.push(StreamDelta::UsageIterations(it));

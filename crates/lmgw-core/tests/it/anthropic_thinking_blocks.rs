@@ -229,6 +229,7 @@ fn the_assembler_keeps_each_streamed_block_signed_where_it_stood() {
                 id: "toolu_1".into(),
                 name: "lookup".into(),
                 args: json!({"q": "kiwi"}),
+                cache_control: None
             },
             ContentPart::signed_reasoning(THOUGHT, SIG_B, row),
             ContentPart::text("KIWI"),

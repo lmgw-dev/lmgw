@@ -201,6 +201,7 @@ impl Sizer {
             ctx: self.ctx_adapts.then_some(self.min_ctx),
             n_cpu_moe: (self.layers_adapt && self.moe).then_some(self.layers),
             n_gpu_layers: self.layers_adapt.then_some(1),
+            split: None,
         }
     }
 
@@ -232,6 +233,7 @@ impl Sizer {
                 ctx,
                 n_cpu_moe: Some(k),
                 n_gpu_layers: None,
+                split: None,
             };
             if let Some(k) = smallest(1, self.layers, |k| fits(&with(k))) {
                 return Some(with(k));
@@ -242,6 +244,7 @@ impl Sizer {
             ctx,
             n_cpu_moe: self.moe.then_some(self.layers),
             n_gpu_layers: Some(n),
+            split: None,
         };
         largest(1, self.layers, |n| fits(&with(n))).map(with)
     }
@@ -283,7 +286,7 @@ pub(crate) fn left(params: &crate::config::LlamaParams, args: &[String]) -> Left
 }
 
 /// Whether `s` has routed experts.
-fn has_experts(s: &ModelSummary) -> bool {
+pub(crate) fn has_experts(s: &ModelSummary) -> bool {
     s.tensor_list
         .tensors
         .iter()

@@ -39,6 +39,7 @@ impl<'a> AnthropicSent<'a> {
                 text,
                 citations,
                 citations_scope,
+                ..
             } if !citations.is_empty() && !signer::goes_to(citations_scope.as_ref(), row) => {
                 Self::TextOnly(text)
             }

@@ -1,4 +1,4 @@
-//! The "⋯" row menu (UX plan §4): a row's secondary actions in a popover,
+//! The kebab row menu (UX plan §4): a row's secondary actions in a popover,
 //! a destructive one asking in place. Shared by the dashboard's tables and
 //! the Chat's thread rows (`lmgw-chat-ui`).
 
@@ -16,9 +16,14 @@ pub struct MenuItem {
     /// Destructive: the first pick only arms it ("Delete? ✓"), the second
     /// runs it (UX plan §4: nothing destructive is one click).
     pub danger: bool,
+    /// Red like `danger`, but the pick runs at once: for an item that opens
+    /// its own confirmation.
+    pub destructive: bool,
     pub disabled: bool,
     /// Why it is disabled, or what it does.
     pub title: Option<String>,
+    /// A rule above it: it starts a group of its own.
+    pub separated: bool,
 }
 
 impl MenuItem {
@@ -27,13 +32,29 @@ impl MenuItem {
             label: label.into(),
             on_select: Callback::new(move |()| on_select()),
             danger: false,
+            destructive: false,
             disabled: false,
             title: None,
+            separated: false,
         }
+    }
+
+    /// A rule above it: it starts a group of its own. The first item of a
+    /// menu has no rule above it.
+    pub fn separated(mut self) -> Self {
+        self.separated = true;
+        self
     }
 
     pub fn danger(mut self) -> Self {
         self.danger = true;
+        self
+    }
+
+    /// Red like [`Self::danger`] but without arming: for items that open
+    /// their own confirmation.
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
         self
     }
 
@@ -48,7 +69,37 @@ impl MenuItem {
     }
 }
 
-/// The "⋯" button that holds a row's secondary actions (UX plan §4: at most
+/// The next enabled item from `from` (none: the first or last), wrapping.
+fn next_enabled(enabled: &[bool], from: Option<usize>, down: bool) -> Option<usize> {
+    let n = enabled.len();
+    let mut i = from;
+    for _ in 0..n {
+        let next = match (i, down) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(k), true) => (k + 1) % n,
+            (Some(k), false) => (k + n - 1) % n,
+        };
+        if enabled[next] {
+            return Some(next);
+        }
+        i = Some(next);
+    }
+    None
+}
+
+/// The index of item `i` among the list's children: a separator is a child
+/// of its own in front of the item it rules off.
+fn child_index(items: &[MenuItem], i: usize) -> usize {
+    i + items
+        .iter()
+        .take(i + 1)
+        .skip(1)
+        .filter(|m| m.separated)
+        .count()
+}
+
+/// The kebab button that holds a row's secondary actions (UX plan §4: at most
 /// one visible row button, the rest in here). The menu is a [`Popover`], so
 /// it opens over the table card's edge instead of being cut off by it.
 ///
@@ -58,17 +109,26 @@ impl MenuItem {
 /// it; closing the menu disarms it. The second press of a
 /// double-click (or a held Enter) is not that second pick. Something that
 /// deletes what a modal should explain first (a model, an upstream) is a
-/// plain "Delete…" item that opens that modal instead.
+/// [`MenuItem::destructive`] item that opens that modal instead.
 #[component]
 pub fn RowMenu(
     #[prop(into)] items: Signal<Vec<MenuItem>>,
     /// The button's tooltip.
     #[prop(default = "More actions")]
     title: &'static str,
-    /// Words instead of "⋯", for a menu that is an action of its own ("+ add
+    /// Words instead of the kebab button, for a menu that is an action of its own ("+ add
     /// file role (9 more)") rather than a row's overflow.
     #[prop(optional, into)]
     label: Option<Signal<String>>,
+    /// A symbolic icon on a header bar's round button instead of the kebab (the
+    /// detail pane's more-menu, a list's add menu). Given with `label`, the
+    /// icon leads the words on a text button.
+    #[prop(optional)]
+    icon: Option<super::icon::Ico>,
+    /// A disclosure chevron after the words: a menu button that says it opens
+    /// a list. For a button with a `label`.
+    #[prop(optional)]
+    chevron: bool,
 ) -> impl IntoView {
     let open = RwSignal::new(false);
     let btn: NodeRef<html::Button> = NodeRef::new();
@@ -85,23 +145,9 @@ pub fn RowMenu(
         }
     });
 
-    let enabled = move |i: usize| items.with_untracked(|v| v.get(i).is_some_and(|m| !m.disabled));
     let step = move |from: Option<usize>, down: bool| {
-        let n = items.with_untracked(Vec::len);
-        let mut i = from;
-        for _ in 0..n {
-            let next = match (i, down) {
-                (None, true) => 0,
-                (None, false) => n - 1,
-                (Some(k), true) => (k + 1) % n,
-                (Some(k), false) => (k + n - 1) % n,
-            };
-            if enabled(next) {
-                return Some(next);
-            }
-            i = Some(next);
-        }
-        None
+        let flags: Vec<bool> = items.with_untracked(|v| v.iter().map(|m| !m.disabled).collect());
+        next_enabled(&flags, from, down)
     };
     let focus_btn = move || {
         if let Some(b) = btn.get_untracked() {
@@ -134,7 +180,7 @@ pub fn RowMenu(
     let set_active = move |i: Option<usize>| {
         active.set(i);
         if let (Some(i), Some(l)) = (i, list.get_untracked()) {
-            popover::reveal_child(&l, i);
+            popover::reveal_child(&l, items.with_untracked(|v| child_index(v, i)));
         }
     };
     let on_key = move |ev: web_sys::KeyboardEvent| {
@@ -170,7 +216,15 @@ pub fn RowMenu(
         <span class="row-menu">
             <button
                 type="button"
-                class=if label.is_some() { "btn ghost sm" } else { "btn ghost sm row-menu-btn" }
+                class=if label.is_some() && chevron {
+                    "btn ghost sm menu-btn"
+                } else if label.is_some() {
+                    "btn ghost sm"
+                } else if icon.is_some() {
+                    "icon-btn"
+                } else {
+                    "btn ghost sm row-menu-btn"
+                }
                 node_ref=btn
                 title=title
                 aria-haspopup="menu"
@@ -188,7 +242,26 @@ pub fn RowMenu(
                     }
                 }
             >
-                {move || label.map(|l| l.get()).unwrap_or_else(|| "⋯".to_string())}
+                {match (icon, label) {
+                    (icon, Some(l)) => {
+                        view! {
+                            {icon.map(|i| view! { <super::icon::Icon ico=i class="menu-btn-lead"/> })}
+                            {move || l.get()}
+                            {chevron
+                                .then(|| {
+                                    view! {
+                                        <super::icon::Icon
+                                            ico=super::icon::Ico::Down
+                                            class="menu-btn-ico"
+                                        />
+                                    }
+                                })}
+                        }
+                            .into_any()
+                    }
+                    (Some(ico), None) => view! { <super::icon::Icon ico=ico/> }.into_any(),
+                    (None, None) => view! { <super::icon::Icon ico=super::icon::Ico::More/> }.into_any(),
+                }}
             </button>
             <Popover open=open anchor=btn class="menu-pop">
                 <div
@@ -211,9 +284,11 @@ pub fn RowMenu(
                                 // the menu itself, not only in its tooltip.
                                 let note = m.danger.then(|| m.title.clone()).flatten();
                                 view! {
+                                    {(m.separated && i > 0)
+                                        .then(|| view! { <div class="menu-sep" role="separator"></div> })}
                                     <div
                                         class="menu-item"
-                                        class:danger=m.danger
+                                        class:danger=m.danger || m.destructive
                                         class:armed=is_armed
                                         class:active=move || active.get() == Some(i)
                                         class:disabled=m.disabled
@@ -247,5 +322,39 @@ pub fn RowMenu(
                 </div>
             </Popover>
         </span>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(separated: bool) -> MenuItem {
+        let m = MenuItem::new("x", || {});
+        if separated {
+            m.separated()
+        } else {
+            m
+        }
+    }
+
+    #[test]
+    fn arrow_down_crosses_a_separator() {
+        let enabled = [true, true, true];
+        assert_eq!(next_enabled(&enabled, Some(0), true), Some(1));
+        assert_eq!(next_enabled(&enabled, Some(2), true), Some(0));
+        assert_eq!(next_enabled(&[true, false, true], Some(0), true), Some(2));
+        assert_eq!(next_enabled(&enabled, None, false), Some(2));
+        assert_eq!(next_enabled(&[false, false], None, true), None);
+    }
+
+    #[test]
+    fn a_separator_shifts_the_child_index_of_later_items_only() {
+        let items = [item(true), item(false), item(true), item(false)];
+        // The first item's own flag draws no rule.
+        assert_eq!(child_index(&items, 0), 0);
+        assert_eq!(child_index(&items, 1), 1);
+        assert_eq!(child_index(&items, 2), 3);
+        assert_eq!(child_index(&items, 3), 4);
     }
 }

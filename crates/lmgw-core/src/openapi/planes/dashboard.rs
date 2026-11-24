@@ -137,7 +137,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "The GPU ledger and the admission queue, freshly measured, and the \
                 starts waiting for their engine image's download (downloading, with its \
                 bytes) — the same object the vram SSE frame carries, so a page can fetch once \
-                and then follow the stream.",
+                and then follow the stream. Each card has its own figures and lmgw's models \
+                on it, and each model its cards; the top-level figures are the cards' sums.",
             response: Resp::Json(|g| g.root_schema_for::<dto::VramStatus>()),
             ..base("GET", "/api/vram", "status", "Get the GPU ledger")
         },

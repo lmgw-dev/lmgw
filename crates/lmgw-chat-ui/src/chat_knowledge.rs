@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use super::chat::ChatThread;
 use super::knowledge_source::SourceRef;
 use lmgw_ui_kit::scope::Scope;
-use lmgw_ui_kit::widgets::Popover;
+use lmgw_ui_kit::widgets::{Ico, Icon, Popover};
 
 // ---------------------------------------------------------------------------
 // The shared list of bases
@@ -268,9 +268,10 @@ pub(super) fn KbSection(kb: KbDraft) -> impl IntoView {
                         type="button"
                         class="chip-x"
                         title="Remove it from this list"
+                        aria-label="Remove it from this list"
                         on:click=move |_| toggle(id, false)
                     >
-                        "✕"
+                        <Icon ico=Ico::Close/>
                     </button>
                 </div>
             </For>
@@ -356,9 +357,10 @@ pub(super) fn KbChip(id: i64, #[prop(optional)] on_remove: Option<Callback<i64>>
                             type="button"
                             class="chip-x"
                             title="Remove"
+                            aria-label="Remove"
                             on:click=move |_| cb.run(id)
                         >
-                            "✕"
+                            <Icon ico=Ico::Close/>
                         </button>
                     }
                 })}

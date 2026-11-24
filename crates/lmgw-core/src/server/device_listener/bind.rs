@@ -54,7 +54,7 @@ impl Plan {
         }
     }
 
-    /// The settings a bind error names.
+    /// The settings a bind error's log line names.
     pub fn settings_text(&self) -> String {
         format!(
             "devices.listen = {}, devices.port = {}",
@@ -138,8 +138,8 @@ fn no_ipv6(e: &std::io::Error) -> bool {
     )
 }
 
-/// Bind every address of `plan`; the error names the address, the reason
-/// and the settings. A second address of the loopback pair takes the port
+/// Bind every address of `plan`; the error is a sentence naming the address
+/// and the reason (the log adds [`Plan::settings_text`]). A second address of the loopback pair takes the port
 /// the first got (they differ only for a port of 0, which no setting holds).
 pub(super) fn bind(plan: &Plan) -> Result<Vec<TcpListener>, String> {
     let mut sockets: Vec<TcpListener> = Vec::new();
@@ -156,12 +156,7 @@ pub(super) fn bind(plan: &Plan) -> Result<Vec<TcpListener>, String> {
                      this machine has no IPv6 loopback"
                 );
             }
-            Err(e) => {
-                return Err(format!(
-                    "binding the device listener on {addr} failed: {e} ({})",
-                    plan.settings_text()
-                ))
-            }
+            Err(e) => return Err(format!("Binding the device listener on {addr} failed: {e}")),
         }
     }
     Ok(sockets)
@@ -256,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_taken_port_is_an_error_naming_the_settings() {
+    async fn a_taken_port_is_a_sentence_without_the_settings_keys() {
         let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = taken.local_addr().unwrap().port();
         let plan = Plan {
@@ -265,7 +260,19 @@ mod tests {
         };
         let e = bind(&plan).unwrap_err();
         assert!(e.contains(&format!("127.0.0.1:{port}")), "{e}");
-        assert!(e.contains("devices.listen = 127.0.0.1"), "{e}");
-        assert!(e.contains(&format!("devices.port = {port}")), "{e}");
+        assert!(e.starts_with("Binding the device listener on "), "{e}");
+        assert!(!e.contains("devices."), "{e}");
+    }
+
+    #[test]
+    fn the_settings_text_still_names_both_keys() {
+        let plan = Plan {
+            listen: DevicesListen::Addr("127.0.0.1".parse().unwrap()),
+            port: 8002,
+        };
+        assert_eq!(
+            plan.settings_text(),
+            "devices.listen = 127.0.0.1, devices.port = 8002"
+        );
     }
 }

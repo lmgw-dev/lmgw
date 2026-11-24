@@ -9,15 +9,18 @@
   "nav": "/chat"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
- },
- {
   "js": "localStorage.removeItem('lmgw.voice.viz'); 'default visualisations: ribbon in the chat panel, orb in the focus view'"
  },
  {
   "until": "!!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
   "timeout": 15,
   "label": "the newest thread's voice mode button is enabled (Settings → Chat → Voice or Settings → Realtime names speech models)"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "script": "scripts/realtime-mock.js"
@@ -47,6 +50,10 @@
   "wait": 0.8
  },
  {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the chat-voice-menu shot"
+ },
+ {
   "shot": "chat-voice-menu"
  },
  {
@@ -67,9 +74,9 @@
   "label": "voice mode is live"
  },
  {
-  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
-  "label": "the ribbon draws in the chat panel"
+  "label": "the ribbon draws in the chat panel (its canvas has a width: a collapsed stage draws nothing visible)"
  },
  {
   "js": "window.lmgwRealtimeMock.speak('Which one would you pick for sorting a linked list?', 1500); 'first turn'"
@@ -87,6 +94,12 @@
   "wait": 0.8
  },
  {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
+ },
+ {
   "js": "Object.assign(window.lmgwRealtimeMock.opts, {audioMs: 9000, reply: 'Insertion sort. On nearly sorted data it runs in close to linear time, and on a handful of elements it beats both, which is why many libraries switch to it for small slices.'}); window.lmgwRealtimeMock.speak('And for a small array that is almost sorted already?', 1700); 'second turn'"
  },
  {
@@ -95,6 +108,10 @@
  },
  {
   "wait": 3.2
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the chat-voice-panel shot"
  },
  {
   "shot": "chat-voice-panel"
@@ -108,9 +125,15 @@
   "click": "[data-rt-focus]"
  },
  {
-  "until": "!!document.querySelector('.rt-dock.focus') && document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "until": "!!document.querySelector('.rt-dock.focus') && document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind) && document.querySelector('.rt-viz canvas').getBoundingClientRect().width > 100",
   "timeout": 10,
-  "label": "the focus view draws the orb"
+  "label": "the focus view draws the orb (its canvas has a width: a collapsed stage draws nothing visible)"
+ },
+ {
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "js": "Object.assign(window.lmgwRealtimeMock.opts, {audioMs: 8000, reply: 'Merge sort for linked lists and a guaranteed n log n, quicksort for fast in-place arrays, and insertion sort for tiny or nearly sorted input.'}); window.lmgwRealtimeMock.speak('Thanks. Can you sum that up in one sentence?', 1500); 'third turn'"
@@ -121,6 +144,10 @@
  },
  {
   "wait": 2.6
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the chat-voice-focus shot"
  },
  {
   "shot": "chat-voice-focus"
@@ -145,9 +172,6 @@
   "nav": "/settings/chat"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
- },
- {
   "until": "!!document.querySelector('#f-chat-tts-alias')",
   "timeout": 20,
   "label": "Settings → Chat has the Voice group"
@@ -156,11 +180,21 @@
   "js": "document.querySelector('#f-chat-stt-alias').closest('.set-group').scrollIntoView({block: 'start'}); 'Voice group in view'"
  },
  {
-  "expect": "(() => { const e = [...document.querySelectorAll('body *')].find(e => e.children.length === 0 && /^v\\S+ · data in \\//.test(e.textContent)); if (!e) return false; e.textContent = e.textContent.replace(/data in .*/, 'data in ~/.local/share/lmgw'); return true; })()",
-  "label": "the header's data dir reads as an installed app's (~/.local/share/lmgw), not the dev copy's path with a user name in it"
+  "until": "(()=>{const p=document.querySelector('.gpu-pill .pill-text'); return !!p && Number((/^GPU · (\\d+)$/.exec(p.textContent.trim()) || [])[1] || 0) >= @MODELS_UP@})()",
+  "timeout": 20,
+  "label": "the live status is in: the chat model and the embedder both run (the GPU pill counts at least @MODELS_UP@ models)",
+  "abort": true
  },
  {
   "wait": 1.0
+ },
+ {
+  "expect": "(() => { const e = [...document.querySelectorAll('body *')].find(e => e.children.length === 0 && /^v\\S+ · data in /.test(e.textContent)); if (!e) return false; e.textContent = e.textContent.replace(/data in .*/, 'data in ~/.local/share/lmgw'); return /^v\\S+ · data in ~\\/\\.local\\/share\\/lmgw$/.test(e.textContent) && document.body.innerText.includes('data in ~/.local/share/lmgw'); })()",
+  "label": "the header's data dir reads as an installed app's (~/.local/share/lmgw), not the dev copy's path with a user name in it; set after every wait, right before the shot"
+ },
+ {
+  "expect": "!/\\/home\\/|\\/var\\/home\\//.test(document.body.innerText)",
+  "label": "no home path shows on the settings-chat-voice shot"
  },
  {
   "shot": "settings-chat-voice"

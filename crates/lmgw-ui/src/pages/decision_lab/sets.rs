@@ -68,7 +68,9 @@ pub(super) fn set_of(p: &LabPresetView) -> &QuestionSet {
     static NONE: std::sync::LazyLock<QuestionSet> = std::sync::LazyLock::new(QuestionSet::default);
     match &p.preset {
         LabPresetBody::QuestionSet(s) => s,
-        LabPresetBody::ImagePrompt(_) | LabPresetBody::AudioSettings(_) => &NONE,
+        LabPresetBody::ImagePrompt(_)
+        | LabPresetBody::AudioSettings(_)
+        | LabPresetBody::DocumentOptions(_) => &NONE,
     }
 }
 

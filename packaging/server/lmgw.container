@@ -32,9 +32,12 @@ Image=localhost/lmgw-server:current
 ContainerName=lmgw
 Pull=never
 # The report's minimal set of flags, without --privileged. The card by its CDI name, from the
-# host's system CDI spec. Expected, not yet run: that AddDevice= passes a CDI name through to
-# podman run --device as written (the dry run shows --device nvidia.com/gpu=all); else
-# PodmanArgs=--device.
+# host's system CDI spec. Measured 2026-11-17 (Podman 6.1.3, Fedora 45): podman run --device
+# nvidia.com/gpu=all gives the card's nodes and CUDA. Expected, not yet run: that Quadlet's
+# AddDevice= passes the CDI name through as written; else PodmanArgs=--device.
+# On an SELinux host with NVIDIA the host needs the lmgw-gpu module first (docs/server.md,
+# packaging/server/lmgw-gpu.cil): stock container-selinux keeps container_engine_t away from the
+# card's device nodes.
 AddDevice=nvidia.com/gpu=all
 AddDevice=/dev/net/tun
 AddCapability=SYS_ADMIN NET_ADMIN

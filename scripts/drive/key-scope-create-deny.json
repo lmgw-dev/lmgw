@@ -1,5 +1,8 @@
 [
  {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');for(const k of (r.keys||[]))if(k.name==='drive-deny')await j('/api/op/key_delete',{id:k.id});return 'removed earlier drive-deny'})()"
+ },
+ {
   "nav": "/usage/keys"
  },
  {
@@ -12,7 +15,7 @@
   "type": "drive-deny"
  },
  {
-  "click": ".key-create > button.ghost"
+  "click": ".key-create .switch"
  },
  {
   "wait": 1.2
@@ -43,13 +46,13 @@
   "wait": 0.3
  },
  {
-  "click": ".key-create > button.ghost"
+  "click": ".key-create .switch"
  },
  {
   "wait": 0.5
  },
  {
-  "click": ".key-create > button.ghost"
+  "click": ".key-create .switch"
  },
  {
   "wait": 2.0
@@ -59,13 +62,16 @@
   "label": "the tick made in Create survives collapse and expand"
  },
  {
-  "click": ".key-create > button.btn:not(.ghost)"
+  "click": ".key-create .key-create-go .btn.suggested"
  },
  {
-  "wait": 1.0
+  "wait": 1.5
  },
  {
-  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-deny')&&r.textContent.includes('tools deny docs__*'))",
+  "expect": "(async()=>{const r=await (await fetch('/api/usage/keys')).json();const k=(r.keys||[]).find(k=>k.name==='drive-deny');return !!k&&k.tool_scope_mode==='deny'&&k.tool_scope_patterns==='docs__*'})()",
   "label": "the created key denies docs__*"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');for(const k of (r.keys||[]))if(k.name==='drive-deny')await j('/api/op/key_delete',{id:k.id});return 'removed earlier drive-deny'})()"
  }
 ]

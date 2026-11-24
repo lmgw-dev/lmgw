@@ -17,6 +17,9 @@
 mod answer_defaults;
 mod build;
 mod descriptions;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod doc_cache;
 mod endpoints;
 mod exclusions;
 mod headers;
@@ -31,6 +34,9 @@ mod serve;
 mod tags;
 mod v1;
 
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use build::build_admin_doc;
 pub use build::{admin_doc, v1_doc};
 pub use endpoints::lmgw_endpoints;
 pub(crate) use headers::takes_background;

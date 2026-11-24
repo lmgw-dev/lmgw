@@ -10,6 +10,7 @@ use super::*;
 use lmgw_core::config::LlamaParams;
 use lmgw_core::gguf::synth;
 use lmgw_core::store::OutsideHour;
+use lmgw_core::vram::headroom::LLAMA_MARGIN;
 
 const MIB: u64 = 1024 * 1024;
 
@@ -89,11 +90,12 @@ pub(super) fn now_hour() -> i64 {
     i64::try_from(secs / 3600).unwrap()
 }
 
-/// A day of other programs' use at a flat `bytes`: auto headroom learned,
-/// at no growth.
+/// A day of other programs' use at a flat `bytes`: the floor capped at it,
+/// no learned room.
 fn learned_flat(f: &Fixture, bytes: u64) {
     let now = now_hour();
     f.state.vram.seed_outside_hours(
+        &card_id(0),
         (0..24)
             .map(|h| OutsideHour {
                 hour: now - h,
@@ -110,7 +112,7 @@ fn learned_flat(f: &Fixture, bytes: u64) {
 /// as before, with nothing rendered over it.
 #[tokio::test]
 async fn a_fitted_start_records_its_placement_and_a_whole_one_renders_nothing() {
-    let f = fixture(96 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default()).await;
     start(&f, "fit-model").await.unwrap();
     let a = argv(&f, "fit-model");
@@ -121,7 +123,7 @@ async fn a_fitted_start_records_its_placement_and_a_whole_one_renders_nothing() 
         "{l}"
     );
 
-    let f = fixture(512 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(512 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default()).await;
     start(&f, "fit-model").await.unwrap();
     let a = argv(&f, "fit-model");
@@ -135,6 +137,7 @@ async fn a_fitted_start_records_its_placement_and_a_whole_one_renders_nothing() 
 /// flag is rendered anywhere.
 #[tokio::test]
 async fn an_image_without_fit_is_charged_as_written() {
+    // Too large beside the floor alone (the margin never refuses a model).
     let f = fixture(96 * MIB, 8 * MIB, 8 * MIB, 4).await;
     f.world().llama_without_fit = true;
     add_row(&f, "fit-model", LlamaParams::default()).await;
@@ -148,7 +151,7 @@ async fn an_image_without_fit_is_charged_as_written() {
 /// of time — instead of starting with a smaller context for its life.
 #[tokio::test]
 async fn a_busy_resident_is_waited_for_rather_than_the_row_fitted_smaller() {
-    let f = fixture(96 * MIB, 40 * MIB, 8 * MIB, 4).await;
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 40 * MIB, 8 * MIB, 4).await;
     start(&f, "chat-model").await.unwrap();
     set_slot_busy(&f, true);
     set_queue_timeout(&f, 1).await;
@@ -166,7 +169,7 @@ async fn a_busy_resident_is_waited_for_rather_than_the_row_fitted_smaller() {
 /// has run; then the driver's figure has what the first prompt put there.
 #[tokio::test]
 async fn a_ready_llama_server_keeps_its_margin_until_its_first_request() {
-    let f = fixture(4096 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(4096 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     learned_flat(&f, 0);
     start(&f, "chat-model").await.unwrap();
     let note = |v: &Value| {
@@ -178,7 +181,7 @@ async fn a_ready_llama_server_keeps_its_margin_until_its_first_request() {
     };
     let v = vram_status(&f.gateway).await;
     assert!(
-        note(&v).contains("807 MiB is kept free beside it until its first request has run"),
+        note(&v).contains("327 MiB is kept free beside it until its first request has run"),
         "{v}"
     );
     let resp = sized_chat(&f.gateway, "hello", 8).await;
@@ -199,7 +202,7 @@ async fn a_ready_llama_server_keeps_its_margin_until_its_first_request() {
 /// the card, and the owner's op forgets what was learned.
 #[tokio::test]
 async fn the_hold_teaches_nothing_and_the_growth_can_be_forgotten() {
-    let f = fixture(4096 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(4096 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     learned_flat(&f, 0);
     engage_hold(&f).await;
     assert_eq!(
@@ -208,7 +211,11 @@ async fn the_hold_teaches_nothing_and_the_growth_can_be_forgotten() {
         "no reading under the hold"
     );
     let snap = f.state.snapshot();
-    assert!(f.state.vram.headroom_now(&snap).learned_in_use);
+    assert_eq!(
+        f.state.vram.headroom_now(&snap).bytes,
+        0,
+        "nobody else used the card: nothing kept"
+    );
     let now: Value = f
         .gateway
         .client()
@@ -221,15 +228,19 @@ async fn the_hold_teaches_nothing_and_the_growth_can_be_forgotten() {
         .await
         .unwrap();
     assert_eq!(now["hours_seen"], 0, "{now}");
-    assert_eq!(now["learned_in_use"], false, "{now}");
-    assert_eq!(now["sample_seconds"], 30, "{now}");
+    assert_eq!(
+        now["bytes"],
+        4 * MIB,
+        "the whole floor until the next reading: {now}"
+    );
+    assert_eq!(now["sample_seconds"], 1, "{now}");
 }
 
 /// Finding 6: the command line `local_model_get` shows is the one the
 /// running container was told, with where it comes from.
 #[tokio::test]
 async fn the_preview_shows_the_fitted_command() {
-    let f = fixture(96 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(96 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     add_row(&f, "fit-model", LlamaParams::default()).await;
     // The card's total, as the dashboard's status poll reads it.
     vram_status(&f.gateway).await;
@@ -275,9 +286,10 @@ async fn the_preview_shows_the_fitted_command() {
 /// and the first start of a row was refused as too large.
 #[tokio::test]
 async fn a_first_start_under_a_declared_budget_is_fitted() {
-    let f = fixture(512 * MIB, 8 * MIB, 8 * MIB, 4).await;
+    let f = fixture(512 * MIB + LLAMA_MARGIN, 8 * MIB, 8 * MIB, 4).await;
     let mut s = f.state.snapshot().settings.clone();
-    s.vram.budget_mb = 96;
+    // 96 MiB for the model and the floor, and the start's margin on top.
+    s.vram.budget_mb = 96 + LLAMA_MARGIN / MIB;
     store::save_settings(&f.state.db, &s).await.unwrap();
     f.state.reload_snapshot().await.unwrap();
     add_row(&f, "fit-model", LlamaParams::default()).await;

@@ -15,6 +15,7 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlDialogElement;
 
 use super::confirm::is_second_press;
+use super::icon::{Ico, Icon};
 
 /// The panel's size. `Auto` fits the content (420px to `min(820px, 94vw)`);
 /// `Wide` is an editor's width and grows with its content up to the window
@@ -150,8 +151,32 @@ pub fn Modal(
             touched.set(false);
             asking.set(false);
             errs_since.set(toasts.map_or(u64::MAX, |t| t.mark()));
-            if !el.open() {
-                let _ = el.show_modal();
+            if !el.open() && el.show_modal().is_ok() {
+                // `showModal()` focuses the first control, the × of the head,
+                // and a dialog opened with the mouse would show its ring. The
+                // dialog takes the focus itself (Tab reaches the first control)
+                // unless the caller marked a control to start on.
+                let target = el
+                    .query_selector("[autofocus], [data-autofocus]")
+                    .ok()
+                    .flatten()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok());
+                if let Some(t) = &target {
+                    let _ = t.focus();
+                }
+                // A marked control that is not there to take it (a closed pop's
+                // list) leaves the dialog the one to hold it.
+                let on_target = target.as_ref().is_some_and(|t| {
+                    web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.active_element())
+                        .is_some_and(|a| {
+                            wasm_bindgen::JsValue::from(a) == wasm_bindgen::JsValue::from(t.clone())
+                        })
+                });
+                if !on_target {
+                    let _ = el.focus();
+                }
             }
         } else if el.open() {
             el.close();
@@ -194,6 +219,8 @@ pub fn Modal(
         <dialog
             node_ref=dialog
             class="modal"
+            tabindex="-1"
+            aria-label=title
             // Esc: with unsaved input, ask instead. Handled on keydown too,
             // because Chrome lets a second Esc close a dialog whose `cancel`
             // was already refused. Only an Esc meant for this dialog: one
@@ -244,11 +271,11 @@ pub fn Modal(
                     <h2>{title}</h2>
                     <button
                         type="button"
-                        class="btn ghost"
+                        class="icon-btn"
                         title="Close"
                         on:click=move |_| request_close()
                     >
-                        "✕"
+                        <Icon ico=Ico::Close/>
                     </button>
                 </div>
                 <Show when=move || asking.get()>
@@ -286,7 +313,7 @@ pub fn Modal(
                                                 title="Dismiss"
                                                 on:click=move |_| t.dismiss(e.0)
                                             >
-                                                "✕"
+                                                <Icon ico=Ico::Close/>
                                             </button>
                                         </div>
                                     </For>
